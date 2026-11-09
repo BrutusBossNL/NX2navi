@@ -1512,9 +1512,9 @@ class MakeGameTest(Tmp):
         sys.path.insert(0, str(self.layout.pydeps))   # the fake zbic
         self.addCleanup(sys.path.remove, str(self.layout.pydeps))
         with mock.patch.multiple(self.mg, KIT=kit, PROMPT_PACKAGES={}, EVENTS=False, step_romfs=fake('romfs'),
-                                 step_lift=fake('lift'), step_compile=fake('compile'), step_shaders=fake('shaders')):
+                                 step_lift=fake('lift'), step_compile=fake('compile'), step_scan=fake('scan'), step_shaders=fake('shaders')):
             others, ev, runs = build()
-            self.assertEqual((others, runs), (['compile', 'lift', 'romfs', 'shaders'], 1))
+            self.assertEqual((others, runs), (['compile', 'lift', 'romfs', 'scan', 'shaders'], 1))
             self.assertEqual(states(ev), ['start', 'done'])
             fractions = [e['fraction'] for e in ev if e['ev'] == 'progress']
             self.assertEqual(fractions, [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
@@ -1892,7 +1892,7 @@ class JobTest(Tmp):
         ctx = self.make_ctx('ok')
         j = jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game').run_inline()
         self.assertEqual(j.result, 'ok', j.error)
-        self.assertEqual([s.state for s in j.steps], [jobs.SKIPPED] + [jobs.DONE] * 7)   # tools ... shaders, ready
+        self.assertEqual([s.state for s in j.steps], [jobs.SKIPPED] + [jobs.DONE] * 6 + [jobs.SKIPPED, jobs.DONE])   # tools ... shaders, scan (the fake build has no such step), ready
         self.assertEqual(j.step('check').value, 'Version 1.1.1')
         self.assertTrue(any('working on lift' in ln for ln in j.lines))
         self.assertEqual(j.overall(), 1.0)
@@ -1905,9 +1905,9 @@ class JobTest(Tmp):
         (ctx.layout.app / 'prompt-art').mkdir()
         j = jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game').run_inline()
         self.assertEqual(j.result, 'ok', j.error)
-        self.assertEqual([s.id for s in j.steps][-3:], ['shaders', 'prompts', 'ready'])
+        self.assertEqual([s.id for s in j.steps][-4:], ['shaders', 'prompts', 'scan', 'ready'])
         self.assertEqual(j.step('prompts').state, jobs.DONE)
-        self.assertEqual([s.id for s in jobs.RebuildJob(ctx, self.tmp / 'game').steps][-2:], ['shaders', 'prompts'])
+        self.assertEqual([s.id for s in jobs.RebuildJob(ctx, self.tmp / 'game').steps][-3:], ['shaders', 'prompts', 'scan'])
 
     def test_failed_job(self):
         self.patch_tools()

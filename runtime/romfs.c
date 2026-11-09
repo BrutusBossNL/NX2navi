@@ -85,6 +85,8 @@ static uint64_t handles[NH];         // file index + 1; 0 is free
 static uint32_t handle_ovl[NH];      // overlay slot + 1 of an open handle, 0 = original
 static PlatFile *handle_file[NH];    // the handle's open overlay file, when handle_ovl is set
 static Overlay *overlays;            // sorted by RomFS index after overlay_init
+static uint32_t *open_ms;            // open_note: per file, the last open and the opens in a row
+static uint16_t *open_n;
 static size_t noverlay, overlay_cap;
 static char **added;                 // RomFS paths of the added files, sorted; added[k] is index file_count + k
 static size_t nadded;
@@ -1017,6 +1019,7 @@ static void init_once(void *param) {
         }
     }
     overlay_init();
+    open_ms = calloc(file_count, sizeof *open_ms), open_n = calloc(file_count, sizeof *open_n);   // open_note
     rt_log("RomFS ready: %llu files, %zu overlays, %zu added, %.2f s", (unsigned long long)file_count, noverlay,
            nadded, now_s() - t0);
 #endif
@@ -1124,6 +1127,23 @@ static int movie_skipped(const char *p) {
     return 1;
 }
 
+// A file the game cannot load, damaged or refused for any other reason: its loader opens it again and again and in the
+// end does without it, and whatever needs it stays out of the world. tools/romfs_check.py finds damaged files before
+// play; this names the ones that still fail, in the log. One timestamp and one count per file, read and written only
+// here, where a file is opened (a few thousand times a session), without a lock: a race at worst logs a line twice.
+#define RETRY_OPENS 24             // opens each less than RETRY_GAP_MS after the last; a file reloaded in play stays far below
+#define RETRY_GAP_MS 3000
+
+static void open_note(uint64_t i, const char *path) {
+    if (!open_n || i >= file_count) return;
+    uint32_t now = (uint32_t)(plat_now_ns() / 1000000);
+    if (now - open_ms[i] > RETRY_GAP_MS) open_n[i] = 0;
+    open_ms[i] = now;
+    if (open_n[i] < RETRY_OPENS && ++open_n[i] == RETRY_OPENS)
+        rt_log("RomFS: the game keeps opening %s and cannot load it; what needs it stays out of the world "
+               "(romfs-check.json lists the files found damaged)", path);
+}
+
 uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     fs_trace("rom", path);
     if (!out || mode != FS_OPEN_READ) return FS_R_UNSUPPORTED_OPEN;
@@ -1137,6 +1157,7 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     }
     uint64_t i = file_index(p);
     if (i == UINT64_MAX) return FS_R_PATH_NOT_FOUND;
+    open_note(i, p);
     uint32_t ov = overlay_slot(i);
     PlatFile *f = NULL;
     if (ov) {

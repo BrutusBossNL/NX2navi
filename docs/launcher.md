@@ -110,7 +110,13 @@ A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the too
    `nx2navi.ini`'s `bind_` lines, so Rebuild the Game after rebinding keys draws them again; the step's key names
    all it reads (the RomFS, the art, the tools, those lines), so it runs again only when one changed or a folder is
    gone, and runs no other step again. Without art the row is not shown and the game keeps its own prompts.
-5. The game's Cetra Display is decoded for the window.
+5. **Check the Game Files**: make_game.py's last step runs `tools/romfs_check.py`, once for each copy of the game data
+   (about 4 minutes, in worker threads, never while the game runs). It decompresses every file, writes
+   `romfs-check.json` beside the game, and for each damaged texture puts a stand-in, another texture of the same kind
+   under the damaged one's name, in `mods/Damaged file stand-ins`, so the game can load what needs it. A damaged file
+   of any other kind is only reported: only a clean dump restores it. In play the game logs a file it keeps opening
+   and cannot load (runtime/romfs.c `open_note`).
+6. The game's Cetra Display is decoded for the window.
 
 ## Updating
 

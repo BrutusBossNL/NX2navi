@@ -24,7 +24,10 @@ Steps, each skipped when a run before finished it for the same inputs (state in 
               from it into <out>/romfs-patches-* (the Controls menu's Button prompts loads them), the keys as the
               bind_ lines of <out>/nx2navi.ini give them. Its key names everything it reads (the RomFS, the art, the
               tools, those lines), so it runs again only when one of them changed or a folder is gone, and running
-              it makes no other step run again. It is last: a failure here leaves the game and its shaders complete.
+              it makes no other step run again. A failure here leaves the game and its shaders complete.
+  8. scan     tools/romfs_check.py decompresses every file of the game data once, writes <out>/romfs-check.json and
+              makes stand-ins for damaged textures in <out>/mods. Its key names the game files and the tool, and it
+              is last: nothing of it runs while the game does.
               Without art the step is skipped and the game shows its own prompts, as before
 
 The exefs and romfs steps depend only on the game files; lift and compile depend on this kit's code too. A newer kit
@@ -82,14 +85,15 @@ EXEFS_FILES = ('main', 'main.npdm', 'sdk', 'subsdk0', 'rtld')
 MODULES = ('main', 'sdk', 'subsdk0', 'rtld')
 ALIGN = 16
 STATE_VERSION = 2
-STEPS = ('exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts')
+STEPS = ('exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts', 'scan')
 # Steps whose key names every input they read rather than the step before them: a step before them that runs does
 # not make them run again, and they make no step after them run again.
-OWN_KEY_STEPS = ('prompts',)
+OWN_KEY_STEPS = ('prompts', 'scan')
 # The Python packages tools/pad_prompts.py imports (pip name: import name), checked before a build with button art.
 PROMPT_PACKAGES = {'zstandard': 'zstandard', 'fonttools': 'fontTools', 'pillow': 'PIL'}
 # The line tools/pad_prompts.py prints for each overlay folder it wrote.
 PROMPTS_WRITTEN = re.compile(r'^.+: \d+ files, the font grew by -?\d+ bytes$')
+SCAN_CHECKED = re.compile(r'^checked (\d+) of (\d+)$')   # tools/romfs_check.py's progress lines
 
 # Bring-up fixes in the lifted SDK, each anchored on exact generated text that must occur once.
 LIFT_FIXES = [
@@ -1540,6 +1544,30 @@ def cpu_tag():
         return 'any'
 
 
+def step_scan(out):
+    """Every file of the game data decompressed once, and stand-ins made for the damaged textures: tools/romfs_check.py,
+    in worker threads here, so nothing of it runs while the game does."""
+    proc = subprocess.Popen(py_cmd(KIT / 'tools' / 'romfs_check.py', '--game', out),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                            errors='replace', bufsize=1)
+    emit('progress', step='scan', fraction=0.0, detail='Checking the game files')
+    try:
+        for line in proc.stdout:
+            line = line.rstrip('\n')
+            m = SCAN_CHECKED.match(line)
+            if m:
+                emit('progress', step='scan', fraction=round(int(m[1]) / max(int(m[2]), 1), 4),
+                     detail=f'Checked {m[1]} of {m[2]} files')
+            else:
+                say(f'  {line}')
+    finally:
+        rc = proc.wait()
+        proc.stdout.close()
+    if rc:
+        fail('checking the game files failed (the lines above say why); the game still runs. Run the build again to '
+             'retry this step')
+
+
 def step_key(step, identity, out=None):
     """What a step's output depends on. exefs and romfs: the game files only; lift: the unpacked ExeFS and the
     lifter; compile: the lift, the runtime sources, this script and the processor (cpu_tag); prompts: the game files,
@@ -1547,6 +1575,10 @@ def step_key(step, identity, out=None):
     is still there."""
     if step in ('exefs', 'romfs'):
         return f'{step}-1|{identity}'
+    if step == 'scan':
+        written = 'written' if (out / 'romfs-check.json').is_file() else 'missing'
+        tool = KIT / 'tools' / 'romfs_check.py'
+        return f'scan-1|{identity}|{sha256_file(tool) if tool.is_file() else "no tool"}|{written}'
     if step == 'prompts':
         tools = tree_digest(KIT / 'tools', ('pad_prompts.py', 'prompt_art.py', 'button_icons.py'))
         binds = sha256_bytes(json.dumps(bind_lines(out)).encode())
@@ -1640,7 +1672,8 @@ def main():
     runs = {'exefs': lambda: step_exefs(src, out), 'romfs': lambda: step_romfs(src, out, min(a.jobs, 8)),
             'lift': lambda: step_lift(out, cache),
             'compile': lambda: step_compile(out, cache, msys, a.jobs, romfs_job, a.rebuild and not a.retune),
-            'shaders': lambda: step_shaders(out, a.rebuild), 'prompts': lambda: step_prompts(out)}
+            'shaders': lambda: step_shaders(out, a.rebuild), 'prompts': lambda: step_prompts(out),
+            'scan': lambda: step_scan(out)}
     state_lock = threading.Lock()   # the RomFS step records itself from its own thread
 
     def save():
@@ -1682,7 +1715,7 @@ def main():
                             state['steps'].pop(later, None)
                 say(f'{name}:')
                 emit('step', step=name, state='start')
-                if name in ('shaders', 'prompts') and romfs_job:   # they read the RomFS image
+                if name in ('shaders', 'prompts', 'scan') and romfs_job:   # they read the RomFS image
                     romfs_job.join()
                 if name == 'romfs' and a.until != 'romfs':
                     # The RomFS image is mostly disk work, the lift and the compile are processor work: they run side
