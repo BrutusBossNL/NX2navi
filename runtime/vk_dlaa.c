@@ -2,12 +2,15 @@
 // NGX core: on Windows _nvngx.dll, found through HKLM\SOFTWARE\NVIDIA Corporation\Global\NGXCore; on Linux
 // libnvidia-ngx.so.1, which the NVIDIA driver installs on the library path. NGX loads the DLSS model from the folder of
 // the executable: nvngx_dlss.dll on Windows, libnvidia-ngx-dlss.so.<version> on Linux. No NVIDIA SDK code or header is
-// compiled in: the few NGX types used are declared here from the SDK's documented ABI.
+// compiled in: the few NGX types used are declared here from the SDK ABI and the Linux core's shutdown interface.
 //
 // The core's parameter object is a C++ class whose virtual functions are called through its vtable: the Set overloads
 // in slots 0-7 and the Get overloads in 8-15. MSVC (the Windows core) lays out each group of overloads in reverse
 // declaration order, the Itanium C++ ABI (the Linux core, built with GCC) in declaration order. vtable_ok checks the
 // layout with a set-then-get round trip before anything relies on it.
+//
+// NGX and DLAA's resources live as long as the device: vk_dlaa_init brings NGX up on the new device, and
+// vk_dlaa_release (Linux) frees everything DLAA made and shuts NGX down before the device is destroyed.
 //
 // Where DLAA runs in the frame, the jitter and the motion vectors: see the sections below.
 #ifdef _WIN32
@@ -60,6 +63,11 @@ typedef NgxResult (*PFN_DestroyParams)(NgxParam *);
 typedef NgxResult (*PFN_Create)(VkCommandBuffer, int feature, NgxParam *, NgxHandle **);
 typedef NgxResult (*PFN_Evaluate)(VkCommandBuffer, const NgxHandle *, const NgxParam *, void *callback);
 typedef NgxResult (*PFN_Release)(NgxHandle *);
+#ifndef _WIN32
+// NVSDK_NGX_VULKAN_Shutdown1 as the Linux core exports it: the device and a pointer that receives the devices NGX still
+// serves afterwards (vk_dlaa_release).
+typedef NgxResult (*PFN_Shutdown1)(VkDevice, unsigned *remaining);
+#endif
 
 static struct {
     void *core;   // the NGX core library (an HMODULE on Windows)
@@ -73,6 +81,12 @@ static struct {
     int tried, loaded, available;
     int ngx_up;   // vk_dlaa_init brought NGX up: DLSS serves this run
     int wanted;   // -1 not read yet
+#ifndef _WIN32
+    // Linux teardown (vk_dlaa_release)
+    PFN_Shutdown1 shutdown1;   // required: core_load leaves DLAA off without it
+    VkDevice device;           // what NGX was initialised with: set while vk_dlaa_release owes it a shutdown
+    NgxParam *caps_map;        // GetCapabilityParameters' map: allocated for the caller, destroyed by vk_dlaa_release
+#endif
 } N = {.wanted = -1};
 
 typedef void (*SetI)(NgxParam *, const char *, int);
@@ -157,6 +171,9 @@ static int core_load(void) {
 #define FN(f, name) N.f = plat_lib_sym(N.core, name)
 #endif
     FN(init, "NVSDK_NGX_VULKAN_Init_Ext2");
+#ifndef _WIN32
+    FN(shutdown1, "NVSDK_NGX_VULKAN_Shutdown1");   // Linux: checked below
+#endif
     FN(req_ext, "NVSDK_NGX_VULKAN_RequiredExtensions");
     FN(caps, "NVSDK_NGX_VULKAN_GetCapabilityParameters");
     FN(alloc_params, "NVSDK_NGX_VULKAN_AllocateParameters");
@@ -169,6 +186,16 @@ static int core_load(void) {
         rt_log("dlaa: the NGX core %s lacks Vulkan entry points: DLAA off", path);
         return 0;
     }
+#ifndef _WIN32
+    // Without Shutdown1 the device cannot be taken back from NGX (vk_dlaa_release), and the process then segfaults after
+    // the Vulkan teardown (NVIDIA 615.78.08): DLAA stays off rather than run with a teardown known to crash. The
+    // parameter maps are destroyed there too.
+    if (!N.shutdown1 || !N.destroy_params) {
+        rt_log("dlaa: the NGX core %s lacks NVSDK_NGX_VULKAN_Shutdown1 or DestroyParameters, which its teardown needs: "
+               "DLAA off", path);
+        return 0;
+    }
+#endif
     N.loaded = 1;
     rt_log("dlaa: NGX core %s", path);
     return 1;
@@ -273,10 +300,16 @@ void vk_dlaa_init(void) {
         rt_log("dlaa: NGX init failed (%08x): DLAA off", (unsigned)r);
         return;
     }
+#ifndef _WIN32
+    N.device = c->device;   // NGX holds the device from here, also if the layout check below turns DLAA off
+#endif
     if (!vtable_ok()) return;
     NgxParam *caps = NULL;
     int avail = 0, driver = 0;
     if (NGX_OK(N.caps(&caps)) && caps) {
+#ifndef _WIN32
+        N.caps_map = caps;   // allocated for us (the SDK header: free it with DestroyParameters): vk_dlaa_release does
+#endif
         p_geti(caps, "SuperSampling.Available", &avail);
         p_geti(caps, "SuperSampling.NeedsUpdatedDriver", &driver);
     }
@@ -468,9 +501,10 @@ static int image2d(uint32_t w, uint32_t h, VkFormat f, VkImageUsageFlags usage, 
     return vkCreateImageView(c->device, &vi, NULL, view) == VK_SUCCESS;
 }
 
-static void free_size(struct Size *e) {
+// The images and views of a size, then its feature. The device must be idle: free_size waits for it, vk_dlaa_release
+// has. Whatever was not made is skipped, so a half-made size goes the same way.
+static void destroy_size(struct Size *e) {
     const VkCtx *c = vk_ctx();
-    vk_queue_lock(), vkDeviceWaitIdle(c->device), vk_queue_unlock();   // a third scene size: the evicted images may still be in flight
     if (e->out_view) vkDestroyImageView(c->device, e->out_view, NULL);
     if (e->mv_view) vkDestroyImageView(c->device, e->mv_view, NULL);
     if (e->out) vmaDestroyImage(c->vma, e->out, e->out_mem);
@@ -485,6 +519,11 @@ static void free_size(struct Size *e) {
     }
     if (e->feat && N.release) N.release(e->feat);
     memset(e, 0, sizeof *e);
+}
+
+static void free_size(struct Size *e) {
+    vk_queue_lock(), vkDeviceWaitIdle(vk_ctx()->device), vk_queue_unlock();   // a third scene size: the evicted images may still be in flight
+    destroy_size(e);
 }
 
 // The entry for a scene and output size: its output (RGBA16F at the output size, written by DLSS, then blitted into
@@ -678,9 +717,11 @@ static int mv_init(void) {
                                       .layout = D.mv_layout};
     VkResult r = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &D.mv_pipe);
     vkDestroyShaderModule(c->device, m, NULL);
+    m = VK_NULL_HANDLE;
     if (r != VK_SUCCESS) goto fail;
     return D.mv_ok = 1;
 fail:
+    if (m) vkDestroyShaderModule(c->device, m, NULL);   // made before a later step failed
     rt_log("dlaa: the motion-vector pass could not be set up: DLAA runs with zero motion");
     return 0;
 }
@@ -1023,21 +1064,28 @@ static int mask_init(void) {
                                       .layout = R.layout};
     VkResult r = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &R.pipe);
     vkDestroyShaderModule(c->device, m, NULL);
+    m = VK_NULL_HANDLE;
     if (r != VK_SUCCESS) goto fail;
     return R.ok = 1;
 fail:
+    if (m) vkDestroyShaderModule(c->device, m, NULL);   // made before a later step failed
     rt_log("dlaa: the reactive mask pass could not be set up: DLSS runs without it");
     return 0;
 }
 
-static void free_snap(struct Snap *s) {
+// A snapshot's images and views. The device must be idle: free_snap waits for it, vk_dlaa_release has.
+static void destroy_snap(struct Snap *s) {
     const VkCtx *c = vk_ctx();
-    vk_queue_lock(), vkDeviceWaitIdle(c->device), vk_queue_unlock();   // a fourth size: the evicted images may still be in flight
     if (s->before_view) vkDestroyImageView(c->device, s->before_view, NULL);
     if (s->mask_view) vkDestroyImageView(c->device, s->mask_view, NULL);
     if (s->before) vmaDestroyImage(c->vma, s->before, s->before_mem);
     if (s->mask) vmaDestroyImage(c->vma, s->mask, s->mask_mem);
     memset(s, 0, sizeof *s);
+}
+
+static void free_snap(struct Snap *s) {
+    vk_queue_lock(), vkDeviceWaitIdle(vk_ctx()->device), vk_queue_unlock();   // a fourth size: the evicted images may still be in flight
+    destroy_snap(s);
 }
 
 static struct Snap *snap_for(VkCommandBuffer cb, uint32_t w, uint32_t h, VkFormat f) {
@@ -1113,6 +1161,55 @@ static struct Snap *mask_pass(VkCommandBuffer cb, VkImageView cv, uint32_t w, ui
     full_barrier(cb);
     R.made++;
     return s;
+}
+
+// ---------------------------------------------------------------- teardown
+// The HUD-less picture's images, a half-made pair too. The device must be idle, or the images not yet used.
+static void hl_destroy(void) {
+    const VkCtx *c = vk_ctx();
+    if (D.hl_view) vkDestroyImageView(c->device, D.hl_view, NULL);
+    if (D.hl) vmaDestroyImage(c->vma, D.hl, D.hl_mem);
+    if (D.hl_srgb) vmaDestroyImage(c->vma, D.hl_srgb, D.hl_srgb_mem);
+    D.hl_view = VK_NULL_HANDLE, D.hl = D.hl_srgb = VK_NULL_HANDLE;
+}
+
+// The device is idle here. Release NGX features and parameters before their Vulkan resources, then shut down NGX even
+// if initialization succeeded but the layout check failed. The Linux core's Shutdown1 takes an extra output pointer
+// compared with the SDK's public wrapper; it reports the number of devices still using NGX.
+void vk_dlaa_release(void) {
+#ifndef _WIN32
+    const VkCtx *c = vk_ctx();
+    if (!c) return;
+    for (int i = 0; i < 5; i++)
+        if (D.sizes[i].feat) N.release(D.sizes[i].feat), D.sizes[i].feat = NULL;
+    if (D.params) N.destroy_params(D.params);
+    if (N.caps_map) N.destroy_params(N.caps_map);
+    for (int i = 0; i < 5; i++) destroy_size(&D.sizes[i]);
+    for (int i = 0; i < SNAPS; i++) destroy_snap(&R.s[i]);
+    hl_destroy();
+    if (D.mv_pipe) vkDestroyPipeline(c->device, D.mv_pipe, NULL);
+    if (D.mv_layout) vkDestroyPipelineLayout(c->device, D.mv_layout, NULL);
+    if (D.mv_dsl) vkDestroyDescriptorSetLayout(c->device, D.mv_dsl, NULL);
+    if (D.mv_samp) vkDestroySampler(c->device, D.mv_samp, NULL);
+    if (D.camb) vmaDestroyBuffer(c->vma, D.camb, D.camb_mem);
+    if (D.mvm) vmaDestroyBuffer(c->vma, D.mvm, D.mvm_mem);   // mapped for good: the destroy unmaps it
+    if (R.pipe) vkDestroyPipeline(c->device, R.pipe, NULL);
+    if (R.layout) vkDestroyPipelineLayout(c->device, R.layout, NULL);
+    if (R.dsl) vkDestroyDescriptorSetLayout(c->device, R.dsl, NULL);
+    if (T.pool) vkDestroyQueryPool(c->device, T.pool, NULL);
+    memset(&D, 0, sizeof D), D.mv_ok = -1, D.cfg_seen = ~0u;
+    memset(&R, 0, sizeof R), R.ok = -1, R.knob = -1;
+    memset(&T, 0, sizeof T), T.on = -1;
+    memset(&F, 0, sizeof F);
+    vk_dlaa_swap_img = NULL, vk_dlaa_swap_view = VK_NULL_HANDLE;
+    if (!N.device) return;   // NGX never came up on this device: DLAA off, FSR 3.1, or its init failed
+    unsigned left = 0;
+    vk_queue_lock();   // NGX may wait for the device itself
+    NgxResult r = N.shutdown1(N.device, &left);
+    vk_queue_unlock();
+    rt_log("dlaa: NGX shut down (%08x, %u devices left)", (unsigned)r, left);
+    N.device = NULL, N.caps_map = NULL, N.ngx_up = 0, N.available = 0;
+#endif
 }
 
 // ---------------------------------------------------------------- jitter
@@ -1469,16 +1566,15 @@ static void hudless(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_t h) 
     VkFormat fmt = hdr ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
     if (D.hl && (D.hl_w != w || D.hl_h != h || D.hl_fmt != fmt)) {
         vk_queue_lock(), vkDeviceWaitIdle(c->device), vk_queue_unlock();
-        vkDestroyImageView(c->device, D.hl_view, NULL);
-        vmaDestroyImage(c->vma, D.hl, D.hl_mem);
-        if (D.hl_srgb) vmaDestroyImage(c->vma, D.hl_srgb, D.hl_srgb_mem);
-        D.hl = D.hl_srgb = VK_NULL_HANDLE;
+        hl_destroy();
     }
     if (!D.hl) {
         VkImageView v2 = VK_NULL_HANDLE;
         VkImageUsageFlags u = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         if ((!hdr && !image2d(w, h, VK_FORMAT_R8G8B8A8_SRGB, u, &D.hl_srgb, &D.hl_srgb_mem, &v2)) ||
             !image2d(w, h, fmt, u | VK_IMAGE_USAGE_STORAGE_BIT, &D.hl, &D.hl_mem, &D.hl_view)) {
+            if (v2) vkDestroyImageView(c->device, v2, NULL);   // the first image's view, when the second image failed
+            hl_destroy();   // and what of the two images was made
             rt_log("dlaa: the HUD-less picture's images could not be made: frame generation sees the HUD");
             vk_dlaa_hudless_wanted = 0;
             return;

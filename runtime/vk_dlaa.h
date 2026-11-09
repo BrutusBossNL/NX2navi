@@ -33,6 +33,11 @@ int vk_dlaa_fg_camera(VkDlaaCamera *c);     // ... and its temporal upscaler is 
 void vk_dlaa_instance_exts(const char **ext, uint32_t *n, uint32_t max);
 void vk_dlaa_device_exts(const VkExtensionProperties *have, uint32_t nhave, const char **ext, uint32_t *n, uint32_t max);
 void vk_dlaa_init(void);
+// vk_device.c destroy_all, once the device is idle and before the allocator and the device go (Linux): releases the NGX
+// features and parameters, frees every image, buffer, pipeline and query pool DLAA made, resets its state for a later
+// device and shuts NGX down for this one. Safe when NGX never came up, when nothing was made, and more than once.
+// Windows: does nothing.
+void vk_dlaa_release(void);
 // 1 when dlaa is on and NGX came up with DLSS (after vk_dlaa_init): a DLSS mode's smaller scene is scaled up by DLSS.
 int vk_dlaa_available(void);
 // vk_exec.c vk_exec_pass_begin, once the pass's targets are resolved and before its barrier: arms the frame on the
