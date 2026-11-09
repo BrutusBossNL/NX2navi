@@ -482,6 +482,7 @@ static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
 VkCommandBuffer vk_sync_split(void) {
     VkCtx *c = vk_ctx();
     VkCommandBuffer cb = slots[cur_slot].cb;
+    vk_gpu_passes_part(cb, 1);
     ts_end(cb, cur_fence);
     if (!rec_end_cb(cb, 0, 0)) vkEndCommandBuffer(cb);   // every command of the part is in cb, ended by its recorder
     vk_upload_flush(0);   // the uploads this part asked for precede it in queue order
@@ -500,6 +501,7 @@ VkCommandBuffer vk_sync_split(void) {
     vk_crumb(s->cb, VK_CRUMB_SUBMIT, cur_fence);
     ts_begin(s->cb);
     rec_begin(s->cb, cur_fence);
+    vk_gpu_passes_part(s->cb, 0);
     return s->cb;
 }
 
@@ -533,8 +535,10 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     vk_crumb(s->cb, VK_CRUMB_SUBMIT, fence);
     ts_begin(s->cb);
     rec_begin(s->cb, fence);
+    vk_gpu_passes_part(s->cb, 0);
     int recorded = vk_exec_record(s->cb, handles, n, fence);
     s = &slots[cur_slot];   // the last part (vk_sync_split)
+    vk_gpu_passes_part(s->cb, 1);
     if (recorded) ts_end(s->cb, fence);
     else ts_drop();
     // The recorder is done with the part: the end-of-submission crumb, then the end, by the recorder when it records.

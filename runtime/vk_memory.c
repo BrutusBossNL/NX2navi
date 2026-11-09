@@ -2335,6 +2335,7 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
         // the merge reads the mirror the submission's shaders wrote and writes the imported buffers
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        vk_gpu_gap_note(VK_GAP_WB_MERGE, 0);
         int m = wb_merge_record(cb);
         if (!m) {   // no range list: copy them plainly
             for (int i = 0; i < nsnl; i++) range_add(&wbl, &nwbl, &cwbl, snl[i].r, snl[i].off, snl[i].size);
@@ -2355,6 +2356,7 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_READ_BIT);
         for (int i = 0; i < nwbl; i++) wbl[i].r->wb_sub = msub;
+        vk_gpu_gap_note(VK_GAP_WB_COPY, 0);
         mrep.wb_ranges += (uint64_t)nwbl;
         rec += copy_ranges(cb, wbl, nwbl, 0, &mrep.wb_bytes, &mrep.wb_copies) + 2;
         mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,

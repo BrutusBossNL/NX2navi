@@ -1325,6 +1325,7 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     uint32_t w = t->width, h = t->height, ow = dst->width, oh = dst->height;
     VkCommandBuffer cb = ex->cb;
     vk_exec_barrier(ex);   // what drew the scene is done (no pass is open here)
+    vk_gpu_gap_note(VK_GAP_UPSCALER, (uint64_t)ow * oh);
     if (D.preset_dirty) {   // another model: features are created with it, so every size gets a new one
         for (int i = 0; i < DLSS_SIZES; i++)
             if (D.sizes[i].out) free_size(&D.sizes[i]);

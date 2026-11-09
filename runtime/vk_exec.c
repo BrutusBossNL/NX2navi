@@ -263,6 +263,7 @@ static void bc_copy_back(VkExec *ex, const VkExecTarget *t) {
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, bcs[i].level, 0, 1},
                           .dstOffset = {0, 0, (int32_t)t->base_layer},
                           .extent = {bcs[i].w, bcs[i].h, t->layers}};   // texels of the uncompressed source
+        vk_gpu_gap_note(VK_GAP_BC_BACK, 0);
         vkCmdCopyImage(ex->cb, t->image, VK_IMAGE_LAYOUT_GENERAL, bcs[i].bc, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
         memory_barrier(ex->cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
@@ -814,6 +815,7 @@ static void clear_color(VkExec *ex, const p_clear_color *c) {
     if (whole_target(ex, t)) {
         vk_exec_barrier(ex);
         VkImageSubresourceRange r = {VK_IMAGE_ASPECT_COLOR_BIT, t->level, 1, t->base_layer, t->layers};
+        vk_gpu_gap_note(VK_GAP_CLEAR_TARGET, (uint64_t)t->width * t->height);
         vkCmdClearColorImage(ex->cb, t->image, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &r);
         ex->recorded++;
         vk_texture_gpu_written(t->tex);
@@ -844,6 +846,7 @@ static void clear_ds(VkExec *ex, const p_clear_ds *c) {
     if (whole_target(ex, t)) {
         vk_exec_barrier(ex);
         VkImageSubresourceRange r = {asp, t->level, 1, t->base_layer, t->layers};
+        vk_gpu_gap_note(VK_GAP_CLEAR_TARGET, (uint64_t)t->width * t->height);
         vkCmdClearDepthStencilImage(ex->cb, t->image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &r);
         ex->recorded++;
         vk_texture_gpu_written(t->tex);

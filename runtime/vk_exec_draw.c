@@ -1868,6 +1868,7 @@ void vk_exec_pool_marks(VkExec *ex) {
     VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = mb};
     vkCmdPipelineBarrier2(cb, &dep);
     VkBufferCopy region = {0, 0, (VkDeviceSize)VK_POOL_TEX * 4};
+    vk_gpu_gap_note(VK_GAP_POOL_MARKS, region.size);
     vkCmdCopyBuffer(cb, PL.marks, PL.rb[i].buf, 1, &region);
     mb[0] = (VkMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                                .dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT};
@@ -2365,6 +2366,7 @@ static Twin *twin_update(VkExec *ex, const VkTexImage *img) {
     vkCmdPipelineBarrier2(ex->cb, &d0);
     VkBufferImageCopy src = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, layers},
                              .imageExtent = {img->width, img->height, 1}};
+    vk_gpu_gap_note(VK_GAP_TWIN, (uint64_t)img->width * img->height);
     vkCmdCopyImageToBuffer(ex->cb, img->image, VK_IMAGE_LAYOUT_GENERAL, twin_buf, 1, &src);
     VkMemoryBarrier2 m1 = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
@@ -4373,6 +4375,7 @@ static int mesh_ring_entry(VkExec *ex, const VkMemSpan *src, VkDeviceSize *at) {
     }
     *at = 12ull * (mesh_ring_next++ % MESH_RING);
     vk_exec_barrier(ex);   // ends the pass (the next draw opens it again) and orders the culling's writes before the copy
+    vk_gpu_gap_note(VK_GAP_MESH_RING, 12);
     vkCmdFillBuffer(ex->cb, mesh_ring, *at + 4, 8, 1);
     VkBufferCopy cp = {src->offset, *at, 4};
     vkCmdCopyBuffer(ex->cb, src->buffer, mesh_ring, 1, &cp);

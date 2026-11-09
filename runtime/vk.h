@@ -117,6 +117,17 @@ typedef struct {
     uint32_t layer;                     // NX2NAVI_GPU_PASSES: the first layer of the depth target (a shadow cascade)
 } VkPassMark;
 void vk_gpu_passes_frame(uint64_t frame);   // vk_crumbs.c, each present: NX2NAVI_GPU_PASSES, GPU time per pass and dispatch
+// NX2NAVI_GPU_PASSES also times what a part of a submission spends outside its passes and dispatches (vk_crumbs.c, "the
+// gap ledger"). vk_gpu_passes_part: vk_sync.c, at the start (end 0) and the end (end 1) of each part's command buffer.
+// vk_gpu_gap_note: the replay is about to record commands of this kind outside a pass or dispatch; units is their size
+// (bytes for buffers, texels for images, 0 unknown). Both do nothing outside the timed frames. Replay thread only.
+enum {
+    VK_GAP_COPY_B2B, VK_GAP_COPY_B2T, VK_GAP_COPY_T2B, VK_GAP_COPY_T2T, VK_GAP_CLEAR_BUF, VK_GAP_CLEAR_TEX,
+    VK_GAP_CLEAR_TARGET, VK_GAP_UPSCALER, VK_GAP_WB_MERGE, VK_GAP_WB_COPY, VK_GAP_TWIN, VK_GAP_POOL_MARKS,
+    VK_GAP_MESH_RING, VK_GAP_BC_BACK, VK_GAP_N
+};
+void vk_gpu_passes_part(VkCommandBuffer cb, int end);
+void vk_gpu_gap_note(int kind, uint64_t units);
 // Pass marks wanted and possible (NX2NAVI_PASS_CRUMBS and the extensions): set by vk_crumbs_init.
 extern int vk_pass_marks_on;
 // vk_device.c create_device, before vkCreateDevice: 1 when NX2NAVI_PASS_CRUMBS asks for NVIDIA checkpoints.
