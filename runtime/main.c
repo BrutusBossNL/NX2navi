@@ -8,9 +8,10 @@
 //                       show which device NX2NAVI_AUDIO_DEVICE picks; needs no game files
 //     --monitor VALUE   open the game window on one monitor: sets NX2NAVI_MONITOR before the settings are read, so it wins
 //                       over nx2navi.ini's `monitor =`. VALUE is auto (default), primary, a 1-based index as --list-monitors
-//                       prints it, or part of a GDI device name (DISPLAY3) or of a monitor's name, case-insensitive
-//     --list-monitors   print each monitor's index, GDI device name, name, desktop rectangle, primary flag and DPI;
-//                       needs no game files
+//                       prints it, or part of a monitor's name (on Windows also of its GDI device name, DISPLAY3),
+//                       case-insensitive. Wayland places a windowed window itself: only fullscreen opens on the monitor
+//     --list-monitors   print each monitor's index, name (on Windows also its GDI device name), desktop rectangle,
+//                       primary flag and DPI; needs no game files
 //     --selftest        layout, dispatch table and host-function registry; needs no game files
 //     --probe-mods      the mods folder scan, order and switches (mods.c); needs no game files
 //     --probe-loader    load and relocate the modules, check them against the measured 1.2.1 values
