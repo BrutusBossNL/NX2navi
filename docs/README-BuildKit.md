@@ -96,6 +96,11 @@ processor can fill memory and swap until the kernel stops processes of the deskt
 On NVIDIA, start the game with `NX2NAVI_SHADOW=0` if the 3D world stays black while the HUD draws (issue #72). The
 profile, logs and settings are in the `--out` folder as on Windows.
 
+On NVIDIA the driver keeps the shaders it compiled in `nvidia-cache` beside `ocarina`, not in `~/.cache/nvidia`, where
+one run adds at most 1 GiB while the preparation at the end of the build makes about 1.5 GB. The game sets the folder
+and a limit of 8 GiB itself (`__GL_SHADER_DISK_CACHE_PATH` and `__GL_SHADER_DISK_CACHE_SIZE` in the environment take
+precedence). Deleting the folder costs one slow start; `./ocarina --warm-shaders` fills it again.
+
 `tools/make_appimage.py` packs this kit into one `NX2navi-Linux-<version>-x86_64.AppImage` with its own Python, for
 players without a source checkout: it checks for the packages above, installs zbic with pip on its first run, picks
 `--jobs` from the memory, builds into `~/Games/Ocarina` (or the folder given after the dump) and writes `play.sh`

@@ -72,9 +72,37 @@ static void mesa_cache_beside_exe(void) {
     plat_setenv("MESA_SHADER_CACHE_DIR", dir);
 }
 
+#ifdef __linux__
+// NVIDIA's Linux driver keeps the pipelines it compiles in a disk cache of its own, by default in ~/.cache/nvidia,
+// shared with every program. One process adds at most __GL_SHADER_DISK_CACHE_SIZE to it (1 GiB unless set), and a start
+// that finds more than that in several files deletes the later ones. nx2navi.exe --prepare-shaders builds the 42,142
+// variants of game 1.1.1 into it in one process: with the default limit it stored about 30,700 of them and the rest
+// were compiled again by the first start after it. So unless the environment sets them, the cache goes to nvidia-cache
+// beside the exe, which nothing else writes, with a limit of NV_CACHE_BYTES. The driver makes GLCache inside that
+// folder but not the folder, so it is made here.
+#define NV_CACHE_BYTES "8589934592"   // 8 GiB
+static void nvidia_cache_beside_exe(void) {
+    char dir[PLAT_PATH_MAX * 2], size[32];
+    if (!plat_getenv("__GL_SHADER_DISK_CACHE_PATH", dir, sizeof dir)) {
+        int len = plat_exe_path(dir, sizeof dir - 16);
+        char *cut = len ? plat_last_sep(dir) : NULL;
+        if (cut) {
+            strcpy(cut + 1, "nvidia-cache");
+            plat_fs_mkdir(dir);   // already there is fine
+            plat_setenv("__GL_SHADER_DISK_CACHE_PATH", dir);
+        }
+    }
+    if (!plat_getenv("__GL_SHADER_DISK_CACHE_SIZE", size, sizeof size))
+        plat_setenv("__GL_SHADER_DISK_CACHE_SIZE", NV_CACHE_BYTES);
+}
+#endif
+
 static int create_instance(void) {
     vk_dlssg_early();   // DLSS Frame Generation: Streamline before any Vulkan call of the process (its slInit asks so)
     mesa_cache_beside_exe();
+#ifdef __linux__
+    nvidia_cache_beside_exe();
+#endif
     const char *ext[12];
     uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 7);
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
