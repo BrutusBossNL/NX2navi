@@ -1478,6 +1478,8 @@ int vk_pipeline_spirv_selftest(void) {
         failures++;
     }
     printf("spirv: SignedZeroInfNanPreserve rewrite: %s\n", failures ? "FAIL" : "ok");
+    const char *list = cfg_get("NX2NAVI_SPV_MARK_TEST");
+    if (list && *list) failures += spirv_mark_list_test(list);
     return failures;
 }
 
@@ -1557,6 +1559,172 @@ static uint32_t *spirv_pool_rebind(const uint32_t *w, uint64_t n) {
     return o;
 }
 
+// ---- texture pool marks (NX2NAVI_TEX_DISUSE, default on; vk_texture.c "disuse" uses them)
+// Ocarina samples nearly every texture through the bindless pool: a shader reads a handle from memory and indexes the
+// pool array with it, so the CPU never learns which of the registered textures a frame samples, and every registered
+// texture counts as in use (vk_texture.c idle). The game keeps the textures of the areas it has loaded registered, so
+// none of them could go, and their memory, which the driver charges to the system's commit, grew to 6 GiB in a session.
+// This rewrite gives each module that indexes the texture pool a storage buffer at set 2, binding VK_POOL_MARK_BINDING
+// (a uint per pool slot, vk_exec_draw.c "pool marks") and, after every access chain into a pool texture array, a store
+// of 1 into the slot it indexes. The stores of one warp to one slot are one memory transaction. The replay copies the
+// buffer out and clears it every few submissions; slots marked mean textures sampled. A module that indexes the pool
+// and cannot be marked (SPIR-V other than 1.3, a stage whose stores the device does not allow, no memory) is counted
+// in vk_pool_marks_missed, which keeps vk_texture.c from evicting by disuse: an unmarked shader could sample a texture
+// the marks call unused.
+volatile int32_t vk_pool_marks_missed;
+static int marks_on = -1, marks_vs_ok, marks_fs_ok;
+
+int vk_pool_marks_enabled(void) {
+    if (marks_on < 0) {
+        marks_on = rt_knob("TEX_DISUSE", "1") == 1;
+        VkCtx *c = vk_ctx();
+        if (c) {
+            VkPhysicalDeviceFeatures f;
+            vkGetPhysicalDeviceFeatures(c->phys, &f);   // vk_device.c enables every feature the GPU reports
+            marks_vs_ok = f.vertexPipelineStoresAndAtomics, marks_fs_ok = f.fragmentStoresAndAtomics;
+        }
+    }
+    return marks_on;
+}
+
+// *status: 1 marked, 0 no pool texture access to mark, -1 one that could not be marked. NULL unless marked.
+static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, uint64_t *out_n, int *status) {
+    enum { OP_TYPE_RUNTIME_ARRAY = 29, OP_TYPE_STRUCT_ = 30, OP_ACCESS_CHAIN_ = 65, OP_IN_BOUNDS_ACCESS_CHAIN = 66,
+           OP_STORE_ = 62, OP_MEMBER_DECORATE_ = 72, OP_DECORATION_GROUP = 73, OP_GROUP_DECORATE = 74,
+           OP_GROUP_MEMBER_DECORATE = 75, OP_DECORATE_ID = 332, OP_DECORATE_STRING = 5632, OP_MEMBER_DECORATE_STRING = 5633,
+           SC_STORAGE_BUFFER = 12, DEC_BLOCK = 2, DEC_ARRAY_STRIDE = 6, DEC_OFFSET_ = 35 };
+    *status = 0;
+    if (n < 5) return NULL;
+    uint32_t bound = w[3];
+    if (!bound || bound > (1u << 22)) return NULL;
+    uint32_t *bind = calloc(bound, sizeof *bind);   // per id: its Binding + 1 when its DescriptorSet is 2, else 0
+    uint8_t *set2 = calloc(bound, 1);
+    if (!bind || !set2) return free(bind), free(set2), *status = -1, NULL;
+    uint64_t ann_end = 0, fn_start = 0;
+    uint32_t uint_t = 0, c0 = 0, c1 = 0, ptr_u = 0;
+    int vertex_stage = 0, fragment_stage = 0;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        if (!l || i + l > n) return free(bind), free(set2), *status = -1, NULL;
+        if (op == SPV_OP_FUNCTION) { fn_start = i; break; }
+        if (op == SPV_OP_ENTRY_POINT && l >= 3) {
+            if (w[i + 1] <= 3) vertex_stage = 1;   // Vertex, TessellationControl, TessellationEvaluation, Geometry
+            else if (w[i + 1] == 4) fragment_stage = 1;
+        } else if (op == SPV_OP_DECORATE && l >= 4 && w[i + 1] < bound) {
+            if (w[i + 2] == SPV_DEC_DESCRIPTOR_SET && w[i + 3] == 2) set2[w[i + 1]] = 1;
+            else if (w[i + 2] == SPV_DEC_BINDING) bind[w[i + 1]] = w[i + 3] + 1;
+        } else if (op == SPV_OP_TYPE_INT && l == 4 && w[i + 2] == 32 && w[i + 3] == 0) {
+            uint_t = w[i + 1];
+        } else if (op == SPV_OP_CONSTANT && l == 4 && uint_t && w[i + 1] == uint_t) {
+            if (w[i + 3] == 0 && !c0) c0 = w[i + 2];
+            if (w[i + 3] == 1 && !c1) c1 = w[i + 2];
+        } else if (op == SPV_OP_TYPE_POINTER && l == 4 && w[i + 2] == SC_STORAGE_BUFFER && uint_t && w[i + 3] == uint_t) {
+            ptr_u = w[i + 1];
+        }
+        if (op == SPV_OP_DECORATE || op == OP_MEMBER_DECORATE_ || op == OP_DECORATION_GROUP || op == OP_GROUP_DECORATE ||
+            op == OP_GROUP_MEMBER_DECORATE || op == OP_DECORATE_ID || op == OP_DECORATE_STRING || op == OP_MEMBER_DECORATE_STRING)
+            ann_end = i + l;
+        i += l;
+    }
+    // pool texture variables: set 2, a binding below VK_POOL_KINDS (spirv_pool_rebind); one already at the marks
+    // binding means the module was marked before
+    uint64_t sites = 0;
+    int marked = 0;
+    for (uint32_t id = 0; id < bound; id++)
+        if (set2[id] && bind[id] == VK_POOL_MARK_BINDING + 1) marked = 1;
+    for (uint64_t i = fn_start; fn_start && !marked && i < n;) {
+        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        if (!l || i + l > n) break;
+        if ((op == OP_ACCESS_CHAIN_ || op == OP_IN_BOUNDS_ACCESS_CHAIN) && l >= 5 && w[i + 3] < bound && set2[w[i + 3]] &&
+            bind[w[i + 3]] && bind[w[i + 3]] - 1 < VK_POOL_KINDS)
+            sites++;
+        i += l;
+    }
+    if (marked || !sites) return free(bind), free(set2), NULL;
+    if (w[1] != 0x00010300 || !ann_end || !fn_start || (vertex_stage && !marks_vs_ok) || (fragment_stage && !marks_fs_ok))
+        return free(bind), free(set2), *status = -1, NULL;
+    uint64_t on = n + 40 + 9 * sites;
+    uint32_t *o = malloc(on * 4);
+    if (!o) return free(bind), free(set2), *status = -1, NULL;
+    uint32_t next = bound;
+    uint32_t new_uint = uint_t ? 0 : (uint_t = next++), new_c0 = c0 ? 0 : (c0 = next++), new_c1 = c1 ? 0 : (c1 = next++);
+    uint32_t rta = next++, st = next++, ptr_st = next++, var = next++, new_ptr_u = ptr_u ? 0 : (ptr_u = next++);
+    uint64_t p = 0;
+    memcpy(o, w, ann_end * 4), p = ann_end;
+    o[p++] = 4u << 16 | SPV_OP_DECORATE, o[p++] = rta, o[p++] = DEC_ARRAY_STRIDE, o[p++] = 4;
+    o[p++] = 5u << 16 | OP_MEMBER_DECORATE_, o[p++] = st, o[p++] = 0, o[p++] = DEC_OFFSET_, o[p++] = 0;
+    o[p++] = 3u << 16 | SPV_OP_DECORATE, o[p++] = st, o[p++] = DEC_BLOCK;
+    o[p++] = 4u << 16 | SPV_OP_DECORATE, o[p++] = var, o[p++] = SPV_DEC_DESCRIPTOR_SET, o[p++] = 2;
+    o[p++] = 4u << 16 | SPV_OP_DECORATE, o[p++] = var, o[p++] = SPV_DEC_BINDING, o[p++] = VK_POOL_MARK_BINDING;
+    memcpy(o + p, w + ann_end, (fn_start - ann_end) * 4), p += fn_start - ann_end;
+    if (new_uint) o[p++] = 4u << 16 | SPV_OP_TYPE_INT, o[p++] = uint_t, o[p++] = 32, o[p++] = 0;
+    if (new_c0) o[p++] = 4u << 16 | SPV_OP_CONSTANT, o[p++] = uint_t, o[p++] = c0, o[p++] = 0;
+    if (new_c1) o[p++] = 4u << 16 | SPV_OP_CONSTANT, o[p++] = uint_t, o[p++] = c1, o[p++] = 1;
+    o[p++] = 3u << 16 | OP_TYPE_RUNTIME_ARRAY, o[p++] = rta, o[p++] = uint_t;
+    o[p++] = 3u << 16 | OP_TYPE_STRUCT_, o[p++] = st, o[p++] = rta;
+    o[p++] = 4u << 16 | SPV_OP_TYPE_POINTER, o[p++] = ptr_st, o[p++] = SC_STORAGE_BUFFER, o[p++] = st;
+    if (new_ptr_u) o[p++] = 4u << 16 | SPV_OP_TYPE_POINTER, o[p++] = ptr_u, o[p++] = SC_STORAGE_BUFFER, o[p++] = uint_t;
+    o[p++] = 4u << 16 | SPV_OP_VARIABLE, o[p++] = ptr_st, o[p++] = var, o[p++] = SC_STORAGE_BUFFER;
+    for (uint64_t i = fn_start; i < n;) {
+        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        memcpy(o + p, w + i, l * 4), p += l;
+        if ((op == OP_ACCESS_CHAIN_ || op == OP_IN_BOUNDS_ACCESS_CHAIN) && l >= 5 && w[i + 3] < bound && set2[w[i + 3]] &&
+            bind[w[i + 3]] && bind[w[i + 3]] - 1 < VK_POOL_KINDS) {
+            uint32_t at = next++;   // marks[slot] = 1, slot being the pool index of this access
+            o[p++] = 6u << 16 | OP_ACCESS_CHAIN_, o[p++] = ptr_u, o[p++] = at, o[p++] = var, o[p++] = c0, o[p++] = w[i + 4];
+            o[p++] = 3u << 16 | OP_STORE_, o[p++] = at, o[p++] = c1;
+        }
+        i += l;
+    }
+    o[3] = next;
+    free(bind), free(set2);
+    *out_n = p;
+    *status = 1;
+    return o;
+}
+
+// --selftest with NX2NAVI_SPV_MARK_TEST=<list>: each line "<in.spv> <out.spv>"; the module is moved to the pools
+// (spirv_pool_rebind) and marked, and written to <out> when marked, for spirv-val. Prints the counts; 0 failures unless
+// a file cannot be read or written.
+static int spirv_mark_list_test(const char *list) {
+    marks_vs_ok = marks_fs_ok = 1;
+    FILE *f = fopen(list, "rb");
+    if (!f) return printf("spirv: pool marks test: %s cannot be read\n", list), 1;
+    char line[2048];
+    int marked = 0, none = 0, missed = 0, bad = 0;
+    while (fgets(line, sizeof line, f)) {
+        char in[1024], out[1024];
+        if (sscanf(line, "%1023s %1023s", in, out) != 2) continue;
+        FILE *g = fopen(in, "rb");
+        if (!g) { bad++; continue; }
+        fseek(g, 0, SEEK_END);
+        long sz = ftell(g);
+        fseek(g, 0, SEEK_SET);
+        uint32_t *w = sz > 20 ? malloc((size_t)sz) : NULL;
+        if (!w || fread(w, 1, (size_t)sz, g) != (size_t)sz) { fclose(g), free(w), bad++; continue; }
+        fclose(g);
+        uint64_t n = (uint64_t)sz / 4, mn = 0;
+        uint32_t *pooled = spirv_pool_rebind(w, n);
+        int st;
+        uint32_t *m = spirv_pool_mark(pooled ? pooled : w, n, &mn, &st);
+        if (st > 0) {
+            marked++;
+            FILE *h = fopen(out, "wb");
+            if (!h || fwrite(m, 4, mn, h) != mn) bad++;
+            if (h) fclose(h);
+        } else if (st < 0) {
+            missed++;
+        } else {
+            none++;
+        }
+        free(m), free(pooled), free(w);
+    }
+    fclose(f);
+    printf("spirv: pool marks test: %d marked, %d without pool texture accesses, %d not markable, %d file errors\n", marked,
+           none, missed, bad);
+    return bad;
+}
+
 static VkShaderModule make_module(const uint32_t *w, uint64_t words) {
     uint64_t fixed_n = 0;
     uint32_t *fixed = spirv_fixup(w, words, &fixed_n);
@@ -1565,6 +1733,18 @@ static VkShaderModule make_module(const uint32_t *w, uint64_t words) {
     if (pooled) {
         free(fixed);
         w = fixed = pooled;
+        if (vk_pool_marks_enabled()) {
+            uint64_t mk_n = 0;
+            int st;
+            uint32_t *mk = spirv_pool_mark(w, words, &mk_n, &st);
+            if (mk) {
+                free(fixed);
+                w = fixed = mk, words = mk_n;
+            } else if (st < 0 && plat_inc32(&vk_pool_marks_missed) == 1) {
+                rt_log("vk_pipeline: a shader that indexes the texture pool could not be marked: textures are not evicted "
+                       "by disuse this run (NX2NAVI_TEX_DISUSE)");
+            }
+        }
     }
     uint64_t rc_n = 0;
     uint32_t *rc = P.reconverge ? spirv_reconverge(w, words, &rc_n) : NULL;

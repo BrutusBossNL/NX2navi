@@ -476,6 +476,12 @@ int vk_sampler_slot_count_locked(void);
 #define VK_POOL_SAMP 4096                           // Accessor.SamplerPoolLength
 #define VK_POOL_KINDS 16                            // kind = depth * 8 + dim * 2 + arrayed, dim 1D 2D 3D CUBE
 extern volatile uint32_t vk_pool_kinds_used;        // bit k: a pipeline was made with a kind-k pool array
+// Texture pool marks (vk_pipeline.c spirv_pool_mark, vk_exec_draw.c "pool marks"): set 2, this binding, a uint per pool
+// slot that shaders set to 1 when they index the slot.
+#define VK_POOL_MARK_BINDING (VK_POOL_KINDS + 1)
+int vk_pool_marks_enabled(void);                     // NX2NAVI_TEX_DISUSE: modules get the marks
+extern volatile int32_t vk_pool_marks_missed;        // modules indexing the pool that could not be marked
+void vk_pool_marks_read(const uint32_t *marks, uint32_t n);   // vk_texture.c: slots marked since the last read
 VkDescriptorSetLayout vk_pool_set_layout(void);     // the pools' layout (made on first use)
 VkDescriptorSetLayout vk_empty_set_layout(void);    // set 1 of layouts without one
 // The upscaler stand-in (vk_tonemap.c): src (sampled) scaled to dw x dh and tonemapped into its own RGBA16F image, which
