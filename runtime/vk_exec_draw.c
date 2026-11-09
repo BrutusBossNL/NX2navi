@@ -1728,7 +1728,15 @@ static struct {
     VkImageView *view;                 // [kind * VK_POOL_TEX + id]: what the entry holds
     VkSampler *samp;                   // [id]
     uint64_t writes;
+    // pool marks (vk_exec_pool_marks): the device buffer the marked shaders write, read-back copies in a ring
+    VkBuffer marks;
+    VmaAllocation marks_alloc;
+    struct { VkBuffer buf; VmaAllocation alloc; const uint32_t *p; uint64_t fence; } rb[4];
+    int rb_head, rb_n, marks_ready;
+    uint32_t marks_since;              // submissions that recorded work since the last copy
 } PL;
+
+static void pool_marks_make(void);
 
 static VkDescriptorSetLayout pool_layout_make(void) {
     VkCtx *c = vk_ctx();
@@ -1737,8 +1745,10 @@ static VkDescriptorSetLayout pool_layout_make(void) {
     vkGetPhysicalDeviceFeatures2(c->phys, &f2);   // create_device enables every supported feature
     PL.uab = f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingPartiallyBound &&
              f12.descriptorBindingUpdateUnusedWhilePending;
-    VkDescriptorSetLayoutBinding b[VK_POOL_KINDS + 1];
-    VkDescriptorBindingFlags fl[VK_POOL_KINDS + 1];
+    int marks = vk_pool_marks_enabled();
+    uint32_t nb = VK_POOL_KINDS + 1 + (marks ? 1u : 0u);   // the marks buffer at VK_POOL_MARK_BINDING, last
+    VkDescriptorSetLayoutBinding b[VK_POOL_KINDS + 2];
+    VkDescriptorBindingFlags fl[VK_POOL_KINDS + 2];
     VkDescriptorBindingFlags f = (f12.descriptorBindingPartiallyBound ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : 0) |
         (PL.uab ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT : 0);
     for (uint32_t k = 0; k <= VK_POOL_KINDS; k++) {
@@ -1746,22 +1756,28 @@ static VkDescriptorSetLayout pool_layout_make(void) {
                                               k < VK_POOL_KINDS ? VK_POOL_TEX : VK_POOL_SAMP, VK_SHADER_STAGE_ALL, NULL};
         fl[k] = f;
     }
+    if (marks) {   // written once, before any set is bound: no update-after-bind
+        b[VK_POOL_MARK_BINDING] = (VkDescriptorSetLayoutBinding){VK_POOL_MARK_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                                                 VK_SHADER_STAGE_ALL, NULL};
+        fl[VK_POOL_MARK_BINDING] = 0;
+    }
     VkDescriptorSetLayoutBindingFlagsCreateInfo bf = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-                                                      .bindingCount = VK_POOL_KINDS + 1, .pBindingFlags = fl};
+                                                      .bindingCount = nb, .pBindingFlags = fl};
     VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &bf,
                                           .flags = PL.uab ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT : 0,
-                                          .bindingCount = VK_POOL_KINDS + 1, .pBindings = b};
+                                          .bindingCount = nb, .pBindings = b};
     VkDescriptorSetLayout l;
     if (vkCreateDescriptorSetLayout(c->device, &li, NULL, &l) != VK_SUCCESS) rt_fatal("vk: the texture pool layout failed");
-    VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_POOL_KINDS * VK_POOL_TEX},
-                                  {VK_DESCRIPTOR_TYPE_SAMPLER, VK_POOL_SAMP}};
+    VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_POOL_KINDS * VK_POOL_TEX},
+                                  {VK_DESCRIPTOR_TYPE_SAMPLER, VK_POOL_SAMP}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
+    uint32_t nps = marks ? 3 : 2;
     // POOL_SETS sets, fewer where the device has no room for them (one at the least, as before)
     for (int n = POOL_SETS; n >= 1 && !PL.nsets; n--) {
-        VkDescriptorPoolSize psn[2] = {{ps[0].type, ps[0].descriptorCount * (uint32_t)n},
-                                       {ps[1].type, ps[1].descriptorCount * (uint32_t)n}};
+        VkDescriptorPoolSize psn[3];
+        for (uint32_t i = 0; i < nps; i++) psn[i] = (VkDescriptorPoolSize){ps[i].type, ps[i].descriptorCount * (uint32_t)n};
         VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                                          .flags = PL.uab ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT : 0,
-                                         .maxSets = (uint32_t)n, .poolSizeCount = 2, .pPoolSizes = psn};
+                                         .maxSets = (uint32_t)n, .poolSizeCount = nps, .pPoolSizes = psn};
         if (vkCreateDescriptorPool(c->device, &pi, NULL, &PL.dpool) != VK_SUCCESS) continue;
         VkDescriptorSetLayout ls[POOL_SETS];
         for (int i = 0; i < n; i++) ls[i] = l;
@@ -1771,6 +1787,7 @@ static VkDescriptorSetLayout pool_layout_make(void) {
         else vkDestroyDescriptorPool(c->device, PL.dpool, NULL), PL.dpool = VK_NULL_HANDLE;
     }
     if (!PL.nsets) rt_fatal("vk: the texture pool set failed");
+    if (marks) pool_marks_make();
     PL.set = PL.sets[0];
     PL.log = malloc(sizeof *PL.log * POOL_LOG);
     PL.last = calloc((size_t)VK_POOL_KINDS * VK_POOL_TEX + VK_POOL_SAMP, sizeof *PL.last);
@@ -1779,10 +1796,90 @@ static VkDescriptorSetLayout pool_layout_make(void) {
     PL.view = calloc((size_t)VK_POOL_KINDS * VK_POOL_TEX, sizeof *PL.view);
     PL.samp = calloc(VK_POOL_SAMP, sizeof *PL.samp);
     if (!PL.tok || !PL.view || !PL.samp) rt_fatal("vk: out of memory");
-    rt_log("vk: bindless texture pools: %d kinds x %d textures, %d samplers, %s, %d sets (one per submission in turn)",
+    rt_log("vk: bindless texture pools: %d kinds x %d textures, %d samplers, %s, %d sets (one per submission in turn)%s",
            VK_POOL_KINDS, VK_POOL_TEX, VK_POOL_SAMP,
-           PL.uab ? "update after bind" : "no update-after-bind on this GPU (entries written while bound are undefined)", PL.nsets);
+           PL.uab ? "update after bind" : "no update-after-bind on this GPU (entries written while bound are undefined)", PL.nsets,
+           marks ? "; shaders mark the slots they sample (NX2NAVI_TEX_DISUSE)" : "");
     return l;
+}
+
+// ---- pool marks (NX2NAVI_TEX_DISUSE; vk_pipeline.c spirv_pool_mark writes them, vk_texture.c "disuse" reads them)
+// A device buffer of a uint per texture slot at VK_POOL_MARK_BINDING of every pool set: a marked shader stores 1 into
+// the slot of every pool texture it samples. Every MARKS_EVERY submissions that recorded work, the end of the
+// submission copies the buffer into a host-visible read-back buffer and clears it; a copy is in the submission that
+// signals the timeline value, so once vk_sync_fence_done reaches that value the copy is complete, and a later
+// submission hands it to vk_pool_marks_read. Up to MARKS_RB copies may be in flight; with none free, the marks stay
+// and the next submission tries. The buffer starts with whatever the memory held: a stray mark only keeps a texture
+// one read longer, and vk_texture.c waits for two reads before it evicts by disuse.
+#define MARKS_EVERY 4
+#define MARKS_RB 4
+
+static void pool_marks_make(void) {
+    VkCtx *c = vk_ctx();
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)VK_POOL_TEX * 4,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &PL.marks, &PL.marks_alloc, NULL) != VK_SUCCESS)
+        rt_fatal("vk: the texture pool marks buffer failed");
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo hi = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                  .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    for (int i = 0; i < MARKS_RB; i++) {
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(c->vma, &bi, &hi, &PL.rb[i].buf, &PL.rb[i].alloc, &info) != VK_SUCCESS || !info.pMappedData)
+            rt_fatal("vk: the texture pool marks read-back buffer failed");
+        PL.rb[i].p = info.pMappedData;
+    }
+    VkDescriptorBufferInfo di = {PL.marks, 0, VK_WHOLE_SIZE};
+    for (int i = 0; i < PL.nsets; i++) {
+        VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = PL.sets[i],
+                                  .dstBinding = VK_POOL_MARK_BINDING, .descriptorCount = 1,
+                                  .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &di};
+        vkUpdateDescriptorSets(c->device, 1, &w, 0, NULL);
+    }
+    __atomic_store_n(&PL.marks_ready, 1, __ATOMIC_RELEASE);   // the recording thread reads the rest after this
+}
+
+void vk_exec_pool_marks(VkExec *ex) {
+    if (!__atomic_load_n(&PL.marks_ready, __ATOMIC_ACQUIRE)) return;
+    VkCtx *c = vk_ctx();
+    uint64_t done = vk_sync_fence_done();
+    while (PL.rb_n) {   // the copies the GPU completed, in submission order
+        int i = (PL.rb_head - PL.rb_n + MARKS_RB) % MARKS_RB;
+        if (PL.rb[i].fence > done) break;
+        vmaInvalidateAllocation(c->vma, PL.rb[i].alloc, 0, VK_WHOLE_SIZE);
+        vk_pool_marks_read(PL.rb[i].p, VK_POOL_TEX);
+        PL.rb_n--;
+    }
+    if (++PL.marks_since < MARKS_EVERY || PL.rb_n == MARKS_RB) return;
+    PL.marks_since = 0;
+    int i = PL.rb_head;
+    PL.rb_head = (PL.rb_head + 1) % MARKS_RB, PL.rb_n++;
+    PL.rb[i].fence = ex->fence;
+    VkCommandBuffer cb = ex->cb;
+    // the shaders' stores before the copy; the copy's read before the clear
+    VkMemoryBarrier2 mb[2] = {
+        {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+         .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+         .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT}};
+    VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = mb};
+    vkCmdPipelineBarrier2(cb, &dep);
+    VkBufferCopy region = {0, 0, (VkDeviceSize)VK_POOL_TEX * 4};
+    vkCmdCopyBuffer(cb, PL.marks, PL.rb[i].buf, 1, &region);
+    mb[0] = (VkMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                               .dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT};
+    vkCmdPipelineBarrier2(cb, &dep);
+    vkCmdFillBuffer(cb, PL.marks, 0, VK_WHOLE_SIZE, 0);
+    // the clear before later shaders' stores, and the copy visible to the host
+    mb[0] = (VkMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                               .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+    mb[1] = (VkMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                               .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                               .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    dep.memoryBarrierCount = 2;
+    vkCmdPipelineBarrier2(cb, &dep);
 }
 
 static PlatMutex pool_lock_ = PLAT_MUTEX_INIT;
@@ -2039,6 +2136,7 @@ static void pool_sync_entries(VkExec *ex) {
     uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();
     if (PL.ready && !PL.retry && used == PL.kinds && gen == PL.gen && ep == PL.epoch && sg == PL.sgen) return;
     vk_texture_lock();
+    vk_texture_pool_ctx(1);   // these lookups are the pool's own: a texture evicted by disuse keeps its stand-in
     uint32_t fresh = used & ~PL.kinds;
     int n = vk_texture_slot_count_locked();
     if (n > VK_POOL_TEX) n = VK_POOL_TEX;
@@ -2088,6 +2186,7 @@ static void pool_sync_entries(VkExec *ex) {
         }
     }
     pool_flush();
+    vk_texture_pool_ctx(0);
     vk_texture_unlock();
     PL.kinds = used, PL.gen = gen, PL.epoch = ep, PL.sgen = sg;
 }

@@ -149,6 +149,10 @@
 # A render target that needs an image of its own takes the image of a released one of the same size and format
 # instead of making a new one (0 = always a new image).
 # tex_reuse = 1
+# 1: shaders mark the textures they sample, so that while video memory or the system's memory runs low, textures no
+# shader sampled for a while go, even those the game keeps registered (the areas it has loaded); one sampled again is
+# made again within a few frames. The first start after changing it builds the pipelines again. 0: such textures stay.
+# tex_disuse = 1
 # Host zstd decoder in place of the game's (0 = the game's), and a check that decodes every call both ways and logs
 # the differences (1 = on; slow).
 # zstd_native = 1

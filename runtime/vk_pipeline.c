@@ -743,12 +743,17 @@ static int ensure_init(void) {
     // RDNA 2 and older (vk_caps.amd_sc), which applies alpha to coverage while the dynamic state says off: on an RX 590
     // (24.9.1) NX2navi, which never turns it on, drew Link and the NPCs with depth but no colour (black silhouettes) and
     // dithered other surfaces into checkerboards (issue #67, RX 470/570/580). Taken out of the dynamic state, it goes
-    // into the pipeline key and the characters draw.
+    // into the pipeline key and the characters draw. With the texture pool marks it stays out of the dynamic state
+    // whatever the setting: a marked fragment shader gets early fragment tests only in a pipeline that has alpha to
+    // coverage off (spirv_pool_mark), so the pipeline has to know.
     const char *da = cfg_get("NX2NAVI_VK_DYN_A2C");   // no fixed default: it depends on the driver, see above
-    int da_on = da && *da ? strcmp(da, "0") != 0 : !vk_caps.amd_sc;
+    int marks = vk_pool_marks_enabled();
+    int da_on = !marks && (da && *da ? strcmp(da, "0") != 0 : !vk_caps.amd_sc);
     if (!da_on && P.dyn_a2c) {
         P.dyn_a2c = 0;
-        rt_log("vk_pipeline: dynamic alpha to coverage off (%s)", da && *da ? "NX2NAVI_VK_DYN_A2C=0" : "AMD's driver for RDNA 2 and older");
+        rt_log("vk_pipeline: dynamic alpha to coverage off (%s)", marks ? "the texture pool marks, NX2NAVI_TEX_DISUSE"
+                                                                  : da && *da ? "NX2NAVI_VK_DYN_A2C=0"
+                                                                              : "AMD's driver for RDNA 2 and older");
     }
 #undef PROC
     static const VkDynamicState core[] = {
@@ -1435,6 +1440,8 @@ static uint32_t *spirv_nan_preserve(const uint32_t *w, uint64_t n, uint32_t widt
     return o;
 }
 
+static int spirv_mark_list_test(const char *list);   // texture pool marks, below
+
 // --selftest (main.c): spirv_nan_preserve on a small fragment module, without a device. Returns the number of failures.
 int vk_pipeline_spirv_selftest(void) {
     enum { CAP = 2u << 16 | 17, MODE = 4u << 16 | 16 };
@@ -1587,11 +1594,21 @@ int vk_pool_marks_enabled(void) {
     return marks_on;
 }
 
+// A fragment shader that stores to memory runs before the depth test unless it declares EarlyFragmentTests: the GPU
+// must run it for fragments the test then rejects, as the stores are visible. The marks would so take the early depth
+// rejection from every marked fragment shader and make overdraw cost full shading. With early_ok, a fragment shader
+// whose result is the same under early tests gets EarlyFragmentTests along with its marks: one that discards, writes
+// its depth, sample mask or stencil reference, or already writes memory does not, as early tests would change what it
+// does. The caller passes early_ok only for a pipeline without alpha to coverage, which also drops samples after the
+// shader (ensure_init keeps alpha to coverage out of the dynamic state while marks are on, so a pipeline knows).
 // *status: 1 marked, 0 no pool texture access to mark, -1 one that could not be marked. NULL unless marked.
-static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, uint64_t *out_n, int *status) {
+static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, uint64_t *out_n, int *status) {
     enum { OP_TYPE_RUNTIME_ARRAY = 29, OP_TYPE_STRUCT_ = 30, OP_ACCESS_CHAIN_ = 65, OP_IN_BOUNDS_ACCESS_CHAIN = 66,
            OP_STORE_ = 62, OP_MEMBER_DECORATE_ = 72, OP_DECORATION_GROUP = 73, OP_GROUP_DECORATE = 74,
            OP_GROUP_MEMBER_DECORATE = 75, OP_DECORATE_ID = 332, OP_DECORATE_STRING = 5632, OP_MEMBER_DECORATE_STRING = 5633,
+           OP_EXECUTION_MODE = 16, OP_EXECUTION_MODE_ID = 331, OP_IMAGE_WRITE = 99, OP_ATOMIC_FIRST = 227,
+           OP_ATOMIC_LAST = 242, OP_KILL = 252, OP_TERMINATE_INVOCATION = 4416, OP_DEMOTE_TO_HELPER = 5380,
+           EM_EARLY_FRAGMENT_TESTS = 9, BI_SAMPLE_MASK = 20, BI_FRAG_DEPTH = 22, BI_FRAG_STENCIL_REF = 5014,
            SC_STORAGE_BUFFER = 12, DEC_BLOCK = 2, DEC_ARRAY_STRIDE = 6, DEC_OFFSET_ = 35 };
     *status = 0;
     if (n < 5) return NULL;
@@ -1600,19 +1617,28 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, uint64_t *out_n,
     uint32_t *bind = calloc(bound, sizeof *bind);   // per id: its Binding + 1 when its DescriptorSet is 2, else 0
     uint8_t *set2 = calloc(bound, 1);
     if (!bind || !set2) return free(bind), free(set2), *status = -1, NULL;
-    uint64_t ann_end = 0, fn_start = 0;
-    uint32_t uint_t = 0, c0 = 0, c1 = 0, ptr_u = 0;
-    int vertex_stage = 0, fragment_stage = 0;
+    uint64_t ann_end = 0, fn_start = 0, em_end = 0;   // em_end: past the entry points and execution modes
+    uint32_t uint_t = 0, c0 = 0, c1 = 0, ptr_u = 0, fs_entry = 0;
+    int vertex_stage = 0, fragment_stage = 0, entries = 0, early = early_ok;
     for (uint64_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
         if (!l || i + l > n) return free(bind), free(set2), *status = -1, NULL;
         if (op == SPV_OP_FUNCTION) { fn_start = i; break; }
+        if (op == SPV_OP_ENTRY_POINT || op == OP_EXECUTION_MODE || op == OP_EXECUTION_MODE_ID) em_end = i + l;
         if (op == SPV_OP_ENTRY_POINT && l >= 3) {
+            entries++;
             if (w[i + 1] <= 3) vertex_stage = 1;   // Vertex, TessellationControl, TessellationEvaluation, Geometry
-            else if (w[i + 1] == 4) fragment_stage = 1;
+            else if (w[i + 1] == 4) fragment_stage = 1, fs_entry = w[i + 2];
+        } else if (op == OP_EXECUTION_MODE && l >= 3 && w[i + 2] == EM_EARLY_FRAGMENT_TESTS) {
+            early = 0;   // has them already
         } else if (op == SPV_OP_DECORATE && l >= 4 && w[i + 1] < bound) {
             if (w[i + 2] == SPV_DEC_DESCRIPTOR_SET && w[i + 3] == 2) set2[w[i + 1]] = 1;
             else if (w[i + 2] == SPV_DEC_BINDING) bind[w[i + 1]] = w[i + 3] + 1;
+            else if (w[i + 2] == SPV_DEC_BUILTIN &&
+                     (w[i + 3] == BI_SAMPLE_MASK || w[i + 3] == BI_FRAG_DEPTH || w[i + 3] == BI_FRAG_STENCIL_REF))
+                early = 0;
+        } else if (op == SPV_OP_VARIABLE && l >= 4 && w[i + 3] == SC_STORAGE_BUFFER) {
+            early = 0;   // the guest's own storage buffers: its stores would change under early tests
         } else if (op == SPV_OP_TYPE_INT && l == 4 && w[i + 2] == 32 && w[i + 3] == 0) {
             uint_t = w[i + 1];
         } else if (op == SPV_OP_CONSTANT && l == 4 && uint_t && w[i + 1] == uint_t) {
@@ -1638,19 +1664,29 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, uint64_t *out_n,
         if ((op == OP_ACCESS_CHAIN_ || op == OP_IN_BOUNDS_ACCESS_CHAIN) && l >= 5 && w[i + 3] < bound && set2[w[i + 3]] &&
             bind[w[i + 3]] && bind[w[i + 3]] - 1 < VK_POOL_KINDS)
             sites++;
+        else if (op == OP_KILL || op == OP_TERMINATE_INVOCATION || op == OP_DEMOTE_TO_HELPER || op == OP_IMAGE_WRITE ||
+                 (op >= OP_ATOMIC_FIRST && op <= OP_ATOMIC_LAST))
+            early = 0;
         i += l;
     }
     if (marked || !sites) return free(bind), free(set2), NULL;
     if (w[1] != 0x00010300 || !ann_end || !fn_start || (vertex_stage && !marks_vs_ok) || (fragment_stage && !marks_fs_ok))
         return free(bind), free(set2), *status = -1, NULL;
-    uint64_t on = n + 40 + 9 * sites;
+    early = early && fragment_stage && entries == 1 && em_end && em_end <= ann_end;
+    uint64_t on = n + 3 + 20 + 30 + 9 * sites;   // the mode, decorations, at most 30 words of new types and the variable, 9 a site
     uint32_t *o = malloc(on * 4);
     if (!o) return free(bind), free(set2), *status = -1, NULL;
     uint32_t next = bound;
     uint32_t new_uint = uint_t ? 0 : (uint_t = next++), new_c0 = c0 ? 0 : (c0 = next++), new_c1 = c1 ? 0 : (c1 = next++);
     uint32_t rta = next++, st = next++, ptr_st = next++, var = next++, new_ptr_u = ptr_u ? 0 : (ptr_u = next++);
     uint64_t p = 0;
-    memcpy(o, w, ann_end * 4), p = ann_end;
+    if (early) {
+        memcpy(o, w, em_end * 4), p = em_end;
+        o[p++] = 3u << 16 | OP_EXECUTION_MODE, o[p++] = fs_entry, o[p++] = EM_EARLY_FRAGMENT_TESTS;
+        memcpy(o + p, w + em_end, (ann_end - em_end) * 4), p += ann_end - em_end;
+    } else {
+        memcpy(o, w, ann_end * 4), p = ann_end;
+    }
     o[p++] = 4u << 16 | SPV_OP_DECORATE, o[p++] = rta, o[p++] = DEC_ARRAY_STRIDE, o[p++] = 4;
     o[p++] = 5u << 16 | OP_MEMBER_DECORATE_, o[p++] = st, o[p++] = 0, o[p++] = DEC_OFFSET_, o[p++] = 0;
     o[p++] = 3u << 16 | SPV_OP_DECORATE, o[p++] = st, o[p++] = DEC_BLOCK;
@@ -1706,12 +1742,13 @@ static int spirv_mark_list_test(const char *list) {
         uint64_t n = (uint64_t)sz / 4, mn = 0;
         uint32_t *pooled = spirv_pool_rebind(w, n);
         int st;
-        uint32_t *m = spirv_pool_mark(pooled ? pooled : w, n, &mn, &st);
+        uint32_t *m = spirv_pool_mark(pooled ? pooled : w, n, 1, &mn, &st);
         if (st > 0) {
             marked++;
-            FILE *h = fopen(out, "wb");
-            if (!h || fwrite(m, 4, mn, h) != mn) bad++;
-            if (h) fclose(h);
+            if (!plat_file_write_atomic(out, m, (size_t)mn * 4)) {
+                if (!bad) printf("spirv: pool marks test: %s cannot be written\n", out);
+                bad++;
+            }
         } else if (st < 0) {
             missed++;
         } else {
@@ -1725,7 +1762,8 @@ static int spirv_mark_list_test(const char *list) {
     return bad;
 }
 
-static VkShaderModule make_module(const uint32_t *w, uint64_t words) {
+// early_ok: a fragment shader whose pipeline has no alpha to coverage (spirv_pool_mark)
+static VkShaderModule make_module(const uint32_t *w, uint64_t words, int early_ok) {
     uint64_t fixed_n = 0;
     uint32_t *fixed = spirv_fixup(w, words, &fixed_n);
     if (fixed) w = fixed, words = fixed_n;
@@ -1736,7 +1774,7 @@ static VkShaderModule make_module(const uint32_t *w, uint64_t words) {
         if (vk_pool_marks_enabled()) {
             uint64_t mk_n = 0;
             int st;
-            uint32_t *mk = spirv_pool_mark(w, words, &mk_n, &st);
+            uint32_t *mk = spirv_pool_mark(w, words, early_ok, &mk_n, &st);
             if (mk) {
                 free(fixed);
                 w = fixed = mk, words = mk_n;
@@ -2315,7 +2353,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         const uint32_t *tcode = gfx_shader_spirv(s->ts, &tw);
         uint32_t toff = fs_off + (s->fs ? binding_span(s->fs) - 1 : 0);
         uint32_t *t = tcode && toff ? spirv_rebind(tcode, tw, toff) : NULL;
-        tm = make_module(t ? t : tcode, tw);
+        tm = make_module(t ? t : tcode, tw, 0);
         free(t);
     }
     if (l->set1 && !mesh) {   // independent layouts: outputs from the vertex shader's union, not from this fragment shader
@@ -2356,9 +2394,9 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
             fcode = fpatched = r;
         }
         // A bound colour target outside the shader's output map gets write mask 0 (target_wmask)
-        if (fcode) fm = make_module(fcode, fw);
+        if (fcode) fm = make_module(fcode, fw, !k->a2c);
     }
-    vm = make_module(vcode, vw);
+    vm = make_module(vcode, vw, 0);
     free(vpatched), free(fpatched);
     VkPipeline pipe = VK_NULL_HANDLE;
     if (!vm || (s->fs && !fm) || (mesh && s->ts && !tm)) goto out;
@@ -2567,7 +2605,7 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         sw = vw;
         if (pk->missing && (patched = spirv_add_outputs(vcode, vw, pk->missing, pk->fin, &n2))) vcode = patched, vw = n2;
         else if (pk->missing) LOG_ONCE("vk_pipeline: cannot add missing vertex outputs (mask %#x)", pk->missing);
-        if (!(m = make_module(vcode, vw))) goto out;
+        if (!(m = make_module(vcode, vw, 0))) goto out;
         st.stage = VK_SHADER_STAGE_VERTEX_BIT, st.module = m;
         pin_subgroup32(&st, &rq, scode, sw);
         pi.stageCount = 1, pi.pStages = &st, pi.pViewportState = &vp, pi.pRasterizationState = &rs;
@@ -2584,7 +2622,7 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
             }
             patched = fcode ? spirv_set(fcode, fw, 1) : NULL;
             free(d);
-            if (!patched || !(m = make_module(patched, fw))) goto out;
+            if (!patched || !(m = make_module(patched, fw, !k->a2c))) goto out;
             st.stage = VK_SHADER_STAGE_FRAGMENT_BIT, st.module = m;
             pin_subgroup32(&st, &rq, scode, sw);
             pi.stageCount = 1, pi.pStages = &st;
@@ -3898,7 +3936,7 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l, int cache
     if (over) code = over, words = ow;
     uint32_t *fog = spirv_fog_keep_froxels(code, words);
     if (fog) free(over), over = fog, code = fog;
-    VkShaderModule m = make_module(code, words);
+    VkShaderModule m = make_module(code, words, 0);
     if (!m) return free(over), VK_NULL_HANDLE;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rqc;
     VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,

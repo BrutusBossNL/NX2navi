@@ -482,6 +482,9 @@ extern volatile uint32_t vk_pool_kinds_used;        // bit k: a pipeline was mad
 int vk_pool_marks_enabled(void);                     // NX2NAVI_TEX_DISUSE: modules get the marks
 extern volatile int32_t vk_pool_marks_missed;        // modules indexing the pool that could not be marked
 void vk_pool_marks_read(const uint32_t *marks, uint32_t n);   // vk_texture.c: slots marked since the last read
+// Texture lock held: 1 while the texture pool refresh looks its slots up (vk_exec_draw.c pool_sync_entries), 0 after.
+// Those lookups leave out a texture evicted by disuse, and are not counted as the texture being used.
+void vk_texture_pool_ctx(int on);
 VkDescriptorSetLayout vk_pool_set_layout(void);     // the pools' layout (made on first use)
 VkDescriptorSetLayout vk_empty_set_layout(void);    // set 1 of layouts without one
 // The upscaler stand-in (vk_tonemap.c): src (sampled) scaled to dw x dh and tonemapped into its own RGBA16F image, which

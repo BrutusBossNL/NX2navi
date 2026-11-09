@@ -139,6 +139,9 @@ void vk_exec_inline_end(int reopen);
 void vk_exec_draw_new_cb(void);
 // vk_exec_draw.c: the vertex and fragment shader of the last draw recorded into this command buffer (NULL: none yet).
 void vk_exec_draw_shaders(const GfxShader **vs, const GfxShader **fs);
+// vk_exec_draw.c "pool marks": at the end of a submission that recorded work, after its closing barrier. Hands the
+// mark copies the GPU completed to vk_texture.c and, every few such submissions, copies the marks out and clears them.
+void vk_exec_pool_marks(VkExec *ex);
 VkBuffer vk_exec_inline_buffer(VkDeviceSize size);
 // vk_exec.c: the stand-in a 3D BC render target is drawn through goes with its image (vk_exec_image_gone).
 void vk_exec_bc_gone(VkImage image);
