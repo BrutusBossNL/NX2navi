@@ -1524,10 +1524,25 @@ def step_prompts(out):
              'to retry this step')
 
 
+AWAKE = None   # keep_awake's systemd-inhibit process on Linux; dropping it would close the pipe and end the hold
+
+
 def keep_awake():
-    """Hold off sleep for this process's life (Windows): the build runs for many minutes with no input, and a PC that
-    sleeps in the middle stops the compiles. The hold ends with the process."""
+    """Hold off sleep for this process's life: the build runs for many minutes with no input, and a PC that sleeps in
+    the middle stops the compiles. The hold ends with the process. Only sleep: the screen may still blank and lock, as
+    with Windows' ES_SYSTEM_REQUIRED. Linux: systemd-inhibit takes a lock on sleep and keeps it while its `cat` reads
+    the pipe this process holds open, so the lock also goes when this process is killed. Without systemd-inhibit (or a
+    login manager to take the lock) nothing happens."""
+    global AWAKE
     if os.name != 'nt':
+        if AWAKE is None:
+            try:
+                AWAKE = subprocess.Popen(['systemd-inhibit', '--what=sleep', '--mode=block', '--who=NX2navi',
+                                          '--why=Building the game', 'cat'], stdin=subprocess.PIPE,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         start_new_session=True)   # a Ctrl+C meant for the build leaves the lock
+            except OSError:
+                pass
         return
     try:
         import ctypes
@@ -1551,12 +1566,31 @@ def load_state(path):
     return state
 
 
+CPUINFO = Path('/proc/cpuinfo')
+
+
 def cpu_tag():
-    """This processor's features the lifted code's level follows (cpu_level), as Windows reports them; part of the
+    """This processor's features the lifted code's level follows (cpu_level), as the system reports them: Windows
+    through IsProcessorFeaturePresent, Linux through the flags of /proc/cpuinfo (which lists a feature only when the
+    kernel runs with it). One digit each for SSE4.2, AVX2 and AVX-512F: '110' is AVX2 without AVX-512. Part of the
     compile key, so a game folder moved to a PC without them (or a new processor) is compiled again rather than kept
     with instructions the processor lacks. 'any' where it cannot be read."""
     if os.name != 'nt':
-        return 'any'
+        try:
+            lines = CPUINFO.read_text(encoding='ascii', errors='replace').splitlines()
+        except OSError:
+            return 'any'
+        # One flags line per logical processor; a hybrid processor's cores can differ and the game runs on any of
+        # them, so only what all of them have counts.
+        flags = []
+        for line in lines:
+            key, _, rest = line.partition(':')
+            if key.strip() == 'flags':
+                flags.append(set(rest.split()))
+        if not flags:   # not x86 (its list is called Features)
+            return 'any'
+        have = set.intersection(*flags)
+        return ''.join('1' if f in have else '0' for f in ('sse4_2', 'avx2', 'avx512f'))
     try:
         import ctypes
         present = ctypes.windll.kernel32.IsProcessorFeaturePresent
