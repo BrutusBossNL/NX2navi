@@ -18,6 +18,7 @@
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
 #include "vk.h"
+#include "vk_dlaa.h"
 #include "vk_exec.h"
 #include "vk_gpa.h"
 #include "wb_merge_spv.h"
@@ -576,6 +577,7 @@ static void shadow_log(uint64_t frame);
 static int dead_pending(void);
 
 static void vram_log(uint64_t frame);
+static void outside_watch(uint64_t frame);
 
 static volatile uint64_t mirror_frame;   // the frame vk_mem_census last saw, for mirror_sync's log lines
 
@@ -583,6 +585,7 @@ void vk_mem_census(uint64_t frame) {
     mirror_frame = frame;
     static uint64_t window_start;
     if ((rt_trace & RT_TRACE_PERF) && frame % 600 == 0) vram_log(frame), mirror_pool_log(frame);
+    if ((rt_trace & RT_TRACE_PERF) && frame % 60 == 0) outside_watch(frame);
     if ((rt_trace & RT_TRACE_PERF) && !vk_mirror_on) dirty_frame(frame);
     if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
         mirror_log(frame), shadow_log(frame);   // mirror_log also logs the write-watch line
@@ -2528,9 +2531,11 @@ static void heap_log(VkCtx *c, uint64_t frame, const VmaBudget *vb) {
     for (uint32_t t = 0; t < c->mem_props.memoryTypeCount && t < VK_MAX_MEMORY_TYPES && o < (int)sizeof line - 120; t++) {
         const VmaDetailedStatistics *d = &ts.memoryType[t];
         if (!d->statistics.blockCount) continue;
-        o += snprintf(line + o, sizeof line - (size_t)o, " type %u: %u blocks %.0f MiB, %u allocations %.0f MiB, largest %.1f MiB;", t,
-                      d->statistics.blockCount, d->statistics.blockBytes / M, d->statistics.allocationCount,
-                      d->statistics.allocationBytes / M, d->allocationSizeMax / M);
+        o += snprintf(line + o, sizeof line - (size_t)o,
+                      " type %u: %u blocks %.0f MiB, %u allocations %.0f MiB, largest %.1f MiB, %u free ranges (largest %.1f MiB);",
+                      t, d->statistics.blockCount, d->statistics.blockBytes / M, d->statistics.allocationCount,
+                      d->statistics.allocationBytes / M, d->allocationSizeMax / M, d->unusedRangeCount,
+                      d->unusedRangeCount ? d->unusedRangeSizeMax / M : 0.0);
     }
     rt_log("%s", line);
     // The address-space walk of the census (plat_mem_census, 100-240 ms of VirtualQuery) runs on its own thread, but
@@ -2569,6 +2574,71 @@ static void pool_census_log(uint64_t frame) {
            (unsigned long long)nn, nb / M, (unsigned long long)mn, mb / M, MIRROR_IDLE, (unsigned long long)in, ib / M);
 }
 
+// After the heap lines: the driver's figure for the device-local heaps split by what holds it. VMA's blocks hold the
+// textures with their own memory (live and released), the VRAM mirrors, the physical pools, the ASTC decoder's scratch,
+// the headroom's spare blocks (their anchors), everything else VMA placed, and the free space inside the blocks, which
+// the driver counts as used until a block empties. The rest of the driver's figure was never allocated through VMA:
+// the swapchain, DLSS and frame generation (Streamline), compiled pipelines and the driver's own memory; DLSS's share
+// as its statistics report it, when known.
+static void vram_use_log(VkCtx *c, uint64_t frame, const VmaBudget *vb, const VkTexCensus *t) {
+    uint64_t usage = 0, blocks = 0, allocs = 0, phys = 0;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT bp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    if (c->has_memory_budget) {
+        VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, .pNext = &bp};
+        vkGetPhysicalDeviceMemoryProperties2(c->phys, &p2);
+    }
+    for (uint32_t h = 0; h < c->mem_props.memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++)
+        if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            usage += c->has_memory_budget ? bp.heapUsage[h] : vb[h].statistics.blockBytes,
+                blocks += vb[h].statistics.blockBytes, allocs += vb[h].statistics.allocationBytes;
+    plat_mutex_lock_shared(&pool_lock);
+    for (int i = 0; i < nphys; i++)
+        if (phys_list[i]->alloc) phys += phys_list[i]->size;
+    plat_mutex_unlock_shared(&pool_lock);
+    uint64_t mir = (uint64_t)__atomic_load_n(&m_live_bytes, __ATOMIC_RELAXED), held = vk_headroom_held(),
+             scratch = vk_astc_scratch_bytes();
+    uint64_t known = t->bytes_live + t->bytes_released + mir + phys + held + scratch;
+    int64_t dlss = vk_dlaa_vram();
+    char ds[48] = "n/a";
+    if (dlss >= 0) snprintf(ds, sizeof ds, "%.0f MiB", dlss / 1048576.0);
+    const double M = 1048576.0;
+    rt_log("mem: vram by use frame %llu: in use %.0f MiB = VMA blocks %.0f MiB (textures %.0f, released textures %.0f, "
+           "VRAM mirrors %.0f, physical pools %.0f, ASTC scratch %.0f, headroom spare %.0f, other %.0f, free inside the "
+           "blocks %.0f) + outside VMA %.0f MiB (swapchain, DLSS and frame generation, pipelines, driver; DLSS reports %s)",
+           (unsigned long long)frame, usage / M, blocks / M, t->bytes_live / M, t->bytes_released / M, mir / M, phys / M,
+           scratch / M, held / M, allocs > known ? (allocs - known) / M : 0.0, blocks > allocs ? (blocks - allocs) / M : 0.0,
+           usage > blocks ? (usage - blocks) / M : 0.0, ds);
+}
+
+// With NX2NAVI_TRACE=perf every 60 frames: a line when the device-local memory VMA did not allocate (vram_use_log's
+// "outside VMA") moved by OUTSIDE_STEP or more since the last line, so the log places it beside what did it. In one
+// session it grew from 0.6 to 2.6 GiB at the title screen, in two steps of about 1 GiB while the boot's compute
+// pipelines were being built (vk_pipeline.c, stage library prebuild), and DLSS and frame generation add theirs when
+// they start.
+#define OUTSIDE_STEP (256ull << 20)
+static void outside_watch(uint64_t frame) {
+    VkCtx *c = vk_ctx();
+    if (!c || !c->has_memory_budget) return;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT bp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, .pNext = &bp};
+    vkGetPhysicalDeviceMemoryProperties2(c->phys, &p2);
+    VmaBudget vb[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(c->vma, vb);
+    uint64_t usage = 0, blocks = 0;
+    for (uint32_t h = 0; h < c->mem_props.memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++)
+        if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            usage += bp.heapUsage[h], blocks += vb[h].statistics.blockBytes;
+    uint64_t out = usage > blocks ? usage - blocks : 0;
+    static uint64_t last;
+    static int seen;
+    if (seen && (out > last ? out - last : last - out) < OUTSIDE_STEP) return;
+    const double M = 1048576.0;
+    rt_log("mem: frame %llu: device memory outside VMA (swapchain, DLSS and frame generation, pipelines, driver) %s%.0f "
+           "MiB (%s%.0f MiB)", (unsigned long long)frame, seen ? "now " : "", out / M, out >= last ? "+" : "-",
+           (out >= last ? out - last : last - out) / M);
+    last = out, seen = 1;
+}
+
 // With NX2NAVI_TRACE=perf every 600 frames: what holds device-local memory, to see what grows over a long session.
 // VMA's blocks and allocations on the device-local heaps, texture entries with their own memory, the VRAM mirrors and
 // the objects waiting for their last submission to retire.
@@ -2594,6 +2664,7 @@ static void vram_log(uint64_t frame) {
     vk_texture_census_log(frame);
     pool_census_log(frame);
     heap_log(c, frame, vb);
+    vram_use_log(c, frame, vb, &t);
 }
 
 // Device class: INTEGRATED -> uma; a discrete GPU with a DEVICE_LOCAL heap of 1 GiB or more beside a

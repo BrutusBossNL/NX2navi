@@ -72,6 +72,7 @@ static struct {
     PFN_Release release;
     int tried, loaded, available;
     int ngx_up;   // vk_dlaa_init brought NGX up: DLSS serves this run
+    NgxParam *capsp;   // the capability parameters (vk_dlaa_init), which DLSS's statistics callback reads and fills
     int wanted;   // -1 not read yet
 } N = {.wanted = -1};
 
@@ -83,6 +84,7 @@ typedef NgxResult (*GetI)(const NgxParam *, const char *, int *);
 typedef NgxResult (*GetU)(const NgxParam *, const char *, unsigned *);
 typedef NgxResult (*GetF)(const NgxParam *, const char *, float *);
 typedef NgxResult (*GetP)(const NgxParam *, const char *, void **);
+typedef NgxResult (*GetU64)(const NgxParam *, const char *, unsigned long long *);
 // The SDK declares Set(u64), Set(float), Set(double), Set(u32), Set(int), Set(ID3D11Resource *), Set(ID3D12Resource *),
 // Set(void *), then the Get overloads in the same order, then Reset.
 #ifdef _WIN32
@@ -98,6 +100,9 @@ static int p_geti(const NgxParam *p, const char *n, int *v) { return NGX_OK(((Ge
 static int p_getu(const NgxParam *p, const char *n, unsigned *v) { return NGX_OK(((GetU)p->vt->slot[G_U32])(p, n, v)); }
 static int p_getf(const NgxParam *p, const char *n, float *v) { return NGX_OK(((GetF)p->vt->slot[G_F])(p, n, v)); }
 static int p_getp(const NgxParam *p, const char *n, void **v) { return NGX_OK(((GetP)p->vt->slot[G_P])(p, n, v)); }
+static int p_getull(const NgxParam *p, const char *n, unsigned long long *v) {
+    return NGX_OK(((GetU64)p->vt->slot[G_U64])(p, n, v));
+}
 
 #ifdef _WIN32
 #define DLSS_MODEL "nvngx_dlss.dll"
@@ -279,6 +284,7 @@ void vk_dlaa_init(void) {
         p_geti(caps, "SuperSampling.NeedsUpdatedDriver", &driver);
     }
     N.available = avail != 0;
+    N.capsp = caps;
     N.ngx_up = 1;
     rt_log("dlaa: NGX up; DLSS %s%s", avail ? "available" : "NOT available (is " DLSS_MODEL " next to the executable?)",
            driver ? "; the driver needs an update" : "");
@@ -309,6 +315,10 @@ int vk_dlaa_available(void) { return vk_dlaa_wanted() && N.available; }
 // (vk_dlaa_swap_img, applied by vk_exec_draw.c tex_info): whichever shader scales, it scales DLSS's picture.
 #define OCAM_BLOCK 0x3500u   // Ocarina's scene context block (vk_dlaa_draw)
 #define OCAM_BYTES 0xb0u     // its rows 0-10: the view and the projection
+#define DLSS_SIZES 5         // DLSS features kept, one per scene and output size (D.sizes)
+// A size no evaluation used for this many goes with its feature (stale_sizes): DLSS's history buffers and the work
+// images at the output size held their VRAM after a switch of the DLSS mode, until four more sizes had come and gone.
+#define SIZE_STALE 3600
 static struct {
     VkExecTarget color, depth;   // the armed pair, valid in the frame it was armed
     int armed, done, gbuf;       // this frame: armed on the light target, DLAA ran, the G-buffer was drawn
@@ -328,7 +338,7 @@ static struct {
         int dist_cur, dist_ok;   // as chars_cur and chars_ok
         NgxHandle *feat;
         uint64_t used;           // evals count when it last ran
-    } sizes[5], *last;           // last: the one the previous DLAA frame ran with
+    } sizes[DLSS_SIZES], *last;  // last: the one the previous DLAA frame ran with
     VkImage last_color;          // the target DLAA ran on last frame: another one means a new history
     NgxParam *params;
     int failed, reset;
@@ -487,7 +497,7 @@ static void free_size(struct Size *e) {
 // goes for a new one.
 static struct Size *size_for(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
     struct Size *e = NULL, *lru = &D.sizes[0];
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < DLSS_SIZES; i++) {
         if (D.sizes[i].w == w && D.sizes[i].h == h && D.sizes[i].ow == ow && D.sizes[i].oh == oh) return &D.sizes[i];
         if (!D.sizes[i].out && !e) e = &D.sizes[i];
         if (D.sizes[i].used < lru->used) lru = &D.sizes[i];
@@ -1282,6 +1292,33 @@ static void target_changed(const VkExecTarget *t) {
     D.reset = 1, D.why[2]++, D.last_color = t->image;
 }
 
+// DLSS's own video memory, the features and their history (NGX's DLSS statistics callback with the capability
+// parameters), for the log's VRAM breakdown (vk_dlaa_vram); -1 until known. Asked on the replay thread, which makes every
+// other NGX call, every 600 evaluations.
+static volatile int64_t dlss_vram = -1;
+int64_t vk_dlaa_vram(void) { return __atomic_load_n(&dlss_vram, __ATOMIC_RELAXED); }
+
+static void query_vram(void) {
+    void *cb = NULL;
+    unsigned long long n = 0;
+    if (fsr3() || !N.capsp || !p_getp(N.capsp, "DLSSGetStatsCallback", &cb) || !cb) return;
+    if (NGX_OK(((NgxResult (*)(NgxParam *))cb)(N.capsp)) && p_getull(N.capsp, "SizeInBytes", &n))
+        __atomic_store_n(&dlss_vram, (int64_t)n, __ATOMIC_RELAXED);
+}
+
+// Frees the sizes other than cur that no evaluation used for SIZE_STALE evaluations: the GPU finished with them long
+// ago (the CPU is never that many presents ahead), so their images and feature go at once.
+static void stale_sizes(const struct Size *cur) {
+    for (int i = 0; i < DLSS_SIZES; i++) {
+        struct Size *s = &D.sizes[i];
+        if (s == cur || !s->out || D.evals < s->used + SIZE_STALE) continue;
+        rt_log("dlaa: the DLSS feature at %ux%u -> %ux%u went unused for %d frames: freed", s->w, s->h, s->ow, s->oh,
+               SIZE_STALE);
+        if (D.last == s) D.last = NULL;
+        free_size(s);
+    }
+}
+
 static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     const VkExecTarget *t = &D.color, *z = &D.depth;
     if (!dst) dst = t;
@@ -1289,7 +1326,7 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     VkCommandBuffer cb = ex->cb;
     vk_exec_barrier(ex);   // what drew the scene is done (no pass is open here)
     if (D.preset_dirty) {   // another model: features are created with it, so every size gets a new one
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < DLSS_SIZES; i++)
             if (D.sizes[i].out) free_size(&D.sizes[i]);
         D.last = NULL, D.preset_dirty = 0;
     }
@@ -1404,6 +1441,8 @@ evaluated:
     if (timed) times_mark(cb, T_DL1);   // through the recorder, after NGX's own commands
     D.reset = 0;
     D.last = e, e->used = D.evals + 1;
+    if (D.evals % 600 == 0) query_vram();
+    stale_sizes(e);
     full_barrier(cb);
     vk_mvcheck_output(cb, e->out, ow, oh);   // NX2NAVI_MV_CHECK (test)
     // the result into the scene target (DLAA: the bloom, the post passes and the HUD read it and draw over it) or into

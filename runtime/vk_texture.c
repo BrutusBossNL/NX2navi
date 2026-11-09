@@ -483,8 +483,9 @@ static int shadow_scale_of(const nvn_texdesc *d, const TexVkFormat *f, uint32_t 
     return d->width * (uint32_t)scale <= most ? scale : 1;
 }
 
-// NX2NAVI_ASTC_BC_PROBE=1: measures, without changing any format, how much of the ASTC set could be compressed if the
-// alpha rule were data-driven instead of footprint-driven. Each texture's source blocks are decoded on the CPU with
+// NX2NAVI_ASTC_BC_PROBE=1 (astc_bc_probe in nx2navi.ini): measures, without changing any format, how much of the ASTC
+// set could be compressed if the alpha rule were data-driven instead of footprint-driven: the opaque part could be BC1,
+// half the size of the BC3 every decoded ASTC texture is now. Each texture's source blocks are decoded on the CPU with
 // tex_astc.c astc_decode_block (up to 512 spread over the level) and counted by whether any block has alpha below 250.
 #define ASTC_BC_PROBES 512
 static uint64_t n_probe_calls, n_probe_alpha, n_probe_opaque, n_probe_bytes_alpha, n_probe_bytes_opaque;
@@ -530,9 +531,9 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         log_limited(&n_unsupported, "texture format %#x: VkFormat %d lacks features %#x", d->format, (int)f.vk, (unsigned)f.need);
         return NULL;
     }
-    // NX2NAVI_ASTC_BC_PROBE (environment; diagnostics only): measure what a data-driven alpha rule would compress
+    // NX2NAVI_ASTC_BC_PROBE (diagnostics only): measure what a data-driven alpha rule would compress
     static int bc_probe = -1;   // read once: this runs for every texture created
-    if (bc_probe < 0) bc_probe = getenv("NX2NAVI_ASTC_BC_PROBE") != NULL;
+    if (bc_probe < 0) bc_probe = cfg_bool("NX2NAVI_ASTC_BC_PROBE");
     if (f.astc_bw && bc_probe) astc_probe_alpha(t, &f);
     nvn_texlayout L;
     nvn_tex_layout(d, &L);
@@ -3025,6 +3026,8 @@ void vk_texture_census_log(uint64_t frame) {
     struct { int fmt; uint64_t n, b; } fm[48];
     int nfm = 0;
     struct { uint64_t b; uint32_t w, h, d, levels; int fmt, gpu; } big[4] = {{0}};   // copied: read after unlock
+    // the addresses whose extra entries hold the most, with their largest few entries (copied: read after unlock)
+    struct { uint64_t addr, cnt, extra; struct { uint64_t b; uint32_t w, h, d; int fmt, gpu; } e[4]; } dup[3] = {{0}};
     const double M = 1048576.0;
     lock();
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
@@ -3052,6 +3055,25 @@ void vk_texture_census_log(uint64_t frame) {
         for (const Tex *p = by_addr.vals[i]; p; p = p->next_at)
             if (!p->released && p->bytes) cnt++, sum += p->bytes, most = p->bytes > most ? p->bytes : most;
         if (cnt > 1) dup_n += cnt - 1, dup_b += sum - most;
+        for (int q = 0; cnt > 1 && q < 3; q++) {
+            if (sum - most <= dup[q].extra) continue;
+            memmove(dup + q + 1, dup + q, sizeof *dup * (size_t)(2 - q));
+            memset(&dup[q], 0, sizeof dup[q]);
+            dup[q].cnt = cnt, dup[q].extra = sum - most;
+            for (const Tex *p = by_addr.vals[i]; p; p = p->next_at) {
+                if (p->released || !p->bytes) continue;
+                dup[q].addr = p->pub.addr;
+                for (int x = 0; x < 4; x++)
+                    if (p->bytes > dup[q].e[x].b) {
+                        memmove(dup[q].e + x + 1, dup[q].e + x, sizeof dup[q].e[0] * (size_t)(3 - x));
+                        dup[q].e[x].b = p->bytes, dup[q].e[x].w = p->pub.width, dup[q].e[x].h = p->pub.height;
+                        dup[q].e[x].d = p->pub.layers * p->pub.depth, dup[q].e[x].fmt = (int)p->f.vk;
+                        dup[q].e[x].gpu = !comes_back_intact(p);
+                        break;
+                    }
+            }
+            break;
+        }
     }
     unlock();
     char line[1024];
@@ -3074,6 +3096,19 @@ void vk_texture_census_log(uint64_t frame) {
     for (int q = 0; q < 4 && big[q].b; q++)
         o += snprintf(line + o, sizeof line - (size_t)o, " %ux%ux%u fmt %d %u levels %.0f MiB%s;", big[q].w, big[q].h,
                       big[q].d, big[q].fmt, big[q].levels, big[q].b / M, big[q].gpu ? " (GPU-written)" : "");
+    rt_log("%s", line);
+    if (!dup[0].cnt) return;
+    // Which entries share an address: each descriptor of the same storage (another size, format or level count) gets
+    // an image of its own, and its memory beside the others'.
+    o = snprintf(line, sizeof line, "mem: textures frame %llu: addresses with the most extra entries:", (unsigned long long)frame);
+    for (int q = 0; q < 3 && dup[q].cnt && o < (int)sizeof line - 200; q++) {
+        o += snprintf(line + o, sizeof line - (size_t)o, " %#llx: %llu entries, %.0f MiB beyond the largest (",
+                      (unsigned long long)dup[q].addr, (unsigned long long)dup[q].cnt, dup[q].extra / M);
+        for (int x = 0; x < 4 && dup[q].e[x].b && o < (int)sizeof line - 80; x++)
+            o += snprintf(line + o, sizeof line - (size_t)o, "%s%ux%ux%u fmt %d %.1f MiB%s", x ? ", " : "", dup[q].e[x].w,
+                          dup[q].e[x].h, dup[q].e[x].d, dup[q].e[x].fmt, dup[q].e[x].b / M, dup[q].e[x].gpu ? " GPU-written" : "");
+        o += snprintf(line + o, sizeof line - (size_t)o, ");");
+    }
     rt_log("%s", line);
 }
 

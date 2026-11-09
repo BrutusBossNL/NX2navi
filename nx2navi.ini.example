@@ -522,6 +522,13 @@
 # Each walk holds the address-space lock for 100-240 ms and delays the next frame by as much, so they are off unless
 # asked for.
 # mem_census = 0
+# The size in MiB (16 to 256) of the blocks the renderer takes video memory in. A block goes back to the driver only once
+# everything in it is freed, so smaller blocks hold less free space after area changes; larger ones need fewer
+# allocations while an area loads. Default: 64.
+# vma_block_mb = 64
+# 1: samples each new ASTC texture's blocks on the CPU and logs how many are opaque ("ASTC alpha probe" lines), which
+# could be stored at half the video memory. Slows area loads. Default: 0.
+# astc_bc_probe = 0
 # Flight recorder: keeps the last frames and saves them to a flight folder next to the folder of nx2navi.exe when a frame
 # takes longer than flight_spike_ms (0 to 60000).
 # flight = 0
