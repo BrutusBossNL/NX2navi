@@ -136,6 +136,17 @@ static void density_update(void) {
 }
 
 // ---- the window thread
+// NX2NAVI_MONITOR's display while a Wayland compositor has yet to place the fullscreen window (open_window): SDL learns
+// the output a Wayland window is on later, with a display, scale or mode change (Hyprland sends only the latter two).
+static SDL_DisplayID g_place_pending;
+
+static void report_placement(SDL_DisplayID want) {
+    SDL_DisplayID at = SDL_GetDisplayForWindow(g_win);
+    const char *name = SDL_GetDisplayName(at);
+    if (at == want) rt_log("gfx: the window is on the chosen monitor \"%s\"", name ? name : "an unknown monitor");
+    else rt_log("gfx: the window is not on the chosen monitor; it is on \"%s\"", name ? name : "an unknown monitor");
+}
+
 static void handle(const SDL_Event *e) {
     if (e->type == g_ev_base + EV_RUN) {
         RunReq *r = e->user.data1;
@@ -172,6 +183,10 @@ static void handle(const SDL_Event *e) {
         density_update();
         refresh_rate_update();
         gfx_window_mark_dirty();
+        if (g_place_pending && SDL_GetDisplayForWindow(g_win) == g_place_pending) {
+            report_placement(g_place_pending);
+            g_place_pending = 0;
+        }
         break;
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
     case SDL_EVENT_WINDOW_FOCUS_LOST:
@@ -462,10 +477,11 @@ static void open_window(void *arg) {
                "where the game opens in fullscreen");
     if (gfx_cfg_fullscreen()) SDL_SetWindowFullscreen(g_win, true);
     SDL_SyncWindow(g_win);
-    SDL_DisplayID at = SDL_GetDisplayForWindow(g_win);
-    if (on_mon && (gfx_cfg_fullscreen() || !wayland) && at != mon.id) {
-        const char *name = SDL_GetDisplayName(at);
-        rt_log("gfx: the window is not on the chosen monitor; it is on \"%s\"", name ? name : "an unknown monitor");
+    // A Wayland compositor places the fullscreen window after SDL_SyncWindow returns; handle reports it once the window
+    // is on the chosen monitor.
+    if (on_mon && (gfx_cfg_fullscreen() || !wayland)) {
+        if (wayland && SDL_GetDisplayForWindow(g_win) != mon.id) g_place_pending = mon.id;
+        else report_placement(mon.id);
     }
     input_sdl_window(g_win);
     open_ok = 1;
