@@ -40,8 +40,9 @@ identity (`NX2navi.Launcher`), so the taskbar groups and pins it under NX2navi r
 
 Screens (`launcher/ui/app.py`): first run (dump, install folder, Desktop Shortcut, Check for Updates at Start,
 Update Channel, Begin Installation); the steps of an install, update or rebuild with their progress, the build log's
-last lines and Cancel, and after a failure Try Again and Copy Report; home (Play, Updates, Game Folder, Import Saves,
-Rebuild the Game, Settings); settings (update check, Install Updates Automatically, Hide Launcher While Playing, Keep
+last lines and Cancel, and after a failure Try Again and Copy Report; home (Play, Updates, Game Folder, Saves,
+Rebuild the Game, Settings); saves (Export Save, Add Log and Settings, Export To, Import a Save, Import a Save Folder,
+Open Saves Folder, Back); settings (update check, Install Updates Automatically, Hide Launcher While Playing, Keep
 Build Cache, Update Channel, the folders, Open Logs Folder, Uninstall, Back); uninstall (keep or remove the built game).
 A screen with more rows than the window holds draws them closer together (`fit_rows`).
 
@@ -67,7 +68,7 @@ toolchain/msys64/ucrt64  MSYS2's clang and libraries, downloaded from the MSYS2 
 toolchain/pkgs/          the downloaded package files
 data/launcher.json       settings; data/logs/launcher.log (and crash.log); data/cache/fonts
 game/                    the built game, unless another folder was chosen (its layout: README-BuildKit.md), with
-                         saves/ for saves to import (below)
+                         saves/ for saves to import and the backups imports make (below)
 ```
 
 A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the toolchain then goes to
@@ -207,15 +208,53 @@ When the new version fails to start (exit code 86 from `start.pyw`, or any error
 runs. Keep Build Cache off deletes the lifted C and the objects (about 5 GB) after each build but keeps
 `build-cache/state.json`, so updates still rebuild without the dump (compiling everything).
 
-## Importing a save
+## Sharing a save
 
-Import Saves (home, under Game Folder; `launcher/saves.py`) makes another save the game's own. The game folder has
-a `saves` folder with a README for it: a save put there (its files, or the folder that holds them) is taken first,
-and the row then reads "From the Saves Folder"; otherwise selecting the row asks for the folder. It recognises a
-Switch save backup (the save's files), an emulator's save folder (nested folders named by user and title ids), and
-another NX2navi game folder or its profile folder (the account folder inside). A folder with `progress.sav` at its
-top is one save slot: it replaces that slot (`slot_00` to `slot_05`, by the folder's name, else `slot_00`) and the rest
-of the current save stays. A folder with more than 4,000 files or 1 GB is refused as picked by mistake.
+A bug report from a place in the game the developer has not reached yet is quickest to reproduce with the reporter's
+save. Saves (home, under Game Folder; `launcher/saves.py`) and the Saves rows of the game's settings menu (Game tab;
+`runtime/save_share.c`) write and read the same zip.
+
+**Export.** Export Save writes `NX2navi-save-<date>_<time>.zip` into the Downloads folder (Export To chooses another
+folder) and opens the folder with the zip selected, ready to drag into a bug report. With Add Log and Settings on (the
+default) it is `...-bug-report.zip` and also holds the game's latest log and its `nx2navi.ini`. In the game, Export
+save and Export save for a bug report write the same two zips into Downloads; the second holds the log of the run in
+progress. The zip:
+
+```
+manifest.json   format "nx2navi-save", format_version 1, the game, its title id and version (1.1.1), the NX2navi
+                version, the export time (UTC), exported_by (launcher or game), the number of save files, bug_report
+save/           the save the game would load next (a finished commit still waiting in profile/save-tx, else
+                profile/save/<account>): account.sav, option.sav, slot_00 to slot_05
+bug-report/     nx2navi.log and nx2navi.ini, in a bug report
+```
+
+Key files (any `*.keys`, also one left in a save folder) and game files never go in.
+
+**Import.** Import a Save takes such a zip: put it into the game folder's `saves` folder (the row then reads "From the
+Saves Folder", and the home's Saves row "Import Waiting") or select the row and choose it. Before anything changes it
+checks the manifest (the format, a format version it knows, the game's title id: a newer NX2navi's zip or another
+game's save is refused), every path (inside the save, no links), the size (4,000 files, 256 MB), that the save is
+this game's (`account.sav`, `option.sav` or a `slot_NN/progress.sav`), and each file's CRC as it unpacks. Then the
+zip's save replaces the whole save, every slot, as a save folder does (below): the save the game would load now goes
+to `saves/backup <date time>` first. It refuses while the game runs. A zip taken from the saves folder moves to
+`saves/imported <date time>`.
+
+The game's menu imports at the next start instead of at once: the game keeps its progress in memory and writes it back
+at its next save, over files replaced under it, and the save's working copy is made when the game mounts its save.
+Import a save checks the zip as the launcher does and puts its save in `profile/save-import`; the row then reads "at
+next start", and Cancel the import drops it. The next start (the menu's Restart, or quitting and starting again)
+copies the current save to `saves/backup <date time>` and makes the import the save before the game reads it
+(`runtime/fs_host.c` `import_pending`), and the menu says where the old save went. An import in the launcher replaces
+one still waiting from the menu.
+
+## Importing a save folder
+
+Import a Save Folder (Saves) makes another save the game's own. A save put into the game folder's `saves` folder (its
+files, or the folder that holds them) is taken first by Import a Save; otherwise this row asks for the folder. It
+recognises a Switch save backup (the save's files), an emulator's save folder (nested folders named by user and title
+ids), and another NX2navi game folder or its profile folder (the account folder inside). A folder with `progress.sav`
+at its top is one save slot: it replaces that slot (`slot_00` to `slot_05`, by the folder's name, else `slot_00`) and
+the rest of the current save stays. A folder with more than 4,000 files or 1 GB is refused as picked by mistake.
 
 The game keeps its save in `profile/save/<account>`, named after `profile/account.uid` (made as the game would when
 it never ran). The import copies the save the game would load now (a finished commit still waiting in
@@ -311,7 +350,10 @@ makes no other step run), the button art a release copies and the packages and t
 the compile step's object cache with the system's C compiler and its
 largest-first order, its windres call under folders with spaces in their names, CLANG64's clang in the lock and the
 install, the save import (the account folder, the save folders it recognises, backup, the commit journal, the saves
-folder, refusals), the install job with a fake
+folder, refusals), the shared save's zip (export of the save the game would load, the bug report files, no key
+files, the import of a zip with its backup, a zip in the saves folder, the menu's waiting import dropped, the zips it
+refuses: no manifest, another format or game, a newer format, paths outside the save, links, damage), the install
+job with a fake
 `make_game.py` (with and without the prompts row), and the window's selftest when a display is there.
 
 ## Requirements and limits
