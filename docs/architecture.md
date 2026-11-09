@@ -106,6 +106,10 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   skipped as for a translation (`runtime/gfx_shader.c` `load_budget`). Opening a loose file is what costs (5.6 ms a
   pair the first time on Windows), so an update that carries the shaders over packs the cache once it holds 1,000
   loose translations (`tools/make_game.py` `PACK_LOOSE_MIN`).
+- Texture pool streaming: the bindless pool's refresh before each draw creates at most `pool_create_budget` entries,
+  and once a frame's refreshes have taken `pool_create_ms` (6 ms) none more until the next frame; the slots left keep
+  their stand-in, and the frame's later refreshes skip them (`runtime/vk_exec_draw.c` `pool_refill`). An area load
+  spreads over several frames instead of holding one for 200-400 ms.
 - Mesh and task shaders run as `VK_EXT_mesh_shader`; indirect mesh draws read NVN's `{count, first}` record through a
   ring of Vulkan `{x, y, z}` records filled on the GPU.
 - Pipelines: `VK_EXT_graphics_pipeline_library` where the driver has it: stage libraries compiled ahead, a fast link

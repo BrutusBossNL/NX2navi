@@ -558,6 +558,11 @@
 # the next refresh and show their stand-in until then. Lower spreads streaming over more frames (smaller hitches, a
 # frame or two of pop-in); higher loads sooner.
 # pool_create_budget = 16
+# The refresh runs before every draw that samples the pool, so the budget above holds per draw. Once a frame's
+# refreshes have taken this many ms, they create nothing more until the next frame (the first refresh of each frame
+# keeps its budget): an area load then spreads over several frames with stand-ins instead of holding one frame for
+# 200-400 ms. 0: no limit.
+# pool_create_ms = 6
 # Written storage-buffer ranges up to this size in MiB (1 to 256) go back to game memory as a merge, in 4 MiB pieces:
 # copied within video memory and only the words that changed written over PCIe. Larger ones are copied back whole at
 # the end of every submission. Raising it from 4 to 16 took a 5.5 MiB range off the plain copies (about 46 MiB a frame

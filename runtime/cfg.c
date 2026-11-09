@@ -66,7 +66,7 @@ static const char *const known[] = {
     "ZSTD_CHECK", "ZSTD_NATIVE",
     "BIND_REUSE", "DYN_DELTA", "STG_ARENA", "SUBMIT_BATCH", "ASTC_GPU_DESWIZZLE", "ASTC_SCRATCH_KEEP", "ASTC_ARENA",
     "TEXUP_LOG_MS", "DYN_RES", "DYN_RES_TARGET", "DYN_RES_STEP",
-    "RECORDER_CORE", "RECORDER_PRIO", "REPLAY_TIME", "LOCK_TIME", "POOL_CREATE_BUDGET",
+    "RECORDER_CORE", "RECORDER_PRIO", "REPLAY_TIME", "LOCK_TIME", "POOL_CREATE_BUDGET", "POOL_CREATE_MS",
 };
 
 // The nx2navi.ini section a key cfg_set may write goes to when the file lacks it (nx2navi.ini.example's sections).
@@ -107,6 +107,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"RECORDER_CORE", "performance"}, {"RECORDER_PRIO", "performance"}, {"BIND_REUSE", "performance"},
     {"DYN_DELTA", "performance"}, {"STG_ARENA", "performance"}, {"SUBMIT_BATCH", "performance"},
     {"ASTC_GPU_DESWIZZLE", "performance"}, {"ASTC_SCRATCH_KEEP", "performance"}, {"ASTC_ARENA", "performance"}, {"POOL_CREATE_BUDGET", "performance"},
+    {"POOL_CREATE_MS", "performance"},
     {"TIMER_1MS", "performance"}, {"PIPE_WAIT", "performance"}, {"PIPE_SKIP", "performance"}, {"ONESHOT_BUDGET", "performance"},
     {"LIB_PREBUILD", "performance"}, {"LIB_PREBUILD_THREADS", "performance"}, {"PIPE_PREBUILD", "performance"},
     {"PREWARM_XLATE", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"},
@@ -197,7 +198,7 @@ static const CfgMeta metas[] = {
     {"DYN_RES", "0", "0|1", LIVE}, {"DYN_RES_TARGET", "16.7", "1..100", LIVE}, {"DYN_RES_STEP", "45", "8..600", LIVE},
     // the recording thread: a core of its own (auto: with 12 or more logical processors) and the highest priority
     // (vk_exec.c vk_exec_record)
-    {"RECORDER_CORE", "auto", "auto|0|1", RESTART}, {"RECORDER_PRIO", "1", "0|1", RESTART}, {"REPLAY_TIME", "0", "0|1", RESTART}, {"LOCK_TIME", "0", "0|1", RESTART}, {"POOL_CREATE_BUDGET", "16", "1..4096", RESTART},
+    {"RECORDER_CORE", "auto", "auto|0|1", RESTART}, {"RECORDER_PRIO", "1", "0|1", RESTART}, {"REPLAY_TIME", "0", "0|1", RESTART}, {"LOCK_TIME", "0", "0|1", RESTART}, {"POOL_CREATE_BUDGET", "16", "1..4096", RESTART}, {"POOL_CREATE_MS", "6", "0..100", RESTART},
     // held submissions handed to the queue together (vk_sync.c, submit batching)
     {"SUBMIT_BATCH", "4", "1..16", RESTART},
     // shaders and pipelines

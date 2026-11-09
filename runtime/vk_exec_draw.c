@@ -1724,6 +1724,8 @@ static struct {
     int ready, uab;
     uint32_t kinds, gen, epoch, sgen;
     int retry;                         // the last sync left slots to the creation budget
+    uint64_t frame, frame_ns;          // the frame of the last sync, and the sync time spent in it (pool_create_ns)
+    uint64_t n_frame_stops, n_defer_skips;   // syncs that created nothing for the frame's time, lookups they skipped
     uint64_t *tok;                     // per texture slot: vk_texture_slot_token it was filled under (0: stand-ins)
     VkImageView *view;                 // [kind * VK_POOL_TEX + id]: what the entry holds
     VkSampler *samp;                   // [id]
@@ -1920,6 +1922,22 @@ static int pool_create_budget(void) {
     }
     return n;
 }
+
+// The refresh runs before every draw that binds the pools, not once per submission, so the count above held for each
+// draw: an area load made 4,925 entries (1.7 GB of uploads) in one 430 ms frame, and while slots were left over every
+// draw walked the whole table and looked each of them up again (key and hash), about 100 ms of that frame on its own.
+// Once a frame's refreshes have taken NX2NAVI_POOL_CREATE_MS (default 6; 0: no limit), its later ones create nothing,
+// and skip the slots left earlier in the frame (pool_defer) instead of looking them up again; the first refresh of
+// each frame keeps its count budget. The slots left keep their stand-in, a few frames longer in a large load.
+static uint64_t pool_create_ns(void) {
+    static int64_t ns = -1;
+    if (ns < 0) {
+        int ms = cfg_int("NX2NAVI_POOL_CREATE_MS");
+        ns = (int64_t)(ms < 0 ? 0 : ms) * 1000000;
+    }
+    return (uint64_t)ns;
+}
+static uint32_t pool_defer[VK_POOL_TEX];   // per slot: 1 + the low bits of the frame a refresh left it in
 static VkWriteDescriptorSet pool_w[POOL_WBATCH];
 static VkDescriptorImageInfo pool_ii[POOL_WBATCH];
 static uint32_t pool_nw;
@@ -2006,14 +2024,16 @@ static void pool_catch_up(uint64_t from, uint64_t to) {
     if (PL.switches % 3600 == 0)
         rt_log("vk: texture pool sets: %llu switches, %llu waited for the GPU, %.1f log entries and %.1f writes per "
                "catch-up, %llu whole rewrites; %.3f ms catch-up and %.3f ms entry refresh per switch (%.0f slots, %.0f "
-               "refilled: %.0f registered, %.0f address changes, %.0f shared a lookup; %.0f checked); %llu identical registrations kept",
+               "refilled: %.0f registered, %.0f address changes, %.0f shared a lookup; %.0f checked); %llu identical registrations kept; "
+               "%llu refreshes created nothing for their frame's time (pool_create_ms), %llu lookups of slots left in the frame skipped",
                (unsigned long long)PL.switches, (unsigned long long)PL.waits, (double)PL.catchup / (double)PL.switches,
                (double)PL.written / (double)PL.switches, (unsigned long long)PL.rewrites,
                PL.catch_ns / 1e6 / (double)PL.switches, PL.sync_ns / 1e6 / (double)PL.switches,
                (double)PL.n_slots / (double)PL.switches, (double)PL.n_refill / (double)PL.switches,
                (double)PL.n_by_reg / (double)PL.switches, (double)PL.n_by_addr / (double)PL.switches,
                (double)pool_memo_hits / (double)PL.switches,
-               (double)PL.n_fresh / (double)PL.switches, (unsigned long long)vk_texture_same_regs());
+               (double)PL.n_fresh / (double)PL.switches, (unsigned long long)vk_texture_same_regs(),
+               (unsigned long long)PL.n_frame_stops, (unsigned long long)PL.n_defer_skips);
 }
 
 // Entry id of every kind in mask: the slot's view of that kind or the kind's stand-in. Texture lock held. 0: the
@@ -2104,10 +2124,12 @@ static void pool_sync(VkExec *ex) {
     if (!PL.layout) vk_pool_set_layout();
     uint64_t from = 0, pre = PL.logn;
     int switched = pool_take_set(ex, &from);   // every submission its own set, before the shortcut
-    uint64_t t0 = kern_now_ns();
+    uint64_t t0 = kern_now_ns(), f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != PL.frame) PL.frame = f, PL.frame_ns = 0;
     pool_sync_entries(ex);
     uint64_t t1 = kern_now_ns();
     PL.sync_ns += t1 - t0;
+    PL.frame_ns += t1 - t0;
     if (switched) {
         vk_texture_lock();
         pool_catch_up(from, pre);   // what the other sets got since; this sync's own writes went into it already
@@ -2117,7 +2139,17 @@ static void pool_sync(VkExec *ex) {
     PL.set_synced[PL.cur] = PL.logn;
 }
 
-typedef struct { VkExec *ex; uint32_t used; int n, retry; } PoolDirty;
+typedef struct { VkExec *ex; uint32_t used; int n, retry, spent; } PoolDirty;
+
+// A slot whose token changed: filled, or noted as left (pool_defer). With the frame's creation time spent (spent), a
+// slot left earlier in the frame is not looked up again.
+static int pool_refill(VkExec *ex, uint32_t id, uint32_t used, uint64_t t, int spent) {
+    uint32_t mark = (uint32_t)PL.frame + 1;
+    if (spent && pool_defer[id] == mark) return PL.n_defer_skips++, 0;
+    if (pool_fill(ex, id, used, t)) return 1;
+    pool_defer[id] = mark;
+    return 0;
+}
 
 static void pool_dirty_slot(int id, void *arg) {   // vk_texture_dirty_slots_locked: a slot whose token may have changed
     PoolDirty *d = arg;
@@ -2127,7 +2159,7 @@ static void pool_dirty_slot(int id, void *arg) {   // vk_texture_dirty_slots_loc
     PL.n_refill++;
     if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
     else PL.n_by_addr++;
-    if (pool_fill(d->ex, (uint32_t)id, d->used, t)) PL.tok[id] = t;
+    if (pool_refill(d->ex, (uint32_t)id, d->used, t, d->spent)) PL.tok[id] = t;
     else d->retry = 1;
 }
 
@@ -2135,6 +2167,8 @@ static void pool_sync_entries(VkExec *ex) {
     uint32_t used = __atomic_load_n(&vk_pool_kinds_used, __ATOMIC_RELAXED);
     uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();
     if (PL.ready && !PL.retry && used == PL.kinds && gen == PL.gen && ep == PL.epoch && sg == PL.sgen) return;
+    int spent = pool_create_ns() && PL.frame_ns >= pool_create_ns();   // this frame creates nothing more
+    if (spent && PL.ready && used == PL.kinds && gen == PL.gen && ep == PL.epoch && sg == PL.sgen) return;   // left slots only
     vk_texture_lock();
     vk_texture_pool_ctx(1);   // these lookups are the pool's own: a texture evicted by disuse keeps its stand-in
     uint32_t fresh = used & ~PL.kinds;
@@ -2150,10 +2184,11 @@ static void pool_sync_entries(VkExec *ex) {
     }
     int retry = 0;   // slots whose texture the creation budget left: filled again by the next sync
     if (fresh || gen != PL.gen || ep != PL.epoch || PL.retry) {
-        vk_texture_create_budget_locked(pool_create_budget());
+        vk_texture_create_budget_locked(spent ? 0 : pool_create_budget());
+        PL.n_frame_stops += (uint64_t)spent;
         // Only a slot change since the last sync (no new kinds, no new submission, nothing left over): the slots that
         // changed (vk_texture_dirty_slots_locked), not the whole table
-        PoolDirty pd = {ex, used, n, 0};
+        PoolDirty pd = {ex, used, n, 0, spent};
         int walked = !fresh && ep == PL.epoch && !PL.retry && PL.dirty_pos &&
                      vk_texture_dirty_slots_locked(&PL.dirty_pos, pool_dirty_slot, &pd);
         retry = pd.retry;
@@ -2164,7 +2199,7 @@ static void pool_sync_entries(VkExec *ex) {
                 PL.n_refill++;
                 if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
                 else PL.n_by_addr++;
-                if (pool_fill(ex, (uint32_t)id, used, t)) PL.tok[id] = t;
+                if (pool_refill(ex, (uint32_t)id, used, t, spent)) PL.tok[id] = t;
                 else retry = 1;
             } else if (t && fresh) {
                 pool_fill(ex, (uint32_t)id, fresh, t);
