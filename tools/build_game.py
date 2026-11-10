@@ -61,6 +61,7 @@ import ctypes.wintypes as wt   # the job-object structures below; importing it w
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -178,6 +179,40 @@ def vma_include():
         VMA_LOCAL.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(data)
     return VMA_LOCAL
+
+
+def system_vulkan_version(clang, env=None):
+    """VK_HEADER_VERSION of the <vulkan/vulkan_core.h> this compiler finds by itself (its own search path, CPATH
+    included), 0 when it finds none."""
+    probe = '#include <vulkan/vulkan_core.h>\nnx2navi_vulkan_headers VK_HEADER_VERSION\n'
+    try:
+        p = subprocess.run([str(clang), '-E', '-P', '-x', 'c', '-'], input=probe, capture_output=True, text=True,
+                           env=env, errors='replace')
+    except OSError:
+        return 0
+    m = re.search(r'nx2navi_vulkan_headers\s+(\d+)', p.stdout) if p.returncode == 0 else None
+    return int(m.group(1)) if m else 0
+
+
+def vulkan_include(clang=None, env=None):
+    """A build with the system's own headers (Linux without --deps): the folder to put ahead of them for
+    <vulkan/vulkan.h>, or None when the system's serve. The runtime names Vulkan extensions newer than the headers
+    many distributions package, and every file that does fails to compile there (tools/vulkan_pin.py). So:
+    toolchain/vulkan-headers when it holds the pinned release (a kit carries it; a checkout once it was fetched), else
+    nothing when the system's headers are at least that release, else the pinned release, fetched there once.
+    Windows takes MSYS2's headers and returns None."""
+    if WIN:
+        return None
+    import vulkan_pin
+    local = ROOT / vulkan_pin.FOLDER
+    if vulkan_pin.have(local):
+        return local / 'include'
+    found = system_vulkan_version(clang or CLANG, env)
+    if found >= vulkan_pin.HEADER_VERSION:
+        return None
+    print(f'build_game: the system\'s Vulkan headers are {f"release {found}" if found else "missing"}; the runtime is '
+          f'built against release {vulkan_pin.HEADER_VERSION} ({vulkan_pin.VERSION}) or newer', flush=True)
+    return vulkan_pin.resolve(local) / 'include'
 
 
 # --toolchain: an llvm-mingw tree. The libraries, headers and DLLs MSYS2 supplies come from the deps directory instead.
@@ -380,6 +415,9 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
     vma = f'{cmd_path(DEPS / "include")} -I {cmd_path(DEPS / "include" / "vma")}' if DEPS else cmd_path(vma_include())
     imgui = cmd_path(RUNTIME / 'third_party' / 'imgui')
     rt_inc = f'{inc} -I {cmd_path(out)} -I {vma} -I {imgui}'   # romfs_config.h, vk_mem_alloc.h (+ deps headers), imgui.h
+    vulkan = None if DEPS else vulkan_include()   # deps carries the Vulkan headers itself
+    if vulkan:   # first, so that no other folder on the path answers for <vulkan/vulkan.h> (VMA's may be /usr/include)
+        rt_inc = f'-I {cmd_path(vulkan)} {rt_inc}'
     libs = [f'-L {cmd_path(DEPS / "lib")}'] + (LLVM_LINK_LIBS if WIN else LINK_LIBS) if DEPS else LINK_LIBS
     # A compiler cache (sccache) may front clang: every lift rewrites the generated chunks with the same contents, so
     # the cached objects save the compile step on the next build.

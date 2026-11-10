@@ -922,6 +922,81 @@ def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=No
     return len(todo), reused, bad
 
 
+def report_failures(bad):
+    """The files that did not compile, to stderr: the compiler's errors of the first three, and the names of all of
+    them, so that a paste of the build's end says which they were."""
+    for src, err in bad[:3]:
+        print(f'--- {src}\n{err}', file=sys.stderr)
+    print('did not compile: ' + ', '.join(Path(src).name for src, _ in bad), file=sys.stderr, flush=True)
+
+
+def runtime_headers(rt):
+    """The headers tools/build_shaders.py builds into runtime/ (the runtime's own shaders, the menu font's bytes): in
+    the repository as source only, so from a source checkout they are not there until they are built, and every
+    runtime file that includes one would fail to compile. A kit carries them built; a release's kit carries neither
+    tools/build_shaders.py nor the compilers it calls, and skips this."""
+    try:
+        import build_shaders
+    except ModuleNotFoundError:
+        return
+    stale = build_shaders.stale(rt)
+    if stale:
+        say(f'  building {len(stale)} of the runtime\'s own headers (runtime/*_spv.h, the menu font)')
+        build_shaders.build(rt, stale)
+
+
+def preflight(msys, jobs, sources=None):
+    """Linux, before the long steps of a build whose compile step will run: this machine's compiler, headers and
+    libraries are tried on the runtime itself. Every runtime source that needs no header of this install is checked
+    with the compile step's own command (clang -fsyntax-only), and an empty program is linked against the libraries
+    the game links. The build takes the compiler, the linker and the libraries from the system (only the Vulkan
+    headers and VMA come with the kit), and a distribution's older compiler, older headers or a missing development
+    package stopped the compile step only after the RomFS image and the lift, ten minutes and more into the build.
+    sources: the files to check instead (tests)."""
+    clang, clangxx, env, vma = toolchain(msys)
+    version = clang_version(clang, env)
+    say(f'check: the compiler is {version}')
+    rt = KIT / 'runtime'
+    runtime_headers(rt)
+    inc = ['-I', str(rt), '-I', str(rt / 'third_party' / 'imgui'), '-I', str(vma)]
+    vulkan = vulkan_headers(clang, env)
+    cmd_for = runtime_cmd(clang, clangxx, inc, first=vulkan)
+    if sources is None:
+        tainted = per_install_names()
+        sources = [p for p, _ in runtime_sources() if not per_install(p, tainted)]
+
+    def check(src):
+        cmd = [c for c in cmd_for(src, Path('unused.o')) if c not in ('-c', '-o', 'unused.o')]
+        p = subprocess.run([cmd[0], '-fsyntax-only', *cmd[1:]], capture_output=True, text=True, env=env, errors='replace')
+        return src, p.returncode, p.stderr[-1500:]
+
+    t0 = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as ex:
+        bad = [(src, err) for src, rc, err in ex.map(check, sources) if rc]
+    if bad:
+        report_failures(bad)
+        lacking = sorted(set(re.findall(r"fatal error: '([^']+)' file not found", ''.join(e for _, e in bad))))
+        fail(f'{len(bad)} of the runtime\'s {len(sources)} files do not compile on this machine, so the build would stop '
+             f'in its compile step. ' +
+             (f'These headers are missing: {", ".join(lacking)}. Install the development packages '
+              f'README-BuildKit.md lists under "Linux".' if lacking else
+              f'The compiler ({version}) or a library\'s headers are older than the runtime needs: the releases are '
+              f'built with clang 23, and the Vulkan headers come ' +
+              (f'from {vulkan[1]}' if vulkan else 'from the system') + '. The errors above name what is missing.'))
+    with tempfile.TemporaryDirectory(prefix='nx2navi-check-') as tmp:
+        probe = Path(tmp) / 'probe.c'
+        probe.write_text('int main(void) { return 0; }\n', encoding='ascii')
+        ld = (['-fuse-ld=lld'] if shutil.which('ld.lld') else []) + ['-no-pie']
+        p = subprocess.run([str(clangxx), *ld, '-o', str(Path(tmp) / 'probe'), '-x', 'c', str(probe), '-x', 'none',
+                            *LINK_LIBS], capture_output=True, text=True, env=env, errors='replace')
+    if p.returncode:
+        print(p.stderr[-2000:], file=sys.stderr)
+        fail('the libraries the game links are not all there (the linker\'s lines above name the missing ones): '
+             'install the development packages README-BuildKit.md lists under "Linux". '
+             'On Fedora the static C++ library is its own package, libstdc++-static.')
+    say(f'check: {len(sources)} runtime files and the libraries pass, {time.time() - t0:.0f} s')
+
+
 def runtime_sources():
     """(source, object name) of every runtime file this OS's build compiles: the Win32 files on Windows, the SDL
     window's (*_sdl.*) and platform/linux.c elsewhere (tools/build_game.py's foreign_os)."""
@@ -1023,8 +1098,10 @@ def fast_clang(msys, clang, env):
     return fast if mine and clang_ident(fast, env) == mine else None
 
 
-def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None):
-    """fast: fast_clang's compiler for the lifted code, with msys as its sysroot."""
+def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None, first=()):
+    """fast: fast_clang's compiler for the lifted code, with msys as its sysroot. first: include flags that go
+    ahead of inc for the runtime's sources only (vulkan_headers); the lifted code includes none of those headers,
+    and its command, which is part of its objects' keys, stays as it was."""
     def cmd_for(src, dst):
         cpp = src.suffix in ('.cpp', '.cxx')
         # the lifted code at -O1 (its size makes -O2 slow to build), the runtime at -O2; neither may assume strict
@@ -1037,7 +1114,7 @@ def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None):
         # -fdeclspec: third_party/ffx_api/ffx_api.h declares its entry points __declspec(dllexport) unconditionally
         declspec = ['-fdeclspec'] if cpp and not WIN else []
         return [*cc, '-c', '-std=gnu++17' if cpp else '-std=gnu11', '-O1' if guest else '-O2',
-                *march, '-fno-strict-aliasing', '-w', *declspec, *inc, '-o', str(dst), str(src)]
+                *march, '-fno-strict-aliasing', '-w', *declspec, *([] if guest else first), *inc, '-o', str(dst), str(src)]
     return cmd_for
 
 
@@ -1056,12 +1133,12 @@ def make_runtime_lib(dest, msys, jobs, obj=None):
     inc = ['-I', str(rt), '-I', str(rt / 'third_party' / 'imgui'), '-I', str(vma)]
     cache = ObjectCache(obj / 'objects.json', {'<kit>': KIT})
     t0 = time.time()
-    compiled, reused, bad = compile_all(srcs, runtime_cmd(clang, clangxx, inc), cache, jobs, env,
+    compiled, reused, bad = compile_all(srcs, runtime_cmd(clang, clangxx, inc, first=vulkan_headers(clang, env)),
+                                        cache, jobs, env,
                                         lambda d, t: (d % 20 == 0 or d == t) and say(f'  {d} of {t}'),
                                         salt=compiler_id(clang, env))
     if bad:
-        for src, err in bad[:3]:
-            print(f'--- {src}\n{err}', file=sys.stderr)
+        report_failures(bad)
         fail(f'{len(bad)} runtime files did not compile')
     lib = dest / RUNTIME_LIB
     lib.unlink(missing_ok=True)
@@ -1206,6 +1283,21 @@ def toolchain(msys):
     return Path(shutil.which('clang')), Path(shutil.which('clang++')), dict(os.environ), vma
 
 
+def vulkan_headers(clang, env):
+    """The include flags that put the kit's Vulkan headers ahead of the system's for the runtime's sources: the
+    pinned release in <kit>/toolchain/vulkan-headers (tools/vulkan_pin.py), which the AppImage's kit carries and a
+    source checkout fetches when the system's headers are older (tools/build_game.py vulkan_include). None on
+    Windows, where MSYS2 supplies the headers, and none where the system's headers are new enough."""
+    if WIN:
+        return []
+    try:
+        from build_game import vulkan_include
+        folder = vulkan_include(clang, env)
+    except ImportError:   # a kit without tools/vulkan_pin.py: the system's headers, as before it existed
+        return []
+    return ['-I', str(folder)] if folder else []
+
+
 def xlate_source():
     """The folder of the shader translator to copy beside the game: the kit's bin/, else a source checkout's
     build/xlate/ (tools/build_xlate.py)."""
@@ -1261,17 +1353,7 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     gen.mkdir(parents=True, exist_ok=True)
     obj.mkdir(parents=True, exist_ok=True)
     rt = KIT / 'runtime'
-    # The runtime's own shaders are in the repository as source only: from a source checkout their headers are not
-    # there until they are built, and every runtime file that includes one would fail to compile. A kit carries them
-    # built and does not carry tools/build_shaders.py (nor the compilers it calls), so a kit build skips this step.
-    try:
-        import build_shaders
-    except ModuleNotFoundError:
-        build_shaders = None
-    stale = build_shaders.stale(rt) if build_shaders else []
-    if stale:
-        say(f'  compiling {len(stale)} of the runtime\'s own shaders (runtime/*_spv.h)')
-        build_shaders.build(rt, stale)
+    runtime_headers(rt)
     clang, clangxx, env, vma = toolchain(msys)
     if not romfs_job:
         romfs_index(out, gen)
@@ -1298,15 +1380,23 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     fast = fast_clang(msys, clang, env)
     if fast:
         say(f'  the lifted code compiles with {fast}')
-    cmd_for = runtime_cmd(clang, clangxx, inc, level, fast, msys)
+    vulkan = vulkan_headers(clang, env)
+    if vulkan:
+        say(f'  the Vulkan headers come from {vulkan[1]}')
+    cmd_for = runtime_cmd(clang, clangxx, inc, level, fast, msys, first=vulkan)
     # The keys earlier versions gave the same compiles (compile_all alts): 0.6.0's, with the compiler's file time and,
-    # with the fast compiler, its id and --sysroot; 0.5.0's and earlier's, with their kit's folder in the paths.
+    # with the fast compiler, its id and --sysroot; 0.5.0's and earlier's, with their kit's folder in the paths; and
+    # up to 0.7.1 the runtime's without the Vulkan headers' folder ahead of the system's (an object that compiled
+    # against the system's headers is as good).
     plain = runtime_cmd(clang, clangxx, inc, level, None, msys)
+    no_vulkan = runtime_cmd(clang, clangxx, inc, level, fast, msys)
     fast_old = (cid_old + compiler_ids(fast, env)[1]) if fast else None
     kits = earlier_kits()
 
     def alts(src, dst):
         keys = [object_key(plain(src, dst), src, dst, cache, cid_old, sysroot=True)]
+        if vulkan:
+            keys.append(object_key(no_vulkan(src, dst), src, dst, cache, cid))
         if fast:
             keys.append(object_key(cmd_for(src, dst), src, dst, cache, fast_old, sysroot=True))
         keys += [legacy_key(src, dst, cache, cid_old, clang, clangxx, k, lift, gen, vma) for k in kits]
@@ -1344,8 +1434,7 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
             compiled, reused = compiled + c2, reused + r2
     say(f'  {compiled} compiled, {reused} unchanged since the last build')
     if bad:
-        for src, err in bad[:3]:
-            print(f'--- {src}\n{err}', file=sys.stderr)
+        report_failures(bad)
         fail(f'{len(bad)} files did not compile')
     if cache.keep_only({o.name for _, o in srcs}):
         cache.save()
@@ -1891,6 +1980,10 @@ def main():
         # the compile step's key does not name the level: without this a finished compile reads as done before
         state['steps'].pop('compile', None)
     keep_awake()
+    # Linux: the compiler, headers and libraries are the system's, so they are tried on the runtime before the long
+    # steps of a build that will reach the compile step (the first step whose key is not current makes the rest run)
+    if not WIN and any(state['steps'].get(n) != step_key(n, src.identity, out) for n in STEPS[:STEPS.index('compile') + 1]):
+        preflight(msys, a.jobs)
     t0 = time.time()
     romfs_job = None
     runs = {'exefs': lambda: step_exefs(src, out), 'romfs': lambda: step_romfs(src, out, min(a.jobs, 8)),

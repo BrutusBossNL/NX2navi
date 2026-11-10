@@ -39,6 +39,8 @@ __pycache__/
 # tools/make_*.py assemblers when the game is built; tools/check_content.py refuses them in a commit)
 /runtime/*_spv.h
 *.spv
+# The menu font's bytes as a header for compilers without #embed (tools/build_shaders.py EMBEDDED)
+/runtime/ui/roboto_ttf.h
 
 # Build outputs
 *.exe
