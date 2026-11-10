@@ -739,6 +739,11 @@ static void astc_probe_alpha(const tex_t *t, const TexVkFormat *f) {
 #define DETAIL_LOW_MIN 1024
 #define DETAIL_FULL_MB 8192
 #define DETAIL_LOW_MB 6144
+// The levels above assume the ASTC textures end as BC3 (or stay ASTC), a byte a texel. Where they stay RGBA8 (astc =
+// cpu, a card without the decoder, astc_bc = 0) they take four times that, which is what one level left out gives
+// back: under this budget auto then goes one step lower. A card with 8 GiB that decoded on the CPU held two texture
+// arrays of 852 MiB each, was 560 MiB over its budget and lost its device.
+#define DETAIL_RGBA8_MB 20480
 #define EXACT_MAX 65536
 static nvn_hmap exact = {.klen = sizeof(TexKey)};   // keys made whole whatever the setting; value 1
 static uint64_t n_exact;                             // textures made whole again so far
@@ -756,7 +761,9 @@ int vk_texture_detail_auto(void) {
         mb = vk_mem_vram(&used, &budget, &exact_budget) ? (int64_t)(budget >> 20) : 0;
         __atomic_store_n(&detail_budget_mb, mb, __ATOMIC_RELAXED);
     }
-    return !mb || mb >= DETAIL_FULL_MB ? 0 : mb >= DETAIL_LOW_MB ? 1 : 2;
+    int most = !mb || mb >= DETAIL_FULL_MB ? 0 : mb >= DETAIL_LOW_MB ? 1 : 2;
+    if (mb && mb < DETAIL_RGBA8_MB && most < 2 && vk_astc_mode() != VK_ASTC_NATIVE && !vk_astc_bc()) most++;
+    return most;
 }
 
 static int detail_most(void) {   // the most levels a texture is made without: 0 full, 1 reduced, 2 low
@@ -773,7 +780,9 @@ static int detail_most(void) {   // the most levels a texture is made without: 0
             rt_log("vk: texture detail: full (texture_detail = %s; the device reports no video memory budget)", v);
         else
             rt_log("vk: texture detail: %s, chosen for a video memory budget of %lld MiB (texture_detail = %s; full from "
-                   "%d MiB, low under %d MiB)", names[most], (long long)detail_budget_mb, v, DETAIL_FULL_MB, DETAIL_LOW_MB);
+                   "%d MiB, low under %d MiB%s)", names[most], (long long)detail_budget_mb, v, DETAIL_FULL_MB, DETAIL_LOW_MB,
+                   vk_astc_mode() != VK_ASTC_NATIVE && !vk_astc_bc() && detail_budget_mb < DETAIL_RGBA8_MB
+                       ? "; one step lower because ASTC textures stay uncompressed here" : "");
     }
     return most;
 }
