@@ -2693,8 +2693,13 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         // evicted by disuse: the pool refresh keeps the stand-in, without spending the creation budget on it
         if (pool_ctx && holds.n && nvn_hm_get(&holds, &k)) resolve_held = 1;
         else if (create_budget < 0) e = entry_of(&s->t);
+        // Unmapped storage first: such a slot has nothing to make, now or later. Asked after the budget, every stale
+        // slot a refresh met with the budget at 0 was noted as left: in a busy frame (its creation time spent) that
+        // was about a thousand slots at once, which vk_exec_draw.c pool_sync_entries took for an area load, several
+        // times a second in some places, and each time lifted the count budget and the frame's creation time.
+        else if (!mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size)) e = NULL;
         else if (!create_budget && !(s->cwant && want_take())) create_deferred = 1;
-        else if (mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size)) {
+        else {
             e = entry_of(&s->t);
             if (create_budget > 0) create_budget--;
         }
