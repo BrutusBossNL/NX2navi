@@ -94,6 +94,13 @@ of them.
    .venv\Scripts\python tools\build_game.py --version <ver>
    ```
 
+   The runtime's own shaders (upscaling, HDR, texture decode and the like) are in the repository as source only:
+   GLSL and SPIR-V assembly in `runtime\shaders\`, and two small ones assembled by `tools\make_dlaa_mask.py` and
+   `tools\make_mvobj_fs.py`. `build_game.py` compiles them into `runtime\<name>_spv.h` (git ignores these) before it
+   compiles the runtime, with `glslc`, `spirv-as` and `spirv-val` from the `shaderc` and `spirv-tools` packages above,
+   and again whenever a source changed. `python tools\build_shaders.py` does that step alone; `--check` only reports
+   the headers that are missing or stale.
+
    `--cpu v2` targets x86-64-v2 (SSE4.2, no AVX2/FMA) for older CPUs; the default `v3` needs AVX2. The v2 build links
    `runtime/fma.c`, a correctly rounded software fma the FP lowering needs, and runs slower. Inline assembly,
    target attributes and intrinsics are not bound by `-march`, so a v2 build runs `tools/check_isa.py` over the runtime
@@ -224,7 +231,7 @@ The Deck's GPU (Van Gogh) has no native ASTC, so its textures go through the com
 
 Before a commit:
 
-- `python tools/check_content.py --staged`: nothing game-derived is staged. CI runs the same check;
+- `python tools/check_content.py --staged`: nothing game-derived and no compiled shader is staged. CI runs the same check;
   `git config core.hooksPath .githooks` runs it before each local commit.
 - `build\<ver>\nx2navi.exe --selftest`: layout, dispatch table and host-function registry, without game files.
 
