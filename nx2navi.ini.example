@@ -736,8 +736,8 @@
 # 1: what the game's shaders write into its memory is copied back from the video card once, and after that only when
 # the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field), for about a third more frames
 # a second in open areas. 0: copied back at the end of every GPU submission, as in 0.7.0.
-# Default: 1 on Windows, except 0 with AMD's driver for RX 5000 and RX 6000 cards, where it has not been tried by us
-# and one report lost its device with it on: set 1 there to try it, and back to 0 if the game ends in play (the log's
+# Default: 1 on Windows, except 0 on AMD graphics cards (AMD's own driver), where two reports had the game end in play
+# with it on and the cause is not found: set 1 there to try it, and back to 0 if the game ends in a fight (the log's
 # "mem: lazy write-back" line says which is in effect and why). 0 elsewhere. With shadow storage (Linux, Wine) it
 # stays off whatever is set.
 # wb_lazy = 1

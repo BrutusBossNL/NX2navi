@@ -64,7 +64,6 @@ typedef struct {
     int amd_llpc;                      // AMD's own driver for RDNA 3 and newer (its driverInfo names LLPC)
     int mesa;                          // a Mesa driver the game runs on: RADV, ANV or NVK
     uint32_t driver_id;                // the device's VkDriverId
-    char driver_info[256];             // and its driverInfo (VK_MAX_DRIVER_INFO_SIZE)
 } VkCaps;
 extern VkCaps vk_caps;
 void vk_caps_driver(VkPhysicalDevice p);             // first, before vkCreateDevice: vk_caps.amd, amd_sc, amd_llpc, mesa, driver_id

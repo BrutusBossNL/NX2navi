@@ -140,8 +140,7 @@ static const struct { const char *key, *section; } sections[] = {
 // The lazy write-back (memory.c "Lazy write-back") is on where it has run: its fetch inside the access-fault handler
 // has only ever run on Windows. This is the platform's part of the default, which memory.c mem_init goes by to take
 // the access faults; the back end then turns it off for a driver it is not trusted on while the key is unset
-// (wb_lazy_choice.h: AMD's for RX 5000 and 6000 cards), and with shadow storage whatever is set (vk_memory.c
-// vk_mem_lazy_decide).
+// (wb_lazy_choice.h: AMD's own), and with shadow storage whatever is set (vk_memory.c vk_mem_lazy_decide).
 #ifdef _WIN32
 #define WB_LAZY_DEFAULT "1"
 #else

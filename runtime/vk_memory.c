@@ -2617,7 +2617,7 @@ static const char *lz_why = "";     // the reason the log gave
 
 void vk_mem_lazy_decide(void) {
     const char *set = cfg_is_set("NX2NAVI_WB_LAZY") ? cfg_get("NX2NAVI_WB_LAZY") : NULL;
-    WblChoice ch = wb_lazy_choice(set, WBL_ON_WINDOWS, vk_caps.driver_id, vk_caps.driver_info);
+    WblChoice ch = wb_lazy_choice(set, WBL_ON_WINDOWS, vk_caps.driver_id);
     if (!vk_mirror_on) ch = (WblChoice){0, "no pool has a mirror in import mode"};
     else if (shadow_on) ch = (WblChoice){0, "shadow storage keeps it off"};
     else if (ch.on && cfg_bool("NX2NAVI_WB_PROBE")) ch = (WblChoice){0, "the write-back probe watches the same pages"};

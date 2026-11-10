@@ -690,6 +690,7 @@ int probe_vkdevice(void) {
            c->has_conditional_rendering, c->has_transform_feedback, c->has_provoking_vertex, c->has_robustness2,
            c->has_device_fault, c->has_memory_budget, c->has_buffer_device_address, c->has_fragment_shader_interlock,
            c->has_buffer_marker, c->has_nv_checkpoints, c->validation);
+    fatal_note();   // the line a fatal error or a crash would add to the log, to read it without one
     vk_shutdown();
     printf("probe-vkdevice: %s (validation errors %ld)\n", g_errors_total ? "FAILED" : "passed", g_errors_total);
     return g_errors_total ? 1 : 0;

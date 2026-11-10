@@ -108,8 +108,8 @@ static void unprobe_locked(uint64_t r) {
     plat_dec32(&nprb);
 }
 
-// Lazy write-back (NX2NAVI_WB_LAZY; unset: on under Windows except on AMD's driver for RX 5000 and 6000 cards, off
-// elsewhere, as wb_lazy_choice.h decides and gives the reasons for; vk_memory.c "lazy write-back"). It was off
+// Lazy write-back (NX2NAVI_WB_LAZY; unset: on under Windows except on AMD's own driver, off elsewhere, as
+// wb_lazy_choice.h decides and gives the reasons for; vk_memory.c "lazy write-back"). It was off
 // by default in 0.7.0: with it on, single frames came out with the whole scene's shadowing missing, 10 to 180 of 1,800
 // presents standing in Hyrule Field with other programs keeping the CPU busy and none found with it off. That was
 // not this code's doing: frames were drawn from copies taken before the game's signal that their data was written
