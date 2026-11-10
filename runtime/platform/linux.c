@@ -1191,6 +1191,14 @@ int plat_mem_census(uint64_t *priv, uint64_t *wc, uint64_t *wc_allocs) {
     return 0;
 }
 
+int plat_mem_prepare_write(uint64_t addr, uint64_t n) {
+    if (ww_fd < 0 || !n || addr >= PS_LIMIT || n > PS_LIMIT - addr) return 0;
+    uint64_t lo = addr & ~(PG - 1), hi = (addr + n + PG - 1) & ~(PG - 1);
+    struct uffdio_writeprotect wp = {.range = {lo, hi - lo}, .mode = 0};
+    // PAGEMAP_SCAN observes cleared protection as written, just as after an asynchronous write fault.
+    return ioctl(ww_fd, UFFDIO_WRITEPROTECT, &wp) == 0;
+}
+
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset) {
     if (!max || !n) return 0;
     if (ww_fd < 0) return UINT64_MAX;

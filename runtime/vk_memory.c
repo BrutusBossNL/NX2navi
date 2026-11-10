@@ -1283,10 +1283,24 @@ static int wb_no_reup(void) {
     return wb_reup_off;
 }
 
+// NX2NAVI_SHADOW_BULK_WRITE=1 (default 0): before a write-back stores into guest memory, the write watch's protection
+// of the whole range is cleared in one call (plat_mem_prepare_write). Where the watch protects pages (Linux), the
+// first store into each page otherwise takes a fault of its own; the pages count as written either way.
+static int shadow_bulk_write(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = cfg_bool("NX2NAVI_SHADOW_BULK_WRITE");
+        if (on) rt_log("mem: shadow write-backs clear the write watch's protection of their range in one call "
+                       "(NX2NAVI_SHADOW_BULK_WRITE)");
+    }
+    return on;
+}
+
 // Completion thread: the GPU's bytes of [addr, addr+size) from the shadow into guest memory (merge_page against the
 // base copies; a page without one whole). Returns the bytes moved.
 static uint64_t shadow_write_back(uint64_t addr, uint64_t size) {
     uint64_t moved = 0;
+    int bulk = shadow_bulk_write();   // before the locks: its first call logs
     plat_mutex_lock_shared(&pool_lock);
     const pidx_ent *e = pidx_find(&pool_index, addr, size);
     PoolRec *r = e ? e->buf : NULL;
@@ -1294,6 +1308,7 @@ static uint64_t shadow_write_back(uint64_t addr, uint64_t size) {
     if (r && r->smap && addr >= r->import_lo && addr + size <= r->import_hi) {
         uint64_t t0 = qpc();
         mem_thaw(addr, size);
+        if (bulk) plat_mem_prepare_write(addr, size);
         for (uint64_t a = addr, end = addr + size; a < end;) {
             uint64_t pg = a & ~(SB_PAGE - 1), pe = pg + SB_PAGE < end ? pg + SB_PAGE : end;
             uint8_t *base = sbase_find(r, pg), *s = r->smap + (a - r->import_lo);

@@ -829,6 +829,11 @@ int plat_mem_census(uint64_t *priv, uint64_t *wc, uint64_t *wc_allocs) {
     return 1;
 }
 
+int plat_mem_prepare_write(uint64_t addr, uint64_t n) {
+    (void)addr; (void)n;
+    return 0;
+}
+
 // Contains code Copyright (c) 2026 Peiikai (MIT; see THIRD_PARTY_NOTICES.md).
 // GetWriteWatch with the reset flag.
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset) {
