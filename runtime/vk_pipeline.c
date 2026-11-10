@@ -5898,7 +5898,7 @@ static int seed_pipelines(const char *dir) {
     gfx_shader_prewarm((const uint8_t(*)[32])ids, u, sh, cpus, procs < 1 ? 1 : procs);
     static const char note[] = "the listed pipelines are being built; a run that finds this file skips them\n";
     plat_file_write_atomic(mark, note, sizeof note - 1);
-    uint32_t queued = 0, dropped = 0, known = 0, other = 0, mesh = 0;
+    uint32_t queued = 0, dropped = 0, known = 0, other = 0, mesh = 0, no_mesh = 0;
     plat_mutex_lock(&P.lock);
     uint32_t built0 = K.built, failed0 = K.failed;
     K.loading = 1;
@@ -5915,6 +5915,10 @@ static int seed_pipelines(const char *dir) {
         s.vs = vs, s.fs = fs, s.ts = ts;
         if (!is_mesh(&s) && !all) {
             other++;
+            continue;
+        }
+        if (is_mesh(&s) && !vk_ctx()->has_mesh_shader) {   // this GPU draws no mesh pipeline
+            no_mesh++;
             continue;
         }
         if (!is_mesh(&s) && P.indep && fs && gfx_shader_stage(vs) == GFX_STAGE_VS) {   // its vertex output union, as the boot
@@ -5953,9 +5957,9 @@ static int seed_pipelines(const char *dir) {
     char msg[640];
     snprintf(msg, sizeof msg, "prepare-pipelines: %zu listed pipelines: %u built (%u mesh), %u failed, %u the same as one "
              "built before, %u without a shader this game version or its shader cache has, %u vertex pipelines left to "
-             "their first draw (NX2NAVI_PREPARE_PIPELINES=%s); on %d threads in %.0f ms; pipeline cache %s", n, built,
-             mesh, failed, known, dropped, other, all ? "all" : "mesh", nt ? nt : 1, now_ms() - t0,
-             saved ? "saved" : "not saved (builds kept running)");
+             "their first draw (NX2NAVI_PREPARE_PIPELINES=%s), %u mesh pipelines this GPU cannot draw; on %d threads in "
+             "%.0f ms; pipeline cache %s", n, built, mesh, failed, known, dropped, other, all ? "all" : "mesh", no_mesh,
+             nt ? nt : 1, now_ms() - t0, saved ? "saved" : "not saved (builds kept running)");
     printf("%s\n", msg);
     fflush(stdout);
     rt_log("vk_pipeline: %s", msg);
