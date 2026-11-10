@@ -1347,6 +1347,15 @@ static void restart_confirm(float scale) {
 
 static void tab_controls(float scale) {
     opt_begin("##controls", scale);
+    // The mouse camera first, where a player on keyboard and mouse looks for it; both rows are live. How the mouse
+    // reaches the game, where the game version has the direct mode's patch set (mouse_direct.c; the values in their
+    // cfg.c order, stick then direct), and its sensitivity. The slider stops short of 0, which nx2navi.ini takes to
+    // switch the mouse camera and the cursor capture off.
+    if (input_direct_mouse_available()) {
+        static const UiTextId mouse_mode[] = {UI_MENU_MOUSE_STICK, UI_MENU_MOUSE_DIRECT};
+        opt_choice("NX2NAVI_MOUSE_MODE", UI_MENU_MOUSE_MODE, mouse_mode, 2, UI_MENU_MOUSE_MODE_DESC);
+    }
+    opt_slider("NX2NAVI_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0.05f, 10, UI_MENU_MOUSE_SENS_DESC, 0.05f, "%.2f");
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX,
                                       UI_MENU_PAD_LAYOUT_PLAYSTATION};
     opt_choice("NX2NAVI_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());

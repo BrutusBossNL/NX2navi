@@ -936,6 +936,15 @@ static void fg_camera(const float *v, const double m[16]) {
     c->fov_y = P[5] != 0 ? 2.0f * (float)atan(1.0 / fabs(P[5])) : 1.0f;
     c->aspect = P[0] != 0 ? (float)fabs(P[5] / P[0]) : 1.777f;
     D.fg_cam_ok = 1;
+    // NX2NAVI_MOUSE_TRACE=1 (test runs, mouse_direct.c): the camera's direction each frame
+    static int trace = -1;
+    if (trace < 0) {
+        const char *e = cfg_get("NX2NAVI_MOUSE_TRACE");
+        trace = e && *e && strcmp(e, "0");
+    }
+    if (trace)
+        rt_log("mousetrace: cam t=%.3f fwd=%.6f,%.6f,%.6f pos=%.3f,%.3f,%.3f", plat_now_ns() / 1e6, c->fwd[0], c->fwd[1],
+               c->fwd[2], c->pos[0], c->pos[1], c->pos[2]);
 }
 
 // Frames without a camera (dlaa_cam_keep, NX2NAVI_DLAA_CAM_KEEP; 1 by default, 0 restores the old handling). Measured in

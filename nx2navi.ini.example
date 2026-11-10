@@ -554,10 +554,12 @@
 # lstick_deadzone = 8
 # rstick_deadzone = 8
 # Mouse camera mode: direct (default) or stick. Direct turns the camera by the raw mouse motion, the same on both axes,
-# with no stick dead zone or response curve. Stick makes the
+# with no stick dead zone or response curve, at any frame rate and however fast the mouse moves. Stick makes the
 # mouse a right stick. Neither changes the gamepad. The Controls tab changes this while the game runs.
 # mouse_mode = direct
-# Mouse camera sensitivity (0 to 10; 0 = no mouse camera and no cursor capture).
+# Mouse camera sensitivity (0 to 10; 0 = no mouse camera and no cursor capture). In direct mode a count of the mouse
+# turns the camera about 0.08 degrees at 1; the game's own camera sensitivity (Options) scales it as it scales the
+# stick. The Controls tab changes this while the game runs.
 # mouse_sens = 1
 # The keyboard's sticks are all or nothing, so the game only sees a full tilt from them; while this key is held the
 # keyboard-driven stick values shrink and the keyboard can walk instead of run. Key names as in the bind_ lines below,
