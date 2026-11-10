@@ -3477,11 +3477,17 @@ static int skip_prog_wanted(uint64_t serial) {
 
 // NX2NAVI_PROG_LEAD=1 (diagnostics): how long before its first draw the game made each program
 // (nvnProgramSetShaders, nvn_api_obj.c nvn_prog_made_ns): the head start a build begun at that moment would have over
-// one begun at the draw, which is where shaders are looked up and pipelines built today. One line with the draw
-// statistics (draw_stats_tick's period), mesh programs apart.
+// one begun at the draw, which is where shaders are looked up and pipelines built today. A line for vertex, mesh and
+// compute programs (their first dispatch) each, after every 200 programs first used.
 #define PROG_LEAD_N 16384
-static struct { int on; uint64_t seen[PROG_LEAD_N]; uint64_t n[2][6], logged; } PLD = {-1};
+static struct { int on; uint64_t seen[PROG_LEAD_N]; uint64_t n[3][6], logged; } PLD = {-1};
 
+static int prog_lead_on(void) {
+    if (PLD.on < 0) PLD.on = cfg_get("NX2NAVI_PROG_LEAD") != NULL && strcmp(cfg_get("NX2NAVI_PROG_LEAD"), "0") != 0;
+    return PLD.on;
+}
+
+// mesh: 0 a vertex program's draw, 1 a mesh program's, 2 a compute program's dispatch.
 static void prog_lead(const prog_t *p, int mesh) {
     uint32_t i = (uint32_t)p->serial & (PROG_LEAD_N - 1);
     if (PLD.seen[i] == p->serial) return;
@@ -3491,13 +3497,14 @@ static void prog_lead(const prog_t *p, int mesh) {
     double ms = (double)(plat_now_ns() - made) / 1e6;
     PLD.n[mesh][ms < 17 ? 0 : ms < 100 ? 1 : ms < 1000 ? 2 : ms < 5000 ? 3 : ms < 30000 ? 4 : 5]++;
     uint64_t tot = 0;
-    for (int m = 0; m < 2; m++)
+    for (int m = 0; m < 3; m++)
         for (int k = 0; k < 6; k++) tot += PLD.n[m][k];
     if (tot - PLD.logged < 200) return;
     PLD.logged = tot;
-    for (int m = 0; m < 2; m++)
-        rt_log("vk: %s programs were made before their first draw by: under 17 ms %llu, 17-100 ms %llu, 0.1-1 s %llu, 1-5 s "
-               "%llu, 5-30 s %llu, longer %llu (NX2NAVI_PROG_LEAD)", m ? "mesh" : "vertex", (unsigned long long)PLD.n[m][0],
+    static const char *const kind[3] = {"vertex", "mesh", "compute"};
+    for (int m = 0; m < 3; m++)
+        rt_log("vk: %s programs were made before their first use by: under 17 ms %llu, 17-100 ms %llu, 0.1-1 s %llu, 1-5 s "
+               "%llu, 5-30 s %llu, longer %llu (NX2NAVI_PROG_LEAD)", kind[m], (unsigned long long)PLD.n[m][0],
                (unsigned long long)PLD.n[m][1], (unsigned long long)PLD.n[m][2], (unsigned long long)PLD.n[m][3],
                (unsigned long long)PLD.n[m][4], (unsigned long long)PLD.n[m][5]);
 }
@@ -3519,8 +3526,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     VkRect2D sc = vk_exec_scissor(ex);
     if (!sc.extent.width || !sc.extent.height) return draw_skipped(ex, mesh, SK_SCISSOR);
     if (!ex->prog) return draw_skipped(ex, mesh, SK_NO_PROGRAM);
-    if (PLD.on < 0) PLD.on = cfg_get("NX2NAVI_PROG_LEAD") != NULL && strcmp(cfg_get("NX2NAVI_PROG_LEAD"), "0") != 0;
-    if (PLD.on) prog_lead(ex->prog, mesh);
+    if (prog_lead_on()) prog_lead(ex->prog, mesh);
     if (n_skip_prog && skip_prog_wanted(ex->prog->serial)) return draw_skipped(ex, mesh, SK_DISABLED);   // -1 until read
     int has_vs, has_fs, vs_wait = 0, fs_wait = 0, memo = mesh ? 0 : shader_memo_on();
     int has_ts = 0, ts_wait = 0, vst = mesh ? NVN_STAGE_MESH : NVN_STAGE_VS;
@@ -5120,6 +5126,7 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (d->x <= 0 || d->y <= 0 || d->z <= 0) return;
     if (!ex->prog) return warn_once(W_PROGRAM, "a dispatch without a bound program is skipped");
+    if (prog_lead_on()) prog_lead(ex->prog, 2);
     vk_contact_flush(ex);
     cb_res(ex);
     dummies_init();
