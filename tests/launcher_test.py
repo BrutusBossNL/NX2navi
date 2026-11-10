@@ -1407,6 +1407,40 @@ class MakeGameTest(Tmp):
         steps = json.loads((self.out / 'build-cache' / 'state.json').read_text())['steps']
         self.assertEqual(set(steps), {'exefs', 'romfs', 'lift', 'compile'})
 
+    def test_a_repeated_romfs_step_does_not_repeat_the_lift(self):
+        """An install cut short while the RomFS image was packed, its lift already done: the next run packs the
+        image again and compiles, but keeps the lift, which reads only the unpacked ExeFS."""
+        calls = []
+
+        def lift(out, cache):
+            calls.append('lift')
+            (cache / 'lift').mkdir(exist_ok=True)
+            (cache / 'lift' / 'layout.json').write_text('[]')   # the lifted code is there (make_game.py lift_gone)
+
+        def compile_(out, cache, msys, jobs, romfs_job=None, update=False):
+            calls.append('compile')
+            if romfs_job:
+                romfs_job.join()
+            (out / self.mg.EXE_NAME).write_bytes(b'MZ')
+        self.assertEqual(self.main_with(self.mg.step_romfs, lift, compile_), 0)
+        self.assertEqual(calls, ['lift', 'compile'])
+        state = self.out / 'build-cache' / 'state.json'
+        st = json.loads(state.read_text())
+        for step in ('romfs', 'compile'):   # as the cut run left it: the image and the compile not finished
+            del st['steps'][step]
+        state.write_text(json.dumps(st))
+        (self.out / 'romfs' / 'romfs.bin').unlink()
+        self.assertEqual(self.main_with(self.mg.step_romfs, lift, compile_), 0)
+        self.assertEqual(calls, ['lift', 'compile', 'compile'])
+        self.assertTrue((self.out / 'romfs' / 'romfs.bin').is_file())
+        self.assertEqual(set(json.loads(state.read_text())['steps']), {'exefs', 'romfs', 'lift', 'compile'})
+        # the ExeFS step still makes the lift run again: the lift reads what it writes
+        st = json.loads(state.read_text())
+        del st['steps']['exefs']
+        state.write_text(json.dumps(st))
+        self.assertEqual(self.main_with(self.mg.step_romfs, lift, compile_), 0)
+        self.assertEqual(calls, ['lift', 'compile', 'compile', 'lift', 'compile'])
+
     def test_shader_progress_reaches_the_launcher(self):
         """The shaders step turns nx2navi.exe's counts into progress (translation the first half of the bar, the
         driver build the second), sends one every few seconds while nothing is printed, says when the counts stop

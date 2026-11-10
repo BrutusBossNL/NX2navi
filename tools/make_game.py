@@ -92,6 +92,10 @@ STEPS = ('exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts', 'scan')
 # Steps whose key names every input they read rather than the step before them: a step before them that runs does
 # not make them run again, and they make no step after them run again.
 OWN_KEY_STEPS = ('prompts', 'scan')
+# (a step that runs, a later step that reads nothing it writes): the later step is not made to run again. The lift
+# reads only the unpacked ExeFS (step_key), so the RomFS step leaves it alone: an install that was cut short while the
+# image was still being packed, the lift beside it already done, packs the image again but does not lift again.
+UNAFFECTED = {('romfs', 'lift')}
 # The Python packages tools/pad_prompts.py imports (pip name: import name), checked before a build with button art.
 PROMPT_PACKAGES = {'zstandard': 'zstandard', 'fonttools': 'fontTools', 'pillow': 'PIL'}
 # The line tools/pad_prompts.py prints for each overlay folder it wrote.
@@ -2060,10 +2064,10 @@ def main():
                 emit('step', step=name, state='skip')
             else:
                 # a step that runs makes every step after it run too: their keys hash its output, not its key (but
-                # for OWN_KEY_STEPS, whose keys name their inputs)
+                # for OWN_KEY_STEPS, whose keys name their inputs, and a step that reads nothing of it, UNAFFECTED)
                 with state_lock:
                     for later in STEPS[STEPS.index(name):]:
-                        if later == name or not {name, later} & set(OWN_KEY_STEPS):
+                        if later == name or not ({name, later} & set(OWN_KEY_STEPS) or (name, later) in UNAFFECTED):
                             state['steps'].pop(later, None)
                 say(f'{name}:')
                 emit('step', step=name, state='start')
