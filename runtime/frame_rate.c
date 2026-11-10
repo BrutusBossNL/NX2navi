@@ -233,6 +233,7 @@ double frame_step_game_hz(void) {
 
 // RivaTuner Statistics Server (rtss_limit.c) gets the same limit; while it limits this process the pacer holds no
 // frames, so the two never stack. NX2NAVI_RTSS=0 and frame generation (RTSS would count the generated frames) keep it out.
+static double paced_hz;   // the game frames a second the newest frame_step_cap_ns paces at (ocarina_step); 0: none
 uint64_t frame_step_cap_ns(void) {
     frame_limit_live();
     static int rtss_allowed = -1;
@@ -253,6 +254,7 @@ uint64_t frame_step_cap_ns(void) {
     }
     if (limit_hz == -2 && !movie_hz && !frame_free_running()) {   // unlimited: the pacer does not hold frames, and
         rtss_limit_want(rtss ? 0 : -1);                              // RTSS's limit is cleared
+        paced_hz = 0;
         return 0;
     }
     // unlimited in a build that steps by the clock: LIMIT_FREE_MAX_HZ game frames; during a movie, the movie's rate.
@@ -276,6 +278,7 @@ uint64_t frame_step_cap_ns(void) {
     // display's rate, the generated frames then fill the display's refreshes and none is dropped.
     if (gen > 1) hz /= gen;
     if (movie_hz) hz = movie_hz;
+    paced_hz = hz;
     rtss_limit_want(rtss ? (int64_t)(hz * 1000 + 0.5) : -1);
     if (rtss_limit_active()) return 0;
     return (uint64_t)(1e9 / hz + 0.5);
@@ -343,13 +346,87 @@ static double ocarina_step_s(void) {
     return base * speed / 60.0;
 }
 
-// Free-running builds (Ocarina): the time manager's base step follows the display interval (5-frame average, 1/1000 to
-// 1/15 s, in 60 Hz frames), written at each present. The game left it at one 60 Hz frame whatever the frame rate, so at
-// 144 fps it ran 2.4 times too fast. NX2NAVI_OCARINA_STEP=0 leaves it. Counts how often the game itself had changed
-// the value since the last write (diagnosis).
+// Free-running builds (Ocarina): the game's step follows the display interval (ocarina_step, in 60 Hz frames), written
+// at each present: frames per update on the patch page with the set ostep, else the time manager's base step. The
+// game left it at one 60 Hz frame whatever the frame rate, so at 144 fps it ran 2.4 times too fast.
+// NX2NAVI_OCARINA_STEP=0 leaves it. Counts how often the game itself had changed the value since the last write
+// (diagnosis).
 static uint64_t ostep_writes, ostep_changed;
 static float ostep_last = -1;
 
+// The step Ocarina is given for a display interval dt, in seconds. The game ships with a step of one 60 Hz frame (two
+// at 30 fps) that never changes in play, so nothing in it was written for a step that differs from frame to frame: its
+// physics takes the step as the length of the next solve while the bodies' velocities come from the step before
+// (the physics system keeps both, main+0x38af1f0), and it derives whole numbers from it (the solver step count,
+// patches-v111.txt osolver). The mean of the last 5 intervals, which stood here, moved with every one of them: display
+// intervals of 5 and 30 ms in turn gave steps of 15 and 20 ms in turn, and one 60 ms frame at 200 fps took the step
+// from 5 to 16 ms for five frames and back. So the step is kept steady and the clock is kept by a slow correction:
+//   - the base is the mean of the last 12 intervals without their longest and shortest: one late frame and the short
+//     one after it (nvn_api_obj.c pace keeps the phase) leave it alone, intervals alternating in a period of 2, 3 or 4
+//     frames give one value, and a real change of frame rate arrives within 12 frames;
+//   - a base within 3% of the pacer's period is that period: at a frame limit the game holds, the step is the same
+//     number every frame, at 60 fps exactly the one frame the game ships with;
+//   - what the display showed and the game was not given is owed (the late frame cut from the base, the 3% of the
+//     snap). Past half a step of it the step repays a 64th a frame, 10% of the step at most, so the game still follows
+//     the clock and a hitch is paid back over the next second rather than in five frames. More than STEP_RESET_S owed
+//     is dropped: the game runs slower than the clock, as it does for a frame longer than STEP_MAX_S.
+// The step is at least OSTEP_MIN_S: the solver step count of the set osolver reaches 0 under a 16th of a frame.
+// NX2NAVI_STEP_STEADY=0 gives the mean of the last 5 intervals again (comparison runs).
+#define OSTEP_WINDOW 12
+#define OSTEP_SNAP 0.03
+#define OSTEP_REPAY_MAX 0.10
+#define OSTEP_MIN_S (1.0 / 480.0)
+static double os_ring[OSTEP_WINDOW], os_owed;
+static unsigned os_count, os_next;
+static double os_step_lo, os_step_hi;   // the steps given since the last speed line (speed_report)
+
+static void ocarina_step_reset(void) {
+    os_count = os_next = 0;
+    os_owed = 0;
+}
+
+static double ocarina_step(double dt) {
+    static int steady = -1;
+    if (steady < 0) {
+        const char *e = cfg_get("NX2NAVI_STEP_STEADY");
+        steady = !(e && !strcmp(e, "0"));
+    }
+    if (dt > STEP_MAX_S) dt = STEP_MAX_S;
+    os_ring[os_next++ % OSTEP_WINDOW] = dt;
+    if (os_count < OSTEP_WINDOW) os_count++;
+    double step;
+    if (!steady) {
+        unsigned n = os_count < STEP_SAMPLES ? os_count : STEP_SAMPLES;
+        double sum = 0;
+        for (unsigned i = 1; i <= n; i++) sum += os_ring[(os_next - i) % OSTEP_WINDOW];
+        step = sum / n;
+        if (step < 1.0 / 1000) step = 1.0 / 1000;
+    } else {
+        double sum = 0, lo = os_ring[0], hi = os_ring[0];
+        for (unsigned i = 0; i < os_count; i++) {
+            sum += os_ring[i];
+            if (os_ring[i] < lo) lo = os_ring[i];
+            if (os_ring[i] > hi) hi = os_ring[i];
+        }
+        double base = os_count >= 4 ? (sum - lo - hi) / (os_count - 2) : sum / os_count;
+        double period = paced_hz > 0 ? 1.0 / paced_hz : 0;
+        if (period > 0 && fabs(base - period) <= OSTEP_SNAP * period) base = period;
+        double over = fabs(os_owed) - base * 0.5, repay = 0;
+        if (over > 0) {
+            repay = over / 64 < OSTEP_REPAY_MAX * base ? over / 64 : OSTEP_REPAY_MAX * base;
+            if (os_owed < 0) repay = -repay;
+        }
+        step = base + repay;
+        if (step < OSTEP_MIN_S) step = OSTEP_MIN_S;
+        if (step > STEP_MAX_S) step = STEP_MAX_S;
+        os_owed += dt - step;
+        if (os_owed > STEP_RESET_S) os_owed = STEP_RESET_S;
+        if (os_owed < -STEP_RESET_S) os_owed = -STEP_RESET_S;
+    }
+    if (os_step_lo <= 0 || step < os_step_lo) os_step_lo = step;
+    if (step > os_step_hi) os_step_hi = step;
+    return step;
+}
 
 static void ocarina_step_write(double dt) {
     static int on = -1;
@@ -423,7 +500,7 @@ static void speed_report(uint64_t now, double step, int interval) {
         probe = e && !strcmp(e, "1");
     }
     double wall = (double)(now - win_t0) * 1e-9;
-    char pos[160] = "";
+    char pos[240] = "";
     float p[3];
     if (probe && player_pos(p)) {
         double d = last_pos_ns ? hypot(p[0] - last_pos[0], p[2] - last_pos[2]) : 0,
@@ -432,6 +509,12 @@ static void speed_report(uint64_t now, double step, int interval) {
                  s > 0 ? d / s : 0);
         memcpy(last_pos, p, sizeof p);
         last_pos_ns = now;
+    }
+    if (os_step_hi > 0) {   // Ocarina: the shortest and longest step given in these frames, and the time still owed
+        size_t o = strlen(pos);
+        snprintf(pos + o, sizeof pos - o, "; step %.3f..%.3f frames, %.1f ms owed", os_step_lo * 60, os_step_hi * 60,
+                 os_owed * 1000);
+        os_step_lo = os_step_hi = 0;
     }
     if (step_word || win_game > 0)
         rt_log("fps: %llu frames in %.3f s (%.1f fps), %.3f s game stepped, speed %.3f; interval 1/2/3+ %llu/%llu/%llu%s",
@@ -488,14 +571,9 @@ void frame_step_present(uint64_t display_ns, int interval) {
             step_store((float)step);
         }
     }
-    if (frame_free_running() && last_ns && dt > 0 && dt < STEP_RESET_S) {
-        static double os[STEP_SAMPLES];
-        static unsigned on_, ox;
-        os[ox++ % STEP_SAMPLES] = dt;
-        if (on_ < STEP_SAMPLES) on_++;
-        double sum = 0;
-        for (unsigned i = 0; i < on_; i++) sum += os[i];
-        ocarina_step_write(sum / on_);
+    if (frame_free_running() && last_ns) {
+        if (dt > 0 && dt < STEP_RESET_S) ocarina_step_write(ocarina_step(dt));
+        else ocarina_step_reset();   // a load or a debugger stop: the intervals before it say nothing about the next
     }
     last_ns = display_ns;
     // The game clock of untimed script lines: what the game stepped this frame, the patch page's step with the

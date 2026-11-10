@@ -244,6 +244,11 @@ launcher imports a zip it wrote. The second builds `fs_host.c` and `save_share.c
 and runs each step as a start of the game on a profile it makes: the export, an import from a zip the launcher
 exported, its backup and swap at the next start, the zips it refuses and Cancel. No game files.
 
+A change to the step Ocarina is given each frame (`runtime/frame_rate.c` `ocarina_step`) passes
+`python tests\frame_step_check.py`, which builds `frame_rate.c` with the rest of the runtime stubbed and feeds it
+display times: a held 60 fps limit gives exactly one frame every frame, a 240 fps limit never less than a quarter
+frame, uneven frame times one steady step, and game time follows the clock. No game files.
+
 A change to the button prompts (`tools/make_romfs_patches.py --prompts`, `tools/button_icons.py`) passes
 `.venv-py314\Scripts\python tests\romfs_prompts_test.py`, which runs the tool on a RomFS it makes itself (no game
 files); a change to the settings passes `nx2navi.exe --probe-cfg`.
