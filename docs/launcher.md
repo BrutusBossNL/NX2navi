@@ -262,7 +262,9 @@ save. Saves (home, under Game Folder; `launcher/saves.py`) and the Saves rows of
 
 **Export.** Export Save writes `NX2navi-save-<date>_<time>.zip` into the Downloads folder (Export To chooses another
 folder) and opens the folder with the zip selected, ready to drag into a bug report. With Add Log and Settings on (the
-default) it is `...-bug-report.zip` and also holds the game's latest log and its `nx2navi.ini`. In the game, Export
+default) it is `...-bug-report.zip` and also holds the game's latest log and its `nx2navi.ini`; while the game has no
+save yet (it stopped before its first one) the launcher then writes `NX2navi-log-<date>_<time>-bug-report.zip` with
+those two alone, which an import refuses as a zip without a save. In the game, Export
 save and Export save for a bug report write the same two zips into Downloads; the second holds the log of the run in
 progress. The zip:
 
