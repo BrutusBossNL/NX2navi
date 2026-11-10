@@ -26,7 +26,8 @@ Steps, each skipped when a run before finished it for the same inputs (state in 
               tools, those lines), so it runs again only when one of them changed or a folder is gone, and running
               it makes no other step run again. A failure here leaves the game and its shaders complete.
   8. scan     tools/romfs_check.py decompresses every file of the game data once, writes <out>/romfs-check.json and
-              makes stand-ins for damaged textures in <out>/mods. Its key names the game files and the tool, and it
+              makes stand-ins for damaged textures in <out>/mods. Its key names the game files and the check's
+              version (SCAN_TOOL, changed by hand: an edit of the tool alone does not run it again), and it
               is last: nothing of it runs while the game does.
               Without art the step is skipped and the game shows its own prompts, as before
 
@@ -104,6 +105,13 @@ PROMPT_PACKAGES = {'zstandard': 'zstandard', 'fonttools': 'fontTools', 'pillow':
 # The line tools/pad_prompts.py prints for each overlay folder it wrote.
 PROMPTS_WRITTEN = re.compile(r'^.+: \d+ files, the font grew by -?\d+ bytes$')
 SCAN_CHECKED = re.compile(r'^checked (\d+) of (\d+)$')   # tools/romfs_check.py's progress lines
+# What stands for tools/romfs_check.py in the scan step's key (step_key). The key held the sha256 of the script's
+# bytes, so any edit of the script, a comment's too, made every install check its 26 GB of game files again, four
+# minutes. It is this constant now, changed by hand when a change to the script can change what the check finds
+# or writes, and only then. Its value is the sha256 the script had in 0.7.0 and 0.7.1, the releases that brought the
+# check, so the key of every install that passed it stays what it is. tests/launcher_test.py
+# test_the_file_checks_logic_is_the_recorded_one fails when the script's logic changes, to ask this question.
+SCAN_TOOL = '55ea0c150aaf9dac93a2e6fd3b4ca11e1c572b5eee8b6bd74960535964384634'
 
 # Bring-up fixes in the lifted SDK, each anchored on exact generated text that must occur once.
 LIFT_FIXES = [
@@ -2002,13 +2010,13 @@ def step_key(step, identity, out=None):
     """What a step's output depends on. exefs and romfs: the game files only; lift: the unpacked ExeFS and the
     lifter; compile: the lift, the runtime sources, this script and the processor (cpu_tag); prompts: the game files,
     the kit's button art, the tools that draw it, the bind_ lines of nx2navi.ini, and whether every folder it writes
-    is still there."""
+    is still there; scan: the game files, the check's version (SCAN_TOOL) and whether its report is still there."""
     if step in ('exefs', 'romfs'):
         return f'{step}-1|{identity}'
     if step == 'scan':
         written = 'written' if (out / 'romfs-check.json').is_file() else 'missing'
         tool = KIT / 'tools' / 'romfs_check.py'
-        return f'scan-1|{identity}|{sha256_file(tool) if tool.is_file() else "no tool"}|{written}'
+        return f'scan-1|{identity}|{SCAN_TOOL if tool.is_file() else "no tool"}|{written}'
     if step == 'prompts':
         tools = tree_digest(KIT / 'tools', ('pad_prompts.py', 'prompt_art.py', 'button_icons.py'))
         binds = sha256_bytes(json.dumps(bind_lines(out)).encode())

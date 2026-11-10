@@ -2693,6 +2693,210 @@ class MakeGameTest(Tmp):
         self.assertFalse(build.installed(self.tmp / 'no such folder'))
 
 
+# ---------------------------------------------------------------- the check of the game files
+
+def logic_digest(path):
+    """sha256 of a Python file's code without what cannot change what it does: docstrings, comment lines, blank
+    lines and trailing spaces. The same on every Python version, as it reads only where the docstrings are."""
+    import ast
+    text = Path(path).read_text(encoding='utf-8')
+    skip = set()
+    for node in ast.walk(ast.parse(text)):
+        body = getattr(node, 'body', None)
+        if (isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and body
+                and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], 'value', None), ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            skip.update(range(body[0].lineno, body[0].end_lineno + 1))
+    lines = [ln.rstrip() for n, ln in enumerate(text.splitlines(), 1) if n not in skip]
+    return hashlib.sha256('\n'.join(ln for ln in lines if ln and not ln.lstrip().startswith('#')).encode()).hexdigest()
+
+
+# make_game.SCAN_TOOL, and tools/romfs_check.py's logic_digest when that value was last looked at. A change to the
+# script's logic fails FileCheckTest.test_the_file_checks_logic_is_the_recorded_one, which asks: can the change alter
+# what the check finds or writes for some game file? If it can, give SCAN_TOOL a new value (every install then checks
+# its game files again, about four minutes) and record both here. If it cannot, record only the new digest.
+SCAN_LOGIC = ('55ea0c150aaf9dac93a2e6fd3b4ca11e1c572b5eee8b6bd74960535964384634',
+              '758faaaaca013ed78f21359270cb92196e7f3ffd3aa30a2d06a9edfa0de1a502')
+
+
+class FakeImage:
+    """What tools/romfs_check.py problem() reads of the packed game data, held in memory: files by path, and the
+    game's dictionaries by id."""
+
+    def __init__(self, files, dicts=()):
+        self.files = files
+        self.dicts = {d.dict_id(): d for d in dicts}
+
+    def read(self, entry):
+        return self.files[entry['path']][:entry['size']]
+
+    def decompressor(self, dict_id):
+        import zstandard
+        return zstandard.ZstdDecompressor(dict_data=self.dicts[dict_id]) if dict_id else zstandard.ZstdDecompressor()
+
+
+class FileCheckTest(Tmp):
+    """tools/romfs_check.py reads each file in pieces of PIECE bytes. The piece size is a matter of speed only:
+    what the check says of a file is the same with the 4 MiB pieces of 0.7.1 and the 64 KiB pieces of now."""
+
+    def setUp(self):
+        super().setUp()
+        try:
+            import zstandard  # noqa: F401
+        except ImportError:
+            self.skipTest('needs zstandard')
+        import romfs_check
+        self.rc = romfs_check
+
+    SOME, SAME = object(), object()   # cases()
+
+    @staticmethod
+    def old_problem(rc, image, entry, piece=1 << 22):
+        """The check as 0.7.1 made it: 4 MiB pieces, and no look at whether the frame had ended."""
+        import zstandard
+        data = image.read(entry)
+        if len(data) != entry['size']:
+            return 'shorter than the index says'
+        if not entry['path'].endswith('.zs'):
+            return 'nothing but zeros' if len(data) >= 16 and not any(data) else None
+        if data[:4] != rc.ZSTD_MAGIC:
+            return 'no compressed frame at its start'
+        try:
+            params = zstandard.get_frame_parameters(data)
+            if params.dict_id and params.dict_id not in image.dicts:
+                return None
+            out = image.decompressor(params.dict_id).decompressobj()
+            size = 0
+            for at in range(0, len(data), piece):
+                size += len(out.decompress(data[at:at + piece]))
+        except zstandard.ZstdError as e:
+            return f'does not decompress ({e})'
+        if params.content_size and size != params.content_size:
+            return f'decompresses to {size} bytes, not {params.content_size}'
+        return None
+
+    def cases(self):
+        """(name, path, bytes, what the check must say) of made-up files: frames of about 8 MiB packed, which span
+        several pieces at either size, and small ones. SOME: the check must find the file damaged, whatever its
+        words; SAME: only that both piece sizes say the same."""
+        import random
+        import zstandard
+        z = zstandard.ZstdCompressor(level=3)
+        twelve = bytes(i % 12 for i in range(256))   # bytes of 12 values: packs to about half
+        big_raw = random.Random(1).randbytes(16 << 20).translate(twelve)
+        big = z.compress(big_raw)
+        self.assertGreater(len(big), 6 << 20)
+        small = z.compress(random.Random(2).randbytes(300 << 10).translate(twelve))
+        mid = len(big) // 2
+        samples = [bytes([65 + i % 7]) * 40 + f'sample {i} of the dictionary'.encode() * 3 for i in range(400)]
+        dic = zstandard.train_dictionary(4096, samples)
+        with_dict = zstandard.ZstdCompressor(level=3, dict_data=dic).compress(b''.join(samples[:50]))
+        no_size = zstandard.ZstdCompressor(level=3, write_content_size=False).compress(big_raw[:1 << 20])
+        some, same, span = self.SOME, self.SAME, 300 << 10
+        return dic, [
+            ('whole, small', 'Tex/a.bntx.zs', small, None),
+            ('whole, large', 'Tex/b.bntx.zs', big, None),
+            ('zeros before the frame', 'Tex/c.bntx.zs', bytes(16) + small, 'no compressed frame at its start'),
+            ('damaged at the start', 'Tex/d.bntx.zs', big[:4] + bytes(60) + big[64:], some),
+            ('damaged after the start', 'Tex/e.bntx.zs', big[:64] + bytes(span) + big[64 + span:], some),
+            ('damaged in the middle', 'Tex/f.bntx.zs', big[:mid] + bytes(span) + big[mid + span:], some),
+            ('damaged near the end', 'Tex/g.bntx.zs', big[:-9000] + bytes(4096) + big[-9000 + 4096:], some),
+            # a few changed bytes inside a block can decompress to other bytes of the same length
+            ('a little damage in the middle', 'Tex/v.bntx.zs', big[:mid] + bytes(64) + big[mid + 64:], same),
+            ('cut in the middle', 'Tex/h.bntx.zs', big[:mid], some),
+            ('cut at 4 MiB', 'Tex/i.bntx.zs', big[:4 << 20], some),
+            ('cut at 64 KiB', 'Tex/j.bntx.zs', big[:64 << 10], some),
+            ('cut by one byte', 'Tex/k.bntx.zs', big[:-1], some),
+            ('small, cut', 'Tex/l.bntx.zs', small[:len(small) // 2], some),
+            ('all zeros', 'Model/m.bfres.zs', bytes(1 << 20), 'no compressed frame at its start'),
+            ('all zeros, not packed', 'Param/n.bgyml', bytes(64), 'nothing but zeros'),
+            ('not packed, fine', 'Param/o.bgyml', b'YB' + bytes(62), None),
+            ('not packed, a few zeros', 'Param/p.bgyml', bytes(8), None),
+            ('only the magic', 'Tex/q.bntx.zs', big[:4], some),
+            ('with a dictionary', 'Pack/r.pack.zs', with_dict, None),
+            ('with a dictionary, damaged', 'Pack/s.pack.zs', with_dict[:40] + bytes(40) + with_dict[80:], some),
+            ('no size in its frame', 'Tex/t.bntx.zs', no_size, same),
+            ('no size in its frame, damaged', 'Tex/u.bntx.zs', no_size[:9000] + bytes(4096) + no_size[13096:], same),
+            ('no size in its frame, cut', 'Tex/w.bntx.zs', no_size[:len(no_size) // 2], same),
+        ]
+
+    def test_the_piece_size_does_not_change_the_result(self):
+        rc = self.rc
+        dic, cases = self.cases()
+        self.assertEqual(rc.PIECE, 1 << 16)
+        for dicts in ((dic,), ()):   # the game's dictionaries there, and a frame naming one the game lacks
+            image = FakeImage({path: data for _, path, data, _ in cases}, dicts)
+            for name, path, data, want in cases:
+                if not dicts and 'dictionary' not in name:
+                    continue
+                entry = {'path': path, 'size': len(data)}
+                was = self.old_problem(rc, image, entry)
+                with mock.patch.object(rc, 'PIECE', 1 << 22):
+                    large = rc.problem(image, entry)
+                small = rc.problem(image, entry)
+                self.assertEqual((large, small), (was, was), name)
+                if want is self.SOME:
+                    if dicts or 'dictionary' not in name:   # a frame naming a dictionary the game lacks is not judged
+                        self.assertTrue(was, f'{name}: not found damaged')
+                elif want is not self.SAME:
+                    self.assertEqual(was, want, name)
+        # an index that says more bytes than the image holds
+        image = FakeImage({'Tex/a.bntx.zs': cases[0][2]})
+        self.assertEqual(rc.problem(image, {'path': 'Tex/a.bntx.zs', 'size': len(cases[0][2]) + 1}),
+                         'shorter than the index says')
+
+    def test_bytes_after_the_frame_do_not_depend_on_the_piece_size(self):
+        """A whole frame with other bytes after it. The check stops at the frame's end at either piece size. As
+        0.7.1 made it, such a file passed when the frame ended in the file's last piece and failed when another
+        piece followed, so the answer hung on the piece size; the game data has no such file (the check reports
+        the same four files on every copy, none for this reason)."""
+        rc = self.rc
+        _, cases = self.cases()
+        small, big = cases[0][2], cases[1][2]
+        tails = {'Tex/a.bntx.zs': small + bytes(200 << 10),       # past the next 64 KiB piece
+                 'Tex/b.bntx.zs': big + bytes(5 << 20),           # past the next 4 MiB piece
+                 'Tex/c.bntx.zs': small + small}                   # a second frame
+        image = FakeImage(tails)
+        for path, data in tails.items():
+            entry = {'path': path, 'size': len(data)}
+            with mock.patch.object(rc, 'PIECE', 1 << 22):
+                self.assertIsNone(rc.problem(image, entry), path)
+            self.assertIsNone(rc.problem(image, entry), path)
+        entry = {'path': 'Tex/b.bntx.zs', 'size': len(tails['Tex/b.bntx.zs'])}
+        self.assertIn('multiple times', self.old_problem(rc, image, entry))
+        self.assertIn('multiple times', self.old_problem(rc, image, {'path': 'Tex/a.bntx.zs',
+                                                                    'size': len(tails['Tex/a.bntx.zs'])}, 1 << 16))
+
+    def test_the_scan_key_is_the_one_installs_have(self):
+        """The scan step's key no longer follows the script's bytes: it is what 0.7.0 and 0.7.1 wrote into
+        state.json, so an install that passed the check does not run it again because the script was edited."""
+        import make_game
+        out = self.tmp / 'game'
+        out.mkdir()
+        ident = 'nup C:\\dumps\\game.nup 28000000000 1760000000'
+        released = '55ea0c150aaf9dac93a2e6fd3b4ca11e1c572b5eee8b6bd74960535964384634'   # sha256 of 0.7.1's script
+        self.assertEqual(make_game.step_key('scan', ident, out), f'scan-1|{ident}|{released}|missing')
+        (out / 'romfs-check.json').write_text('{}')
+        self.assertEqual(make_game.step_key('scan', ident, out), f'scan-1|{ident}|{released}|written')
+
+    def test_the_file_checks_logic_is_the_recorded_one(self):
+        import make_game
+        now = (make_game.SCAN_TOOL, logic_digest(ROOT / 'tools' / 'romfs_check.py'))
+        self.assertEqual(now, SCAN_LOGIC,
+                         "tools/romfs_check.py's logic changed. If the change can alter what the check finds or "
+                         'writes, give make_game.SCAN_TOOL a new value, so that installs check their game files '
+                         'again; either way record the new pair in SCAN_LOGIC (tests/launcher_test.py).')
+        # the digest follows the code, not its comments, docstrings or blank lines
+        a = self.tmp / 'a.py'
+        a.write_text('"""Doc."""\nX = 1\n\n\ndef f():\n    """Doc."""\n    # why\n    return X  \n')
+        b = self.tmp / 'b.py'
+        b.write_text('"""Another."""\n# a comment\nX = 1\n\ndef f():\n    """Another\n    one."""\n    return X\n')
+        c = self.tmp / 'c.py'
+        c.write_text('"""Doc."""\nX = 2\n\n\ndef f():\n    """Doc."""\n    # why\n    return X  \n')
+        self.assertEqual(logic_digest(a), logic_digest(b))
+        self.assertNotEqual(logic_digest(a), logic_digest(c))
+
+
 # ---------------------------------------------------------------- jobs
 
 FAKE_MAKE_GAME = r'''
