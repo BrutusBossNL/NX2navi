@@ -41,6 +41,22 @@ static uint64_t g_table_bytes, g_functions;
 static struct { uint64_t addr; GuestFn fn; } g_host[HOST_CAP];
 static uint64_t g_nhost;
 
+static void (*fatal_notes[4])(void);
+static int n_fatal_notes;
+
+void rt_fatal_note_add(void (*fn)(void)) {
+    for (int i = 0; i < n_fatal_notes; i++)
+        if (fatal_notes[i] == fn) return;
+    if (n_fatal_notes < (int)(sizeof fatal_notes / sizeof *fatal_notes)) fatal_notes[n_fatal_notes++] = fn;
+}
+
+// Once per process: a second fatal error, on another thread or inside a note, adds none.
+void rt_fatal_notes(void) {
+    static volatile int32_t done;
+    if (plat_xchg32(&done, 1)) return;
+    for (int i = 0; i < n_fatal_notes; i++) fatal_notes[i]();
+}
+
 void rt_fatal(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -54,6 +70,7 @@ void rt_fatal(const char *fmt, ...) {
     double proc, used, limit;
     plat_commit_info(&proc, &used, &limit);
     rt_log("fatal: memory commit: this process %.0f MB, the system %.0f of %.0f MB", proc, used, limit);
+    rt_fatal_notes();
     kern_free_cores_note();
     prof_sampler_write();   // NX2NAVI_PROFILE: what was sampled until now, else a crash loses the whole profile
     // RivaTuner Statistics Server's profile as it was: left with the game's limit in it, the next run would take that

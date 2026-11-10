@@ -138,7 +138,9 @@ static const struct { const char *key, *section; } sections[] = {
 #define LIVE 1
 #define RESTART 0
 // The lazy write-back (memory.c "Lazy write-back") is on where it has run: its fetch inside the access-fault handler
-// has only ever run on Windows. With shadow storage it stays off whatever is set (vk_memory.c wb_lazy).
+// has only ever run on Windows. This is the platform's part of the default, which memory.c mem_init goes by to take
+// the access faults; the back end then turns it off for a driver it is not trusted on while the key is unset
+// (wb_lazy_choice.h: AMD's own), and with shadow storage whatever is set (vk_memory.c vk_mem_lazy_decide).
 #ifdef _WIN32
 #define WB_LAZY_DEFAULT "1"
 #else
@@ -287,9 +289,45 @@ static int is_known(const char *key) {
     return !strncmp(key, "CHEAT_", 6);   // cheats.c and the cheat patch sets (tools/cheats.py)
 }
 
+// The keys of the file's lines that are not settings of this version (add), lower-case, ", " between them, each once;
+// what did not fit is counted and left out. Written by cfg_load, before any other thread reads settings.
+static char unknown_keys[384];
+static int n_unknown, unknown_cut;   // how many; whether the list left some out
+
+static void note_unknown(const char *key) {
+    char low[64];
+    size_t n = 0;
+    for (; key[n] && n < sizeof low - 1; n++) {
+        // a key of other characters (a line of text with an '=' in it) is counted, not listed: the menu cuts the list
+        // by bytes to fit its row
+        if (!isalnum((unsigned char)key[n]) && key[n] != '_') break;
+        low[n] = (char)tolower((unsigned char)key[n]);
+    }
+    if (key[n]) {
+        n_unknown++, unknown_cut = 1;
+        return;
+    }
+    low[n] = 0;
+    size_t have = strlen(unknown_keys);
+    for (const char *p = unknown_keys; (p = strstr(p, low)) != NULL; p += n)   // a repeated line counts once
+        if ((p == unknown_keys || p[-1] == ' ') && (p[n] == ',' || !p[n])) return;
+    n_unknown++;
+    if (have + n + 3 > sizeof unknown_keys) {
+        unknown_cut = 1;
+        return;
+    }
+    snprintf(unknown_keys + have, sizeof unknown_keys - have, "%s%s", have ? ", " : "", low);
+}
+
+const char *cfg_unknown_keys(int *count) {
+    if (count) *count = n_unknown;
+    return unknown_keys;
+}
+
 static void clear(void) {
     for (int i = 0; i < n_entries; i++) free(entries[i].key), free(entries[i].value);
     n_entries = 0;
+    unknown_keys[0] = 0, n_unknown = unknown_cut = 0;
 }
 
 static char *trim(char *s) {
@@ -310,7 +348,10 @@ static void add(char *key, char *value, int line) {
     size_t vl = strlen(value);
     if (vl >= 2 && value[0] == '"' && value[vl - 1] == '"') value[vl - 1] = 0, value++;
     if (!*key) return;
-    if (!is_known(key)) rt_log("cfg: nx2navi.ini line %d: unknown key '%s'", line, key);
+    if (!is_known(key)) {
+        rt_log("cfg: nx2navi.ini line %d: unknown key '%s'", line, key);
+        note_unknown(key);
+    }
     if (!*value) return;   // "key =" leaves the setting at its default
     for (int i = 0; i < n_entries; i++)
         if (!strcmp(entries[i].key, key)) {   // a repeated key: the later line wins
@@ -920,6 +961,33 @@ int cfg_save(void) {
     return 0;
 }
 
+// What the file sets, in the log once at start: the settings of this version with their values, in lines of up to
+// about 900 characters, and then the keys that are no settings of this version, which do nothing. A report's log then
+// shows which settings its run had and which of the file's lines had no effect; before, it held only the count of
+// keys, and a player who had added a line this version does not read could take it for the cause of what changed.
+static void log_file_settings(void) {
+    char line[1024];
+    size_t k = 0;
+    for (int i = 0; i < n_entries; i++) {
+        if (!entries[i].value || !is_known(entries[i].key)) continue;
+        char key[64];
+        snprintf(key, sizeof key, "%s", entries[i].key);
+        for (char *p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
+        size_t vl = strlen(entries[i].value);
+        if (vl > 200) vl = 200;   // a long value (a list of mods) is cut: the line shows that the key is set
+        if (k && k + strlen(key) + vl + 5 > 900) {
+            rt_log("cfg: nx2navi.ini sets: %s", line);
+            k = 0;
+        }
+        k += (size_t)snprintf(line + k, sizeof line - k, "%s%s = %.*s", k ? ", " : "", key, (int)vl, entries[i].value);
+    }
+    if (k) rt_log("cfg: nx2navi.ini sets: %s", line);
+    if (n_unknown)
+        rt_log("cfg: nx2navi.ini has %d key%s that %s no setting of this version and %s nothing: %s%s", n_unknown,
+               n_unknown == 1 ? "" : "s", n_unknown == 1 ? "is" : "are", n_unknown == 1 ? "does" : "do", unknown_keys,
+               unknown_cut ? ", ..." : "");
+}
+
 static void load_ini(void) {
     if (!find_ini()) return;
     if (!cfg_load(ini_path)) {
@@ -927,6 +995,7 @@ static void load_ini(void) {
         return;
     }
     rt_log("cfg: read %s: %d keys", ini_path, n_entries);
+    log_file_settings();
     for (int i = 0; i < n_entries; i++) {
         char var[128];
         snprintf(var, sizeof var, PREFIX "%s", entries[i].key);

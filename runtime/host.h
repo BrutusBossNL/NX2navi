@@ -196,6 +196,7 @@ int mem_lazy_armed(uint64_t a, uint64_t n);
 void mem_lazy_window(int open);
 void mem_lazy_release(uint64_t a, uint64_t n);
 void mem_lazy_report(uint64_t frame, uint64_t skipped);
+void mem_lazy_note(char *out, size_t n);                   // its state as a phrase, without a lock (a fatal error's line)
 int mem_lazy_pick(uint64_t *addr, int max);                // test: addresses of armed pages
 int mem_probe(uint64_t a, uint64_t n);                     // the 2 MiB regions inside [a, a+n) fault on their next access
 int mem_probing(void);                                     // the probe is on

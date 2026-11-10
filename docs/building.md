@@ -352,6 +352,16 @@ A change to what the library warm logs when the driver's cache of stage librarie
 `runtime/vk_pipeline.c` `lw_main`) passes `python tests\warm_hint_check.py`, which builds the header alone and checks
 the added text by GPU vendor and by why the cache was cold. No game files.
 
+A change to where the lazy write-back is on by default (`runtime/wb_lazy_choice.h`, `runtime/vk_memory.c`
+`vk_mem_lazy_decide`) passes `python tests\wb_lazy_check.py`, which builds the header alone and checks the choice and
+its reason by platform, by GPU driver and by what the player set. No game files, no GPU.
+
+A change to what writes `nx2navi.ini` outside the game (`launcher/gameini.py`, `installer/ini.py`, `tools/make_game.py`,
+`launcher/updater.py`) passes the settings-file tests of `tests\launcher_test.py` (`PlayerIniTest`, and the tests named
+`..._settings_file` of `BackgroundUpdateTest` and `MakeGameTest`): a player's file with lines that are no settings of
+the game comes through an update and a rebuild byte for byte. The game's own writer, the settings menu, is checked by
+`--probe-cfg` with the same lines.
+
 A change to the mouse camera's stick deflection (`runtime/input_map.c` `input_mouse_stick`) passes
 `python tests\mouse_stick_check.py`, which builds that file with the rest of the runtime stubbed and checks the
 deflection at each camera speed: a slow movement is divided by the factor, a fast flick reaches full tilt. No game

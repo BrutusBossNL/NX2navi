@@ -108,7 +108,8 @@ static void unprobe_locked(uint64_t r) {
     plat_dec32(&nprb);
 }
 
-// Lazy write-back (NX2NAVI_WB_LAZY, default 1 on Windows and 0 elsewhere, vk_memory.c "lazy write-back"). It was off
+// Lazy write-back (NX2NAVI_WB_LAZY; unset: on under Windows except on AMD's own driver, off elsewhere, as
+// wb_lazy_choice.h decides and gives the reasons for; vk_memory.c "lazy write-back"). It was off
 // by default in 0.7.0: with it on, single frames came out with the whole scene's shadowing missing, 10 to 180 of 1,800
 // presents standing in Hyrule Field with other programs keeping the CPU busy and none found with it off. That was
 // not this code's doing: frames were drawn from copies taken before the game's signal that their data was written
@@ -148,6 +149,12 @@ static uint64_t lz_unclean;             // frz_lock: arms refused since the last
 // frz_lock: since the last report: faults by a read, by a write, other releases, fetches, their bytes and time
 static uint64_t lz_faults[2], lz_other, lz_fetches, lz_fetch_bytes, lz_fetch_ns, lz_gaps;
 static volatile uint32_t lz_win_tid;    // the replay thread's id while its part is between check and hand-over; 0 else
+// For a fatal error's summary line (mem_lazy_note): written under frz_lock and read without it, since the thread that
+// fails may be the one inside a fetch.
+static volatile uint64_t lz_fetch_total;   // fetches since the start
+static volatile uint32_t lz_fetch_ms;      // plat_now_ms() | 1 at the end of the last one; 0: none yet
+static volatile uint32_t lz_fetch_tid;     // the thread inside a fetch now; 0: none
+static volatile uint64_t lz_fetch_now;     // that fetch's bytes
 
 static void lazy_flags_locked(uint64_t lo, uint64_t hi) {
     for (uint64_t r = lo >> FRZ_SHIFT; r <= (hi - 1) >> FRZ_SHIFT; r++) {
@@ -165,7 +172,12 @@ static void lazy_drop_locked(int i, int why) {
     LzSeg s = lzs[i];
     if (s.stale && lz_fetch) {
         uint64_t t0 = plat_now_ns();
+        __atomic_store_n(&lz_fetch_now, s.hi - s.lo, __ATOMIC_RELAXED);
+        __atomic_store_n(&lz_fetch_tid, plat_thread_id(), __ATOMIC_RELEASE);
         lz_fetch(s.h0, s.h1, (uint64_t)((int64_t)s.lo + s.delta), s.hi - s.lo);
+        __atomic_store_n(&lz_fetch_ms, (uint32_t)plat_now_ms() | 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&lz_fetch_total, lz_fetch_total + 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&lz_fetch_tid, 0, __ATOMIC_RELEASE);
         lz_fetches++, lz_fetch_bytes += s.hi - s.lo, lz_fetch_ns += plat_now_ns() - t0;
     }
     for (uint64_t a = s.lo, b; a < s.hi; a = b)
@@ -366,6 +378,24 @@ int mem_lazy_pick(uint64_t *addr, int max) {
     next += k;
     plat_mutex_unlock(&frz_lock);
     return k;
+}
+
+// The lazy write-back's state as a phrase for a fatal error's summary line, "" while nothing is armed by it. No lock:
+// the count of armed ranges may be a moment old, and a fetch in progress is named with its thread, which tells a game
+// that ended inside a fetch (the device lost under it, or its wait run out) from one that ended elsewhere.
+void mem_lazy_note(char *out, size_t n) {
+    *out = 0;
+    if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED)) return;
+    uint32_t tid = __atomic_load_n(&lz_fetch_tid, __ATOMIC_ACQUIRE), last = __atomic_load_n(&lz_fetch_ms, __ATOMIC_RELAXED);
+    int k = snprintf(out, n, "%d ranges armed, %llu fetches so far", lz_n,
+                     (unsigned long long)__atomic_load_n(&lz_fetch_total, __ATOMIC_RELAXED));
+    if (k < 0 || (size_t)k >= n) return;
+    if (tid)
+        snprintf(out + k, n - (size_t)k, ", one of %llu bytes in progress on thread %u%s",
+                 (unsigned long long)__atomic_load_n(&lz_fetch_now, __ATOMIC_RELAXED), tid,
+                 tid == plat_thread_id() ? " (this one)" : "");
+    else if (last)
+        snprintf(out + k, n - (size_t)k, ", the last ended %u ms ago", (uint32_t)plat_now_ms() - last);
 }
 
 // One log line since the last one; skipped: the bytes the back end left in the mirror since then.
@@ -640,7 +670,7 @@ void mem_init(void) {
     if (cfg_bool("NX2NAVI_WB_PROBE")) {   // a diagnosis: off, no access fault reaches probe_fault and nothing is probed
         plat_mem_access_hook(access_fault);
         __atomic_store_n(&prb_on, 1, __ATOMIC_RELEASE);
-    } else if (cfg_bool("NX2NAVI_WB_LAZY")) {   // armed only once the back end can fetch (mem_lazy_enable)
+    } else if (cfg_bool("NX2NAVI_WB_LAZY")) {   // armed once the back end wants it and can fetch (mem_lazy_enable)
         plat_mem_access_hook(access_fault);
         lz_want = 1;
     }

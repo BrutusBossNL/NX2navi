@@ -872,8 +872,16 @@ int vk_texture_detail_auto(void) {
     return most;
 }
 
+static const char *const detail_names[3] = {"full", "reduced", "low"};
+static int detail_chosen = -1;   // detail_most's answer once it is made
+
+// The texture detail in effect, for a fatal error's summary line. No lock, any thread.
+const char *vk_texture_detail_name(void) {
+    int most = __atomic_load_n(&detail_chosen, __ATOMIC_RELAXED);
+    return most < 0 ? "not chosen yet (no texture made)" : detail_names[most];
+}
+
 static int detail_most(void) {   // the most levels a texture is made without: 0 full, 1 reduced, 2 low
-    static const char *const names[3] = {"full", "reduced", "low"};
     static int most = -1;
     if (most >= 0) return most;
     const char *v = cfg_value("NX2NAVI_TEXTURE_DETAIL");
@@ -886,10 +894,11 @@ static int detail_most(void) {   // the most levels a texture is made without: 0
             rt_log("vk: texture detail: full (texture_detail = %s; the device reports no video memory budget)", v);
         else
             rt_log("vk: texture detail: %s, chosen for a video memory budget of %lld MiB (texture_detail = %s; full from "
-                   "%d MiB, low under %d MiB%s)", names[most], (long long)detail_budget_mb, v, DETAIL_FULL_MB, DETAIL_LOW_MB,
+                   "%d MiB, low under %d MiB%s)", detail_names[most],(long long)detail_budget_mb, v, DETAIL_FULL_MB, DETAIL_LOW_MB,
                    vk_astc_mode() != VK_ASTC_NATIVE && !vk_astc_bc() && detail_budget_mb < DETAIL_RGBA8_MB
                        ? "; one step lower because ASTC textures stay uncompressed here" : "");
     }
+    __atomic_store_n(&detail_chosen, most, __ATOMIC_RELAXED);
     return most;
 }
 

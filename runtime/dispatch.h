@@ -51,3 +51,8 @@ RtDispatchStats rt_dispatch_stats(void);
 
 // Runtime fatal error: message to stderr, then exit. Used by the dispatcher and the stubs.
 void rt_fatal(const char *fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
+// Lines of context for a fatal error's report, which rt_fatal and the crash report (main.c crash_handler) write after
+// their own: fn logs one with rt_log. It runs on the failing thread, which may hold any lock, so it reads only what
+// needs none. At most four; adding one twice keeps one. rt_fatal_notes runs them, once per process.
+void rt_fatal_note_add(void (*fn)(void));
+void rt_fatal_notes(void);

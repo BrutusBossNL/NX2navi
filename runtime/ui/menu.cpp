@@ -1531,7 +1531,26 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
     // the save menu's brown buttons, with the game's cursor on the selected one (ui/menu_skin.cpp)
     float gap = st.ItemSpacing.x + skin_cursor_reach(scale);
     // right-aligned; in a window too narrow for all three, from the left edge
-    ImGui::SetCursorPos(ImVec2(fmaxf(st.WindowPadding.x, ImGui::GetWindowWidth() - st.WindowPadding.x - bw * 3 - gap * 2), y));
+    const float buttons_x = fmaxf(st.WindowPadding.x, ImGui::GetWindowWidth() - st.WindowPadding.x - bw * 3 - gap * 2);
+    // Lines of nx2navi.ini that are no settings of this version do nothing (cfg.c cfg_unknown_keys). Said here, in the
+    // save status's place while saving works, so that a line added by hand is not taken for the cause of what the game
+    // does: a player took such a line for the fix of a crash. The list is cut to the room left of the buttons.
+    const char *unknown = cfg_unknown_keys(NULL);
+    if (cfg_last_save_ok() && *unknown) {
+        char note[512];
+        snprintf(note, sizeof note, menu_text(UI_MENU_INI_UNKNOWN), unknown);
+        size_t keep = strlen(note), head = keep > strlen(unknown) ? keep - strlen(unknown) : keep;
+        const float room = buttons_x - st.WindowPadding.x - gap;
+        while (keep > head && ImGui::CalcTextSize(note).x > room) {
+            keep--;
+            snprintf(note + keep, sizeof note - keep, "...");
+        }
+        if (keep > head) {
+            ImGui::SetCursorPos(ImVec2(st.WindowPadding.x, y + st.FramePadding.y));
+            ImGui::TextColored(ImVec4(0.90f, 0.80f, 0.50f, 1), "%s", note);
+        }
+    }
+    ImGui::SetCursorPos(ImVec2(buttons_x, y));
     if (skin_widget_button(cont, ImVec2(bw, 0), scale)) set_open(0);
     ImGui::SameLine(0, gap);
     if (skin_widget_button(restart, ImVec2(bw, 0), scale)) g_confirm_quit = false, ImGui::OpenPopup("##confirm");

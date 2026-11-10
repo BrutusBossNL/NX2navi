@@ -262,6 +262,50 @@ class VersionTest(unittest.TestCase):
             versions.parse('banana')
 
 
+# A player's settings file as a report showed it (an AMD card, 0.7.1): what the game's menu wrote, three lines added by
+# hand that are no settings of the game (async_compute, vram_safe_mode, exception_handler: the player took the first for
+# the fix of a crash and asked for it as a default, because "the configuration file gets overwritten on updates"), and a
+# comment. Saved as an editor on Windows saves it: CRLF line ends, no line end after the last line. Nothing in an
+# update may change a byte of it (PlayerIniTest, BackgroundUpdateTest and MakeGameTest each run their part of one).
+PLAYER_INI = (
+    b'# my settings\r\n'
+    b'[display]\r\n'
+    b'async_compute = 1\r\n'
+    b'fullscreen = 1\r\n'
+    b'window_size = 1920x1080\r\n'
+    b'gpu_index = 0\r\n'
+    b'perf_overlay = fps\r\n'
+    b'vk_present = mailbox\r\n'
+    b'upscaler = bilinear\r\n'
+    b'dlaa = 1\r\n'
+    b'framegen = off\r\n'
+    b'taa = fsr3\r\n'
+    b'hdr = 0\r\n'
+    b'aspect = fit\r\n'
+    b'game_res = 1800\r\n'
+    b'sharpness = 80\r\n'
+    b'aniso = 2\r\n'
+    b'assume_focus = 1\r\n'
+    b'texture_detail = auto\r\n'
+    b'\r\n'
+    b'[input]\r\n'
+    b'bind_a = key:default, pad:south\r\n'
+    b'bind_b = key:default, pad:east\r\n'
+    b'bind_x = key:default, pad:north\r\n'
+    b'bind_y = key:default, pad:west\r\n'
+    b'\r\n'
+    b'[language]\r\n'
+    b'operation_mode = docked\r\n'
+    b'\r\n'
+    b'[performance]\r\n'
+    b'wb_lazy = 0\r\n'
+    b'vram_safe_mode = 1\r\n'
+    b'exception_handler = 1\r\n'
+    b'\r\n'
+    b'[frame rate]\r\n'
+    b'fps_limit = 120')
+
+
 class GameIniTest(Tmp):
     """The game settings the launcher switches (launcher/gameini.py), read as runtime/cfg.c reads nx2navi.ini."""
 
@@ -304,6 +348,45 @@ class GameIniTest(Tmp):
         with self.assertRaises(OSError):
             gameini.put(self.tmp, 'discord', 'discord_rpc', '1')
         self.assertTrue((self.tmp / 'nx2navi.ini').is_dir())
+
+class PlayerIniTest(Tmp):
+    """The settings file of a player (PLAYER_INI) under the two writers outside the game: the launcher's Settings
+    (launcher/gameini.py) and the older installer's last step (installer/ini.py). Each changes the one line it is
+    for; the lines that are no settings of the game, the comment and every other byte stay."""
+
+    def test_the_launchers_setting_adds_one_line(self):
+        ini = self.tmp / 'nx2navi.ini'
+        ini.write_bytes(PLAYER_INI)
+        self.assertEqual(gameini.get(self.tmp, 'wb_lazy'), '0')
+        self.assertEqual(gameini.get(self.tmp, 'async_compute'), '1')   # read like any line; the game ignores it
+        gameini.put(self.tmp, 'discord', 'discord_rpc', '0')
+        self.assertEqual(ini.read_bytes(), PLAYER_INI + b'\r\n\r\n[discord]\r\ndiscord_rpc = 0\r\n')
+        gameini.put(self.tmp, 'discord', 'discord_rpc', '1')
+        self.assertEqual(ini.read_bytes(), PLAYER_INI + b'\r\n\r\n[discord]\r\ndiscord_rpc = 1\r\n')
+
+    def test_the_older_installer_changes_the_language_line_only(self):
+        """installer/ini.py sets the language, in the older installer's last step at every install and update: the
+        one line goes under [language] with the file's own line ends, and every other byte stays (it used to write
+        the whole file again with LF line ends, a line end after the last line and no byte order mark). A second run
+        leaves the file alone; a changed language changes that line; a byte order mark and a line that is not UTF-8
+        stay too."""
+        from installer import ini as inst_ini
+        path = self.tmp / 'nx2navi.ini'
+        path.write_bytes(PLAYER_INI)
+        inst_ini.write(self.tmp, 'en-US')
+        want = PLAYER_INI.replace(b'[language]\r\n', b'[language]\r\nlang = en-US\r\n')
+        self.assertEqual(path.read_bytes(), want)
+        self.assertEqual(want.count(b'lang = en-US'), 1)
+        stamp = path.stat().st_mtime_ns
+        inst_ini.write(self.tmp, 'en-US')
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), (want, stamp))
+        inst_ini.write(self.tmp, 'de')
+        self.assertEqual(path.read_bytes(), want.replace(b'lang = en-US', b'lang = de'))
+        marked = b'\xef\xbb\xbf# caf\xe9\r\nlang = ja\r\nasync_compute = 1'
+        path.write_bytes(marked)
+        inst_ini.write(self.tmp, 'fr')
+        self.assertEqual(path.read_bytes(), marked.replace(b'lang = ja', b'lang = fr'))
+        self.assertFalse((self.tmp / 'nx2navi.ini.tmp').exists())
 
 
 class RebuildArgsTest(Tmp):
@@ -897,6 +980,28 @@ class BackgroundUpdateTest(Tmp):
         self.assertIsNone(bg.poll(rel))
         self.assertEqual(bg.install(self.game, rel), '')
         self.assertEqual(len(self.restarts), 1)
+
+    def test_an_update_leaves_the_games_settings_file(self):
+        """The launcher's part of an update (the release staged beside the running version, the switch to it, the
+        cleanup after the rebuild) changes nothing in the game folder, also in its default place inside the
+        launcher's folder: the player's nx2navi.ini is the same bytes afterwards, and an uninstall that keeps the game
+        does not name it."""
+        game = self.layout.root / 'game'
+        (game / 'profile').mkdir(parents=True)
+        ini = game / 'nx2navi.ini'
+        ini.write_bytes(PLAYER_INI)
+        before = sorted(p.relative_to(game).as_posix() for p in game.rglob('*'))
+        bg = self.background(self.context())
+        rel = self.publish('0.5.0', runtime='py-2')
+        self.assertEqual(self.stage(bg, rel), 'staged')
+        self.assertEqual(ini.read_bytes(), PLAYER_INI)
+        self.assertEqual(bg.install(str(game), rel, why='the launcher started'), '0.5.0')
+        self.assertEqual(self.state(), ('0.5.0', '0.4.0', [['--continue-update', '0.4.0']]))
+        updater.prune(self.layout)                           # what ContinueUpdateJob ends with
+        self.assertEqual(ini.read_bytes(), PLAYER_INI)
+        self.assertEqual(sorted(p.relative_to(game).as_posix() for p in game.rglob('*')), before)
+        gone, _ = winsys.uninstall_plan(self.layout)
+        self.assertFalse([p for p in gone if p == game or p in ini.parents])
 
     def test_no_install_while_the_game_runs(self):
         """A copy of the game started elsewhere, the copy the launcher started, and a download under way each hold
@@ -1634,6 +1739,75 @@ class MakeGameTest(Tmp):
             shutil.rmtree(kit / 'prompt-art')
             self.assertEqual(build(), ([], [{'ev': 'step', 'step': 'prompts', 'state': 'skip'}], 4))
             self.assertTrue((self.out / 'romfs-patches-xbox' / 'manifest.tsv').is_file())
+
+    def test_an_update_keeps_the_settings_file(self):
+        """The rebuild an update ends with (make_game.py --rebuild under a newer kit: the lift, the compile, the
+        shaders step and the button prompts all run again) leaves the game folder's nx2navi.ini as the player has it,
+        byte for byte. The build reads the file (the bind_ lines for the prompts, shader_carry for the shaders step)
+        and never writes it; so does a second rebuild that finds nothing to do, and one from the game files again.
+        The lift and the compile are stand-ins here (the real ones need the game and clang); the check, the ExeFS and
+        RomFS steps, the shaders step and the prompts step are the real ones."""
+        from unittest import mock
+        kit = self.tmp / 'kit'
+        for d in ('tools', 'bin', 'recomp'):
+            (kit / d).mkdir(parents=True)
+        (kit / 'VERSION').write_text('0.7.0\n')
+        (kit / 'recomp' / 'gen.py').write_text('# the lifter of 0.7.0\n')
+        (kit / 'bin' / self.mg.XLATE_NAME).write_bytes(b'translator')
+        (kit / 'bin' / 'nx2navi_xlate.id').write_text('xlate 1\n')
+        (kit / 'tools' / 'prepare_shaders.py').write_text('print("prepare-shaders: progress build 1 1", flush=True)\n')
+        for name in ('prompt_art.py', 'button_icons.py'):
+            shutil.copy2(ROOT / 'tools' / name, kit / 'tools' / name)
+        (kit / 'tools' / 'pad_prompts.py').write_text(FAKE_PAD_PROMPTS)
+        art = kit / 'prompt-art' / 'XGamepad' / 'Default'
+        art.mkdir(parents=True)
+        (art / 'T_X_A_White.png').write_bytes(b'picture one')
+        ran = []
+
+        def fake(name):
+            def step(*args, **kw):
+                ran.append(name)
+            return step
+
+        def build(*source):
+            """One run of make_game.py; the steps that ran, in order."""
+            buf = io.StringIO()
+            argv = ['make_game.py', *source, '--out', str(self.out), '--msys', str(self.msys), '--events']
+            with mock.patch.object(sys, 'argv', argv), contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.mg.main()
+            events = [json.loads(ln[2:]) for ln in buf.getvalue().splitlines() if ln.startswith('@@')]
+            return [e['step'] for e in events if e['ev'] == 'step' and e['state'] == 'start']
+
+        sys.path.insert(0, str(self.layout.pydeps))   # the fake zbic
+        self.addCleanup(sys.path.remove, str(self.layout.pydeps))
+        ini = self.out / 'nx2navi.ini'
+        with mock.patch.multiple(self.mg, KIT=kit, PROMPT_PACKAGES={}, EVENTS=False, step_lift=fake('lift'),
+                                 step_compile=fake('compile'), step_scan=fake('scan')):
+            self.assertEqual(build('--nup', str(self.nup)),
+                             ['check', 'exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts', 'scan'])
+            self.assertFalse(ini.exists())                   # the build makes no settings file: the game's menu does
+            ini.write_bytes(PLAYER_INI)
+            names = sorted(p.name for p in self.out.iterdir())
+            # the update: a kit with another lifter and another version
+            (kit / 'VERSION').write_text('0.7.1\n')
+            (kit / 'recomp' / 'gen.py').write_text('# the lifter of 0.7.1\n')
+            ran.clear()
+            steps = build('--rebuild')
+            self.assertEqual(steps, ['check', 'lift', 'compile', 'shaders', 'prompts'])   # the bind_ lines are new to it
+            self.assertEqual(ran, ['lift', 'compile'])
+            self.assertEqual(ini.read_bytes(), PLAYER_INI)
+            self.assertEqual(sorted(p.name for p in self.out.iterdir()), names)   # no copy, no backup, no temporary file
+            self.assertEqual(json.loads((self.out / 'build-cache' / 'state.json').read_text())['kit'], '0.7.1')
+            self.assertEqual(build('--rebuild'), ['check'])                       # nothing to do
+            self.assertEqual(ini.read_bytes(), PLAYER_INI)
+            # from the game files again into the same folder (Rebuild the Game without a build to start from)
+            st = json.loads((self.out / 'build-cache' / 'state.json').read_text())
+            st['steps'] = {}
+            (self.out / 'build-cache' / 'state.json').write_text(json.dumps(st))
+            self.assertEqual(build('--nup', str(self.nup)),
+                             ['check', 'exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts', 'scan'])
+            self.assertEqual(ini.read_bytes(), PLAYER_INI)
 
     @unittest.skipIf(os.name == 'nt', 'uses a POSIX script as the compiler')
     def test_largest_source_compiles_first(self):
