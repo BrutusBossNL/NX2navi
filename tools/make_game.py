@@ -1225,9 +1225,12 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     rt = KIT / 'runtime'
     # The runtime's own shaders are in the repository as source only: from a source checkout their headers are not
     # there until they are built, and every runtime file that includes one would fail to compile. A kit carries them
-    # built, so nothing is stale there and no shader compiler is looked for.
-    import build_shaders
-    stale = build_shaders.stale(rt)
+    # built and does not carry tools/build_shaders.py (nor the compilers it calls), so a kit build skips this step.
+    try:
+        import build_shaders
+    except ModuleNotFoundError:
+        build_shaders = None
+    stale = build_shaders.stale(rt) if build_shaders else []
     if stale:
         say(f'  compiling {len(stale)} of the runtime\'s own shaders (runtime/*_spv.h)')
         build_shaders.build(rt, stale)

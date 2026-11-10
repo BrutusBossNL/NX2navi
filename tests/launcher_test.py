@@ -1091,6 +1091,30 @@ class PromptArtTest(Tmp):
         for tools in (make_launcher.TOOLS, make_kit.TOOLS):
             self.assertLessEqual(local | {'pad_prompts.py'}, set(tools))
 
+    def test_launcher_release_carries_what_make_game_imports(self):
+        """Every tool make_game.py imports is in the launcher release, unless the import sits in a try that catches
+        ImportError (build_shaders: a source checkout's step the release's prebuilt headers do not need) or only runs
+        on Linux (build_game, whose kit carries it). An import that is neither stopped every player's update at its
+        compile step."""
+        import ast
+        import make_launcher
+        tree = ast.parse((ROOT / 'tools' / 'make_game.py').read_text(encoding='utf-8'))
+        guarded = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and any(
+                    isinstance(h.type, ast.Name) and h.type.id in ('ImportError', 'ModuleNotFoundError')
+                    for h in node.handlers):
+                for inner in node.body:
+                    guarded |= {id(n) for n in ast.walk(inner)}
+        needed = set()
+        for node in ast.walk(tree):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+                [node.module] if isinstance(node, ast.ImportFrom) and node.module else []
+            for root in (n.split('.')[0] for n in names):
+                if (ROOT / 'tools' / f'{root}.py').is_file() and id(node) not in guarded and root != 'build_game':
+                    needed.add(f'{root}.py')
+        self.assertLessEqual(needed, set(make_launcher.TOOLS))
+
 
 # ---------------------------------------------------------------- make_game.py
 
