@@ -1685,6 +1685,82 @@ class MakeGameTest(Tmp):
                 self.assertEqual(dst.stat().st_mode & 0o777, src.stat().st_mode & 0o777)
                 self.assertFalse(self.mg.copy_if_changed(src, dst))
 
+    def test_copy_if_changed_makes_no_folder(self):
+        """A network share can refuse the owner-only folder TemporaryDirectory makes: the copy needs a file only, and
+        leaves nothing behind, also when the copy fails."""
+        out = self.tmp / 'share'
+        out.mkdir()
+        src, dst = self.tmp / 'new.bin', out / 'installed.bin'
+        src.write_bytes(b'new')
+        dst.write_bytes(b'old')
+        refused = mock.patch.object(self.mg.tempfile, 'TemporaryDirectory', side_effect=PermissionError('refused'))
+        with refused, mock.patch.object(self.mg.os, 'mkdir', side_effect=PermissionError('refused')):
+            self.assertTrue(self.mg.copy_if_changed(src, dst))
+        self.assertEqual(dst.read_bytes(), b'new')
+        self.assertEqual([p.name for p in out.iterdir()], ['installed.bin'])
+        src.write_bytes(b'newer')
+        with mock.patch.object(self.mg.shutil, 'copy2', side_effect=OSError('the share went away')):
+            with self.assertRaises(OSError):
+                self.mg.copy_if_changed(src, dst)
+        self.assertEqual(dst.read_bytes(), b'new')                       # the installed file is as it was
+        self.assertEqual([p.name for p in out.iterdir()], ['installed.bin'])
+
+    def test_source_size_waits_for_a_share(self):
+        """A share that stops answering for a moment: the source's folder is not there either, and the size is asked
+        again. A folder that answers without the file ends the build at once."""
+        src = self.tmp / 'lift' / 'a.c'
+        src.parent.mkdir()
+        src.write_bytes(b'int a;\n')
+        real_stat, real_is_dir = Path.stat, Path.is_dir
+        down = {'left': 3}
+
+        def stat(p, *a, **k):
+            if p == src and down['left'] > 0:
+                raise FileNotFoundError(2, 'The network path was not found', str(p))
+            return real_stat(p, *a, **k)
+
+        def is_dir(p):   # each look at the folder is one try nearer to the share's return
+            if p == src.parent and down['left'] > 0:
+                down['left'] -= 1
+                return False
+            return real_is_dir(p)
+
+        lines = []
+        with mock.patch.object(Path, 'stat', stat), mock.patch.object(Path, 'is_dir', is_dir), \
+                mock.patch.object(self.mg.time, 'sleep') as sleep, mock.patch.object(self.mg, 'say', lines.append):
+            self.assertEqual(self.mg.source_size(src), 7)
+        self.assertEqual(sleep.call_count, 3)                            # three tries found the share down
+        self.assertEqual(len(lines), 1)                                  # said once, not at every try
+        # the share never comes back: the build stops after SOURCE_WAIT and names the drive
+        down['left'] = 10 ** 6
+        clock = iter(range(0, 10 ** 6, 5))
+        with mock.patch.object(Path, 'stat', stat), mock.patch.object(Path, 'is_dir', is_dir), \
+                mock.patch.object(self.mg.time, 'sleep'), mock.patch.object(self.mg, 'say'), \
+                mock.patch.object(self.mg.time, 'monotonic', lambda: next(clock)), \
+                mock.patch.object(self.mg, 'fail', side_effect=SystemExit) as fail:
+            with self.assertRaises(SystemExit):
+                self.mg.source_size(src)
+        self.assertIn('stopped answering', fail.call_args[0][0])
+        # the file is gone and its folder answers: no wait
+        down['left'] = 0
+        src.unlink()
+        with mock.patch.object(self.mg.time, 'sleep') as sleep, \
+                mock.patch.object(self.mg, 'fail', side_effect=SystemExit) as fail:
+            with self.assertRaises(SystemExit):
+                self.mg.source_size(src)
+        sleep.assert_not_called()
+        self.assertIn('lift folder', fail.call_args[0][0])
+
+    def test_out_path_keeps_a_drive_letter(self):
+        """Windows: --out is made absolute without resolve(), which would turn a mapped drive into its UNC name."""
+        with mock.patch.object(self.mg, 'WIN', True), \
+                mock.patch.object(Path, 'resolve', side_effect=AssertionError('resolve() was called')):
+            got = self.mg.out_path('game')
+        self.assertEqual(got, Path(os.path.abspath('game')))
+        self.assertTrue(got.is_absolute())
+        with mock.patch.object(self.mg, 'WIN', False):
+            self.assertEqual(self.mg.out_path(self.tmp / 'x' / '..' / 'game'), (self.tmp / 'game').resolve())
+
     @unittest.skipUnless(shutil.which('cc'), 'needs a C compiler')
     def test_object_cache(self):
         src = self.tmp / 'src'

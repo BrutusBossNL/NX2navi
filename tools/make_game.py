@@ -534,7 +534,9 @@ def pe_imports(path):
 
 def copy_if_changed(src, dst):
     """Atomically replace dst unless its contents match, even when source modification times are normalized.
-    A same-directory temporary copy preserves modes, replaces read-only files on POSIX and leaves dst intact on copy failure."""
+    A same-directory temporary copy preserves modes, replaces read-only files on POSIX and leaves dst intact on copy
+    failure. The copy is a temporary file, not a file in a temporary folder: such a folder is made for its owner alone,
+    and some network shares refuse that while they take ordinary files."""
     dst = Path(dst)
     s = os.stat(src)
     try:
@@ -543,13 +545,21 @@ def copy_if_changed(src, dst):
             return False
     except FileNotFoundError:
         pass
+    replacement = None
     try:
-        with tempfile.TemporaryDirectory(dir=dst.parent, prefix='.nx2navi-copy-') as tmp:
-            replacement = Path(tmp) / dst.name
-            shutil.copy2(src, replacement)
-            os.replace(replacement, dst)
+        fd, name = tempfile.mkstemp(dir=dst.parent, prefix='.nx2navi-copy-')
+        os.close(fd)
+        replacement = Path(name)
+        shutil.copy2(src, replacement)
+        os.replace(replacement, dst)
     except PermissionError:
         fail(f'cannot replace {dst}: close the game and check output-directory permissions')
+    finally:
+        if replacement is not None:   # still there only when the copy or the replace failed
+            try:
+                replacement.unlink(missing_ok=True)
+            except OSError:
+                pass
     return True
 
 
@@ -832,6 +842,34 @@ def earlier_kits():
     return sorted(kits)
 
 
+SOURCE_WAIT, SOURCE_PAUSE = 60, 2   # seconds source_size waits for a drive in all, and between two tries
+
+
+def source_size(src):
+    """The size of a source file about to be compiled. The sources sit in the build cache beside the game, which a
+    player may keep on a network share, and a share that loses its connection under the build's load answers 'not there'
+    until it is back: while the source's folder does not answer either, the question is asked again for up to
+    SOURCE_WAIT seconds. A folder that answers without the file means the file is gone, which no wait brings back."""
+    src = Path(src)
+    end = time.monotonic() + SOURCE_WAIT
+    told = False
+    while True:
+        try:
+            return src.stat().st_size
+        except OSError as e:
+            away = not src.parent.is_dir()
+            if not away or time.monotonic() >= end:
+                fail(f'cannot read {src} ({e.strerror or e}): '
+                     + ('the drive or network share with the game folder stopped answering; check it and run the '
+                        'build again' if away else
+                        'the file is gone from the build cache; delete the lift folder in the build cache and run '
+                        'the build again, which makes it anew'))
+            if not told:
+                say(f'  {src.parent} does not answer; waiting up to {SOURCE_WAIT} s for the drive to come back')
+                told = True
+            time.sleep(SOURCE_PAUSE)
+
+
 def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=None, alts=None):
     """Compile each (source, object) whose object is not current in cache. cmd_for(src, dst) -> argv without the
     dependency-file options; salt identifies the compiler. Returns (compiled, reused, failures) with failures as
@@ -853,7 +891,7 @@ def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=No
     reused = len(srcs) - len(todo)
     if adopted:
         say(f'  {adopted} objects an earlier version compiled are kept: the same compile of the same sources')
-    todo.sort(key=lambda job: job[0].stat().st_size, reverse=True)
+    todo.sort(key=lambda job: source_size(job[0]), reverse=True)
 
     def cc(job):
         src, dst = job
@@ -1774,6 +1812,13 @@ def step_key(step, identity, out=None):
             f'|{sha256_file(xlate_source() / "nx2navi_xlate.id")}')
 
 
+def out_path(arg):
+    """--out as an absolute path. On Windows a mapped drive letter stays as given: resolve() would name the folder by
+    its server and share instead (a UNC path), which is a second connection to the same share, and some servers drop
+    that one under the compilers' load while the mapped drive stays up."""
+    return Path(os.path.abspath(arg)) if WIN else Path(arg).resolve()
+
+
 def main():
     global EVENTS
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -1804,7 +1849,7 @@ def main():
         ap.error('give --nup, both --exefs and --romfs, or --rebuild')
     if a.rebuild and not a.out:
         ap.error('--rebuild needs --out')
-    out = Path(a.out).resolve() if a.out else None
+    out = out_path(a.out) if a.out else None
     cache = out / 'build-cache' if out else None
     state_path = cache / 'state.json' if cache else None
     state = load_state(state_path) if state_path else {}
