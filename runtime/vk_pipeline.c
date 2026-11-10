@@ -75,7 +75,7 @@ static struct {
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
-    struct { uint64_t links, wlinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
+    struct { uint64_t links, fb_links, wlinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
     int vs_outs_all;                   // NX2NAVI_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src, f_full_subgroups;
@@ -2619,8 +2619,8 @@ static Lib *libs[LIB_BUCKETS];
 typedef struct { uint32_t kind, topo_class, attr_fmt[32], attr_off[32]; uint8_t attr_bind[32], rate[17], pad[3]; } ViKey;
 typedef struct { uint32_t kind, missing; const GfxShader *vs; uint8_t clamp, poly_mode, minus_w, pad; GfxShaderIo fin[32]; } PrKey;
 typedef struct { uint32_t kind; uint8_t dsb, samples, a2c, pad; const GfxShader *fs; } FsKey;
-typedef struct { uint32_t kind; uint8_t n_color, samples, a2c, logic_op, blend_en, pad[3]; uint32_t color[8], depth, stencil, wmask;
-                 uint8_t blend[8][6]; } FoKey;
+typedef struct { uint32_t kind; uint8_t n_color, samples, a2c, logic_op, blend_en, fbl, pad[2]; uint32_t color[8], depth, stencil, wmask;
+                 uint8_t blend[8][6]; } FoKey;   // fbl: GKey.fbl, the feedback loop flags of the library (gpl_feedback)
 
 static uint64_t qpc(void) { return plat_now_ns(); }
 static double ms_since(uint64_t t0) { return (double)(qpc() - t0) / 1e6; }
@@ -2732,6 +2732,11 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         ri.colorAttachmentCount = k->n_color, ri.pColorAttachmentFormats = (const VkFormat *)k->color;
         ri.depthAttachmentFormat = (VkFormat)k->depth, ri.stencilAttachmentFormat = (VkFormat)k->stencil;
         pi.pColorBlendState = &cb, pi.pMultisampleState = &ms;
+        // Whether the pipeline may sample an attachment it renders to is part of the fragment output state: the flags
+        // go on this library alone, and a pipeline linked from it has them (gpl_feedback).
+        const FoKey *ok = key;
+        if (ok->fbl & 1) pi.flags |= VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+        if (ok->fbl & 2) pi.flags |= VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
     }
     VkPipelineCreationFeedbackCreateInfo fci;
     VkPipelineCreationFeedback fb;
@@ -2899,7 +2904,7 @@ static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, F
     fk->kind = LIB_FS, fk->fs = s->fs, fk->dsb = k->dsb, fk->samples = k->samples, fk->a2c = k->a2c;
     memset(ok, 0, sizeof *ok);
     ok->kind = LIB_FO, ok->n_color = k->n_color, ok->samples = k->samples, ok->a2c = k->a2c, ok->logic_op = k->logic_op;
-    ok->blend_en = k->blend_en, ok->depth = k->depth, ok->stencil = k->stencil, ok->wmask = k->wmask;
+    ok->blend_en = k->blend_en, ok->fbl = k->fbl, ok->depth = k->depth, ok->stencil = k->stencil, ok->wmask = k->wmask;
     memcpy(ok->color, k->color, sizeof ok->color), memcpy(ok->blend, k->blend, sizeof ok->blend);
 }
 
@@ -2915,15 +2920,32 @@ static void ready_note(Pipe *p, int fast) {
     P.g.ready_nofast += !fast;
 }
 
+// NX2NAVI_GPL_FEEDBACK (default 1; 0 = as before): a pipeline whose fragment shader samples an attachment of its own pass
+// (VkPipeState.feedback: soft particles and water reading the depth buffer, decals, full-screen passes that read the
+// target they write) gets a fast link like any other. The feedback loop flags belong to the fragment output state, so
+// they are part of that library's key (FoKey.fbl) and of nothing else; the shader libraries are the ones the same
+// shaders use without a loop. Before, such a pipeline had no fast link at all and its draws waited for, or were
+// skipped during, the whole optimised build. On a first visit to Kokiri Forest (RTX 5090, every stage library in the
+// driver's cache, DLSS Frame Generation on, so no frame is held back) full-screen draws of such pipelines waited
+// 267 ms at the area's first frame and 410 ms in the middle of a walk; linked, 3 ms.
+static int gpl_feedback(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = cfg_bool("NX2NAVI_GPL_FEEDBACK");
+        if (!on) rt_log("vk_pipeline: gpl: pipelines with a feedback loop get no fast link (NX2NAVI_GPL_FEEDBACK=0)");
+    }
+    return on;
+}
+
 // A fast-linked pipeline for s from its stage libraries. Caller holds P.lock.
 // build 0 (drawing thread): links only when the shader libraries exist (vertex input and fragment output libraries,
 // which hold no shader, are built here); *final 0 = not yet, a worker builds them. build 1 (worker): builds the
 // missing libraries and links with P.lock released. VK_NULL_HANDLE with *final 1 when GPL cannot express the pipeline
-// (shared layout, feedback loop) or a build failed.
+// (shared layout; a feedback loop with NX2NAVI_GPL_FEEDBACK=0) or a build failed.
 static VkPipeline gpl_link(const VkPipeState *s, const GKey *k, const Layout *lc, int build, int *final) {
     Layout *l = (Layout *)lc;
     *final = 1;
-    if (!l->set1 || k->fbl) return VK_NULL_HANDLE;
+    if (!l->set1 || (k->fbl && !gpl_feedback())) return VK_NULL_HANDLE;
     uint64_t t0 = qpc();
     ViKey vk_;
     PrKey pk;
@@ -2956,7 +2978,7 @@ static VkPipeline gpl_link(const VkPipeState *s, const GKey *k, const Layout *lc
         P.g.link_ms += ms;
         if (ms > P.g.link_max) P.g.link_max = ms;
     }
-    if (pipe) P.g.links++;
+    if (pipe) P.g.links++, P.g.fb_links += k->fbl != 0;
     else if (!P.g.link_fail++) rt_log("vk_pipeline: gpl: fast link failed; such draws wait or skip as without GPL");
     double total = ms_since(t0);
     if (!build && total > 5.0 && P.g.slow++ < 16)
@@ -5762,11 +5784,14 @@ static int cache_save(uint32_t wait_ms) {
 static void save_with(uint32_t wait_ms) {
     if (P.ready) keys_flush(), pb_flush(), cu_flush(), cf_log();
     if (P.ready && P.gpl) {
-        rt_log("vk_pipeline: gpl: %llu fast links (%llu by workers; avg %.2f ms, max %.2f ms, %llu failed), %llu draws "
+        rt_log("vk_pipeline: gpl: %llu fast links (%llu by workers, %llu of pipelines with a feedback loop; avg %.2f ms, "
+               "max %.2f ms, %llu failed), %llu draws "
                "lookups found shader libraries missing (left to a worker), %llu optimised pipelines swapped in (%llu queued "
                "low after their fast link), %llu drawing-thread links over 5 ms; %llu waiting draws built their libraries "
                "(avg %.2f ms, max %.2f ms)",
-               (unsigned long long)P.g.links, (unsigned long long)P.g.wlinks, P.g.links ? P.g.link_ms / P.g.links : 0.0,
+               (unsigned long long)P.g.links, (unsigned long long)P.g.wlinks,
+               (unsigned long long)P.g.fb_links,
+               P.g.links ? P.g.link_ms / P.g.links : 0.0,
                P.g.link_max, (unsigned long long)P.g.link_fail, (unsigned long long)P.g.defer,
                (unsigned long long)P.g.swaps, (unsigned long long)P.g.requeued, (unsigned long long)P.g.slow,
                (unsigned long long)P.g.dlinks, P.g.dlinks ? P.g.dlink_ms / P.g.dlinks : 0.0, P.g.dlink_max);
