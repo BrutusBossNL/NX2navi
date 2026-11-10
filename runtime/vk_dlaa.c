@@ -1496,6 +1496,9 @@ static void release_kept(const struct Size *making, int all) {
                   making->w, making->h, all ? "after a release" : "larger inputs");
 }
 
+// Set when the scene the upscaler runs on has another size than the last one; vk_dlaa_resized_take reads it.
+static volatile int32_t size_changed;
+
 static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     const VkExecTarget *t = &D.color, *z = &D.depth;
     if (!dst) dst = t;
@@ -1510,7 +1513,10 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     }
     struct Size *e = size_for(cb, w, h, ow, oh);
     if (!e) return dl_fail("work image creation", 0);
-    if (e != D.last) D.reset = 1, D.why[0]++, e->chars_ok = 0;   // another size's history is from another moment
+    if (e != D.last) {   // another size's history is from another moment
+        D.reset = 1, D.why[0]++, e->chars_ok = 0;
+        __atomic_store_n(&size_changed, 1, __ATOMIC_RELEASE);
+    }
     // Read once: vk_dlaa_frame runs on the present's thread and can clear fsr_frame while this replay is between the
     // checks below, which would send the rest of this function to DLSS's path without NGX after all.
     const int fsr = use_fsr();
@@ -1870,7 +1876,30 @@ static void preset_check(void) {
     D.preset = p, D.preset_dirty = 1, D.reset = 1;
 }
 
+// The scene's size after a setting changed (a DLSS or FSR 3.1 mode picked in the menu). The game makes its scene targets
+// again at the new size and they start empty, so the first frames drawn into them are wrong: the first one is lit
+// without what the frame before it left (a dark scene), and two frames later the scene can be black with the interface
+// intact (Ultra Performance and DLAA). Measured by capturing every present over six mode changes, 2026-11-10: bad
+// frames 3 and 5 presents after the change, with every other setting the same. evaluate notes a scene of another size;
+// vk_dlaa_frame counts the presents since a setting last changed, so a game that draws two sizes in turn holds nothing.
+static int setting_presents;            // vk_dlaa_frame: presents left in which that counts as a mode change
+#define SETTING_PRESENTS 60
+
+// vk_backend.c frame_hold, each present after vk_dlaa_frame: 1 once when the scene took a new size after a setting
+// changed. The previous picture then stays on screen over the frames described above.
+int vk_dlaa_resized_take(void) {
+    if (!__atomic_exchange_n(&size_changed, 0, __ATOMIC_ACQ_REL) || !setting_presents) return 0;
+    setting_presents = 0;
+    return 1;
+}
+
 void vk_dlaa_frame(void) {
+    static unsigned cfg_seen;
+    static int cfg_known;
+    unsigned v = cfg_version();
+    if (cfg_known && v != cfg_seen) setting_presents = SETTING_PRESENTS;
+    else if (setting_presents) setting_presents--;
+    cfg_seen = v, cfg_known = 1;
     vk_dlaa_swap_img = NULL, vk_dlaa_swap_view = VK_NULL_HANDLE;
     dlss_mode();
     preset_check();

@@ -106,7 +106,14 @@ void vk_present_drain(void) {
 // held and filled again at an eighth of the clock's rate: a pipeline that takes longer, or a run of them on a first
 // visit with nothing recorded, shows its incomplete frames as before and does not freeze the picture. Not with DLSS
 // Frame Generation, which is told about every frame.
-static struct { int64_t limit_ns, left_ns; uint64_t last_ns, held, runs, shown; int holding; } FH = {.limit_ns = -1};
+// The same hold covers a change of the scene's size (a DLSS or FSR 3.1 mode picked in the menu, vk_dlaa.c
+// vk_dlaa_resized_take): the first frames drawn into the game's new, empty scene targets come out dark or black, so the
+// previous picture stays for RESIZE_HOLD presents from the first frame of the new size. That is once per change of a
+// setting and does not use the allowance. It holds with DLSS Frame Generation too: a present left out is a longer gap
+// between two rendered frames to it (its constants and tags are set at the host present, gfx_present.c), and a dark
+// frame it is given comes out as several generated ones.
+#define RESIZE_HOLD 6
+static struct { int64_t limit_ns, left_ns; uint64_t last_ns, held, runs, shown; int holding, resize_left; } FH = {.limit_ns = -1};
 
 static void frame_hold_refill(uint64_t now) {
     if (FH.limit_ns < 0) {
@@ -129,9 +136,18 @@ int vk_frame_hold_left(void) {
     return FH.left_ns > 0 && !vk_dlssg_active();
 }
 
-// 1: this frame is not shown. skipped: the draws it lacks.
-static int frame_hold(uint32_t skipped, uint64_t frame) {
+// 1: this frame is not shown. skipped: the draws it lacks; resized: its scene is the first of a new size.
+static int frame_hold(uint32_t skipped, int resized, uint64_t frame) {
     frame_hold_refill(kern_now_ns());
+    if (resized && FH.limit_ns > 0) {
+        FH.resize_left = RESIZE_HOLD;
+        rt_log("vk: frame %llu: the scene has a new size after a setting changed; the previous picture stays for %d "
+               "frames", (unsigned long long)frame, RESIZE_HOLD);
+    }
+    if (FH.resize_left) {   // beside the allowance: nothing below counts these frames
+        FH.resize_left--;
+        return 1;
+    }
     int hold = skipped && FH.left_ns > 0 && !vk_dlssg_active();
     if (hold && !FH.holding) FH.runs++;
     if (skipped && !hold) FH.shown++;
@@ -167,7 +183,7 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     if (vk_dump_armed) vk_dump_present(frame);
     __atomic_store_n(&gfx_counters.validation_errors, (uint64_t)vk_validation_errors_total(), __ATOMIC_RELAXED);
     const VkTexImage *img = vk_texture_get(t);
-    int held = frame_hold(vk_exec_pending_draws_take(), frame);
+    int held = frame_hold(vk_exec_pending_draws_take(), vk_dlaa_resized_take(), frame);
     if (held || !img || !(img->aspect & VK_IMAGE_ASPECT_COLOR_BIT)) {
         if (!held && plat_inc32(&n_skipped) <= 8)
             rt_log("vk: present of texture %p (format %#x) skipped: no colour image", (const void *)t, t ? t->d.format : 0);
