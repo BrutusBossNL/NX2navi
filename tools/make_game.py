@@ -527,6 +527,15 @@ def step_lift(out, cache):
 
 # ---------------------------------------------------------------- compile
 
+def c_string(text):
+    """text as a C string literal for a source file in UTF-8, which modules.c is: JSON's escapes for the quote, the
+    backslash and the control characters are C's too, and every other character stands as itself. With JSON's
+    default, which writes each character outside ASCII as \\uXXXX, a character outside the Basic Multilingual Plane
+    came out as two surrogate halves (\\ud83e\\uddda), which C refuses ("invalid universal character"): a game
+    folder with an emoji or a rare Han character in its path failed at the end of the compile."""
+    return json.dumps(text, ensure_ascii=False)
+
+
 def modules_c(lift, out, gen):
     layout = json.loads((lift / 'layout.json').read_text(encoding='utf-8'))
     L = ['#include "dispatch.h"', '#include "host.h"', '#include "layout.h"', '']
@@ -545,13 +554,13 @@ def modules_c(lift, out, gen):
     L += ['    return n;', '}', '', 'const RtFileHash rt_exefs_sha256[] = {']
     L += [f'    {{"{name}", "{sha256_file(out / "exefs" / name)}"}},' for name in EXEFS_FILES]
     L += ['};', f'const int rt_exefs_sha256_count = {len(EXEFS_FILES)};', '',
-          f'const char rt_default_exefs[] = {json.dumps(str(out / "exefs"))};',
-          f'const char rt_default_romfs[] = {json.dumps(str(out / "romfs"))};',
-          f'const char rt_default_profile[] = {json.dumps(str(out / "profile"))};',
+          f'const char rt_default_exefs[] = {c_string(str(out / "exefs"))};',
+          f'const char rt_default_romfs[] = {c_string(str(out / "romfs"))};',
+          f'const char rt_default_profile[] = {c_string(str(out / "profile"))};',
           'const int rt_game_version = 111;',
           'const unsigned long long rt_app_pool_bytes = 9809ull << 20;   /* the Switch 2 application pool */',
           'const int rt_nvn_api_version[2] = {231, 40};   /* NVN2: main asks for major 231, minor 40 or later */',
-          f'const char rt_port_version[] = {json.dumps(kit_version())};']
+          f'const char rt_port_version[] = {c_string(kit_version())};']
     p = gen / 'modules.c'
     write_if_changed(p, '\n'.join(L) + '\n')
     if WIN:   # on Linux ui/menu_sdl.cpp defines it

@@ -2624,6 +2624,38 @@ class MakeGameTest(Tmp):
                          'No such file or directory: x.bin')
         self.assertEqual(self.mg.error_text(MemoryError()), 'MemoryError')
 
+    def test_a_game_folder_outside_the_basic_plane_compiles(self):
+        """modules.c holds the game folder's paths as C strings. A character outside the Basic Multilingual Plane
+        (an emoji, a rare Han character) is written as itself in UTF-8, not as the two surrogate escapes JSON's
+        default makes of it, which C refuses."""
+        fairy, han = chr(0x1F9DA), chr(0x20BB7)
+        out = self.tmp / f'Games {fairy}' / f'V\u00edctor \u30bc\u30eb\u30c0 {han}ya'
+        lift, gen = self.tmp / 'lift', self.tmp / 'gen'
+        for d in (out / 'exefs', lift, gen):
+            d.mkdir(parents=True)
+        for name in self.mg.EXEFS_FILES:
+            (out / 'exefs' / name).write_bytes(b'x')
+        (lift / 'layout.json').write_text(json.dumps([{'name': 'main'}]))
+        text = self.mg.modules_c(lift, out, gen).read_text(encoding='utf-8')
+        for half in ('\\ud83e', '\\ud842'):   # the first surrogate halves of the two characters
+            self.assertNotIn(half, text.lower())
+        want = 'const char rt_default_exefs[] = "' + str(out / 'exefs').replace('\\', '\\\\') + '";'
+        self.assertIn(want, text)
+        self.assertEqual(self.mg.c_string('a"b\\c\n' + fairy), '"a\\"b\\\\c\\n' + fairy + '"')
+        cc = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
+        env = dict(os.environ)
+        if not cc and (Path(r'C:\msys64\ucrt64\bin') / 'clang.exe').is_file():   # make_game.py's default --msys
+            cc = r'C:\msys64\ucrt64\bin\clang.exe'
+            env['PATH'] = r'C:\msys64\ucrt64\bin' + os.pathsep + env['PATH']
+        if not cc:
+            self.skipTest('the text is right; compiling it needs a C compiler')
+        (gen / 'layout.h').write_text('#define MOD_MAIN_BASE 0x7000000000ull\n#define MOD_MAIN_SIZE 0x1000000ull\n')
+        obj = self.tmp / 'modules.o'
+        r = subprocess.run([cc, '-c', '-std=gnu11', '-w', '-I', str(ROOT / 'runtime'), '-I', str(gen), '-o', str(obj),
+                            str(gen / 'modules.c')], capture_output=True, text=True, errors='replace', env=env)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertIn(str(out / 'exefs').encode('utf-8'), obj.read_bytes())   # the path's own bytes are in the object
+
     def main_rebuild(self, lift, compile_, *more):
         """make_game.main() --rebuild in this process on self.out, with the given functions in place of the lift and
         the compile. Returns (the SystemExit code or 0, what it printed)."""
