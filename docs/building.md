@@ -322,6 +322,11 @@ A change to what the library warm logs when the driver's cache of stage librarie
 `runtime/vk_pipeline.c` `lw_main`) passes `python tests\warm_hint_check.py`, which builds the header alone and checks
 the added text by GPU vendor and by why the cache was cold. No game files.
 
+A change to the mouse camera's stick deflection (`runtime/input_map.c` `input_mouse_stick`) passes
+`python tests\mouse_stick_check.py`, which builds that file with the rest of the runtime stubbed and checks the
+deflection at each camera speed: a slow movement is divided by the factor, a fast flick reaches full tilt. No game
+files.
+
 The lifter (`recomp/`) and the CPU headers (`runtime/cpu.h`, `runtime/simd.h`) are checked against Unicorn. Every lifter
 change passes these, all run with `.venv`:
 
