@@ -1149,9 +1149,17 @@ static void gpu_written(uint64_t addr, uint64_t size, int back) {
 }
 
 void vk_gpu_written(uint64_t addr, uint64_t size) { gpu_written(addr, size, 0); }
+static int wb_lazy(void);
+
 void vk_gpu_written_back(uint64_t addr, uint64_t size) {
     gpu_written(addr, size, 1);
     mem_probe(addr, size);   // NX2NAVI_WB_PROBE: the bytes are in guest memory now; note who reads them next
+    VkMemSpan sp;
+    if (size && wb_lazy() && vk_mem_resolve(addr, size, &sp) && sp.pool) {   // or newer ones stay in the mirror from here on
+        const PoolRec *r = sp.pool;
+        if (r->mstate == MS_ON && r->mbuf && r->buf && addr >= r->import_lo && addr + size <= r->import_hi)
+            mem_lazy_arm(addr, size, (uint64_t)(uintptr_t)r->mbuf, (uint64_t)(uintptr_t)r->buf, addr - r->import_lo);
+    }
 }
 
 int vk_mem_mirrored(uint64_t addr, uint64_t size) {
@@ -1566,6 +1574,7 @@ static uint64_t mirror_evict(uint64_t need, uint32_t min_idle, const char *why) 
     for (; n < nv && freed < need; n++) {
         PoolRec *r = v[n];
         idle_for[n] = msub - r->acc_sub;
+        mem_lazy_release(r->import_lo, r->import_hi - r->import_lo);   // what only the mirror holds comes down first
         mirror_forget(r);   // off the list, mirror_gen bumped: no buffer use gets the mirror from here on
         r->mstate = MS_NONE, r->acc_sub = 0, r->retry_sub = 0;
         dead[n] = r->mbuf, dead_a[n] = r->malloc_;
@@ -2102,7 +2111,109 @@ static void snap_free(void *arg) {   // completion thread: the submission is don
     free(f);
 }
 
+// ---- lazy write-back (NX2NAVI_WB_LAZY, default 1; memory.c "Lazy write-back")
+// A range a shader wrote goes back to guest memory once and is then armed (vk_gpu_written_back, mem_lazy_arm). While it
+// stays armed, gpu_wrote leaves the later writes of its pages in the mirror: no snapshot, no merge, no copy. When the
+// CPU touches a page, memory.c calls lazy_fetch with the mirror and the imported buffer of the range: a copy of its
+// own, sent after every submission handed over so far (the held ones first), and waited for. A submission that is
+// still being recorded when that happens has already left its write out, so vk_mem_mirror_end copies the ranges it
+// skipped that are no longer armed (lz_skip).
+static VkCommandPool lz_pool;
+static VkCommandBuffer lz_cb;
+static VkFence lz_fence;
+static volatile int32_t lz_state;   // 0 not asked, 1 on, 2 off
+static PlatMutex lz_init_lock = PLAT_MUTEX_INIT;
+typedef struct { PoolRec *r; uint64_t off, size; } LzSkip;
+static LzSkip *lz_skip;             // replay: what this submission left in the mirror
+static int lz_nskip, lz_cskip;
+static uint64_t lz_skipped;         // replay: bytes left in the mirror since the last log line
+
+static void mbarrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds,
+                     VkAccessFlags2 da);
+
+// memory.c's fetch (frz_lock held there, so one at a time): [off, off + size) of the mirror h0 into the imported
+// buffer h1, after all the GPU work handed over so far.
+static void lazy_fetch(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size) {
+    VkCtx *c = vk_ctx();
+    VkBufferCopy reg = {off, off, size};
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkResetCommandPool(c->device, lz_pool, 0);
+    vkBeginCommandBuffer(lz_cb, &bi);
+    mbarrier(lz_cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+             VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vkCmdCopyBuffer(lz_cb, (VkBuffer)(uintptr_t)h0, (VkBuffer)(uintptr_t)h1, 1, &reg);
+    mbarrier(lz_cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+             VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+             VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    vkEndCommandBuffer(lz_cb);
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &lz_cb};
+    vk_queue_lock();
+    vk_sync_flush_held();   // the held submissions wrote first
+    VkResult r = vkQueueSubmit(c->gfx_queue, 1, &si, lz_fence);
+    vk_queue_unlock();
+    if (r == VK_SUCCESS) r = vkWaitForFences(c->device, 1, &lz_fence, VK_TRUE, 10000000000ull);
+    if (r != VK_SUCCESS) {
+        vk_device_fault_report(r);
+        rt_fatal("vk: bringing %llu bytes the GPU wrote down to guest memory failed (%d)", (unsigned long long)size, (int)r);
+    }
+    vkResetFences(c->device, 1, &lz_fence);
+}
+
+static int wb_lazy(void) {
+    int s = __atomic_load_n(&lz_state, __ATOMIC_ACQUIRE);
+    if (s) return s == 1;
+    plat_mutex_lock(&lz_init_lock);
+    if (!lz_state) {
+        VkCtx *c = vk_ctx();
+        int on = vk_mirror_on && c && cfg_bool("NX2NAVI_WB_LAZY");
+        if (on) {
+            VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                          .queueFamilyIndex = c->gfx_family};
+            VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            on = vkCreateCommandPool(c->device, &pi, NULL, &lz_pool) == VK_SUCCESS;
+            VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = lz_pool,
+                                              .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+            on = on && vkAllocateCommandBuffers(c->device, &ai, &lz_cb) == VK_SUCCESS &&
+                 vkCreateFence(c->device, &fi, NULL, &lz_fence) == VK_SUCCESS;
+            on = on && mem_lazy_enable(lazy_fetch);
+        }
+        rt_log("mem: what shaders write into mirrored pools %s (NX2NAVI_WB_LAZY)",
+               on ? "goes back to guest memory once and then only when the CPU touches it"
+                  : "goes back to guest memory at the end of every submission");
+        __atomic_store_n(&lz_state, on ? 1 : 2, __ATOMIC_RELEASE);
+    }
+    plat_mutex_unlock(&lz_init_lock);
+    return lz_state == 1;
+}
+
+static void gpu_wrote_range(const VkMemSpan *sp, uint64_t size, int shader);
+
 static void gpu_wrote(const VkMemSpan *sp, uint64_t size, int shader) {
+    PoolRec *r = sp->pool;
+    if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size || !wb_lazy()) {
+        gpu_wrote_range(sp, size, shader);
+        return;
+    }
+    uint64_t g0 = r->import_lo + sp->offset, g1 = g0 + size, run = g0, out[16][2];
+    int k = mem_lazy_skip(g0, size, out, 16);
+    for (int i = 0; i <= k; i++) {
+        uint64_t lo = i < k ? out[i][0] : g1, hi = i < k ? out[i][1] : g1;
+        if (lo > run) {   // not armed: written back as ever
+            VkMemSpan part = *sp;
+            part.offset = sp->offset + (run - g0);
+            gpu_wrote_range(&part, lo - run, shader);
+        }
+        if (i < k) {
+            if (lz_nskip == lz_cskip) grow((void **)&lz_skip, &lz_cskip, sizeof *lz_skip);
+            lz_skip[lz_nskip++] = (LzSkip){r, sp->offset + (lo - g0), hi - lo};
+            lz_skipped += hi - lo;
+        }
+        run = hi;
+    }
+}
+
+static void gpu_wrote_range(const VkMemSpan *sp, uint64_t size, int shader) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
     r->vd_wrote_sub = msub, r->vd_wrote_n++;
@@ -2371,6 +2482,12 @@ int vk_mem_mirror_wb_pending(void) { return vk_mirror_on && (nsnl || nwbl); }
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     if (!vk_mirror_on) return 0;
     int rec = 0;
+    // What this submission left in the mirror for a range that was armed then and is not now (the CPU touched it while
+    // the submission was recorded): its bytes go down after all, as a copy.
+    for (int i = 0; i < lz_nskip; i++)
+        if (!mem_lazy_armed(lz_skip[i].r->import_lo + lz_skip[i].off, lz_skip[i].size))
+            range_add(&wbl, &nwbl, &cwbl, lz_skip[i].r, lz_skip[i].off, lz_skip[i].size);
+    lz_nskip = 0;
     if (nsnl) {
         // the merge reads the mirror the submission's shaders wrote and writes the imported buffers
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -2467,6 +2584,20 @@ static void mirror_log(uint64_t frame) {
     uint64_t fz, ff, ft, fo;
     mem_freeze_stats(&fz, &ff, &ft, &fo);
     mem_probe_report(frame);
+    mem_lazy_report(frame, lz_skipped);
+    lz_skipped = 0;
+    // NX2NAVI_WB_LAZY_TOUCH=<n> (test, 0 off): at each of these lines this thread reads a byte of n armed ranges, as
+    // the game's CPU might, so the fault, the fetch and the hold run without waiting for the game to do it.
+    static int touch = -1;
+    if (touch < 0) touch = cfg_int("NX2NAVI_WB_LAZY_TOUCH");
+    if (touch > 0) {
+        uint64_t at[16];
+        int k = mem_lazy_pick(at, touch > 16 ? 16 : touch);
+        for (int i = 0; i < k; i++) {
+            volatile uint8_t v = *(volatile const uint8_t *)(uintptr_t)at[i];
+            (void)v;
+        }
+    }
     if (rt_trace & RT_TRACE_PERF)
         rt_log("mem: write-watch frame %llu: per frame, every consumer: %.1f queries over %.1f MiB, %.3f ms (%.1f found "
                "%.0f written pages, %.3f ms); frozen %.0f MiB; since the last line: freezes %llu, thaws by a write %llu, by a file read "

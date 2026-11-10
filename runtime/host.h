@@ -185,6 +185,14 @@ void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen r
                                                            // before a kernel write (file read) into guest memory
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
 // NX2NAVI_WB_PROBE=1 (memory.c, "Probed regions"): who reads what the GPU wrote back into guest memory.
+// NX2NAVI_WB_LAZY (memory.c, "Lazy write-back"): pages the GPU wrote that come down only when the CPU touches them.
+int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size));
+uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t off);
+int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t out[][2], int max);
+int mem_lazy_armed(uint64_t a, uint64_t n);
+void mem_lazy_release(uint64_t a, uint64_t n);
+void mem_lazy_report(uint64_t frame, uint64_t skipped);
+int mem_lazy_pick(uint64_t *addr, int max);                // test: addresses of armed pages
 int mem_probe(uint64_t a, uint64_t n);                     // the 2 MiB regions inside [a, a+n) fault on their next access
 int mem_probing(void);                                     // the probe is on
 void mem_probe_report(uint64_t frame);                     // logs the accesses since the last report
