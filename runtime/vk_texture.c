@@ -1058,12 +1058,19 @@ static void sweep_released(void) {
     while (nreleased > RELEASED_MAX && rel_head) destroy_tex(rel_head);
 }
 
-// NX2NAVI_TEX_VRAM_PRESSURE (percent of the device-local budget, default 90; 0 = off): above it, each submit drops up to
-// PRESSURE_STEP of the oldest released entries, so a 4 GiB card does not keep RELEASED_MAX released images (each ASTC
-// one decoded to RGBA8) while the heap spills into system memory. A few per submit, for the reason above. Only entries
-// that come back intact are dropped: mirrored ones the GPU never wrote, re-uploaded from their storage. A render target
-// lives only in its image; dropping it brought the texture back empty (black flashes in a Depths boss fight, ~170
-// "left uninitialised" aliases a minute).
+// NX2NAVI_TEX_VRAM_PRESSURE (percent of the device-local budget, default VRAM_PRESSURE_DEFAULT; 0 = off): above it, each
+// submit drops up to PRESSURE_STEP of the oldest released entries, so a 4 GiB card does not keep RELEASED_MAX released
+// images (each ASTC one decoded to RGBA8) while the heap spills into system memory. A few per submit, for the reason
+// above. Only entries that come back intact are dropped: mirrored ones the GPU never wrote, re-uploaded from their
+// storage. A render target lives only in its image; dropping it brought the texture back empty (black flashes in a
+// Depths boss fight, ~170 "left uninitialised" aliases a minute).
+//
+// The default lies under the seven eighths of the budget past which a pool gets no VRAM mirror (vk_memory.c
+// mirror_create), and the evictions aim 2% under it, so textures give way before mirrors are refused: on an 8 GiB card
+// that leaves the mirrors about 0.7 GiB, on a 24 GiB one 2 GiB. With the default at 90 the order was the other way
+// round: at 88% of a 22 GiB budget, full of textures of areas left long before, 0.4 MiB mirrors were refused and the
+// draws that read their pools over PCIe brought the game to 11-20 fps, while no texture had been asked to go.
+#define VRAM_PRESSURE_DEFAULT 80
 #define PRESSURE_STEP 32
 static int vram_pressure = -1;
 static uint64_t n_pressure_drops;
@@ -1099,11 +1106,23 @@ static int idle(const Tex *e, uint64_t now);
 // transient ones the game takes back within frames stay. NX2NAVI_TEX_COMMIT_FREE_MB (default the larger of 4 GiB and a tenth of the commit
 // limit; 0 = off) lowers that bound to COMMIT_LOW_KEEP while less of the system's commit is free: an allocation that
 // fails there ends the game. Both drop only stale entries (drop_stale), a few per check like the VRAM pressure.
+//
+// NX2NAVI_TEX_PROC_COMMIT_MB (default the installed memory, at least PROC_COMMIT_MIN_MB; 0 = off) counts the commit as
+// low too while this process's own commit is above it. The system's figure depends on the page file and on what else
+// runs: with a 64 GB limit it turned low at 59 GB in use, when this process alone held 42 GB on a PC with 32 GB of
+// memory, about half of it device memory, with the textures of five areas left behind. A process is not meant to need
+// more commit than the PC has memory: beyond that it lives on the page file, whatever its size. The bound holds until
+// the process is a thirty-second under it, so that it does not flip with every texture freed. The floor keeps it out
+// of the way on PCs with less memory, where a bound at the installed memory could hold all through play: the system's
+// figure decides there, as before.
 #define COMMIT_LOW_KEEP ((uint64_t)256 << 20)
+#define PROC_COMMIT_MIN_MB 24576
 static uint64_t released_cap;   // bytes; 0 = not read yet, UINT64_MAX = no limit
 static long long commit_free_mb = -2;   // -2: not read yet, -1: the default
-static int commit_low, commit_logs;
-static uint64_t n_cap_drops, n_commit_drops;
+static long long proc_commit_mb;        // this process's bound in MB; 0 = none
+static int commit_low, commit_logs;     // commit_low: either of the two below at the last check
+static int sys_low, proc_high;          // the system's commit is low; this process's is above its bound
+static uint64_t n_cap_drops, n_commit_drops, n_commit_past;
 
 static uint64_t released_cap_bytes(void) {
     if (!released_cap) {
@@ -1128,21 +1147,42 @@ static int commit_is_low(void) {
         const char *s = cfg_get("NX2NAVI_TEX_COMMIT_FREE_MB");
         commit_free_mb = s && *s ? atoll(s) : -1;
         if (commit_free_mb < -1) commit_free_mb = -1;
-        if (!plat_commit_enforced()) commit_free_mb = 0;   // a limit no allocation fails at
+        s = cfg_get("NX2NAVI_TEX_PROC_COMMIT_MB");
+        proc_commit_mb = s && *s ? atoll(s) : -1;
+        if (proc_commit_mb < 0) {
+            float ram_used, ram_total, ram_proc;
+            plat_mem_info(&ram_used, &ram_total, &ram_proc);
+            proc_commit_mb = ram_total > PROC_COMMIT_MIN_MB ? (long long)ram_total : PROC_COMMIT_MIN_MB;
+        }
+        if (!plat_commit_enforced()) commit_free_mb = proc_commit_mb = 0;   // a limit no allocation fails at
+        if (proc_commit_mb)
+            rt_log("vk: textures give way as under low commit while this process's commit is above %lld MB "
+                   "(NX2NAVI_TEX_PROC_COMMIT_MB; 0 = off)", proc_commit_mb);
     }
-    if (!commit_free_mb) return 0;
+    if (!commit_free_mb && !proc_commit_mb) return 0;
     double proc, used, limit;
     plat_commit_info(&proc, &used, &limit);
-    if (used < 0 || limit <= 0) return 0;
-    double want = commit_free_mb > 0 ? (double)commit_free_mb : limit / 10 > 4096 ? limit / 10 : 4096;
-    int low = limit - used < want;
-    if (low != commit_low && commit_logs < 40) {   // a few lines, however often it flips
+    int low = 0;
+    if (commit_free_mb && used >= 0 && limit > 0) {
+        double want = commit_free_mb > 0 ? (double)commit_free_mb : limit / 10 > 4096 ? limit / 10 : 4096;
+        low = limit - used < want;
+    }
+    int high = proc_commit_mb && proc > (double)(proc_high ? proc_commit_mb - proc_commit_mb / 32 : proc_commit_mb);
+    if (high != proc_high && commit_logs < 40) {
+        commit_logs++;
+        rt_log("vk: this process's commit %s: %.0f MB, the bound is %lld MB (system: %.0f of %.0f MB in use); released "
+               "textures kept %d, %.0f MiB of own memory%s", high ? "high" : "no longer high", proc, proc_commit_mb,
+               used, limit, nreleased, rel_bytes / 1048576.0, high ? ": dropping the stale ones" : "");
+    }
+    proc_high = high;
+    if (low != sys_low && commit_logs < 40) {   // a few lines, however often it flips
         commit_logs++;
         rt_log("vk: system commit %s: %.0f of %.0f MB in use (this process %.0f MB); released textures kept %d, %.0f MiB "
                "of own memory%s", low ? "low" : "no longer low", used, limit, proc, nreleased, rel_bytes / 1048576.0,
                low ? ": dropping the stale ones" : "");
     }
-    return commit_low = low;
+    sys_low = low;
+    return commit_low = low || high;
 }
 
 int vk_texture_commit_low(void) { return __atomic_load_n(&commit_low, __ATOMIC_RELAXED); }
@@ -1175,19 +1215,20 @@ static uint64_t stale_after(const Tex *e) {
     return gap > GPU_STALE_FRAMES ? gap : GPU_STALE_FRAMES;
 }
 
-static void drop_stale(uint64_t keep, uint64_t *count) {
+static int drop_stale(uint64_t keep, uint64_t *count) {   // returns the entries dropped: PRESSURE_STEP, more may follow
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int dropped = 0;
     const uint64_t stale = STALE_FRAMES;
     for (int any = 0; any < 2; any++)
         for (Tex *e = rel_head, *next; e && now - e->rel_frame >= stale; e = next) {   // in release order
-            if (dropped == PRESSURE_STEP || rel_bytes <= keep) return;
+            if (dropped == PRESSURE_STEP || rel_bytes <= keep) return dropped;
             next = e->rel_next;
             if (!e->bytes || (!any && !comes_back_intact(e) && !e->overwritten)) continue;
             if (now - e->rel_frame < stale_after(e) || (!e->overwritten && !idle(e, now))) continue;
             destroy_tex(e);
             dropped++, (*count)++;
         }
+    return dropped;
 }
 
 // Drops up to PRESSURE_STEP entries that were marked overwritten OVERWRITTEN_KEEP presents ago or earlier
@@ -1213,12 +1254,18 @@ static void drop_overwritten(void) {
 // was gone. The next check waits until the GPU is past the submissions that may still name the images, as their
 // memory goes back to VMA only then (vk_defer_image). A VRAM mirror that did not fit asks for room the same way, below
 // the threshold too (vk_texture_want_room): a pool without its mirror costs far more than a texture uploaded again.
+// Its request stands as the use the mirror fits at (room_level) for ROOM_CHECKS checks or until the use is down there
+// (sweep_pressure): taken as bytes to free at the one check that read it, a request for 205 MiB got the EVICT_STEP
+// textures of that check, 26 MiB, or nothing when the check fell before evict_wait, and was gone.
 #define EVICT_STEP 64
+#define ROOM_CHECKS 64
 static int tex_evict = -1;
 static uint64_t evict_wait;                       // vk_sync_fence_done value the next eviction waits for
 static uint64_t n_evict, n_evict_bytes;           // since the last perf line
 static int evict_logs;
 static volatile int64_t room_wanted;               // bytes refused VRAM mirrors asked for (vk_texture_want_room)
+static uint64_t room_level;                        // tex_lock: the device-local use at which those mirrors fit
+static uint32_t room_checks;                       // tex_lock: checks the request still stands for; 0 = none stands
 
 void vk_texture_want_room(uint64_t bytes) {
     int64_t cur = __atomic_load_n(&room_wanted, __ATOMIC_RELAXED);   // the largest request since the last check
@@ -1447,17 +1494,29 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
     unlock();
 }
 
-// NX2NAVI_TEX_COMMIT_EVICT (default on; 0 = off): while the system's commit is low (commit_is_low), idle live textures
-// go as under VRAM pressure (evict_idle), COMMIT_EVICT_STEP at a time, once the released entries are down to
-// COMMIT_LOW_KEEP. The driver charges device memory to the commit too, and the eviction above starts only at
-// NX2NAVI_TEX_VRAM_PRESSURE of the device's budget: on a 16-32 GB card the textures of every area visited stayed until
-// the commit ran out (27-37 GB processes, then a failed allocation or a device lost, #177 #203 #215), as nothing else
-// gave them back while they stayed below that share of the video memory.
+// NX2NAVI_TEX_COMMIT_EVICT (default on; 0 = off): while the commit is low (commit_is_low), idle live textures go as
+// under VRAM pressure (evict_idle), COMMIT_EVICT_STEP at a time, once the released entries gave what they could: they
+// are down to COMMIT_LOW_KEEP, or drop_stale found less than a full step to drop. The driver charges device memory to
+// the commit too, and the eviction above starts only at NX2NAVI_TEX_VRAM_PRESSURE of the device's budget: on a 16-32 GB
+// card the textures of every area visited stayed until the commit ran out (27-37 GB processes, then a failed
+// allocation or a device lost, #177 #203 #215), as nothing else gave them back while they stayed below that share of
+// the video memory. Waiting for the released entries to be down to COMMIT_LOW_KEEP, as before, never ended where the
+// game releases and takes back 200-300 textures a frame: 2,048 released entries held 1.4-2.0 GiB, none of them stale,
+// and with the commit low for minutes no live texture went (a 42 GB process). The entries the game takes back stay
+// either way: drop_stale leaves them, and the evictions below take live textures only.
 #define COMMIT_EVICT_STEP ((uint64_t)256 << 20)
 static int commit_evict_on = -1;
-static void commit_evict(void) {   // tex_lock held
+static void commit_evict(void) {   // tex_lock held, the commit is low and the released entries gave what they could
     if (commit_evict_on < 0) commit_evict_on = rt_knob("TEX_COMMIT_EVICT", "1") == 1;
-    if (!commit_evict_on || !tex_evict || rel_bytes > COMMIT_LOW_KEEP || !commit_is_low()) return;
+    if (!commit_evict_on || !tex_evict) return;
+    if (rel_bytes > COMMIT_LOW_KEEP) {
+        static int logs;
+        if (!n_commit_past++ && logs < 4) {
+            logs++;
+            rt_log("vk: commit low: the %d released textures keep %.0f MiB the game still takes back or looks up; "
+                   "live textures nothing sampled go without waiting for them", nreleased, rel_bytes / 1048576.0);
+        }
+    }
     uint64_t used = 0, budget = 0;
     vk_mem_vram_live(&used, &budget);
     uint64_t freed = evict_idle(COMMIT_EVICT_STEP, used, budget);
@@ -1467,12 +1526,15 @@ static void commit_evict(void) {   // tex_lock held
 static void sweep_pressure(void) {   // tex_lock held
     if (vram_pressure < 0) {
         const char *s = cfg_get("NX2NAVI_TEX_VRAM_PRESSURE");
-        vram_pressure = s && *s ? atoi(s) : 90;
-        if (vram_pressure < 0 || vram_pressure > 100) vram_pressure = 90;
+        vram_pressure = s && *s ? atoi(s) : VRAM_PRESSURE_DEFAULT;
+        if (vram_pressure < 0 || vram_pressure > 100) vram_pressure = VRAM_PRESSURE_DEFAULT;
         tex_evict = rt_knob("TEX_EVICT", "1");
         rt_log("vk: textures under VRAM pressure: %s%d%%%s", vram_pressure ? "dropped above " : "off", vram_pressure,
                !vram_pressure ? "" : tex_evict ? ", released ones first, then idle live ones (NX2NAVI_TEX_EVICT=0: released only)"
                                                : ", released ones only (NX2NAVI_TEX_EVICT=0)");
+        if (vram_pressure > 87)
+            rt_log("vk: NX2NAVI_TEX_VRAM_PRESSURE=%d is above the seven eighths of the budget past which a new VRAM "
+                   "mirror is refused: textures make room only once a mirror was refused", vram_pressure);
     }
     retire_sweep();
     if (submit_epoch & 7) return;   // the budget and commit queries every 8 submits
@@ -1481,10 +1543,23 @@ static void sweep_pressure(void) {   // tex_lock held
     uint64_t wanted = tex_evict ? (uint64_t)plat_xchg64(&room_wanted, 0) : 0;
     int known = vram_pressure && (rel_head || tex_evict || wanted) &&
                 (tex_evict ? vk_mem_vram_live(&used, &budget) : vk_mem_vram(&used, &budget, &exact));
-    if (known && (used > budget / 100 * (uint64_t)vram_pressure || wanted)) {
-        uint64_t freed = 0, over = used > budget / 100 * (uint64_t)vram_pressure
-                                       ? used - budget / 100 * (uint64_t)vram_pressure + budget / 50 : 0;
-        if (wanted > over) over = wanted;
+    uint64_t over = 0;
+    if (known) {
+        uint64_t limit = budget / 100 * (uint64_t)vram_pressure;
+        if (used > limit) over = used - limit + budget / 50;
+        if (wanted) {   // the use at which the refused mirror fits; the lowest of the requests that stand
+            uint64_t level = used > wanted ? used - wanted : 0;
+            if (!room_checks || level < room_level) room_level = level;
+            room_checks = ROOM_CHECKS;
+        }
+        if (room_checks && used <= room_level) room_checks = 0;   // made: the pool gets its mirror when it asks again
+        if (room_checks) {
+            room_checks--;
+            if (used - room_level > over) over = used - room_level;
+        }
+    }
+    if (over) {
+        uint64_t freed = 0;
         for (Tex *e = rel_head, *next; e && dropped < PRESSURE_STEP; e = next) {
             next = e->rel_next;
             if (!comes_back_intact(e)) continue;
@@ -1495,13 +1570,14 @@ static void sweep_pressure(void) {   // tex_lock held
         if (tex_evict && freed < over) freed += evict_idle(over - freed, used, budget);
         if (tex_evict && freed < over) evict_disused(over - freed);
     }
+    int low = commit_is_low(), more = 0;   // more: the released entries have stale ones left for the next check
     if (rel_head) {
         drop_overwritten();
         uint64_t cap = released_cap_bytes();
         if (rel_bytes > cap) drop_stale(cap, &n_cap_drops);
-        if (rel_bytes > COMMIT_LOW_KEEP && commit_is_low()) drop_stale(COMMIT_LOW_KEEP, &n_commit_drops);
+        if (rel_bytes > COMMIT_LOW_KEEP && low) more = drop_stale(COMMIT_LOW_KEEP, &n_commit_drops) == PRESSURE_STEP;
     }
-    commit_evict();
+    if (low && !more) commit_evict();
 }
 
 // ---------------------------------------------------------------- per-frame texture work (vk.h VK_TS_*)
@@ -2635,18 +2711,20 @@ void vk_texture_new_submit(void) {
                (unsigned long long)untr);
         n_checks = 0;
         rt_log("perf: frame %llu: released textures kept %d (%.0f MiB of own memory), dropped past the size limit %llu, "
-               "under VRAM pressure %llu, under commit pressure %llu; idle live textures evicted %llu (%.1f MiB); "
+               "under VRAM pressure %llu, under commit pressure %llu (%llu checks went on to live textures with the "
+               "released ones still above their bound); idle live textures evicted %llu (%.1f MiB); "
                "unsampled ones evicted %llu (%.1f MiB), retiring %d (%.1f MiB), freed %llu, taken back while retiring "
                "%llu, back %llu, held %u (marks read %u); images reused %llu, made %llu, pool bindings not tried %llu, "
                "superseded taken back %llu; render targets overwritten at another address %llu, dropped unused %llu",
                (unsigned long long)f * 60, nreleased, rel_bytes / 1048576.0, (unsigned long long)n_cap_drops,
-               (unsigned long long)n_pressure_drops, (unsigned long long)n_commit_drops, (unsigned long long)n_evict,
-               n_evict_bytes / 1048576.0, (unsigned long long)n_disuse, n_disuse_bytes / 1048576.0, nretiring,
-               retiring_bytes / 1048576.0, (unsigned long long)n_retire_freed, (unsigned long long)n_retire_cancel,
+               (unsigned long long)n_pressure_drops, (unsigned long long)n_commit_drops,
+               (unsigned long long)n_commit_past, (unsigned long long)n_evict, n_evict_bytes / 1048576.0,
+               (unsigned long long)n_disuse, n_disuse_bytes / 1048576.0, nretiring, retiring_bytes / 1048576.0,
+               (unsigned long long)n_retire_freed, (unsigned long long)n_retire_cancel,
                (unsigned long long)n_disuse_back, holds.n, marks_reads, (unsigned long long)n_reused,
                (unsigned long long)n_reuse_new, (unsigned long long)n_bind_skips, (unsigned long long)n_restarts,
                (unsigned long long)n_overwritten, (unsigned long long)n_over_drops);
-        n_cap_drops = n_pressure_drops = n_commit_drops = n_evict = n_evict_bytes = 0;
+        n_cap_drops = n_pressure_drops = n_commit_drops = n_commit_past = n_evict = n_evict_bytes = 0;
         n_disuse = n_disuse_bytes = n_disuse_back = n_retire_freed = n_retire_cancel = 0;
         n_reused = n_reuse_new = n_bind_skips = n_restarts = n_overwritten = n_over_drops = 0;
     }
