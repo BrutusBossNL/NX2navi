@@ -1120,7 +1120,10 @@ __attribute__((constructor)) static void pgo_flush_start(void) {
 }
 #endif
 
+void (*plat_exit_hook)(void);
+
 void plat_exit(int code) {
+    if (plat_exit_hook) plat_exit_hook();
 #ifdef NX2NAVI_PGO_GEN
     __llvm_profile_dump();
 #endif

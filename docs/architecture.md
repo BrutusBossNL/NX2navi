@@ -40,6 +40,10 @@ from other projects, with its license, is listed in [THIRD_PARTY_NOTICES.md](../
 - Settings and menu: every key with its default is in one table (`cfg.c`), read from `nx2navi.ini` and `NX2NAVI_*`
   variables and written back when the in-game menu changes it. The menu and the performance overlay are Dear ImGui,
   drawn into the swapchain image (`runtime/ui/`); their text is in `ui_text.c`.
+- Log: in a game run the lines go through a queue to a thread that writes them (`runtime/logq.c`), so a stalled
+  write to the log file or the console does not hold the thread that logged; a fatal error, the crash report and the
+  end of the process write the queue out first (`rt_log_sync`). `NX2NAVI_LOG_ASYNC=0` writes each line where it is
+  logged.
 - OS calls the host makes go through `runtime/platform/` (`platform.h`, `win32.c`).
 
 #### Threads and cores
