@@ -159,6 +159,15 @@ def drop_partial_image(game_dir):
         pass
 
 
+# How long an update's rebuild takes, for the Updates row. No single figure holds: a version that changed little
+# compiles a few files and links, minutes; one that changed the lifter translates and compiles the game's code again,
+# and one that changed what the shaders are built with builds all of them into the graphics driver's cache again
+# (tools/make_game.py warm_driver_cache). Players' updates took 24, 34 and 45 minutes where the text said "a few
+# minutes".
+UPDATE_TAKES = ('That takes a few minutes when little changed, and half an hour or more when the game\'s code or '
+                'its shaders are built again.')
+
+
 def drive_of(path):
     return Path(path).anchor.rstrip('\\/') or str(Path(path).parent)
 
@@ -1235,8 +1244,8 @@ class App:
         nv, mine = versions.display(r.version), versions.display(self.layout.version)
         notes = feed.plain_notes(r.notes, 6)
         return {'title': f'Version {nv} Is Ready',
-                'text': [f'You have {mine}. Updating downloads the new version and rebuilds the game in a few '
-                         f'minutes. Your saves and settings stay as they are.'],
+                'text': [f'You have {mine}. Updating downloads the new version and rebuilds the game. {UPDATE_TAKES} '
+                         f'Your saves and settings stay as they are.'],
                 'divider': bool(notes), 'subtitle': "What's New" if notes else '', 'bullets': notes}
 
     def staged_desc(self, m):
@@ -1250,7 +1259,7 @@ class App:
             text = f'You have {mine}. Version {nv} is downloaded. Select this row to install it.'
         return {'title': f'Version {nv} Is Ready', 'text': [text],
                 'divider': bool(notes), 'subtitle': "What's New" if notes else '', 'bullets': notes,
-                'note': 'Installing restarts the launcher and rebuilds the game in a few minutes. Your saves and '
+                'note': f'Installing restarts the launcher and rebuilds the game. {UPDATE_TAKES} Your saves and '
                         'settings stay as they are.'}
 
     def staging_desc(self):

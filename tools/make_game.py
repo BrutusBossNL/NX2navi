@@ -1535,19 +1535,24 @@ SHADER_STALL_S = 180   # no count moved for this long: the launcher says so (the
 SHADER_BEAT_S = 10     # a progress event at least this often while the step runs
 
 
-def shader_progress(phase, done, total, quiet_s, elapsed_s):
+def shader_progress(phase, done, total, quiet_s, elapsed_s, build_only=False):
     """The shaders step's progress event fields: the translation fills the first half of the bar, the build into the
     driver's cache the second (nx2navi.exe prints both counts, runtime/gfx_shader.c prepare_files and
     runtime/vk_pipeline.c lb_warm_prepared); before either count, reading the game's shaders. quiet_s: seconds since a
     count last moved, said once it passes SHADER_STALL_S, so a slow step never looks frozen without a word. The
-    detail ends without a full stop: the launcher adds one (launcher/ui/app.py)."""
+    detail ends without a full stop: the launcher adds one (launcher/ui/app.py).
+    build_only: a run that only builds (warm_driver_cache), whose count fills the whole bar: starting at one half,
+    the bar of a 20 minute build read 50% in its first second, and the launcher's time left, which follows the bar's
+    pace (launcher/jobs.py Job.eta), had half the bar to go by."""
     clock = f'{int(elapsed_s) // 60}:{int(elapsed_s) % 60:02d}'
     if phase is None:
         fraction, detail = 0.0, f'Reading the game\'s shaders ({clock} so far)'
     elif phase == 'translate':
         fraction, detail = 0.5 * done / max(total, 1), f'Translated {done:,} of {total:,} shaders'
     else:
-        fraction, detail = 0.5 + 0.5 * done / max(total, 1), f'Built {done:,} of {total:,} shaders for your graphics card'
+        part = done / max(total, 1)
+        fraction = part if build_only else 0.5 + 0.5 * part
+        detail = f'Built {done:,} of {total:,} shaders for your graphics card'
     if quiet_s >= SHADER_STALL_S:
         detail += (f'. No change for {int(quiet_s) // 60} min, but it is still running: one large shader can take '
                    'a while')
@@ -1607,10 +1612,10 @@ def shader_carry(out):
     return (out / 'shader-prepared.bin').is_file() and bool(cache_identities(out))
 
 
-def shader_run(cmd, cwd=None):
+def shader_run(cmd, cwd=None, build_only=False):
     """Runs a shader preparation command and returns its exit code. Its output is read as it comes: the counts
     nx2navi.exe prints become progress events, the other lines go on to the log, and while nothing moves an event
-    every few seconds keeps saying the step is running and for how long."""
+    every few seconds keeps saying the step is running and for how long. build_only: shader_progress."""
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             encoding='utf-8', errors='replace', bufsize=1)
     t0 = time.monotonic()
@@ -1621,7 +1626,7 @@ def shader_run(cmd, cwd=None):
     def send():
         now = time.monotonic()
         emit('progress', **shader_progress(state['phase'], state['done'], state['total'], now - state['moved'],
-                                           now - t0))
+                                           now - t0, build_only))
 
     def heartbeat():
         while not stop.wait(SHADER_BEAT_S):
@@ -1669,7 +1674,7 @@ def warm_driver_cache(out):
     say("  the prepared shaders are built into the graphics driver's cache again")
     t0 = time.monotonic()
     try:
-        rc = shader_run([str(exe), '--warm-shaders'], cwd=str(out))
+        rc = shader_run([str(exe), '--warm-shaders'], cwd=str(out), build_only=True)
     except OSError as e:
         rc = str(e)
     if rc:
@@ -1696,6 +1701,8 @@ def step_shaders(out, update=False):
     if update and shader_carry(out):
         say('  the shaders prepared before this update stay in use; the game translates them again in the background')
         if loose_shaders(out) >= PACK_LOOSE_MIN:
+            # minutes without a count (4 on a player's 328,000 files): the row says what runs meanwhile
+            emit('progress', step='shaders', fraction=0.0, detail='Folding the shader cache into one file')
             pack_shader_cache(out)
         warm_driver_cache(out)
         return

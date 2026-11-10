@@ -1485,6 +1485,35 @@ class MakeGameTest(Tmp):
         self.assertTrue(any(d.startswith('Built 10 of 100') and 'still running' in d for d in details))
         self.assertEqual([e['fraction'] for e in events if e['detail'] == 'Translated 50 of 100 shaders'][0], 0.25)
 
+    def test_a_build_only_run_fills_the_whole_bar(self):
+        """The driver cache warm-up after an update only builds: its count runs from 0 to 100% of the bar, where a
+        full preparation gives the build the second half after the translation."""
+        p = self.mg.shader_progress
+        self.assertEqual(p('build', 0, 42142, 0, 1, build_only=True)['fraction'], 0.0)
+        self.assertEqual(p('build', 21071, 42142, 0, 600, build_only=True)['fraction'], 0.5)
+        self.assertEqual(p('build', 42142, 42142, 0, 1200, build_only=True)['fraction'], 1.0)
+        self.assertEqual(p('build', 21071, 42142, 0, 600)['fraction'], 0.75)
+        self.assertEqual(p('build', 21071, 42142, 0, 600, build_only=True)['detail'],
+                         'Built 21,071 of 42,142 shaders for your graphics card')
+        # warm_driver_cache runs the game's exe that way: a stand-in exe that prints the counts the game prints
+        self.out.mkdir()
+        (self.out / 'shader-prepared.bin').write_bytes(b'x')
+        exe = self.out / self.mg.EXE_NAME
+        exe.write_bytes(b'MZ')
+        script = self.tmp / 'warm.py'
+        script.write_text('for d in (0, 25, 100):\n    print(f"prepare-shaders: progress build {d} 100", flush=True)\n')
+        real = self.mg.subprocess.Popen
+
+        def popen(cmd, **kw):
+            self.assertEqual(cmd, [str(exe), '--warm-shaders'])
+            return real([sys.executable, str(script)], **kw)
+        buf = io.StringIO()
+        with mock.patch.object(self.mg, 'EVENTS', True), mock.patch.object(self.mg.subprocess, 'Popen', popen), \
+                contextlib.redirect_stdout(buf):
+            self.mg.warm_driver_cache(self.out)
+        events = [json.loads(ln[2:]) for ln in buf.getvalue().splitlines() if ln.startswith('@@')]
+        self.assertEqual([e['fraction'] for e in events if e['detail'].startswith('Built')], [0.0, 0.25, 1.0])
+
     def test_shaders_step_packs_the_cache(self):
         """After the preparation the shaders step folds the loose files of the shader cache into shader-cache.pack
         (tools/pack_shader_cache.py), as the installer did; a kit without the tool leaves the cache as it is."""
@@ -1537,7 +1566,7 @@ class MakeGameTest(Tmp):
         fails is said and does not stop the build, and without a built game or a preparation nothing runs."""
         calls = []
         for name, value in (('shader_carry', lambda out: True),
-                            ('shader_run', lambda cmd, cwd=None: calls.append((cmd, cwd)) or self.rc)):
+                            ('shader_run', lambda cmd, cwd=None, build_only=False: calls.append((cmd, cwd)) or self.rc)):
             self.addCleanup(setattr, self.mg, name, getattr(self.mg, name))
             setattr(self.mg, name, value)
         self.rc = 0
@@ -3403,6 +3432,21 @@ class BeginInstallTest(Tmp):
             rows = {r.label: r for r in App.rows_first_run(a) if r.label}
         self.assertIn('31 GB free', rows['Install Folder'].desc[0])
         self.assertIn('(31 GB free)', rows['Begin Installation'].desc[0])
+
+
+class UpdateTextTest(Tmp):
+    def test_the_updates_row_does_not_promise_a_few_minutes(self):
+        """An update's rebuild took players 24 to 45 minutes: the Updates row says what it depends on instead of
+        "in a few minutes"."""
+        from launcher.ui import app
+        App, a = mock_app(self, self.tmp / 'game')
+        a.release = mock.Mock(version='9.9.9', notes='')
+        texts = [' '.join(App.update_desc(a)['text']), App.staged_desc(a, {'version': '9.9.9', 'notes': ''})['note']]
+        for text in texts:
+            self.assertNotIn('in a few minutes', text)
+            self.assertIn(app.UPDATE_TAKES, text)
+            self.assertIn('saves and settings stay', text)
+        self.assertIn('half an hour or more', app.UPDATE_TAKES)
 
 
 class StartScriptTest(Tmp):

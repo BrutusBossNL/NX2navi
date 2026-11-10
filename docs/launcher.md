@@ -247,7 +247,11 @@ The stub swaps `python.next` in while no Python runs, then starts the new versio
    game files are already unpacked builds on from them as well (`jobs.InstallJob.args`).
 7. **Prepare the Shaders** is skipped once shaders were prepared before (`shader-prepared.bin`): the game keeps using
    them and translates them again with the new translator in the background (`NX2NAVI_SHADER_CARRY`). With
-   `shader_carry = 0`, or nothing prepared yet, the step prepares them all as at the install.
+   `shader_carry = 0`, or nothing prepared yet, the step prepares them all as at the install. The step still builds
+   the prepared shaders into the graphics driver's cache again (`make_game.py` `warm_driver_cache`): seconds while
+   the driver has them, 20 minutes on a player's PC when the update changed what they are built with. Its bar
+   follows that count from 0 to 100 %, and the Updates row says an update takes from a few minutes to half an hour
+   or more (`launcher/ui/app.py` `UPDATE_TAKES`).
 8. **Draw the Button Prompts**, with button art in the new version: only when the art, the prompt tools or the key
    bindings changed, or a prompt folder is missing (a first version with art draws them all).
 9. Every version but the current and the previous one is deleted, except a staged release newer than the current
