@@ -99,6 +99,9 @@
 # A pipeline whose fragment shader reads the picture it draws into (soft particles, water, some full-screen passes) is
 # linked from the shader libraries like any other. 0: as before, such a draw waits for the whole compile.
 # gpl_feedback = 1
+# The threads that build shader libraries also link the pipelines of draws that were left out of a frame, several at
+# once, instead of one thread linking them one after another while the others build optimised pipelines. 0: as before.
+# pipe_fast_workers = 1
 # The graphics driver's cache of shader libraries is checked at every start and, when it lost them (a driver update,
 # a cache the driver emptied), filled again in the background while the game runs. 0: no check; force: at every start.
 # lib_warm = 1

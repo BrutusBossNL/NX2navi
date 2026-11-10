@@ -75,7 +75,7 @@ static struct {
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
-    struct { uint64_t links, fb_links, wlinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
+    struct { uint64_t links, fb_links, wlinks, flinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
     int vs_outs_all;                   // NX2NAVI_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src, f_full_subgroups;
@@ -3238,17 +3238,74 @@ static void u_run(LibJob *lj) {
     free(lj);
 }
 
-// A worker for waiting draws' jobs only (U): a draw that waits finds one free even while the pool builds pipelines,
-// so the drawing thread never builds a library itself.
+// NX2NAVI_PIPE_FAST_WORKERS (default 1; 0 = as before): the library workers also take the fast link of a draw-queue job
+// (fast_take). A draw that is skipped rather than waiting leaves its pipeline to the pool, where a job is first
+// fast-linked and then goes back in the queue for its optimised build. The pool keeps one worker out of optimised
+// builds, so with the others inside one (about 100 ms each with the driver's cache warm, 350 ms cold) that single
+// worker linked every new pipeline of a burst, one after another at 5 to 10 ms each. On a first visit to Kokiri
+// Forest (RTX 5090, libraries in the driver's cache) 180 of the 444 pipelines draws missed took over 50 ms to become
+// usable, the longest 1.3 s, and their draws were missing from every frame until then; with the library workers
+// linking, 23 did, 19 of them mesh pipelines, which have no fast link.
+static int fast_workers(void) {
+    static int on = -1;
+    if (on < 0) on = cfg_bool("NX2NAVI_PIPE_FAST_WORKERS");
+    return on;
+}
+
+// The first draw-queue job whose pipeline still lacks its fast link, taken out of the queue; NULL when there is none.
+// Caller holds P.lock.
+static Job *fast_take(void) {
+    if (!P.gpl || !fast_workers()) return NULL;
+    for (Job *j = A.head, *prev = NULL; j; prev = j, j = j->next) {
+        Pipe *p = j->p;
+        if (p->info.pipeline || p->fast_tried || p->link_queued || !p->lay || is_mesh(&j->s)) continue;
+        if (prev) prev->next = j->next;
+        else A.head = j->next;
+        if (A.tail == j) A.tail = prev;
+        j->next = j->prev = NULL;
+        return j;
+    }
+    return NULL;
+}
+
+// A worker for stage libraries and fast links only: a waiting draw's jobs (U) first, so a draw that waits finds one
+// free even while the pool builds pipelines and the drawing thread never builds a library itself; then the fast link
+// of a draw-queue job (fast_take), whose optimised build goes on to the pool.
 static void lib_worker(void *arg) {
     (void)arg;
     plat_mutex_lock(&P.lock);
     for (;;) {
-        while (!U.head) plat_cond_wait(&lib_cv, &P.lock);
-        LibJob *lj = U.head;
-        if (!(U.head = lj->next)) U.tail = NULL;
-        if (lj->b) lj->b->job = NULL;
-        u_run(lj);
+        Job *j = NULL;
+        while (!U.head && !(j = fast_take())) plat_cond_wait(&lib_cv, &P.lock);
+        if (!j) {
+            LibJob *lj = U.head;
+            if (!(U.head = lj->next)) U.tail = NULL;
+            if (lj->b) lj->b->job = NULL;
+            u_run(lj);
+            continue;
+        }
+        Pipe *p = j->p;
+        int final;
+        p->fast_tried = 1;   // no other thread links it meanwhile; a draw that waits for it waits for this link
+        VkPipeline f = gpl_link(&j->s, &j->k, p->lay, 1, &final);   // releases P.lock while building
+        if (f && !p->info.pipeline) {
+            p->fast = p->info.pipeline = f, P.g.wlinks++, P.g.flinks++;
+            ready_note(p, 1);
+            plat_cond_broadcast(&done_cv);
+        } else if (f) {
+            vkDestroyPipeline(P.device, f, NULL);
+        }
+        if (p->info.pipeline) {   // the optimised build: ahead of the prebuild, behind other draws' misses
+            j->low = 1, P.g.requeued++;
+            j->next = A.low;
+            if (A.low) A.low->prev = j;
+            else A.low_tail = j;
+            A.low = j;
+        } else {   // no fast link for this one: its whole build, next in the draw queue
+            if (!(j->next = A.head)) A.tail = j;
+            A.head = j;
+        }
+        plat_cond_signal(&work_cv);
     }
 }
 
@@ -3349,8 +3406,11 @@ static int workers_start(void) {
         if (!t) break;
         A.thread[A.threads++] = t;   // kept: promote() raises a worker running a prebuild job
     }
-    // two for waiting draws' libraries and links (the vertex and fragment libraries of one draw in parallel)
-    for (int i = 0; A.threads && U.on && P.gpl && i < 2; i++)
+    // Workers for stage libraries and fast links alone: two (the vertex and fragment libraries of one waiting draw in
+    // parallel), and as many as the pool has with the fast links of skipped draws (lib_worker). They sleep unless a
+    // library or a fast link is queued.
+    int nlib = fast_workers() ? n : 2;
+    for (int i = 0; A.threads && U.on && P.gpl && i < nlib; i++)
         if (plat_thread_new(lib_worker, NULL, "pipe lib worker")) U.lib_workers++;
     if (A.threads)
         rt_log("vk_pipeline: %d background graphics pipeline workers, %d for waiting draws' libraries", A.threads,
@@ -3406,6 +3466,7 @@ static void promote(Pipe *p) {
         else A.head = j;
         A.tail = j;
         plat_cond_signal(&work_cv);
+        if (U.lib_workers) plat_cond_signal(&lib_cv);   // its fast link (lib_worker)
     } else if (A.prio_low[j->worker]) {
         A.prio_low[j->worker] = 0;
         plat_thread_set_priority(A.thread[j->worker], PLAT_PRIO_NORMAL);
@@ -3476,6 +3537,7 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
         if (A.tail) A.tail->next = j;
         else A.head = j;
         A.tail = j;
+        if (U.lib_workers && fast_workers()) plat_cond_signal(&lib_cv);   // its fast link (lib_worker)
     }
     A.inflight++;
     plat_cond_signal(&work_cv);
@@ -5784,12 +5846,13 @@ static int cache_save(uint32_t wait_ms) {
 static void save_with(uint32_t wait_ms) {
     if (P.ready) keys_flush(), pb_flush(), cu_flush(), cf_log();
     if (P.ready && P.gpl) {
-        rt_log("vk_pipeline: gpl: %llu fast links (%llu by workers, %llu of pipelines with a feedback loop; avg %.2f ms, "
+        rt_log("vk_pipeline: gpl: %llu fast links (%llu by workers, %llu of those by the library workers for skipped draws; "
+               "%llu of pipelines with a feedback loop; avg %.2f ms, "
                "max %.2f ms, %llu failed), %llu draws "
                "lookups found shader libraries missing (left to a worker), %llu optimised pipelines swapped in (%llu queued "
                "low after their fast link), %llu drawing-thread links over 5 ms; %llu waiting draws built their libraries "
                "(avg %.2f ms, max %.2f ms)",
-               (unsigned long long)P.g.links, (unsigned long long)P.g.wlinks,
+               (unsigned long long)P.g.links, (unsigned long long)P.g.wlinks, (unsigned long long)P.g.flinks,
                (unsigned long long)P.g.fb_links,
                P.g.links ? P.g.link_ms / P.g.links : 0.0,
                P.g.link_max, (unsigned long long)P.g.link_fail, (unsigned long long)P.g.defer,
