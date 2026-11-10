@@ -242,6 +242,11 @@ extern int vk_exec_signalled;                 // set by every replayed SignalEve
 // Events the CPU signals (vk_exec_xfer.c "events the CPU signals").
 void vk_exec_event_cpu(const void *event);    // any thread: nvnEventSignal is about to write the event's value
 void vk_exec_event_sync(int begin);           // vk_exec_record: its mirror sync and uniform copy are taken now / it ends
+int vk_exec_event_cpu_known(const void *event);     // the CPU has signalled this event before
+int vk_exec_event_holds_now(const void *payload);   // an OP_WAIT_EVENT's condition on the value in memory now
+// vk_backend.c submit_sync, before a submission is recorded: waits for the CPU's signal when the submission begins
+// with a wait for it (vk_exec.c "the gate").
+void vk_exec_gate_wait(const uint64_t *handles, int n);
 int vk_exec_event_at_sync(void);              // NX2NAVI_EVENT_AT_SYNC
 uint64_t vk_exec_event_late_take(void);       // waits only a CPU signal after the copies would have passed, since the last call
 // Since the last call, which resets them: waits, waits reached before their signal, those of them a later replayed

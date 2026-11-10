@@ -386,6 +386,7 @@ static uint64_t submit_sync(const uint64_t *handles, int n) {
         if (!vk_exec_held()) ph_flush(&PH.after);
     }
     vk_present_drain();
+    vk_exec_gate_wait(handles, n);   // a submission that begins with a wait for the CPU's signal: before its copies
     vk_texture_new_submit();
     uint64_t f = vk_sync_submit(handles, n);
     // The submission stopped at a wait whose signal the CPU gave while it was being replayed (vk_exec_xfer.c "events
