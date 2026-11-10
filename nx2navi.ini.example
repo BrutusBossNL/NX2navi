@@ -245,8 +245,8 @@
 # back thousands a second). 0: every release and take-back counts as a new state.
 # tex_gen_undo = 1
 # Host zstd decoder in place of the game's (0 = the game's), and a check that decodes every call both ways and logs
-# the differences (1 = on; slow). Ocarina of Time 1.1.1 keeps the game's decoder while zstd_native is unset: its host
-# decoding has not been through a check run yet, so there it takes zstd_native = 1 (or the check) to turn it on.
+# the differences (1 = on; slow). Ocarina of Time 1.1.1 decodes on the host too since a check run over a village and a
+# field found no difference in 3,072 files; zstd_native = 0 keeps the game's own decoder there.
 # zstd_native = 1
 # zstd_check = 0
 

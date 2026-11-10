@@ -13,10 +13,11 @@
 // keeps the guest's result and logs every call where the two differ.
 //
 // Ocarina of Time 1.1.1 has the same decoder at other addresses (recomp/patches-v111.txt: three calls of
-// ZSTD_decompressMultiFrame, main+0xeb380). Its sites have not been through a check run yet, and 1.4.3 has a caller
-// whose result the game relies on being the game decoder's own, so on that build the host decodes only when
-// zstd_native = 1 is set outright or the check runs (trusted); an unset key sends every call on to the game's decoder.
-// Its loading threads decode most data through the game's stream feed (main+0xf5c80): host_stream, further down.
+// ZSTD_decompressMultiFrame, main+0xeb380). Its loading threads decode most data through the game's stream feed
+// (main+0xf5c80): host_stream, further down. The host decodes there by default since a check run (zstd_check = 1) over a
+// village and a field: 3,072 streams, 31.7 GiB of output, compared byte for byte with the game decoder's, none
+// different. Until then an unset key sent every call on to the game's decoder, which took about a fifth of the
+// running time of the game's threads in a village and a second of each area load. zstd_native = 0 keeps the game's.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -173,15 +174,14 @@ static void count(uint64_t in, uint64_t out, uint64_t ns) {
                (unsigned long long)S.inplace, (unsigned long long)S.away);
 }
 
-// Whether this build's sites may decode on the host: always but on 1.1.1, where it takes zstd_native = 1 in the
-// settings or the check (see the top of the file).
+// Whether this build's sites may decode on the host: unless zstd_native = 0 says the game's own decoder (the patch set's
+// switch already leaves the sites alone then on the other builds; 1.1.1 reads the key here as well), or in the check.
 static int trusted(void) {
     static int v = -1;
     if (v < 0) {
         const char *e = cfg_get("NX2NAVI_ZSTD_NATIVE");
-        v = rt_game_version != 111 || (e && *e && strcmp(e, "0") != 0) || check_mode();
-        if (!v) rt_log("zstd: the game's own decoder (the host decoder is not checked on this build yet: zstd_native = 1 "
-                       "turns it on, zstd_check = 1 compares the two)");
+        v = !(e && !strcmp(e, "0")) || check_mode();
+        if (!v) rt_log("zstd: the game's own decoder (zstd_native = 0; zstd_check = 1 compares the two)");
     }
     return v;
 }
