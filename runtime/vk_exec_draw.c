@@ -3254,7 +3254,9 @@ static void foliage_shadow_cull(const VkExec *ex, VkPipeState *s) {
 //   Full-screen draws into such passes wait from their budget of 50 ms a presented frame. The default: a skipped
 //   full-screen draw is a lighting, fog or tone mapping pass that leaves its target as it was, which shows as a black
 //   or unlit frame with the interface intact, and with the stage libraries in the driver's cache the wait is a
-//   millisecond (vk_pipeline.c lw_start keeps them there).
+//   millisecond (vk_pipeline.c lw_start keeps them there). One that is skipped once its budget is spent leaves a frame
+//   that is not shown (vk_backend.c frame_hold); where that cannot hold the picture any longer, the draw waits on
+//   (FULLSCREEN_LAST_MS).
 // fullscreen (2): as any, and full-screen draws into such passes are skipped instead of waiting from their
 //   budget. A full-screen pass whose stage libraries are cold in the driver cache took 86 ms on average (up to 194 ms)
 //   in a fight on an RX 9070: three frames in a row each spent the 50 ms budget, and some of the draws were skipped
@@ -3285,6 +3287,9 @@ static int pipe_skip_mode(void) {
 // this much and no more. Measured on an RX 7900 XT, first walk through a village with no pipeline recorded: 2,349
 // draws skipped without the budget, with the libraries warm in both runs.
 #define LINK_DRAW_MS 3u
+// How long a full-screen draw waits on for its pipeline once its frame budget is spent and the previous picture
+// cannot be held any longer (prepare_draw_ex): the longest optimised build of such a pipeline measured was 194 ms.
+#define FULLSCREEN_LAST_MS 500u
 static uint64_t *link_budget(void) {
     static uint64_t frame = ~0ull, left, per_frame = ~0ull;
     if (per_frame == ~0ull) {
@@ -3384,8 +3389,19 @@ static void draw_stats_tick(void) {
     DRS.frame = f;
 }
 
+// The draws skipped since the last present because their shader or pipeline was still building: the picture of that
+// frame lacks them (a light, a wall, a whole lighting pass). vk_backend.c frame_hold reads it at the present and keeps
+// the previous picture on screen instead. Written and read on the replay thread.
+static uint32_t pending_draws;
+uint32_t vk_exec_pending_draws_take(void) {
+    uint32_t n = pending_draws;
+    pending_draws = 0;
+    return n;
+}
+
 static int draw_skipped(const VkExec *ex, int mesh, int why) {
     DRS.skipped[mesh][why]++;
+    if (why == SK_SHADER_PENDING || why == SK_PIPE_PENDING) pending_draws++;
     if (!(DRS.first[mesh] >> why & 1)) {
         DRS.first[mesh] |= 1u << why;
         rt_log("vk: first %s draw skipped because: %s (program %llu)", mesh ? "mesh" : "vertex", sk_names[why],
@@ -3552,6 +3568,14 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             } else {
                 p = vk_pipeline_graphics_async(&s, &info, &pending, ONESHOT_WAIT_MS);
             }
+        }
+        // A full-screen draw still pending after its budget: skipped, it leaves the frame black or unlit. While the
+        // previous picture can stay on screen in its place (vk_frame_hold_left) that is what happens; once that time
+        // is used up the draw waits on, FULLSCREEN_LAST_MS at most, so that no such frame is shown.
+        if (pending && budget == &wait_left_ns && !vk_frame_hold_left()) {
+            why = "full-screen, nothing left to hold the picture";
+            if (!w0) w0 = kern_now_ns();
+            p = vk_pipeline_graphics_async(&s, &info, &pending, FULLSCREEN_LAST_MS);
         }
         PM.valid = !pending && p && info;
         if (PM.valid) PM.s = s, PM.info = info;

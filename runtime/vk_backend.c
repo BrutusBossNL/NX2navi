@@ -26,6 +26,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
+#include "perfmon.h"
 #include "vk.h"
 #include "vk_exec.h"
 #include "platform/platform.h"
@@ -97,11 +98,64 @@ void vk_present_drain(void) {
     perf_end(PERF_DRAIN, p0);
 }
 
+// NX2NAVI_FRAME_HOLD_MS (default 120; 0 = off): a frame whose draws were skipped because a shader or pipeline was
+// still building (vk_exec_draw.c pending_draws) is not shown: the previous picture stays on screen until a frame is
+// complete again. Such a frame lacks what was skipped, which showed for a frame or two as a black or unlit picture with
+// the interface intact (a lighting pass), a light going out, or ground and walls missing and then back. The game runs
+// on meanwhile, so nothing waits. The hold comes from an allowance of this many milliseconds, used up by the time
+// held and filled again at an eighth of the clock's rate: a pipeline that takes longer, or a run of them on a first
+// visit with nothing recorded, shows its incomplete frames as before and does not freeze the picture. Not with DLSS
+// Frame Generation, which is told about every frame.
+static struct { int64_t limit_ns, left_ns; uint64_t last_ns, held, runs, shown; int holding; } FH = {.limit_ns = -1};
+
+static void frame_hold_refill(uint64_t now) {
+    if (FH.limit_ns < 0) {
+        long long ms = cfg_int("NX2NAVI_FRAME_HOLD_MS");
+        FH.limit_ns = (int64_t)(ms < 0 ? 0 : ms > 500 ? 500 : ms) * 1000000;
+        FH.left_ns = FH.limit_ns, FH.last_ns = now;
+        if (FH.limit_ns)
+            rt_log("vk: a frame with draws skipped for a pipeline is not shown, the previous picture stays up to %lld ms "
+                   "(NX2NAVI_FRAME_HOLD_MS)", (long long)(FH.limit_ns / 1000000));
+    }
+    if (!FH.holding) FH.left_ns += (int64_t)(now - FH.last_ns) / 8;
+    else FH.left_ns -= (int64_t)(now - FH.last_ns);
+    if (FH.left_ns > FH.limit_ns) FH.left_ns = FH.limit_ns;
+    FH.last_ns = now;
+}
+
+// Whether a frame that skipped draws now would be held (vk_exec_draw.c: a full-screen draw is skipped only then).
+int vk_frame_hold_left(void) {
+    frame_hold_refill(kern_now_ns());
+    return FH.left_ns > 0 && !vk_dlssg_active();
+}
+
+// 1: this frame is not shown. skipped: the draws it lacks.
+static int frame_hold(uint32_t skipped, uint64_t frame) {
+    frame_hold_refill(kern_now_ns());
+    int hold = skipped && FH.left_ns > 0 && !vk_dlssg_active();
+    if (hold && !FH.holding) FH.runs++;
+    if (skipped && !hold) FH.shown++;
+    FH.holding = hold;
+    if (hold) FH.held++;
+    static uint64_t logged_at, logged_held, logged_shown;
+    if (!hold && FH.held + FH.shown != logged_held + logged_shown && frame - logged_at >= 600) {
+        rt_log("vk: frame %llu: %llu frames with skipped draws held back so far in %llu runs, %llu shown incomplete "
+               "(allowance used up)", (unsigned long long)frame, (unsigned long long)FH.held,
+               (unsigned long long)FH.runs, (unsigned long long)FH.shown);
+        logged_at = frame, logged_held = FH.held, logged_shown = FH.shown;
+    }
+    if (hold && (rt_trace & RT_TRACE_PRESENT))
+        rt_log("present: frame %llu held back, %u draws skipped", (unsigned long long)frame, skipped);
+    return hold;
+}
+
 // The present after the frame count: resolves the image and hands the blit to the present thread. queued: when the game
 // presented; value: the timeline value queued for this present (asynchronous replay), 0 for the next one (synchronous).
 static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uint64_t queued, uint64_t frame,
                           uint64_t value) {
     static volatile int32_t n_skipped;
+    static int vram_probe;
+    if (!vram_probe) vram_probe = 1, perfmon_set_vram_game(vk_mem_device_used_mb);   // the overlay's "game" beside VRAM
     vk_exec_frame_log(t, frame);
     dynres_frame();   // before vk_dlaa_frame reads the DLSS mode it may override
     vk_dlaa_frame();
@@ -113,8 +167,9 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     if (vk_dump_armed) vk_dump_present(frame);
     __atomic_store_n(&gfx_counters.validation_errors, (uint64_t)vk_validation_errors_total(), __ATOMIC_RELAXED);
     const VkTexImage *img = vk_texture_get(t);
-    if (!img || !(img->aspect & VK_IMAGE_ASPECT_COLOR_BIT)) {
-        if (plat_inc32(&n_skipped) <= 8)
+    int held = frame_hold(vk_exec_pending_draws_take(), frame);
+    if (held || !img || !(img->aspect & VK_IMAGE_ASPECT_COLOR_BIT)) {
+        if (!held && plat_inc32(&n_skipped) <= 8)
             rt_log("vk: present of texture %p (format %#x) skipped: no colour image", (const void *)t, t ? t->d.format : 0);
         if (value) {   // the queued value is still signalled, in order
             vk_present_drain();
