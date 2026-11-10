@@ -328,6 +328,14 @@
 # are raised; shadow maps, data maps and screen-sized buffers keep the game's setting. Changes while the game runs take
 # effect at once.
 # aniso = game
+# Texture detail: auto, full, reduced or low. The textures of a loaded area are what fills a card with little video
+# memory, and three quarters of a texture is its largest mip level. reduced makes the large surface textures (256x256 and
+# more, with smaller levels) without that level, low without the two largest when they are 1024x1024 or more. Surfaces
+# seen up close look softer; interface art, small textures, shadow maps and everything the game draws itself keep their
+# size. auto picks by the video memory Windows grants the game: full from 8192 MiB (cards of 10 GB and more), low under
+# 6144 MiB (cards of 6 GB and less), reduced between (8 GB cards). The log says what was picked ("texture detail:").
+# Read at start.
+# texture_detail = auto
 # Sun shadow map size: game (the game's own, which changes with the view and drops to about 400 near the ground, so
 # leaf shadows look blocky and jump) or a fixed 256, 512, 768, 1024, 1536 or 2048. Above 960 the texture heap grows with
 # it. 256 is coarser than the game's own and is for integrated GPUs short of memory bandwidth. Read at start.

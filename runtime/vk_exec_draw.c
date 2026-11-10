@@ -653,9 +653,23 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     }
     if (!ok) return VK_NULL_HANDLE;
     uint32_t l0 = hv && v->set_levels ? v->base_level : 0;
-    if (l0 >= img->levels) return VK_NULL_HANDLE;
-    uint32_t nl = hv && v->set_levels && v->nlevels ? v->nlevels : img->levels - l0;
-    if (l0 + nl > img->levels) nl = img->levels - l0;
+    uint32_t nl;
+    if (img->skip) {
+        // Texture detail (vk_texture.c): the image was made without the game's top img->skip levels, so the view's
+        // levels [l0, end) of the game are the image's [l0 - skip, end - skip). A view that names only levels the image
+        // lacks shows the first one it has: the nearest content, where a stand-in would show none.
+        uint32_t sk = img->skip, all = img->levels + sk;
+        if (l0 >= all) return VK_NULL_HANDLE;
+        uint32_t end = hv && v->set_levels && v->nlevels ? l0 + v->nlevels : all;
+        if (end > all) end = all;
+        l0 = l0 > sk ? l0 - sk : 0;
+        end = end > sk ? end - sk : 1;
+        nl = end > l0 ? end - l0 : 1;
+    } else {
+        if (l0 >= img->levels) return VK_NULL_HANDLE;
+        nl = hv && v->set_levels && v->nlevels ? v->nlevels : img->levels - l0;
+        if (l0 + nl > img->levels) nl = img->levels - l0;
+    }
     if (storage) nl = 1;
     uint32_t y0 = 0, ny = 1;
     if (vt != VK_IMAGE_VIEW_TYPE_3D) {
@@ -1610,8 +1624,8 @@ static void feedback_written(VkExec *ex, const VkPipeState *s, uint32_t sampled)
     ex->fb_read |= sampled;
 }
 
-static void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate,
-                          VkDescriptorImageInfo *out, VkImage *image);
+static int tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate,
+                         VkDescriptorImageInfo *out, VkImage *image);
 
 // Sampled-texture descriptors per (handle, resource type, separate), kept while nothing they derive from changed: the
 // slot's resolution and texture entry (slot_still) and the samplers (vk_sampler_gen); the layout is set again on every
@@ -1627,6 +1641,7 @@ static struct {
     uint32_t gen, epoch, sgen;
     uint16_t type;
     uint8_t separate, valid;
+    uint8_t reduced;   // the image was made without its top levels and the resource did not mind (GfxShaderRes.exact)
     VkImage image;
     VkDescriptorImageInfo out;
 } TD[TD_N];
@@ -1635,11 +1650,11 @@ static void tex_info_lookup(VkExec *ex, const GfxShaderRes *r, uint64_t h, int s
                             VkDescriptorImageInfo *out) {
     int td_on = td_mode();
     VkImage image;
-    if (!h || storage || !td_on) return tex_info_full(ex, r, h, storage, separate, out, &image);
+    if (!h || storage || !td_on) return (void)tex_info_full(ex, r, h, storage, separate, out, &image);
     uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();   // before any lookup
     typeof(TD[0]) *m = &TD[(h * 0x9E3779B97F4A7C15ull ^ (uint64_t)r->type << 7 ^ (uint64_t)separate) >> 51];
     if (m->valid && m->h == h && m->type == r->type && m->separate == separate && m->sgen == sg &&
-        slot_still(&m->gen, m->tok, h, gen)) {
+        !(m->reduced && r->exact) && slot_still(&m->gen, m->tok, h, gen)) {
         if (m->epoch != ep) {   // the slot's first binding in this submission: only its storage check is due
             vk_texture_by_id_locked((int)(h & 0xfffff), NULL, NULL);
             m->epoch = ep;
@@ -1657,14 +1672,17 @@ static void tex_info_lookup(VkExec *ex, const GfxShaderRes *r, uint64_t h, int s
         return;
     }
     uint64_t tok = token_of(h);   // before the lookup
-    tex_info_full(ex, r, h, storage, separate, out, &image);
+    int reduced = tex_info_full(ex, r, h, storage, separate, out, &image);
+    // a lookup that made the texture whole again changed the slot's resolution after the stamps above were read: the
+    // entry never matches, and the next binding fills it
     *m = (typeof(*m)){.h = h, .tok = tok, .gen = gen, .epoch = ep, .sgen = sg, .type = r->type,
-                      .separate = (uint8_t)separate, .valid = 1, .image = image, .out = *out};
+                      .separate = (uint8_t)separate, .valid = 1, .reduced = (uint8_t)reduced, .image = image, .out = *out};
 }
 
-static void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate,
-                          VkDescriptorImageInfo *out, VkImage *image) {
-    int ms = (r->type & 0x200) != 0;
+// Returns whether the image bound was made without its top mip levels (texture detail, VkTexImage.skip).
+static int tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate,
+                         VkDescriptorImageInfo *out, VkImage *image) {
+    int ms = (r->type & 0x200) != 0, reduced = 0;
     *image = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     VkSampler samp = VK_NULL_HANDLE;
@@ -1673,6 +1691,10 @@ static void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int sto
         view_t v;
         int hv;
         const VkTexImage *img = vk_texture_by_id_locked((int)(h & 0xfffff), &v, &hv);
+        // A shader that reads this binding's texels by position, or asks for its size, needs every level of the
+        // texture where the game put it (gfx_shader.c reflect_exact): one made without its top levels is made again.
+        if (img && img->skip && r->exact) img = vk_texture_exact_by_id_locked((int)(h & 0xfffff), &v, &hv);
+        reduced = img && img->skip;
         if (img) view = get_view(ex, img, &v, hv, r->type, storage), *image = img->image;
         if (img && storage) vk_texture_storage_bound_locked(img);
         if (img && !storage && ex->nfbl && in_fbl(ex, img->image)) layout = VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
@@ -1683,7 +1705,8 @@ static void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int sto
             int point = img && (img->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && !(r->type & 0x400) &&
                         vk_exec_view_aspect(img, &v, hv) != VK_IMAGE_ASPECT_STENCIL_BIT;
             samp = point ? vk_sampler_point_by_id_locked(sid)
-                 : r->type & 0x400 ? vk_sampler_compare_by_id_locked(sid) : vk_sampler_by_id_locked(sid);
+                 : r->type & 0x400 ? vk_sampler_compare_by_id_locked(sid)
+                 : reduced ? vk_sampler_detail_by_id_locked(sid, img->skip) : vk_sampler_by_id_locked(sid);
         }
     }
     if (!view) {
@@ -1692,6 +1715,7 @@ static void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int sto
     }
     if (!samp) samp = r->type & 0x400 ? Z.samp_shadow : Z.samp;
     *out = (VkDescriptorImageInfo){separate || storage ? VK_NULL_HANDLE : samp, view, layout};
+    return reduced;
 }
 
 // ---- texture and sampler pools (bindless)
