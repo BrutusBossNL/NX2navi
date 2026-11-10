@@ -306,7 +306,8 @@ exe's own version first, then of the other one.
 `--probe-prewarm` runs the boot's pipeline stages without the game, from the caches next to the exe (it skips when
 there are none): the pipeline cache load, the shader prewarm, the recorded pipelines and the compute pipeline prebuild,
 with a `mem: boot stage` log line after each that gives the device memory and the process commit so far. It then asks
-for compute pipelines the boot did not keep, as their first dispatch would, and prints what one costs. A change to what
+for compute pipelines the boot did not keep, as their first dispatch would, and prints what one costs. The device
+memory after the compute stage should be what it was before the stage, apart from the kept pipelines. A change to what
 the boot builds or keeps (`runtime/vk_pipeline.c`: `prewarm_run`, `lb_compute`, the `compute-used.bin` record) passes it.
 
 Shaders: `.venv-py314\Scripts\python tools\shader_census.py --version <ver> --translate` extracts every Maxwell shader
