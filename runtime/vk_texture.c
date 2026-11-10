@@ -219,6 +219,15 @@ static uint32_t bepoch[AGEN_N];
 static uint64_t bsig[AGEN_N];
 #define GS_N 8192
 static struct { uint64_t sig; uint32_t b, epoch, gen, valid; } gs[GS_N];
+// A slot lookup is resolving (vk_texture_by_id_locked around slot_resolve). The lookup's callers stamp what they keep
+// with the generation they read before it: the slot's own cache, the pool's tokens, the descriptor, type and feedback
+// memos (vk_exec_draw.c). A lookup that itself changes the state (it takes a released entry back for a slot registered
+// since the release) leaves such a stamp naming the state it left, with a result that state would not give: the next
+// release of that entry is later than the slot's registration, the slot is stale then (slot_resolve), and the kept
+// result would hand out the released entry, whose storage the game may be unmapping. So the state such a lookup
+// leaves loses its remembered generation (tex_gen_flip): it gets a new one when the bucket is next in it, and the
+// stamp never matches again.
+static int in_lookup;
 
 static uint32_t gs_at(uint32_t b) {
     return (uint32_t)(((bsig[b] ^ ((uint64_t)b << 32 | bepoch[b])) * 0x9E3779B97F4A7C15ull) >> 51);
@@ -248,6 +257,10 @@ static void tex_gen_bump(uint64_t addr) {
 // generation never stands for two states. The global generations still move, so their readers look, and find the
 // tokens equal. plain: the take-back of an entry that was superseded or overwritten while released changes more than
 // the flag, and is a change like any other.
+// One input of slot_resolve is not in the state: the stale rule compares a slot's registration with the entry's
+// release (rel_serial), which is later at every release. A slot is stale at every later release once it is at one, so
+// what it resolves to in a released state stays right; the one that is not stale takes the entry back, which is the
+// lookup-made change in_lookup deals with.
 static void tex_gen_flip(Tex *e, int plain) {
     static int on = -1;
     static uint64_t uids;
@@ -258,6 +271,10 @@ static void tex_gen_flip(Tex *e, int plain) {
         e->uid = (z ^ z >> 31) | 1;
     }
     uint32_t b = agen_idx(e->key.addr);
+    if (in_lookup) {   // see in_lookup: the state this lookup leaves is not to get its generation again
+        typeof(gs[0]) *m0 = &gs[gs_at(b)];
+        if (m0->valid && m0->b == b && m0->epoch == bepoch[b] && m0->sig == bsig[b]) m0->valid = 0;
+    }
     bsig[b] ^= e->uid;
     if (!on || plain) {
         tex_gen_bump(e->key.addr);
@@ -2540,7 +2557,9 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
         view_t v;
         int hv;
         resolve_held = 0;
+        in_lookup = 1;
         s->ce = slot_resolve(s, &v, &hv);   // entry_of may create an entry and bump g: g read before it
+        in_lookup = 0;
         s->cview = v, s->chas_view = (uint8_t)hv;
         s->cgen = g;
         s->cepoch = 0;
