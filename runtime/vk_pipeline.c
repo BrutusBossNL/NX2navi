@@ -1125,7 +1125,7 @@ static uint32_t *spirv_rebind(const uint32_t *w, uint64_t n, uint32_t off) {
     memcpy(o, w, n * 4);
     for (uint64_t i = 5; i < n;) {
         uint32_t op = o[i] & 0xffff, len = o[i] >> 16;
-        if (!len || i + len > n) break;
+        if (!len || i + len > n || op == SPV_OP_FUNCTION) break;
         if (op == SPV_OP_DECORATE && len >= 4 && o[i + 2] == SPV_DEC_BINDING && o[i + 3] >= 1) o[i + 3] += off;
         i += len;
     }
@@ -1139,7 +1139,7 @@ static uint32_t *spirv_set(const uint32_t *w, uint64_t n, uint32_t set) {
     memcpy(o, w, n * 4);
     for (uint64_t i = 5; i < n;) {
         uint32_t op = o[i] & 0xffff, len = o[i] >> 16;
-        if (!len || i + len > n) break;
+        if (!len || i + len > n || op == SPV_OP_FUNCTION) break;
         if (op == SPV_OP_DECORATE && len >= 4 && o[i + 2] == SPV_DEC_DESCRIPTOR_SET) o[i + 3] = set;
         i += len;
     }
@@ -1546,10 +1546,11 @@ static uint32_t *spirv_pool_rebind(const uint32_t *w, uint64_t n) {
     uint32_t *cval = calloc(bound, sizeof *cval);
     if (!kind || !cval) return free(kind), free(cval), NULL;
     memset(kind, 0xff, bound * sizeof *kind);
+    // Pool variables and their binding decorations are module declarations, all before the first function.
     int any = 0;
     for (uint64_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
-        if (!len || i + len > n) break;
+        if (!len || i + len > n || op == SPV_OP_FUNCTION) break;
         if (op == OP_TYPE_IMAGE && len >= 9 && w[i + 1] < bound && w[i + 7] == 1) {   // sampled image
             uint32_t dim = w[i + 3], depth = w[i + 4], arrayed = w[i + 5], ms = w[i + 6];
             if (dim <= 3 && !ms) kind[w[i + 1]] = (int32_t)((depth == 1 ? 8 : 0) + dim * 2 + (arrayed ? 1 : 0));
@@ -1575,7 +1576,7 @@ static uint32_t *spirv_pool_rebind(const uint32_t *w, uint64_t n) {
         uint32_t used = 0;
         for (uint64_t i = 5; i < n;) {
             uint32_t op = o[i] & 0xffff, len = o[i] >> 16;
-            if (!len || i + len > n) break;
+            if (!len || i + len > n || op == SPV_OP_FUNCTION) break;
             if (op == SPV_OP_DECORATE && len >= 4 && o[i + 1] < bound && kind[o[i + 1]] >= 2000) {
                 int32_t k = kind[o[i + 1]] - 2000;
                 if (o[i + 2] == SPV_DEC_DESCRIPTOR_SET) o[i + 3] = 2;
