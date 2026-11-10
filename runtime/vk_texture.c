@@ -54,6 +54,7 @@ typedef struct Tex {
                                   // other than the texture pool refresh reached it ("disuse")
     uint8_t retiring;             // evicted by disuse, in retiring[], not destroyed yet: the pool refresh leaves it out
     uint64_t retire_takes;        // vk_pool_takes when it was retired
+    uint64_t retire_frame;        // gfx_counters.frames when it was retired
     uint64_t retire_due;          // vk_sync_issued once every pool set was taken since (0: not yet); destroyed after it
     int uploaded, released;
     uint64_t uid;                 // names the entry in its bucket's released set (tex_gen_flip); 0 until its first release
@@ -1460,6 +1461,8 @@ static uint32_t marks_live;
 static int resolve_held;            // slot_resolve left the slot out for a held key or a retired entry
 static uint64_t n_disuse, n_disuse_bytes, n_disuse_back;   // since the last perf line
 static uint64_t n_retire_cancel, n_retire_freed;           // since the last perf line
+static uint64_t n_retire_stalled;                          // retired textures taken back because they never came due
+#define RETIRE_PATIENCE PRESENTS(5 * 60)
 static int disuse_logs;
 static Tex **retiring;              // retired entries not destroyed yet
 static int nretiring, cretiring;
@@ -1486,11 +1489,22 @@ static void retire_sweep(void) {
     static int keep = -1;
     if (keep < 0) keep = rt_knob("TEX_DISUSE", "1") == 2;
     uint64_t takes = vk_pool_takes(), done = vk_sync_fence_done();
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int k = 0;
     for (int i = 0; i < nretiring; i++) {
         Tex *e = retiring[i];
         if (!e->retiring) continue;   // taken back
         if (!e->retire_due && takes - e->retire_takes > VK_POOL_SETS) e->retire_due = vk_sync_issued();
+        // The takes that count are those of syncs that left no slot behind, and a PC that has no creation time over
+        // in most frames leaves some behind in nearly every sync: there a retired texture was never destroyed and its
+        // slots showed the stand-in for as long as that lasted, minutes in one report. One that is still not due
+        // after RETIRE_PATIENCE presents is taken back and counts as sampled now.
+        if (!e->retire_due && now - e->retire_frame > RETIRE_PATIENCE) {
+            retire_cancel(e);
+            e->samp_frame = now;
+            n_retire_stalled++;
+            continue;
+        }
         if (!keep && e->retire_due && done >= e->retire_due) {
             e->retiring = 0, retiring_bytes -= e->bytes;
             nvn_hm_put(&holds, &e->key, (void *)(uintptr_t)1);
@@ -1501,6 +1515,15 @@ static void retire_sweep(void) {
         retiring[k++] = e;
     }
     nretiring = k;
+    static uint64_t stalled_logged;
+    static int stalled_logs;
+    if (n_retire_stalled != stalled_logged && stalled_logs < 8) {
+        stalled_logs++;
+        rt_log("vk: %llu textures evicted as unsampled were taken back: the texture pool had not been brought up to "
+               "date completely in %d s, so they could not be destroyed and their slots showed stand-ins",
+               (unsigned long long)(n_retire_stalled - stalled_logged), 5);
+        stalled_logged = n_retire_stalled;
+    }
 }
 
 // A lookup of key k that found no entry: 1 when the pool refresh asks for a held key (it gets the stand-in). Any other
@@ -1560,7 +1583,7 @@ static uint64_t evict_disused(uint64_t want) {
             retiring = r, cretiring = c;
         }
         retiring[nretiring++] = e;
-        e->retiring = 1, e->retire_takes = takes, e->retire_due = 0;
+        e->retiring = 1, e->retire_takes = takes, e->retire_due = 0, e->retire_frame = now;
         retiring_bytes += e->bytes;
         freed += e->bytes;
         tex_gen_bump(e->key.addr);
@@ -1593,10 +1616,28 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
         TexKey k;
         make_key(&s->t, &k);
         Tex *e = nvn_hm_get(&by_key, &k);
-        if (e) {
+        if (e && !e->released) {
             if (e->retiring) retire_cancel(e);   // retired, and its stand-in was sampled: back as it is
             e->samp_frame = now;
-        } else if (holds.n && nvn_hm_del(&holds, &k)) {   // the stand-in was sampled: the next pool refresh makes it
+            continue;
+        }
+        // The slot has no entry of its own: it samples another descriptor's image at its address (slot_resolve follows
+        // one of the same target, as a second descriptor with another swizzle does). That image is what was sampled.
+        // With the mark given to the slot's own key alone, a texture sampled only through such slots was never noted
+        // as sampled while the slots' cached resolution was out of date, which it is at most reads in a bucket the
+        // game keeps changing: it was retired as unused after two minutes, and a mark on its stand-in could not take
+        // it back. While the pool's syncs kept leaving slots behind, a retired texture was never destroyed either
+        // (retire_sweep waits for complete takes), so its slots kept the stand-in: the ground of the field drawn
+        // without its textures and its height.
+        int followed = 0;
+        for (Tex *p = nvn_hm_get(&by_addr, &k.addr); p; p = p->next_at) {
+            if (p->released || p->key.d.target != k.d.target) continue;
+            if (p->retiring) retire_cancel(p);
+            p->samp_frame = now;
+            followed = 1;
+        }
+        if (followed) continue;
+        if (holds.n && nvn_hm_del(&holds, &k)) {   // the stand-in was sampled: the next pool refresh makes it
             n_disuse_back++;
             s->cheld = 0;
             s->cwant = 1;   // on screen as a stand-in: made at the next refresh, whatever the frame's creation time
