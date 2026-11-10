@@ -99,7 +99,12 @@ static void queue_submit(VkCtx *c, const VkSubmitInfo2 *si, uint64_t value) {
         hold_max = v < 1 ? 1 : v > HOLD_CAP ? HOLD_CAP : v;
         rt_log("vk: up to %d submissions handed to the queue together (NX2NAVI_SUBMIT_BATCH)", hold_max);
     }
+    // The present holds this lock for its whole flip. A slow flip (frame generation allocating, a swapchain remade) makes
+    // the submitting thread wait here; counted as a present wait, so the slow-frame line no longer shows such a frame
+    // with nothing blocked.
+    uint64_t p0 = perf_begin();
     vk_queue_lock_raw();
+    perf_end(PERF_FENCE, p0);
     if (H.n == HOLD_CAP) hold_flush_locked(c);
     int i = H.n++;
     H.si[i] = *si;
