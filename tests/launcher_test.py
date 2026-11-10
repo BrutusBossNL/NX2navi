@@ -2761,6 +2761,52 @@ class JobTest(Tmp):
         self.assertEqual(run.wait(), 0, lines)
         self.assertEqual(lines, ['build 0x4000', 'compiler 0x4000'])   # BELOW_NORMAL_PRIORITY_CLASS
 
+    def test_the_build_is_read_to_its_end_when_a_handler_fails(self):
+        """A line handler that raises (the log on a full disk) must not end the thread that reads the build's
+        output: the build would stop at a full pipe and never exit."""
+        child = [sys.executable, '-c',
+                 'import json\n'
+                 'for i in range(20000):\n'
+                 '    print("line", i, "x" * 60)\n'
+                 'print("@@[1]")\n'
+                 'print("@@" + json.dumps({"ev": "end"}))\n']
+        events = []
+
+        def on_line(line):
+            raise OSError(28, 'No space left on device')
+
+        def on_event(ev):
+            events.append(ev)
+            raise RuntimeError('a drawing error')
+        run = build.Run(child, on_event, on_line)
+        try:
+            code = run.proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            run.cancel()
+            self.fail('the build never ended: nobody read its output any more')
+        run.wait()
+        self.assertEqual(code, 0)
+        self.assertEqual(events, [{'ev': 'end'}])
+        self.assertEqual(run.dropped, 20002)   # every line, the "@@" line that is no event, and the event
+
+    def test_a_log_that_cannot_be_written_loses_only_the_line(self):
+        ctx = self.make_ctx('ok')
+        real = ctx._file
+        self.addCleanup(real.close)
+        ctx._file = mock.Mock()
+        ctx._file.write.side_effect = OSError(28, 'No space left on device')
+        ctx.log('a line while the disk is full')
+        j = jobs.Job(ctx, [])
+        j.log('a line of the build')           # what the build's reader thread calls
+        self.assertEqual(list(j.lines), ['a line of the build'])
+        ctx._file = real
+        ctx.log('the disk has room again')
+        real.close()
+        ctx.log('a line after the file was closed')
+        text = (ctx.layout.logs / 'launcher.log').read_text(encoding='utf-8')
+        self.assertIn('the disk has room again', text)
+        self.assertNotIn('while the disk is full', text)
+
     def test_an_install_goes_on_from_the_unpacked_game_files(self):
         """Begin Installation into a folder whose game files an earlier run unpacked builds on from them (--rebuild
         for this processor's level), so a moved or deleted dump is not asked for; without them it reads the dump."""

@@ -73,26 +73,40 @@ class Run:
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                      cwd=cwd, env=env, text=True, encoding='utf-8', errors='replace', bufsize=1, **kw)
         self.cancelled = False
+        self.dropped = 0   # lines and events whose handler raised (_read)
         self._reader = threading.Thread(target=self._read, args=(on_event, on_line), daemon=True)
         self._reader.start()
 
     def _read(self, on_event, on_line):
+        """Reads the build's output to its end, whatever the handlers do. A handler that raises (the launcher's log
+        on a full disk, a drawing error) loses its line, counted in dropped, and the reading goes on: when this
+        thread ended on the exception nobody read the pipe any more, the build stopped at its next line once the
+        pipe was full, and the job waited for it for good."""
+        def call(handler, arg):
+            try:
+                handler(arg)
+            except Exception:   # noqa: BLE001 - any failure of a handler must leave the pipe read
+                self.dropped += 1
+
         for line in self.proc.stdout:
             line = line.rstrip('\r\n')
             if line.startswith('@@'):
                 try:
                     ev = json.loads(line[2:])
                 except ValueError:
-                    on_line(line)
+                    call(on_line, line)
                     continue
-                if ev.get('ev') == 'error':
-                    self.error = ev.get('message')
-                on_event(ev)
+                if isinstance(ev, dict):
+                    if ev.get('ev') == 'error':
+                        self.error = ev.get('message')
+                    call(on_event, ev)
+                else:   # "@@" before something that is no event
+                    call(on_line, line)
             elif line.startswith('error: ') and not self.error:
                 self.error = line[7:]
-                on_line(line)
+                call(on_line, line)
             else:
-                on_line(line)
+                call(on_line, line)
 
     def wait(self):
         code = self.proc.wait()
