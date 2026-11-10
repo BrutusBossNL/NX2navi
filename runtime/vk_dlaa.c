@@ -511,19 +511,22 @@ static int image2d(uint32_t w, uint32_t h, VkFormat f, VkImageUsageFlags usage, 
     return vkCreateImageView(c->device, &vi, NULL, view) == VK_SUCCESS;
 }
 
-// A feature was released since the last one was made (destroy_size), and what follows from it (NX2NAVI_DLSS_IDLE_FREE).
-// A pause of 3,600 frames frees the gameplay feature (stale_sizes); the unpause makes it again, and the pause screen's
-// feature, which had stayed, then drew alternating bands of rows black or noise at every later pause, for as long as
-// the game stayed paused: in each of the 8 scripted runs of pause, unpause, pause in which the gameplay feature had
-// been freed and in none of the 12 in which it had not, whatever the texture, write-back, HDR and frame generation
-// settings. Giving the kept feature its own sizes again at each evaluation changed nothing. Features made one after
-// the other with none released in between do not show it (the gameplay feature, then the pause screen's, at every
-// first pause). So a feature is only ever made into that state: with a release since the last creation, the features
-// that stayed are released first (release_kept) and made again when their size is next evaluated. With that rule none
-// of 5 runs in which the gameplay feature had been freed was striped.
-//   1 (default)  idle features are freed, and the kept ones are released before the next creation
-//   0            idle features are never freed
-//   2            idle features are freed and the kept ones stay (as before; shows the fault)
+// Which features may stay alive when another is made (NX2NAVI_DLSS_IDLE_FREE). A feature made while one with a larger
+// input size is alive leaves that larger one drawing alternating bands of rows black or noise from then on, for as long
+// as it is used; seen for the pause screen's feature (the picture's size in and out), in two ways:
+// - a pause of 3,600 frames frees the gameplay feature (stale_sizes) and the unpause makes it again: every later pause
+//   was striped, in each of 8 scripted runs of pause, unpause, pause in which it had been freed and in none of 12 in
+//   which it had not, whatever the texture, write-back, HDR and frame generation settings;
+// - a DLSS mode picked in the menu makes a feature of a third size at the unpause, with nothing freed: the next pause
+//   was striped (performance to ultra performance in play).
+// Giving the kept feature its own sizes again at each evaluation changed nothing. A feature made while a smaller one
+// is alive leaves the smaller one as it was (the pause screen's after the gameplay one, at every first pause). So when
+// a feature is made, the alive ones with a larger input are released first, and after a release since the last
+// creation all of them (release_kept); their images stay and each is made again when its size is next evaluated. With
+// the second half alone, none of 5 runs in which the gameplay feature had been freed was striped.
+//   1 (default)  idle features are freed
+//   0            idle features are never freed (about 0.5 GB more video memory after the first pause)
+//   2            idle features are freed and nothing is released when a feature is made (as before; shows the fault)
 static int feat_released;
 
 static int idle_free(void) {
@@ -1444,18 +1447,21 @@ static void stale_sizes(const struct Size *cur) {
     }
 }
 
-// Before a feature is made after a release (feat_released): the features of the other sizes go too, their images stay.
-// The GPU may still be running an evaluation of theirs, so it finishes first, as in free_size.
-static void release_kept(const struct Size *making) {
+// Before a feature is made: the features of the other sizes with a larger input go, or all of them (all: a feature was
+// released since the last creation, feat_released); their images stay. The GPU may still be running an evaluation of
+// theirs, so it finishes first, as in free_size.
+static void release_kept(const struct Size *making, int all) {
     int n = 0;
     for (int i = 0; i < DLSS_SIZES; i++) {
         struct Size *s = &D.sizes[i];
         if (s == making || !s->feat) continue;
+        if (!all && (uint64_t)s->w * s->h <= (uint64_t)making->w * making->h) continue;
         if (!n++) vk_queue_lock(), vkDeviceWaitIdle(vk_ctx()->device), vk_queue_unlock();
         N.release(s->feat), s->feat = NULL;
         if (D.last == s) D.last = NULL;
     }
-    if (n) rt_log("dlaa: %d kept DLSS feature(s) released before a new one is made after a release; made again when used", n);
+    if (n) rt_log("dlaa: %d DLSS feature(s) released before the one for %ux%u is made (%s); made again when used", n,
+                  making->w, making->h, all ? "after a release" : "larger inputs");
 }
 
 static void evaluate(VkExec *ex, const VkExecTarget *dst) {
@@ -1517,7 +1523,7 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         goto evaluated;
     }
     if (!e->feat) {
-        if (feat_released && idle_free() == 1) release_kept(e);
+        if (idle_free() != 2) release_kept(e, feat_released);
         feat_released = 0;
         p_setu(p, "CreationNodeMask", 1);
         p_setu(p, "VisibilityNodeMask", 1);

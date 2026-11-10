@@ -320,9 +320,9 @@
 # characters, a little more flicker). Any other model by its letter, a to m: on slower RTX cards the older model e is
 # cheaper. Changes while the game runs take effect at once (DLSS starts a new history).
 # dlss_preset = default
-# DLSS keeps one network per picture size (gameplay, the pause screen). 1: one unused for 3,600 frames is freed, and
-# the others are made again with it when it comes back. 0: none is ever freed (about 0.5 GB more video memory after
-# the first pause). 2: freed, the others kept (shows striped pause screens; for tests).
+# DLSS keeps one network per picture size (gameplay, the pause screen). 1: one unused for 3,600 frames is freed.
+# 0: none is ever freed (about 0.5 GB more video memory after the first pause). 2: as 1, and the networks that stay
+# are not made again when another is made (shows striped pause screens; for tests).
 # dlss_idle_free = 1
 # Per-object motion vectors for DLSS: characters, animals and moving objects get their own motion instead of the
 # camera's, so DLSS keeps their history instead of smearing or rejecting it. Costs some CPU time each frame (about 1-2 ms
