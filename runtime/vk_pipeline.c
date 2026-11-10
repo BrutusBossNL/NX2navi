@@ -4075,7 +4075,8 @@ static Layout *compute_layout(const GfxShader *cs, Bindings *B, const char **why
 //   55 ms (vertex) / 28 ms (fragment). Our pipeline-cache.bin is not written there:
 //   it would grow by about 10 KB per library (~240 MB) and be read into memory at every boot.
 // - boot (lb_worker), after the pipeline-key prewarm, on two threads (lb_start) at PLAT_PRIO_IDLE (the short P.lock
-//   sections and shader loads at normal priority, so a preempted thread never holds the lock the replay needs):
+//   sections and shader loads at normal priority, so a preempted thread never holds the lock the replay needs; a
+//   compute pipeline's compile below normal priority, lb_compute):
 //   compute pipelines of every recorded and prepared compute shader (vk_pipeline_compute builds compute
 //   synchronously on the replay thread; 163 prepared): those of the shaders dispatched most recently stay, the others
 //   are built into the pipeline cache and destroyed (comment at compute-used.bin). Then the libraries of the first
@@ -4118,6 +4119,7 @@ static struct {
     int idle;                                          // build at PLAT_PRIO_IDLE (boot), normal (preparation)
     PlatMutex stat;
 } LB = {.stat = PLAT_MUTEX_INIT};
+static __thread int lb_me = -1;        // on a boot prebuild thread (lb_worker): its index in LB.th
 
 // ---- preparation that outlives a driver crash. A bug in the driver's shader compiler can kill the process inside
 // vkCreate*Pipelines: NVIDIA 615.78.08 on an RTX 5080 crashed on the same vertex library at the same point of every
@@ -4259,18 +4261,30 @@ static int cs_flight_has(const GfxShader *cs) {
     return 0;
 }
 
-static uint8_t cs_flight_want[CS_FLIGHT];   // a dispatch waits for the slot's pipeline (vk_pipeline_compute)
+static volatile uint8_t cs_flight_want[CS_FLIGHT];   // a dispatch waits for the slot's pipeline (vk_pipeline_compute)
+static PlatThread *cs_flight_th[CS_FLIGHT];          // the boot prebuild thread compiling it below normal priority
 
-static int cs_flight_add(const GfxShader *cs) {   // 0 when the table is full (the caller compiles anyway)
+// th: the thread a waiting dispatch raises to normal priority, NULL when it compiles at normal priority already.
+static int cs_flight_add(const GfxShader *cs, PlatThread *th) {   // 0 when the table is full (the caller compiles anyway)
     for (int i = 0; i < CS_FLIGHT; i++)
-        if (!cs_flight[i]) return cs_flight[i] = cs, cs_flight_want[i] = 0, 1;
+        if (!cs_flight[i]) return cs_flight[i] = cs, cs_flight_want[i] = 0, cs_flight_th[i] = th, 1;
     return 0;
 }
 
-// A dispatch waits for cs's build: a builder that would only have filled the pipeline cache keeps the pipeline.
-static void cs_flight_wanted(const GfxShader *cs) {
+// A dispatch waits for cs's build: a builder that would only have filled the pipeline cache keeps the pipeline. Returns
+// the thread to raise, the first time.
+static PlatThread *cs_flight_wanted(const GfxShader *cs) {
+    PlatThread *th = NULL;
     for (int i = 0; i < CS_FLIGHT; i++)
-        if (cs_flight[i] == cs) cs_flight_want[i] = 1;
+        if (cs_flight[i] == cs && !cs_flight_want[i]) cs_flight_want[i] = 1, th = cs_flight_th[i];
+    return th;
+}
+
+// Without P.lock, for the thread that holds cs's slot: whether a dispatch came to wait.
+static int cs_flight_is_wanted(const GfxShader *cs) {
+    for (int i = 0; i < CS_FLIGHT; i++)
+        if (__atomic_load_n(&cs_flight[i], __ATOMIC_RELAXED) == cs) return cs_flight_want[i];
+    return 0;
 }
 
 static int cs_flight_remove(const GfxShader *cs) {   // 1 when a dispatch waited for it
@@ -4506,7 +4520,10 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
     double w0 = !p && cs_flight_has(cs) ? now_ms() : 0;
     int bg = 0;
     while (!p && cs_flight_has(cs)) {   // another thread is compiling it: its result, not a second compile
-        cs_flight_wanted(cs);           // a build that only fills the pipeline cache keeps its pipeline for this dispatch
+        // a build that only fills the pipeline cache keeps its pipeline for this dispatch, and a boot prebuild thread
+        // compiling it below normal priority goes to normal
+        PlatThread *builder = cs_flight_wanted(cs);
+        if (builder) plat_thread_set_priority(builder, PLAT_PRIO_NORMAL);
         if (BG.building == cs && BG.th && !plat_xchg32(&BG.raised, 1))   // the background builder: normal priority now
             plat_thread_set_priority(BG.th, PLAT_PRIO_NORMAL), bg = 1;
         plat_mutex_unlock(&P.lock);
@@ -4528,7 +4545,7 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
         Layout *l = compute_layout(cs, &B, &why);
         VkPipeline pipe = VK_NULL_HANDLE;
         if (!why) {
-            int flight = cs_flight_add(cs);
+            int flight = cs_flight_add(cs, NULL);
             plat_mutex_unlock(&P.lock);   // the compile runs without the lock
             uint64_t p0 = perf_begin();
             double c0 = now_ms();
@@ -4759,7 +4776,7 @@ static void bg_main(void *arg) {
         plat_mutex_lock(&P.lock);
         int there = cs_flight_has(cs) || pipe_find(&k, sizeof k, h);   // a dispatch got to it first
         Layout *l = there ? NULL : compute_layout(cs, &B, &why);
-        int flight = l ? cs_flight_add(cs) : 0;
+        int flight = l ? cs_flight_add(cs, NULL) : 0;   // vk_pipeline_compute raises this thread through BG.raised
         if (l) BG.building = cs;
         plat_mutex_unlock(&P.lock);
         if (!l) {
@@ -4830,16 +4847,27 @@ static void lb_compute(const GfxShader *cs, const uint8_t iid[32], int keep) {
     lb_lock();
     int busy = cs_flight_has(cs);   // the replay compiles it now (vk_pipeline_compute)
     Layout *l = busy || pipe_find(&k, sizeof k, h) ? NULL : compute_layout(cs, &B, &why);
-    int have = !l && !why, flight = l ? cs_flight_add(cs) : 0;
+    PlatThread *me = LB.idle && lb_me >= 0 ? LB.th[lb_me] : NULL;
+    int have = !l && !why, flight = l ? cs_flight_add(cs, me) : 0;
     lb_unlock();
     if (!l) {
         lb_count(2, have ? 1 : 2, 0);
         return;
     }
     double t0 = now_ms();
-    // at normal priority: while it is in flight a dispatch of the same shader waits for it (vk_pipeline_compute), and an
-    // idle-priority compile under load held that frame for seconds
-    if (LB.idle) plat_thread_priority(PLAT_PRIO_NORMAL);
+    // The compile runs below normal priority: after an update or a driver update every one of these pipelines is
+    // compiled again (about 140 ms each on an RTX 5090's driver, minutes of two threads for a long play history), and
+    // at normal priority those threads took cores from the game's own on a CPU with few of them. While the shader is in
+    // flight a dispatch of it waits for this build (vk_pipeline_compute) and raises the thread to normal: a compile left
+    // at idle priority under load held that frame for seconds. The dispatch may have come between the unlock and the
+    // call below, which would undo its raise, hence the look at the slot after it. Without a slot or a handle nobody
+    // could raise the thread, so it compiles at normal priority.
+    if (LB.idle && flight && me) {
+        plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+        if (cs_flight_is_wanted(cs)) plat_thread_priority(PLAT_PRIO_NORMAL);
+    } else if (LB.idle) {
+        plat_thread_priority(PLAT_PRIO_NORMAL);
+    }
     VkPipeline pipe = compute_create(cs, l, big);
     double ms = now_ms() - t0;
     int compiled = pipe && cc_hit != 1, kept = 0;
@@ -4955,7 +4983,7 @@ static void lb_report(const char *how) {
 // Boot: compute pipelines (the first LB.n_keep entered for the process, the others only built into the pipeline
 // cache) and kept libraries.
 static void lb_worker(void *arg) {
-    (void)arg;
+    lb_me = (int)(intptr_t)arg;        // its handle is LB.th[lb_me]
     plat_thread_priority(PLAT_PRIO_IDLE);
     for (;;) {
         size_t i = (size_t)plat_inc64(&LB.next) - 1;
@@ -5228,7 +5256,7 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     LB.running = t;
     int started = 0;
     for (int i = 0; i < t; i++)
-        if ((LB.th[started] = plat_thread_new(lb_worker, NULL, "lib prebuild"))) started++;
+        if ((LB.th[started] = plat_thread_new(lb_worker, (void *)(intptr_t)started, "lib prebuild"))) started++;
     plat_add32(&LB.running, started - t);
     LB.threads = started;
     char big[128];
