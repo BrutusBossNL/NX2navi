@@ -47,9 +47,13 @@ Customize Launcher (on the home screen) makes the look the player's own:
 - Animations (on by default): the cursor glides from row to row, a new screen slides into place, sparks drift up
   over the backdrop and Navi bobs in the title band with a pulsing halo (`App.animate`). They move by the time that
   passed, stand still while the window is hidden or minimised, and Off stops them all.
-- Sounds (off by default; Low, Medium or High): a short chime when the cursor moves, a choice changes, a row is
-  chosen, the game starts and a build ends or fails. The chimes are made from sine tones in `launcher/ui/sound.py`
-  and played from memory (PlaySound on Windows; `pw-play`, `paplay` or `aplay` elsewhere).
+- Sounds (off by default; Low, Medium or High): the game's own interface sounds, the cursor, decide and cancel
+  sounds of its menus, when the cursor moves or a choice changes, a row is chosen and the player goes back. The
+  launcher decodes them from the player's built game or dump into `data/cache/sounds` (`gamefiles.extract_sounds`:
+  `Sound/Resource/Stream/SE_Sys_Cursor00.bwav`, `SE_Sys_Do00.bwav` and `SE_Sys_Cancel00.bwav`, the files
+  `runtime/menu_sound.c` plays in the in-game menu), so no sound ships; until they are decoded, chimes made from sine
+  tones in `launcher/ui/sound.py` stand in. They are played from memory (PlaySound on Windows; `pw-play`, `paplay`
+  or `aplay` elsewhere).
 
 The choices are `theme`, `background`, `background_dim`, `animations` and `sounds` in `data/launcher.json`.
 
@@ -87,7 +91,8 @@ app/<version>/           launcher/, runtime/, recomp/, tools/, bin/nx2navi_xlate
 pydeps/                  zbic, downloaded from PyPI on this PC
 toolchain/msys64/ucrt64  MSYS2's clang and libraries, downloaded from the MSYS2 repository on this PC
 toolchain/pkgs/          the downloaded package files
-data/launcher.json       settings; data/logs/launcher.log (and crash.log); data/cache/fonts;
+data/launcher.json       settings; data/logs/launcher.log (and crash.log); data/cache/fonts and data/cache/sounds
+                         (the game's font and interface sounds, decoded from the player's game);
                          data/background.npy (the player's background picture, fitted to the window)
 game/                    the built game, unless another folder was chosen (its layout: README-BuildKit.md), with
                          saves/ for saves to import and the backups imports make (below)

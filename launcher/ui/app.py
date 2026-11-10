@@ -305,18 +305,29 @@ class App:
         return self.fcache[(family, max(7, int(px * smallest)), weight)]
 
     def fonts_from_game(self, game_dir='', dump=''):
-        """Decode the game's fonts in the background and redraw with them."""
-        if self.game_fonts:
+        """Decode the game's fonts and its interface sounds in the background, redraw with the fonts and take up
+        the sounds."""
+        fonts, sounds = not self.game_fonts, not self.sounds.game
+        if not fonts and not sounds:
             return
 
         def work():
+            got = heard = {}
             try:
-                got = gamefiles.extract_fonts(self.layout, game_dir, dump)
+                if fonts:
+                    got = gamefiles.extract_fonts(self.layout, game_dir, dump)
             except Exception as e:
                 self.ctx.log(f'fonts: {e}')
-                got = {}
+            try:
+                if sounds:
+                    heard = gamefiles.extract_sounds(self.layout, game_dir, dump)
+                    self.ctx.log(f'sounds: {len(heard)} of {len(gamefiles.SOUNDS)} interface sounds from the game')
+            except Exception as e:
+                self.ctx.log(f'sounds: {e}')
             if got:
                 self.root.after(0, self.reload_fonts)
+            if heard:
+                self.root.after(0, self.sounds.load_game)
         import threading
         threading.Thread(target=work, daemon=True).start()
 
@@ -940,7 +951,7 @@ class App:
                 desc=('A gliding cursor, sliding screens and drifting sparks.',)),
             Row('enum', 'Sounds', get=lambda: dict(SOUND_LEVELS).get(self.settings.get('sounds'), 'Off'),
                 left=lambda: sounds(-1), right=lambda: sounds(1),
-                desc=('Short chimes when you move and choose. Off by default.',)),
+                desc=('The game\'s cursor, select and back sounds. Off by default.',)),
             Row('divider'),
             Row('action', 'Back', on=lambda: self.show('home', self.home_row('Customize Launcher')), height=40,
                 desc=('Back to the main menu.',)),
