@@ -78,6 +78,17 @@ RADV). It takes clang, clang++ and lld from `PATH` and links against the system'
    (GPL-2.0): `pip install --user zbic`, or in a virtual environment with the packages above.
    Vulkan Memory Allocator is one header: the system's (AUR `vulkan-memory-allocator`), else the build fetches the
    pinned 3.4.0 into `toolchain/vma/` and checks its hash.
+   The Vulkan headers must be release 363 (1.4.363) or newer: the runtime names extensions that older headers do not
+   declare (`VK_KHR_pipeline_binary` among them), and distributions with long support package older ones. The
+   AppImage carries the pinned headers (`toolchain/vulkan-headers/`, `tools/vulkan_pin.py`) and builds against them
+   whatever the system has; a build from a kit or a source checkout uses the system's when they are new enough and
+   otherwise fetches the pinned ones there once and checks their hash. The loader's library still comes from the
+   system (`vulkan-icd-loader`, `libvulkan-dev`, `vulkan-loader-devel`).
+   The compiler is the system's too. The releases are built with clang 23; an older one works as far as it compiles
+   the runtime (one without `#embed`, before clang 19, takes the menu's font from a header the kit carries). Before
+   its long steps the build checks every runtime source with that compiler and links against the libraries, so a
+   compiler, a header or a library it cannot use stops it in the first seconds, with the compiler's own words, and
+   not after the RomFS image.
 
 2. The shader translator: a kit with `bin/nx2navi_xlate` has it; from a source checkout, build it once with
    `python tools/build_xlate.py` (needs the .NET 10 SDK). The build copies it beside the game. A kit also carries the
@@ -132,8 +143,9 @@ switches at once, with a *DLSS multiplier* of 2x to 6x (above 2x on RTX 50 cards
 frames needed to reach the display's refresh rate (`framegen = dlss` and `fg_mult` in `nx2navi.ini`). The log says
 `ngxfg: DLSS Frame Generation available` when NGX found the library.
 
-`tools/make_appimage.py` packs this kit into one `NX2navi-Linux-<version>-x86_64.AppImage` with its own Python, for
-players without a source checkout: it checks for the packages above, installs zbic with pip on its first run, picks
+`tools/make_appimage.py` packs this kit into one `NX2navi-Linux-<version>-x86_64.AppImage` with its own Python and the
+pinned Vulkan headers, for players without a source checkout: it checks for the packages above (their Vulkan headers
+are not needed), installs zbic with pip on its first run, picks
 `--jobs` from the memory, builds into `~/Games/Ocarina` (or the folder given after the dump) and writes `play.sh`
 beside the game.
 

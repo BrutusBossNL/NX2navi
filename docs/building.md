@@ -94,6 +94,9 @@ of them.
    .venv\Scripts\python tools\build_game.py --version <ver>
    ```
 
+   The menu's font comes into `runtime/ui/menu.cpp` with `#embed`; for a compiler without it (before clang 19, which
+   a Linux build with the distribution's compiler can meet) the same step writes the font's bytes as
+   `runtime/ui/roboto_ttf.h` (git ignores it), which `menu.cpp` then includes.
    The runtime's own shaders (upscaling, HDR, texture decode and the like) are in the repository as source only:
    GLSL and SPIR-V assembly in `runtime\shaders\`, and two small ones assembled by `tools\make_dlaa_mask.py` and
    `tools\make_mvobj_fs.py`. `build_game.py` compiles them into `runtime\<name>_spv.h` (git ignores these) before it
@@ -219,6 +222,10 @@ Requirements:
 
   Vulkan Memory Allocator is a single header (AUR `vulkan-memory-allocator`). Without it, `build_game.py` fetches the
   version the Windows release pins (3.4.0) into `toolchain/vma/` on first use and checks its hash.
+  The Vulkan headers must be release 363 (1.4.363, the one MSYS2 supplies on Windows) or newer: the runtime names
+  extensions older headers lack. Where the system's are older, `build_game.py` and `make_game.py` fetch that release
+  into `toolchain/vulkan-headers/` on first use, check its hash and put it ahead of the system's (`tools/vulkan_pin.py`,
+  `build_game.py` `vulkan_include`).
 
 The steps are the Windows ones with POSIX paths: `.venv/bin/python` in place of `.venv\Scripts\python`, and `nx2navi` in
 place of `nx2navi.exe`. `build_game.py` takes clang, lld and Ninja from PATH (or the ones in `<dir>/bin` with

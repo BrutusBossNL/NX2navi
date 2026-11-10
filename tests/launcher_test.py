@@ -1870,6 +1870,131 @@ class MakeGameTest(Tmp):
         self.assertNotEqual(self.mg.object_key(plain, src, dst, cache, 'id', sysroot=True),
                             self.mg.object_key(fast, src, dst, cache, 'id', sysroot=True))
 
+    def test_vulkan_headers_go_first_for_the_runtime_only(self):
+        """The folder of the pinned Vulkan headers goes ahead of every other include folder for the runtime's sources,
+        so that no folder that also is a system one answers for <vulkan/vulkan.h>; the lifted code's command, which is
+        part of its objects' keys, is the one it was."""
+        inc = ['-I', 'rt', '-I', '/usr/include']
+        with_vk = self.mg.runtime_cmd('clang', 'clang++', inc, 3, first=['-I', 'kit/vulkan'])
+        without = self.mg.runtime_cmd('clang', 'clang++', inc, 3)
+        guest = (Path('lift/main_0001.c'), Path('obj/main_main_0001.o'))
+        self.assertEqual(with_vk(*guest), without(*guest))
+        for src in (Path('rt/vk_device.c'), Path('rt/ui/menu.cpp')):
+            cmd, plain = with_vk(src, Path('obj/rt_x.o')), without(src, Path('obj/rt_x.o'))
+            self.assertEqual(cmd.count('-I'), plain.count('-I') + 1)
+            self.assertLess(cmd.index('kit/vulkan'), cmd.index('rt'))
+            self.assertLess(cmd.index('kit/vulkan'), cmd.index('/usr/include'))
+
+    def test_early_check_tries_the_runtime_before_the_long_steps(self):
+        """The check of a Linux build runs the compile step's own command with -fsyntax-only on each source and links
+        an empty program against the game's libraries. When files fail it stops with every one of them named (the
+        compile step named three of four), and a missing header is told from an old one."""
+        srcs = [self.tmp / n for n in ('good.c', 'bad1.c', 'bad2.c', 'bad3.c', 'bad4.cpp')]
+        for s in srcs:
+            s.write_text('int x;\n')
+        ran = []
+
+        def compiler(errors):
+            def run(cmd, **kw):
+                ran.append([str(c) for c in cmd])
+                name = next((Path(c).name for c in cmd if Path(str(c)).name.startswith(('good', 'bad'))), '')
+                bad = name.startswith('bad')
+                return subprocess.CompletedProcess(cmd, 1 if bad else 0, '', errors.get(name, 'error: old') if bad else '')
+            return run
+
+        def check(errors, sources):
+            ran.clear()
+            err = io.StringIO()
+            with mock.patch.multiple(self.mg, toolchain=lambda msys: (Path('clang'), Path('clang++'), {}, Path('vma')),
+                                     clang_version=lambda clang, env: 'clang version 18.1.3',
+                                     vulkan_headers=lambda clang, env: ['-I', 'kit/vulkan'],
+                                     runtime_headers=lambda rt: None, EVENTS=False), \
+                    mock.patch.object(self.mg.subprocess, 'run', compiler(errors)), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                try:
+                    self.mg.preflight(self.msys, 2, sources)
+                    return None, err.getvalue()
+                except SystemExit:
+                    return 'stopped', err.getvalue()
+
+        stopped, text = check({}, srcs)
+        self.assertEqual(stopped, 'stopped')
+        self.assertIn('did not compile: bad1.c, bad2.c, bad3.c, bad4.cpp', text)
+        self.assertIn('4 of the runtime\'s 5 files', text)
+        self.assertIn('clang version 18.1.3', text)
+        self.assertIn('kit/vulkan', text)   # where the Vulkan headers came from
+        compiles = [c for c in ran if '-fsyntax-only' in c]
+        self.assertEqual(len(compiles), 5)
+        for c in compiles:
+            self.assertEqual(c[1], '-fsyntax-only')
+            self.assertFalse({'-c', '-o'} & set(c))
+            self.assertLess(c.index('kit/vulkan'), c.index(str(self.mg.KIT / 'runtime')))
+        self.assertEqual(len(ran), 5)   # no link is tried once sources failed
+        stopped, text = check({'bad1.c': "bad1.c:1:10: fatal error: 'SDL3/SDL.h' file not found"}, srcs[:2])
+        self.assertIn('These headers are missing: SDL3/SDL.h', text)
+        # every source passes: the empty program is linked against the game's libraries
+        stopped, text = check({}, srcs[:1])
+        self.assertIsNone(stopped)
+        link = ran[-1]
+        self.assertNotIn('-fsyntax-only', link)
+        self.assertEqual(link[-len(self.mg.LINK_LIBS):], self.mg.LINK_LIBS)
+
+    def test_pinned_vulkan_headers(self):
+        """tools/vulkan_pin.py keeps the C headers and the licence note of the pinned archive and nothing else, takes
+        no other archive, and says the folder holds them only once the last file is written."""
+        import vulkan_pin
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+            for name, data in (('include/vulkan/vulkan_core.h', b'#define VK_HEADER_VERSION 363\n'),
+                               ('include/vulkan/vulkan.h', b'#include "vulkan_core.h"\n'),
+                               ('include/vk_video/vulkan_video_codecs_common.h', b'\n'),
+                               ('include/vulkan/vulkan.hpp', b'// C++\n'), ('registry/vk.xml', b'<registry/>'),
+                               ('include/vulkan/../../outside.h', b'x'), ('LICENSE.md', b'Apache-2.0 OR MIT\n')):
+                info = tarfile.TarInfo(vulkan_pin.TOP + name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        archive = self.tmp / 'headers.tar.gz'
+        archive.write_bytes(buf.getvalue())
+        dest = self.tmp / 'toolchain' / 'vulkan-headers'
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+            vulkan_pin.resolve(dest, archive)   # not the pinned archive
+        self.assertFalse(vulkan_pin.have(dest))
+        pinned = (vulkan_pin.SOURCE[0], hashlib.sha256(buf.getvalue()).hexdigest())
+        with mock.patch.object(vulkan_pin, 'SOURCE', pinned):
+            self.assertEqual(vulkan_pin.resolve(dest, archive), dest)
+        files = sorted(f.relative_to(dest).as_posix() for f in dest.rglob('*') if f.is_file())
+        self.assertEqual(files, ['LICENSE.md', 'include/vk_video/vulkan_video_codecs_common.h',
+                                 'include/vulkan/vulkan.h', 'include/vulkan/vulkan_core.h', vulkan_pin.STAMP])
+        self.assertFalse((self.tmp / 'outside.h').exists() or (self.tmp / 'toolchain' / 'outside.h').exists())
+        self.assertTrue(vulkan_pin.have(dest))
+        self.assertEqual(vulkan_pin.resolve(dest), dest)   # there already: nothing is fetched
+        self.assertEqual(vulkan_pin.header_version((dest / 'include' / 'vulkan' / 'vulkan_core.h').read_text()), 363)
+        self.assertEqual(vulkan_pin.header_version('#define VK_HEADER_VERSION_COMPLETE 1\n'), 0)
+        (dest / vulkan_pin.STAMP).unlink()   # a folder cut short while it was written
+        self.assertFalse(vulkan_pin.have(dest))
+
+    def test_embedded_file_as_a_header_of_bytes(self):
+        """tools/build_shaders.py writes the menu font's bytes as a header for compilers without #embed: the numbers
+        are the file's bytes, and the header is stale once the file changes."""
+        import build_shaders
+        rt = self.tmp / 'runtime'
+        font = rt / 'ui' / 'fonts' / 'Roboto-Medium.ttf'
+        font.parent.mkdir(parents=True)
+        data = bytes(range(256)) * 3 + b'\r\n\x00tail'
+        font.write_bytes(data)
+        header = rt / 'ui' / 'roboto_ttf.h'
+        with mock.patch.object(build_shaders, 'ASSEMBLED', {}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(build_shaders.stale(rt), [font])
+            self.assertEqual(build_shaders.build(rt), 1)
+            self.assertEqual(build_shaders.stale(rt), [])
+            numbers = ''.join(ln for ln in header.read_text(encoding='utf-8').splitlines() if not ln.startswith('//'))
+            self.assertEqual(bytes(int(n) for n in numbers.split(',') if n), data)
+            font.write_bytes(data + b'!')
+            self.assertEqual(build_shaders.stale(rt), [font])
+        menu = (ROOT / 'runtime' / 'ui' / 'menu.cpp').read_text(encoding='utf-8')
+        self.assertIn('#ifdef __has_embed\n#embed "fonts/Roboto-Medium.ttf"\n#else\n#include "roboto_ttf.h"\n#endif', menu)
+        self.assertEqual(build_shaders.EMBEDDED, {'ui/fonts/Roboto-Medium.ttf': 'ui/roboto_ttf.h'})
+
     def test_objects_of_an_earlier_version_are_taken_over(self):
         """An entry under a key an earlier version gave the same compile is re-recorded under the new key when its
         files read as they did; a header in the earlier kit's folder is read in this kit's (that folder may be gone)."""

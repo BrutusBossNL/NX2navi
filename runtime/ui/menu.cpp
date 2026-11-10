@@ -83,11 +83,18 @@ void cheats_frame(uint64_t frame);   // cheats.c
 bool tab_cheats(float scale);        // ui/cheats_tab.cpp; true: restart into the rebuild
 }
 
-// Roboto Medium (Apache-2.0, ui/fonts/LICENSE-Roboto.txt) with Latin and Cyrillic glyphs.
+// Roboto Medium (Apache-2.0, ui/fonts/LICENSE-Roboto.txt) with Latin and Cyrillic glyphs. The file comes in with
+// #embed where the compiler has it (clang 19 and later define __has_embed). An older one, which a Linux build with the
+// distribution's compiler can meet, includes the same bytes as numbers from roboto_ttf.h, which tools/build_shaders.py
+// writes beside this file from the font when the game is built (a kit carries it).
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc23-extensions"   // #embed in C++
 static const unsigned char roboto_ttf[] = {
+#ifdef __has_embed
 #embed "fonts/Roboto-Medium.ttf"
+#else
+#include "roboto_ttf.h"
+#endif
 };
 #pragma clang diagnostic pop
 
