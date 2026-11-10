@@ -121,7 +121,14 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   ring of Vulkan `{x, y, z}` records filled on the GPU.
 - Pipelines: `VK_EXT_graphics_pipeline_library` where the driver has it: stage libraries compiled ahead, a fast link
   at a new state, an optimised pipeline replacing it from a background thread. A draw whose pipeline is not ready is
-  skipped when one of its pass's targets was rendered in the previous frame, and waits otherwise. Compute pipelines
+  skipped when one of its pass's targets was rendered in the previous frame, and waits otherwise. Three things keep
+  that short on a first visit (`runtime/vk_pipeline.c`): a pipeline whose fragment shader reads a target of its own
+  pass is fast-linked like any other, the feedback loop flags being part of the fragment output library alone
+  (`gpl_feedback`); the library workers also link the pipelines of skipped draws, so a burst of new materials is
+  linked on several threads while the pool is inside optimised builds (`lib_worker`, `fast_take`); and the first
+  draw of a submission that misses has the rest of the submission read ahead, which queues the stage libraries of
+  every pipeline the later draws need before the replay reaches them (`runtime/vk_exec.c` `vk_exec_ahead`,
+  `vk_pipeline_hint`). Mesh pipelines have no libraries and are built whole. Compute pipelines
   are compiled outside the pipeline lock, and one compile serves every thread that needs it. The boot builds the
   pipeline of every compute shader play recorded or the shader preparation listed, but keeps only those of the shaders
   dispatched most recently (`compute-used.bin`, `compute_keep`): the others go into the pipeline cache and are

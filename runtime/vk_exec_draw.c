@@ -3510,6 +3510,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     // session. A draw into per-frame targets is skipped until they are ready and comes back next frame.
     int oneshot = -1, skip = pipe_skip_mode();   // -1: not looked up
     if (vs_wait || fs_wait || ts_wait) {
+        vk_exec_ahead(ex);   // the later draws' shaders and stage libraries are queued while this one waits or is skipped
         if (!(oneshot = !vk_exec_targets_recent(ex, skip >= 1)))   // skipped until ready
             return perf_count(PERF_CNT_SHADER_SKIP), draw_skipped(ex, mesh, SK_SHADER_PENDING);
         perf_count(PERF_CNT_ONESHOT_WAIT);
@@ -3572,15 +3573,15 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         info = PM.info, pending = 0;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
     } else {
-        if (linking) {   // nearly every draw finds its pipeline: the clock is read only for one that did not
-            p = vk_pipeline_graphics_async(&s, &info, &pending, 0);
-            if (pending) {
-                t0 = kern_now_ns();
-                p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
-            }
-        } else {
-            w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;   // the clock is read only for draws that may wait
-            p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
+        // Nearly every draw finds its pipeline, so the first lookup waits for nothing and the clock is read only for a
+        // draw that missed. A miss first has the rest of the submission read ahead (vk_exec_ahead: the stage libraries
+        // of the later draws' pipelines build on the workers from here on), inside this draw's wait budget.
+        p = vk_pipeline_graphics_async(&s, &info, &pending, 0);
+        if (pending) {
+            if (linking) t0 = kern_now_ns();
+            else w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;
+            vk_exec_ahead(ex);
+            if (wait_ms) p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
         }
         if (t0 && budget) {
             uint64_t spent = kern_now_ns() - t0;
@@ -3668,6 +3669,89 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
 
 static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     return prepare_draw_ex(ex, prim, count, restart, 0);
+}
+
+// ---- looking ahead (vk_exec.c vk_exec_ahead): the binds and draws of ops the replay has not reached, applied to sx, a
+// copy of the replay state. A draw looks its shaders up as prepare_draw_ex will (one not in memory is queued for its
+// disk read or translation by that lookup) and names its state to vk_pipeline_hint. The last draw looked up is kept:
+// one with the same program, texture binds and state repeats it, as most draws of a pass do.
+uint64_t vk_exec_ahead_draws, vk_exec_ahead_lookups;
+static struct { int valid; const prog_t *prog; uint64_t serial; uint32_t tex_serial; VkPipeState pipe; } AHL;
+
+void vk_exec_ahead_begin(void) { AHL.valid = 0; }
+
+static void ahead_draw(VkExec *sx) {
+    vk_exec_ahead_draws++;
+    if (!sx->prog) return;
+    if (AHL.valid && AHL.prog == sx->prog && AHL.serial == sx->prog->serial && AHL.tex_serial == sx->tex_serial &&
+        !memcmp(&AHL.pipe, &sx->pipe, sizeof AHL.pipe))
+        return;
+    AHL.valid = 1, AHL.prog = sx->prog, AHL.serial = sx->prog->serial, AHL.tex_serial = sx->tex_serial, AHL.pipe = sx->pipe;
+    vk_exec_ahead_lookups++;
+    int has_vs, has_fs, vs_wait = 0, fs_wait = 0;
+    const GfxShader *vs = shader_for(sx, NVN_STAGE_VS, &has_vs, &vs_wait, 0);
+    if (!has_vs) return;   // a mesh program, or none: no libraries
+    const GfxShader *fs = shader_for(sx, NVN_STAGE_FS, &has_fs, &fs_wait, 0);
+    if (!vs || vs_wait || fs_wait || (has_fs && !fs) || shader_skipped(vs) || shader_skipped(fs)) return;
+    VkPipeState s = sx->pipe;
+    s.vs = vs, s.fs = fs, s.ts = NULL;
+    s.feedback = 0;
+    s.prim = NVN_DRAW_PRIMITIVE_TRIANGLES;
+    s.depth_minus_w = (uint8_t)(nvn_depth_minus_w() != 0);
+    s.y_flip = 1;
+    s.prim_restart = 0;
+    vk_pipeline_hint(&s);
+}
+
+void vk_exec_ahead_op(VkExec *sx, uint32_t op, const void *payload) {
+    switch (op) {
+    case OP_BIND_PROGRAM: {
+        const p_bind_program *b = payload;
+        sx->prog = b->prog, sx->prog_stages = b->stages;
+        break;
+    }
+    case OP_BIND_STATE: {
+        const p_bind_state *b = payload;
+        blend_st bs;
+        switch (b->kind) {
+        case 0:
+            memcpy(&bs, b->bytes, sizeof bs);
+            if (bs.target < 8) sx->pipe.blend[bs.target] = bs;
+            break;
+        case 1: memcpy(&sx->pipe.color, b->bytes, sizeof sx->pipe.color); break;
+        case 2: memcpy(&sx->pipe.chmask, b->bytes, sizeof sx->pipe.chmask); break;
+        case 3: memcpy(&sx->pipe.ms, b->bytes, sizeof sx->pipe.ms); break;
+        case 4: memcpy(&sx->pipe.poly, b->bytes, sizeof sx->pipe.poly); break;
+        case 5: memcpy(&sx->pipe.ds, b->bytes, sizeof sx->pipe.ds); break;
+        }
+        break;
+    }
+    case OP_BIND_VATTR: {
+        const p_bind_vattr *b = payload;
+        if (b->first < 0 || b->n < 0 || b->first + b->n > 16) break;
+        memset(sx->pipe.vattr, 0, sizeof sx->pipe.vattr);
+        memcpy(&sx->pipe.vattr[b->first], b->st, sizeof(uint32_t) * (size_t)b->n);
+        break;
+    }
+    case OP_BIND_VSTREAM: {
+        const p_bind_vstream *b = payload;
+        if (b->first < 0 || b->n < 0 || b->first + b->n > 16) break;
+        memset(sx->pipe.vstream, 0, sizeof sx->pipe.vstream);
+        memcpy(&sx->pipe.vstream[b->first], b->st, sizeof(vs_st) * (size_t)b->n);
+        break;
+    }
+    case OP_BIND_TEX: case OP_BIND_IMG: {
+        const p_bind_handles *b = payload;
+        int cap = op == OP_BIND_TEX ? 128 : 32;
+        if (b->stage < 0 || b->stage >= 8 || b->first < 0 || b->n < 0 || b->n > 32 || b->first + b->n > cap) break;
+        memcpy(op == OP_BIND_TEX ? &sx->tex[b->stage][b->first] : &sx->img[b->stage][b->first], b->h,
+               sizeof(uint64_t) * (size_t)b->n);
+        sx->tex_serial++;
+        break;
+    }
+    case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND: ahead_draw(sx); break;
+    default: break;
+    }
 }
 
 // ---- per-object motion

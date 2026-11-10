@@ -75,7 +75,7 @@ static struct {
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
-    struct { uint64_t links, fb_links, wlinks, flinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
+    struct { uint64_t links, fb_links, wlinks, flinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, hints, hint_libs, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
     int vs_outs_all;                   // NX2NAVI_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src, f_full_subgroups;
@@ -3396,6 +3396,8 @@ static void pipe_worker(void *arg) {
     return;
 }
 
+static int hint_on(void);
+
 // Starts the pool on first use: a quarter of the logical processors, 2 to 4. Caller holds P.lock.
 static int workers_start(void) {
     if (A.threads) return 1;
@@ -3407,9 +3409,10 @@ static int workers_start(void) {
         A.thread[A.threads++] = t;   // kept: promote() raises a worker running a prebuild job
     }
     // Workers for stage libraries and fast links alone: two (the vertex and fragment libraries of one waiting draw in
-    // parallel), and as many as the pool has with the fast links of skipped draws (lib_worker). They sleep unless a
-    // library or a fast link is queued.
-    int nlib = fast_workers() ? n : 2;
+    // parallel), and as many as the pool has with the look-ahead, which queues the libraries of a whole submission's
+    // new pipelines at once (vk_pipeline_hint), or with the fast links of skipped draws (lib_worker). They sleep
+    // unless a library or a fast link is queued.
+    int nlib = hint_on() || fast_workers() ? n : 2;
     for (int i = 0; A.threads && U.on && P.gpl && i < nlib; i++)
         if (plat_thread_new(lib_worker, NULL, "pipe lib worker")) U.lib_workers++;
     if (A.threads)
@@ -3637,6 +3640,42 @@ static void lib_wait(const VkPipeState *s, const GKey *k, Layout *l, double end)
         double until = q && steal_at < end ? steal_at : end;
         plat_cond_wait_ms(&done_cv, &P.lock, (uint32_t)(until - now) + 1);
     }
+}
+
+// ---- stage libraries ahead of their draws (NX2NAVI_PIPE_AHEAD, default 1; 0 off; vk_exec.c "looking ahead")
+// The replay names the state of a draw it has not reached yet. When no pipeline is known for it, its pre-rasterization
+// and fragment shader libraries are queued to the library workers now, so they build while the draws before it are
+// recorded, in parallel with each other and with those of the other draws named: the draw's own lookup then finds both
+// and links on its thread in microseconds instead of waiting for them or being skipped while they build. Nothing else
+// is entered, no pipeline, no optimised build and no key record: a state the scan guessed wrong costs two libraries
+// at most. The feedback loop bits, the topology and the targets do not matter here, as no shader library depends on
+// them. Returns the libraries queued.
+static int hint_on(void) {
+    static int on = -1;
+    if (on < 0) on = cfg_bool("NX2NAVI_PIPE_AHEAD");
+    return on;
+}
+
+int vk_pipeline_hint(const VkPipeState *s) {
+    if (!A.on || !U.on || !hint_on() || !s->vs || !ensure_init() || !P.gpl || !P.indep || is_mesh(s)) return 0;
+    if (gfx_shader_stage(s->vs) != GFX_STAGE_VS || (s->fs && gfx_shader_stage(s->fs) != GFX_STAGE_FS)) return 0;
+    GKey k;
+    gkey_fill(s, &k);
+    if (k.topo_class == 3) return 0;
+    uint64_t h = key_hash(&k, sizeof k);
+    int queued = 0;
+    plat_mutex_lock(&P.lock);
+    if (!pipe_find(&k, sizeof k, h)) {
+        Bindings B = {0}, F = {0};
+        Layout *l = add_stage(&B, s->vs, 0) && (!s->fs || add_stage(&F, s->fs, 0)) ? layout_pair(&B, &F) : NULL;
+        Lib *b[2];
+        uint64_t q0 = U.queued, w0 = U.waits;
+        if (l && l->set1 && workers_start() && lib_queue(s, &k, l, b)) queued = (int)(U.queued - q0);
+        U.waits = w0, U.queued = q0;   // those count waiting draws' jobs
+        P.g.hints++, P.g.hint_libs += (uint64_t)queued;
+    }
+    plat_mutex_unlock(&P.lock);
+    return queued;
 }
 
 static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int async, int *pending, uint32_t wait_ms) {
@@ -5864,6 +5903,9 @@ static void save_with(uint32_t wait_ms) {
                (unsigned long long)P.g.ready_n[0], (unsigned long long)P.g.ready_n[1], (unsigned long long)P.g.ready_n[2],
                (unsigned long long)P.g.ready_n[3], (unsigned long long)P.g.ready_n[4], (unsigned long long)P.g.ready_n[5],
                rn ? P.g.ready_ms / (double)rn : 0.0, P.g.ready_max, (unsigned long long)P.g.ready_nofast);
+        if (P.g.hints)
+            rt_log("vk_pipeline: gpl: looking ahead named %llu pipeline states not known yet and queued %llu stage libraries "
+                   "for them", (unsigned long long)P.g.hints, (unsigned long long)P.g.hint_libs);
         if (U.waits || U.queued)
             rt_log("vk_pipeline: gpl: library jobs for waiting draws: %llu queued, %llu built by a worker, %llu by the "
                    "thread that needed them (no worker free), %llu waits ended at their limit; %llu fast links on the %d "

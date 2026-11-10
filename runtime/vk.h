@@ -701,6 +701,9 @@ VkPipeline vk_pipeline_graphics(const VkPipeState *s, const VkPipeInfo **info);
 // wait_ms > 0 waits up to that long for a pending pipeline first. Pipelines built in a run are recorded to
 // pipeline-keys.bin next to the pipeline cache and prebuilt at the next boot (NX2NAVI_PIPE_PREBUILD=0: not).
 VkPipeline vk_pipeline_graphics_async(const VkPipeState *s, const VkPipeInfo **info, int *pending, uint32_t wait_ms);
+// The stage libraries of a draw the replay has not reached yet, queued to the workers when no pipeline is known for its
+// state (vk_pipeline.c "stage libraries ahead of their draws"). Returns the libraries queued.
+int vk_pipeline_hint(const VkPipeState *s);
 // rt_boot calls it unless --shot is given; NX2NAVI_PIPE_SYNC=1 makes it a no-op. Of the probes only --probe-prewarm
 // calls it.
 void vk_pipeline_async_enable(void);
