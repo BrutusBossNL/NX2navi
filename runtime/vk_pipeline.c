@@ -4110,7 +4110,8 @@ static struct {
     PlatThread *th[LB_MAX_THREADS];
     uint8_t clamp, poly, minus_w, samples;             // library state (GKey fields)
     double t0, ms[3];                                  // ms: build time per kind (vertex, fragment, compute)
-    // warmed: driver cache only; nolib: vertex and fragment variants skipped with the graphics pipeline library off
+    // warmed: built for the caches only and destroyed; nolib: vertex and fragment variants skipped with the graphics
+    // pipeline library off
     // skipped: variants of the skip list (SK below)
     uint64_t built[3], have[3], fail[3], warmed[3], noshader, nolib, skipped, done, cs_draw;
     uint64_t big_words, deferred;                      // LB_BIG_WORDS; compute shaders over it left to their dispatch
@@ -4826,18 +4827,18 @@ static void bg_main(void *arg) {
         VkPipeline pipe = compute_create(cs, l, 0);
         own_cache = VK_NULL_HANDLE;
         double ms = now_ms() - t0;
-        int keep = cu_keep(iid);
+        // The pipeline stays: only a shader a run dispatched is queued here (lb_compute), and it is entered before
+        // the merge below, so a dispatch that comes meanwhile finds it.
         plat_mutex_lock(&P.lock);
-        if (flight && cs_flight_remove(cs)) keep = 1;   // a dispatch waits for it
+        if (flight) cs_flight_remove(cs);
         BG.building = NULL;
         Pipe *e = NULL;
-        if (pipe && keep && !pipe_find(&k, sizeof k, h) &&
+        if (pipe && !pipe_find(&k, sizeof k, h) &&
             (e = pipe_add(&k, sizeof k, h, pipe, l, &B, VK_PIPELINE_BIND_POINT_COMPUTE, 0))) {
             e->pre = 1;
             P.stats.compute++;
-        } else if (pipe) {   // only for the pipeline cache (comment at compute-used.bin), or a dispatch built its own
+        } else if (pipe) {   // a dispatch built its own meanwhile (no flight slot was free), or out of memory
             vkDestroyPipeline(P.device, pipe, NULL);
-            if (!own) __atomic_fetch_add(&cache_merges, 1, __ATOMIC_RELAXED);   // new content in P.cache to save
         }
         plat_mutex_unlock(&P.lock);
         if (own) bg_merge(own, pipe != VK_NULL_HANDLE);   // after the entry: a dispatch waiting for it does not wait for this
