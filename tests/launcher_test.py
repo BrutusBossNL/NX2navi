@@ -2648,19 +2648,30 @@ class MakeGameTest(Tmp):
         want = 'const char rt_default_exefs[] = "' + str(out / 'exefs').replace('\\', '\\\\') + '";'
         self.assertIn(want, text)
         self.assertEqual(self.mg.c_string('a"b\\c\n' + fairy), '"a\\"b\\\\c\\n' + fairy + '"')
-        cc = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
+        cc = shutil.which('clang') or shutil.which('cc') or shutil.which('gcc')
         env = dict(os.environ)
         if not cc and (Path(r'C:\msys64\ucrt64\bin') / 'clang.exe').is_file():   # make_game.py's default --msys
             cc = r'C:\msys64\ucrt64\bin\clang.exe'
             env['PATH'] = r'C:\msys64\ucrt64\bin' + os.pathsep + env['PATH']
         if not cc:
             self.skipTest('the text is right; compiling it needs a C compiler')
-        (gen / 'layout.h').write_text('#define MOD_MAIN_BASE 0x7000000000ull\n#define MOD_MAIN_SIZE 0x1000000ull\n')
-        obj = self.tmp / 'modules.o'
-        r = subprocess.run([cc, '-c', '-std=gnu11', '-w', '-I', str(ROOT / 'runtime'), '-I', str(gen), '-o', str(obj),
-                            str(gen / 'modules.c')], capture_output=True, text=True, errors='replace', env=env)
-        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        self.assertIn(str(out / 'exefs').encode('utf-8'), obj.read_bytes())   # the path's own bytes are in the object
+
+        def compiles(source, *include):
+            obj = source.with_suffix('.o')
+            r = subprocess.run([cc, '-c', '-std=gnu11', '-w', *include, '-o', str(obj), str(source)],
+                               capture_output=True, text=True, errors='replace', env=env)
+            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            self.assertIn(str(out / 'exefs').encode('utf-8'), obj.read_bytes())   # the path's own bytes are in it
+        # the strings alone, which any C compiler takes: the runtime's headers want clang
+        strings = [ln for ln in text.splitlines() if ln.startswith('const char rt_')]
+        self.assertEqual(len(strings), 4)
+        (self.tmp / 'strings.c').write_text('\n'.join(strings) + '\n', encoding='utf-8')
+        compiles(self.tmp / 'strings.c')
+        said = subprocess.run([cc, '--version'], capture_output=True, text=True, errors='replace', env=env).stdout
+        if 'clang' in said:   # and the file as the build compiles it, with the runtime's headers
+            (gen / 'layout.h').write_text('#define MOD_MAIN_BASE 0x7000000000ull\n'
+                                          '#define MOD_MAIN_SIZE 0x1000000ull\n')
+            compiles(gen / 'modules.c', '-I', str(ROOT / 'runtime'), '-I', str(gen))
 
     def test_the_disk_space_of_every_step_is_checked_first(self):
         """Before its first long step the build adds up what its steps will write into the game folder and stops
