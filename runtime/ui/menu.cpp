@@ -43,12 +43,14 @@ extern "C" {
 #include "amiibo.h"
 #include "cheats.h"
 #include "cfg.h"
+#include "folder_pick.h"
 #include "fs.h"
 #include "input.h"
 #include "input_map.h"
 #include "mods.h"
 #include "perfmon.h"
 #include "platform/platform.h"
+#include "save_share.h"
 #include "sysinfo.h"
 #include "ui/menu.h"
 #include "ui_text.h"
@@ -980,6 +982,105 @@ static void tab_screen(float scale) {
     opt_end();
 }
 
+// ---- the Game tab's Saves group (save_share.c). Export writes the save the game would load next into a zip in the
+// player's Downloads folder, for another player or, with this run's log and nx2navi.ini, a bug report. Import takes a
+// zip the player picks in the host's file dialog and leaves its save for the next start (fs_host.c import_pending): the
+// game holds its progress in memory and would write it back over a save replaced under it. The work runs off the
+// present thread (a thread of its own, or the dialog's); the rows wait greyed meanwhile, and the line under them says
+// what the last one did, else what an import did at this start.
+static PlatMutex g_share_lock = PLAT_MUTEX_INIT;
+static std::atomic<int> g_share_busy{0};
+static int g_share_text = -1;   // the last result's UiTextId, -1 none; a format that takes g_share_arg
+static char g_share_arg[PLAT_PATH_MAX + 64];
+static bool g_share_warn;
+
+static void share_done(UiTextId text, const char *arg, bool warn) {
+    plat_mutex_lock(&g_share_lock);
+    g_share_text = text;
+    snprintf(g_share_arg, sizeof g_share_arg, "%s", arg ? arg : "");
+    g_share_warn = warn;
+    plat_mutex_unlock(&g_share_lock);
+    g_share_busy.store(0);
+}
+
+static void share_export_main(void *arg) {
+    const int bug_report = (int)(intptr_t)arg;
+    char dir[PLAT_PATH_MAX], path[PLAT_PATH_MAX + 64];
+    SaveShareResult r = save_share_default_dir(dir, sizeof dir) ? save_share_export(dir, bug_report, path, sizeof path)
+                                                                : SAVE_SHARE_WRITE_FAILED;
+    if (r == SAVE_SHARE_OK) share_done(UI_MENU_SAVE_EXPORTED, path, false);
+    else share_done(r == SAVE_SHARE_NO_SAVE ? UI_MENU_SAVE_E_NO_SAVE : r == SAVE_SHARE_READ_FAILED ? UI_MENU_SAVE_E_READ_SAVE
+                                                                                                   : UI_MENU_SAVE_E_WRITE,
+                    dir, true);
+}
+
+// The file dialog's answer, on its thread: the import's checks and the copy into the profile run here.
+static void share_zip_picked(const char *path, void *ctx) {
+    (void)ctx;
+    if (!path) {   // cancelled: the last line stays
+        g_share_busy.store(0);
+        return;
+    }
+    char detail[160];
+    SaveShareResult r = save_share_import(path, detail, sizeof detail);
+    UiTextId text;
+    switch (r) {
+    case SAVE_SHARE_OK: text = UI_MENU_SAVE_IMPORT_READY; break;
+    case SAVE_SHARE_READ_FAILED: text = UI_MENU_SAVE_E_READ; break;
+    case SAVE_SHARE_WRITE_FAILED: text = UI_MENU_SAVE_E_STAGE; break;
+    case SAVE_SHARE_OTHER_GAME: text = UI_MENU_SAVE_E_OTHER_GAME; break;
+    case SAVE_SHARE_NEWER: text = UI_MENU_SAVE_E_NEWER; break;
+    case SAVE_SHARE_DAMAGED: text = UI_MENU_SAVE_E_DAMAGED; break;
+    case SAVE_SHARE_UNSAFE: text = UI_MENU_SAVE_E_UNSAFE; break;
+    default: text = UI_MENU_SAVE_E_NOT_SAVE; break;
+    }
+    share_done(text, r == SAVE_SHARE_OK ? detail : path, r != SAVE_SHARE_OK);
+}
+
+static void rows_saves(void) {
+    opt_group(UI_MENU_SAVES);
+    const bool busy = g_share_busy.load() != 0;
+    int start = 0;   // 1 export, 2 export for a bug report, 3 import
+    if (busy) opt_disable_next(UI_MENU_SAVE_BUSY);
+    if (opt_button("##save_export", UI_MENU_SAVE_EXPORT, UI_MENU_SAVE_EXPORT_DESC)) start = 1;
+    if (busy) opt_disable_next(UI_MENU_SAVE_BUSY);
+    if (opt_button("##save_export_bug", UI_MENU_SAVE_EXPORT_BUG, UI_MENU_SAVE_EXPORT_BUG_DESC)) start = 2;
+    // a stat per frame while the Game tab shows; the launcher's own import drops a waiting one
+    const bool waiting = save_share_pending() != 0;
+    if (busy) opt_disable_next(UI_MENU_SAVE_BUSY);
+    if (opt_button("##save_import", UI_MENU_SAVE_IMPORT, UI_MENU_SAVE_IMPORT_DESC,
+                   waiting ? menu_text(UI_MENU_SAVE_IMPORT_WAITING) : ""))
+        start = 3;
+    if (waiting) {
+        if (busy) opt_disable_next(UI_MENU_SAVE_BUSY);
+        if (opt_button("##save_import_cancel", UI_MENU_SAVE_IMPORT_CANCEL, UI_MENU_SAVE_IMPORT_CANCEL_DESC)) {
+            if (save_share_cancel()) share_done(UI_MENU_SAVE_E_STAGE, "", true);
+            else share_done(UI_MENU_SAVE_IMPORT_CANCELLED, "", false);
+        }
+    }
+    if (start && !busy) {
+        g_share_busy.store(1);
+        if (start == 3) {
+            char dir[PLAT_PATH_MAX];
+            file_pick(save_share_default_dir(dir, sizeof dir) ? dir : "", "zip", share_zip_picked, NULL);
+        } else if (!plat_thread_spawn(share_export_main, (void *)(intptr_t)(start == 2), "save export", 0)) {
+            share_done(UI_MENU_SAVE_E_READ_SAVE, "", true);
+        }
+    }
+    char line[PLAT_PATH_MAX * 2] = "";
+    plat_mutex_lock(&g_share_lock);
+    bool warn = g_share_warn;
+    if (g_share_text >= 0) snprintf(line, sizeof line, menu_text((UiTextId)g_share_text), g_share_arg);
+    plat_mutex_unlock(&g_share_lock);
+    const char *done = fs_save_import_done();
+    if (!line[0] && *done) {
+        if (!strcmp(done, "-")) snprintf(line, sizeof line, "%s", menu_text(UI_MENU_SAVE_IMPORTED_NEW));
+        else snprintf(line, sizeof line, menu_text(UI_MENU_SAVE_IMPORTED), done);
+        warn = false;
+    }
+    if (line[0]) opt_text_str(line, warn);
+}
+
 static void tab_game(float scale) {
     opt_begin("##game", scale);
     row_fps_limit();   // frame_rate.c: Ocarina steps by the clock, so the pacer alone sets its rate
@@ -989,6 +1090,7 @@ static void tab_game(float scale) {
     opt_toggle("NX2NAVI_ASSUME_FOCUS", UI_MENU_ASSUME_FOCUS, UI_MENU_ASSUME_FOCUS_DESC);
     // discord_rpc.c reads the setting on its own thread and connects or clears the status within half a second
     opt_toggle("NX2NAVI_DISCORD_RPC", UI_MENU_DISCORD_RPC, UI_MENU_DISCORD_RPC_DESC);
+    rows_saves();
     opt_end();
 }
 

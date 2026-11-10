@@ -8,7 +8,8 @@ The window is one Tk canvas at 1000 x 640 logical pixels, scaled to the display.
 flat cells and the orange choices are canvas items. Screens:
 
     first_run   the dump, the install folder, three choices and Begin Installation
-    home        Play, Updates, the game folder, Rebuild the Game, Settings
+    home        Play, Updates, the game folder, Saves, Rebuild the Game, Settings
+    saves       Export Save (a zip for a bug report or another player), Import a Save (such a zip), a save folder
     job         the steps of an install, update or rebuild, with their progress, and Cancel; after a failure Try Again
                 and Copy Report
     settings    the launcher's choices, the folders, the logs and Uninstall
@@ -153,7 +154,8 @@ class App:
                                         enabled=not self.layout.dev and not args.selftest)
         self.row_gap = GAP
         self.message = ''
-        self.save_message = ''   # the last Import Saves result, shown in its description
+        self.save_message = ''   # the last import's result, shown in the import rows' descriptions
+        self.export_message = ''   # the last Export Save result, shown in its description
         self.dumps = None
         self.dump_search = None
         self.uninstall_game = False
@@ -424,6 +426,8 @@ class App:
             self.show('home')
         elif self.screen == 'uninstall':
             self.show('settings')
+        elif self.screen == 'saves':
+            self.show('home', next((i for i, r in enumerate(self.rows_home()) if r.label == 'Saves'), None))
         elif self.screen == 'job' and self.job and self.job.result is None:
             self.cancel_job()
         elif self.screen == 'job':
@@ -755,7 +759,7 @@ class App:
             Row('divider'),
             Row('value', 'Game Folder', gd, on=lambda: self.open(gd),
                 desc=('Open the game folder. The game keeps your save in its profile folder, its settings in '
-                      'nx2navi.ini and its logs in logs. Its saves folder is for saves to import.',)),
+                      'nx2navi.ini and its logs in logs. Its saves folder holds saves to import and backups.',)),
             self.saves_row(gd),
             Row('value', 'Rebuild the Game', rebuild_value, rebuild_style, on=self.start_rebuild,
                 desc=('Build the game again from the files of the last build. Only what changed is compiled. Use it '
@@ -764,24 +768,107 @@ class App:
                 desc=('Updates, the game folder, the logs and uninstalling.',)),
         ]
 
-    def saves_row(self, gd):
-        """Import Saves: a save put into the game folder's saves folder, else a folder the player picks."""
-        ready = False
+    def save_waiting(self, gd):
+        """A save put into the game folder's saves folder (a shared zip, a save folder), waiting to be imported."""
         if gd and Path(gd).is_dir():
             try:
                 saves.ensure_saves_dir(gd)
-                ready = saves.waiting(gd)[0] is not None
+                return saves.waiting(gd)[0] is not None
             except OSError:
                 pass
-        desc = ('Bring in a save from a Switch save backup, an emulator or another NX2navi install. Put it into the '
-                'saves folder of the game folder and select this row, or select this row and choose its folder.',
-                'Your current save is copied to the saves folder first.')
-        if self.save_message:
-            desc = (self.save_message,) + desc
-        return Row('value', 'Import Saves', 'From the Saves Folder' if ready else 'Choose a Folder',
-                   'orange_arrow' if ready else 'arrow', on=self.import_saves, desc=desc)
+        return False
 
-    def import_saves(self):
+    def saves_row(self, gd):
+        """Saves: the screen that exports and imports saves; orange while a save waits in the saves folder."""
+        ready = self.save_waiting(gd)
+        desc = ('Export your save into one zip, to attach to a bug report or give to another player, or import a '
+                'save someone shared, a Switch save backup or an emulator\'s save.',)
+        if ready:
+            desc += ('A save waits in the saves folder of the game folder: select this row, then Import a Save.',)
+        return Row('value', 'Saves', 'Import Waiting' if ready else '', 'orange_arrow' if ready else 'arrow',
+                   on=lambda: self.show('saves'), desc=desc)
+
+    # ---- saves
+
+    def export_dir(self):
+        d = self.settings.get('save_export_dir')
+        return Path(d) if d and Path(d).is_dir() else saves.default_export_dir()
+
+    def rows_saves(self):
+        gd = self.settings.get('game_dir')
+        ready = self.save_waiting(gd)
+        out = self.export_dir()
+        export_desc = ('Write your save into one zip file, to attach to a bug report or give to another player: every '
+                       'save slot and a note of the NX2navi and game versions, never your keys or game files. The '
+                       'folder opens with the zip selected.',)
+        if self.export_message:
+            export_desc = (self.export_message,) + export_desc
+        import_desc = ('Make a save someone shared (an NX2navi-save zip) your save: every slot is replaced. Put the zip '
+                       'into the saves folder of the game folder and select this row, or select this row and choose '
+                       'the zip.', 'Your current save is copied to the saves folder first.')
+        if gd and saves.pending_import(gd):
+            import_desc += ('A save imported in the game\'s menu waits for the game\'s next start; an import here '
+                            'replaces it.',)
+        folder_desc = ('Bring in a save folder: a Switch save backup, an emulator\'s save, another NX2navi install, or '
+                       'one save slot (a folder named slot_00 to slot_05: only that slot is replaced).',
+                       'Your current save is copied to the saves folder first.')
+        if self.save_message:
+            import_desc, folder_desc = (self.save_message,) + import_desc, (self.save_message,) + folder_desc
+
+        def report(v):
+            self.settings['export_with_log'] = bool(v)
+            self.settings.save()
+        return [
+            Row('value', 'Export Save', out.name or str(out), on=self.export_save, desc=export_desc),
+            Row('toggle', 'Add Log and Settings', on=report, get=lambda: bool(self.settings.get('export_with_log')),
+                desc=('On: the zip also holds the game\'s latest log (logs\\nx2navi.log) and its settings '
+                      '(nx2navi.ini), which show what happened and with which settings. Keep it on for a bug report.',
+                      'Off: the save alone, to give to another player.')),
+            Row('value', 'Export To', str(out), on=self.choose_export_dir,
+                desc=(f'Export Save writes into {out}.', 'Select this row to choose another folder.')),
+            Row('divider'),
+            Row('value', 'Import a Save', 'From the Saves Folder' if ready else 'Choose a Zip',
+                'orange_arrow' if ready else 'arrow', on=lambda: self.import_saves(folder=False), desc=import_desc),
+            Row('value', 'Import a Save Folder', 'Choose a Folder', 'arrow',
+                on=lambda: self.import_saves(folder=True), desc=folder_desc),
+            Row('value', 'Open Saves Folder', '', 'arrow',
+                on=lambda: gd and Path(gd).is_dir() and self.open(saves.ensure_saves_dir(gd)),
+                desc=('The saves folder of the game folder: saves to import, and a backup of each save an import '
+                      'replaced.',)),
+            Row('action', 'Back', on=lambda: self.show('home'), height=40, desc=('Back to the main menu.',)),
+        ]
+
+    def choose_export_dir(self):
+        d = filedialog.askdirectory(parent=self.root, title='Choose where Export Save writes its zip',
+                                    initialdir=str(self.export_dir()), mustexist=True)
+        if d:
+            self.settings['save_export_dir'] = str(Path(d))
+            self.settings.save()
+        self.show('saves', self.focus)
+
+    def export_save(self):
+        gd = self.settings.get('game_dir')
+        if not gd or not Path(gd).is_dir():
+            self.export_message = 'Install the game first.'
+        else:
+            try:
+                r = saves.export_save(gd, self.export_dir(), bug_report=bool(self.settings.get('export_with_log')),
+                                      version=versions.display(build.built_version(gd) or self.layout.version),
+                                      log=self.ctx.log)
+            except (saves.SaveError, OSError) as e:
+                self.export_message = f'The save was not exported: {e}'
+            else:
+                extra = ' with the game\'s log and settings' if r['extras'] else ''
+                self.export_message = f'Exported {r["files"]} files{extra} to {r["path"]}.'
+                try:
+                    winsys.reveal(r['path'])
+                except OSError:
+                    pass
+        self.show('saves', self.focus)
+
+    def import_saves(self, folder):
+        """Import a Save (folder False): what waits in the saves folder, else a zip the player picks. Import a Save
+        Folder (folder True): a folder the player picks; the saves folder itself takes what waits there."""
         gd = self.settings.get('game_dir')
         if not gd or not Path(gd).is_dir():
             self.save_message = 'Install the game first.'
@@ -789,20 +876,37 @@ class App:
             self.save_message = 'Quit the game first: it keeps its save open while it runs.'
         else:
             try:
-                folder = None
-                if saves.waiting(gd)[0] is None:
-                    folder = filedialog.askdirectory(parent=self.root, title='Choose the folder with the save',
-                                                     initialdir=str(saves.ensure_saves_dir(gd)), mustexist=True)
-                    if not folder:
+                src = None
+                if folder:
+                    src = filedialog.askdirectory(parent=self.root, title='Choose the folder with the save',
+                                                  initialdir=str(saves.ensure_saves_dir(gd)), mustexist=True)
+                    if not src:
                         return
-                r = saves.import_save(gd, folder, log=self.ctx.log)
+                elif saves.waiting(gd)[0] is None:
+                    src = filedialog.askopenfilename(parent=self.root, title='Choose the save to import',
+                                                     initialdir=str(self.export_dir()),
+                                                     filetypes=[('NX2navi save', '*.zip'), ('All files', '*.*')])
+                    if not src:
+                        return
+                r = saves.import_save(gd, src, log=self.ctx.log)
             except (saves.SaveError, OSError) as e:
                 self.save_message = f'The save was not imported: {e}'
             else:
-                self.save_message = ((f'Save imported into {r["slot"]}.' if r['slot'] else
-                                      f'Save imported: {r["files"]} files from {r["source"].name}.')
-                                     + (f' Your old save is in saves\\{r["backup"].name}.' if r['backup'] else ''))
-        self.show('home', self.focus)
+                self.save_message = self.imported_text(r)
+        self.show('saves', self.focus)
+
+    @staticmethod
+    def imported_text(r):
+        """What an import did, for the import rows' descriptions."""
+        m = r.get('manifest')
+        if m:
+            text = (f'Save imported from {r["source"].name} (exported {str(m.get("exported", ""))[:10]} with NX2navi '
+                    f'{m.get("nx2navi") or "?"}).')
+        elif r['slot']:
+            text = f'Save imported into {r["slot"]}.'
+        else:
+            text = f'Save imported: {r["files"]} files from {r["source"].name}.'
+        return text + (f' Your old save is in saves\\{r["backup"].name}.' if r['backup'] else '')
 
     def update_desc(self):
         r = self.release

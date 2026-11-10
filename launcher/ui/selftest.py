@@ -163,10 +163,17 @@ def states(app):
         app.show('job')
 
     def import_saves():
-        app.release, app.message = None, ''
-        app.save_message = ('Save imported: 3 files from 0100000000010000. Your old save is in '
-                            'saves\\backup 2026-11-08 17.30.12.')
-        app.show('home', next(i for i, r in enumerate(app.rows_home()) if r.label == 'Import Saves'))
+        app.release, app.message, app.export_message = None, '', ''
+        app.save_message = ('Save imported from NX2navi-save-2026-11-09_17-30-05.zip (exported 2026-11-09 with NX2navi '
+                            '0.6.1). Your old save is in saves' + chr(92) + 'backup 2026-11-09 18.02.44.')
+        app.show('saves', next(i for i, r in enumerate(app.rows_saves()) if r.label == 'Import a Save'))
+
+    def export_save():
+        app.save_message = ''
+        app.export_message = ('Exported 14 files with the game' + chr(39) + 's log and settings to '
+                              + str(Path.home() / 'Downloads' / 'NX2navi-save-2026-11-09_17-30-05-bug-report.zip')
+                              + '.')
+        app.show('saves', 0)
 
     def update_staged():   # a release downloaded in the background, waiting for the game to be closed
         rel = fake_release(ahead_of(ctx.version))
@@ -178,7 +185,7 @@ def states(app):
     return [('1-first-run', first_run), ('2-installing', installing), ('3-home', home),
             ('4-update-ready', update_ready), ('5-updating', updating), ('6-settings', settings),
             ('7-build-failed', failed), ('8-uninstall', uninstall), ('9-import-saves', import_saves),
-            ('10-shaders', shaders), ('11-update-staged', update_staged)]
+            ('10-shaders', shaders), ('11-update-staged', update_staged), ('12-export-save', export_save)]
 
 
 def run(app, shots):

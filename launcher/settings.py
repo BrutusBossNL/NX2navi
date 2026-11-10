@@ -13,6 +13,8 @@ DEFAULTS = {
     'hide_while_playing': True,   # hide the window while the game runs, show it again when it exits
     'keep_cache': True,           # keep build-cache/ (the lift and objects) so an update recompiles only changes
     'desktop_shortcut': True,
+    'save_export_dir': '',        # where Saves > Export Save writes its zip; empty: the Downloads folder
+    'export_with_log': True,      # Export Save adds the game's latest log and nx2navi.ini (for a bug report)
     'feed_repo': '',              # owner/name overriding feed.json, for testing a fork's releases
     'github_token': '',           # only for a private release repository; stored as plain text
     'last_check': 0.0,

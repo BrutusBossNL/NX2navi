@@ -237,6 +237,13 @@ With `--romfs <extracted RomFS folder>` it draws the game's interface textures a
 both decode the game's files, so they run with `.venv-py314\Scripts\python` (`compression.zstd` and numpy). What they
 write is decoded game data: keep it under `build/`.
 
+A change to the shared save (`runtime/save_zip.c`, `runtime/save_share.c`, the save import in `runtime/fs_host.c`)
+passes `python tests\save_zip_check.py` and `python tests\save_share_check.py`. The first builds `save_zip.c` alone
+and checks its deflate, inflate, zip writer and reader against Python's zlib and zipfile both ways, and that the
+launcher imports a zip it wrote. The second builds `fs_host.c` and `save_share.c` with the rest of the runtime stubbed
+and runs each step as a start of the game on a profile it makes: the export, an import from a zip the launcher
+exported, its backup and swap at the next start, the zips it refuses and Cancel. No game files.
+
 A change to the button prompts (`tools/make_romfs_patches.py --prompts`, `tools/button_icons.py`) passes
 `.venv-py314\Scripts\python tests\romfs_prompts_test.py`, which runs the tool on a RomFS it makes itself (no game
 files); a change to the settings passes `nx2navi.exe --probe-cfg`.

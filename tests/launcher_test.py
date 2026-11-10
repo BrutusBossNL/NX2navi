@@ -2179,6 +2179,211 @@ class SavesTest(unittest.TestCase):
         self.assertEqual((acct / 'save.dat').read_bytes(), b'1')      # nothing changed
 
 
+class SaveShareTest(unittest.TestCase):
+    """launcher/saves.py export_save and import_zip: one zip with the save and a manifest, for a bug report or another
+    player, and the checks an import makes before it replaces the save."""
+
+    SAVE = {'account.sav': b'acct', 'option.sav': b'opt', 'slot_00/progress.sav': b'p0', 'slot_00/caption.sav': b'c0',
+            'slot_02/progress.sav': b'p2'}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='nx2navi-share-'))
+        self.game = self.tmp / 'game'
+        self.out = self.tmp / 'out'
+        self.out.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def files(self, folder, names):
+        for n, data in names.items():
+            (folder / n).parent.mkdir(parents=True, exist_ok=True)
+            (folder / n).write_bytes(data)
+        return folder
+
+    def game_with_save(self, game, names=None):
+        self.files(saves.account_dir(game), names or self.SAVE)
+        return game
+
+    def zip_of(self, members, manifest=None):
+        """A zip with members {name: bytes} and a manifest (export_save's keys unless given; None: none)."""
+        path = self.tmp / f'made-{len(list(self.tmp.glob("made-*")))}.zip'
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+            if manifest is not False:
+                m = manifest or {'format': saves.FORMAT, 'format_version': 1, 'title_id': '0400486024dec000',
+                                 'game_version': '1.1.1', 'nx2navi': '0.6.1', 'exported': '2026-11-09T17:30:05Z'}
+                z.writestr(saves.MANIFEST, json.dumps(m))
+            for n, data in members.items():
+                z.writestr(n, data)
+        return path
+
+    def test_export_writes_one_zip_of_the_newest_save(self):
+        self.game_with_save(self.game)
+        tx = self.game / 'profile' / 'save-tx'
+        self.files(tx, {'ready-7/option.sav': b'newer', 'ready-7/slot_00/progress.sav': b'p0 newer',
+                        'work/option.sav': b'not committed'})
+        self.files(self.game, {'logs/nx2navi.log': b'log', 'nx2navi.ini': b'[graphics]'})
+        r = saves.export_save(self.game, self.out, version='0.6.1', log=lambda m: None)
+        self.assertRegex(r['path'].name, r'^NX2navi-save-\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.zip$')
+        self.assertEqual(r['extras'], [])
+        self.assertEqual([p.name for p in self.out.iterdir()], [r['path'].name])   # no .part left behind
+        with zipfile.ZipFile(r['path']) as z:
+            names = sorted(z.namelist())
+            self.assertEqual(names, ['manifest.json', 'save/option.sav', 'save/slot_00/progress.sav'])
+            self.assertEqual(z.read('save/option.sav'), b'newer')   # the finished commit the game would load
+            m = json.loads(z.read('manifest.json'))
+        self.assertEqual((m['format'], m['format_version'], m['title_id'], m['game_version'], m['nx2navi'],
+                          m['files'], m['bug_report']), (saves.FORMAT, 1, '0400486024dec000', '1.1.1', '0.6.1', 2,
+                                                         False))
+        self.assertRegex(m['exported'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        r2 = saves.export_save(self.game, self.out, log=lambda m: None)   # the same second: a name of its own
+        self.assertNotEqual(r2['path'], r['path'])
+
+    def test_a_bug_report_adds_the_log_and_settings_and_never_keys(self):
+        self.game_with_save(self.game, dict(self.SAVE, **{'prod.keys': b'secret', 'sub/title.keys': b'secret'}))
+        self.files(self.game, {'logs/nx2navi.log': b'the log', 'logs/nx2navi.1.log': b'older', 'nx2navi.ini': b'[x]',
+                               'prod.keys': b'secret'})
+        r = saves.export_save(self.game, self.out, bug_report=True, log=lambda m: None)
+        self.assertTrue(r['path'].name.endswith('-bug-report.zip'))
+        self.assertEqual(r['extras'], ['nx2navi.log', 'nx2navi.ini'])
+        with zipfile.ZipFile(r['path']) as z:
+            names = z.namelist()
+            self.assertEqual(z.read('bug-report/nx2navi.log'), b'the log')
+            self.assertEqual(z.read('bug-report/nx2navi.ini'), b'[x]')
+            self.assertTrue(json.loads(z.read('manifest.json'))['bug_report'])
+            self.assertFalse(any(b'secret' in z.read(n) for n in names))
+        self.assertFalse([n for n in names if 'keys' in n])
+        self.assertEqual(len([n for n in names if n.startswith('save/')]), len(self.SAVE))
+
+    def test_no_save_no_export(self):
+        with self.assertRaises(saves.SaveError):
+            saves.export_save(self.game, self.out, log=lambda m: None)   # a game that never ran
+        self.assertFalse((self.game / 'profile' / 'account.uid').exists())   # and the export made no account
+        saves.account_dir(self.game).mkdir(parents=True)
+        with self.assertRaises(saves.SaveError):
+            saves.export_save(self.game, self.out, log=lambda m: None)   # an account without files
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_a_shared_save_replaces_the_save_and_keeps_a_backup(self):
+        other = self.game_with_save(self.tmp / 'other')
+        shared = saves.export_save(other, self.out, bug_report=True, version='0.6.1', log=lambda m: None)['path']
+        self.game_with_save(self.game, {'option.sav': b'mine', 'slot_05/progress.sav': b'mine5'})
+        acct = saves.account_dir(self.game)
+        self.files(self.game / 'profile' / 'save-tx', {'ready-2/option.sav': b'mine newer'})
+        r = saves.import_save(self.game, shared, log=lambda m: None)
+        self.assertEqual(r['manifest']['nx2navi'], '0.6.1')
+        self.assertIsNone(r['slot'])
+        got = {p.relative_to(acct).as_posix(): p.read_bytes() for p in acct.rglob('*') if p.is_file()}
+        self.assertEqual(got, self.SAVE)                                # every slot: slot_05 is gone too
+        self.assertFalse((acct / 'nx2navi.log').exists())               # the bug report files stay out
+        self.assertEqual((r['backup'] / 'option.sav').read_bytes(), b'mine newer')
+        self.assertEqual(r['backup'].parent, self.game / 'saves')
+        self.assertEqual(list((self.game / 'profile' / 'save-tx').iterdir()), [])
+        self.assertTrue(shared.is_file())                              # a picked zip is left where it was
+
+    def test_a_zip_in_the_saves_folder_is_taken_first(self):
+        self.game_with_save(self.game)
+        shared = saves.export_save(self.game_with_save(self.tmp / 'other', {'option.sav': b'theirs'}), self.out,
+                                   log=lambda m: None)['path']
+        d = saves.ensure_saves_dir(self.game)
+        self.files(d, {'loose.sav': b'x'})
+        shutil.copy2(shared, d / shared.name)
+        src, _ = saves.waiting(self.game)
+        self.assertEqual(src, d / shared.name)
+        r = saves.import_save(self.game, log=lambda m: None)
+        self.assertEqual((saves.account_dir(self.game) / 'option.sav').read_bytes(), b'theirs')
+        self.assertFalse((saves.account_dir(self.game) / shared.name).exists())   # not copied in as a file
+        done = [e for e in d.iterdir() if e.name.startswith('imported ')]
+        self.assertEqual([p.name for p in done[0].iterdir()], [shared.name])   # moved out: not imported twice
+        self.assertEqual(saves.waiting(self.game)[0], d)              # the loose file waits on its own
+        self.assertIsNotNone(r['backup'])
+        # picking the saves folder itself takes what waits there, as the row does
+        shutil.copy2(shared, d / 'again.zip')
+        r = saves.import_save(self.game, d, log=lambda m: None)
+        self.assertEqual(r['source'].name, 'again.zip')
+
+    def test_an_import_in_the_launcher_drops_the_game_menus_waiting_import(self):
+        self.game_with_save(self.game)
+        self.files(self.game / 'profile', {'save-import/option.sav': b'from the menu',
+                                           'save-import.part/option.sav': b'half'})
+        self.assertIsNotNone(saves.pending_import(self.game))
+        shared = saves.export_save(self.game_with_save(self.tmp / 'other'), self.out, log=lambda m: None)['path']
+        saves.import_save(self.game, shared, log=lambda m: None)
+        self.assertIsNone(saves.pending_import(self.game))
+        self.assertFalse((self.game / 'profile' / 'save-import.part').exists())
+
+    def test_zips_that_are_refused(self):
+        acct = saves.account_dir(self.game_with_save(self.game))
+        good = {'save/option.sav': b'o', 'save/slot_00/progress.sav': b'p'}
+        manifest = {'format': saves.FORMAT, 'format_version': 1, 'title_id': '0400486024dec000'}
+        notzip = self.tmp / 'not.zip'
+        notzip.write_bytes(b'PK not really')
+        cases = {
+            'not a zip': notzip,
+            'no manifest': self.zip_of(good, manifest=False),
+            'another format': self.zip_of(good, dict(manifest, format='something-else')),
+            'a newer format': self.zip_of(good, dict(manifest, format_version=2)),
+            'no format version': self.zip_of(good, {'format': saves.FORMAT, 'title_id': '0400486024dec000'}),
+            'another game': self.zip_of(good, dict(manifest, title_id='0100000000010000')),
+            'a path outside the save': self.zip_of(dict(good, **{'save/../../evil.sav': b'x'}), manifest),
+            'an absolute path': self.zip_of(dict(good, **{'save//abs.sav': b'x'}), manifest),
+            'a drive': self.zip_of(dict(good, **{'save/C:/evil.sav': b'x'}), manifest),
+            'a backslash': self.zip_of(dict(good, **{'save/..\\evil.sav': b'x'}), manifest),
+            'not this game': self.zip_of({'save/save.dat': b'x', 'save/user/0001.bin': b'y'}, manifest),
+            'no save': self.zip_of({'bug-report/nx2navi.log': b'l'}, manifest),
+        }
+        for why, path in cases.items():
+            with self.subTest(why=why):
+                with self.assertRaises(saves.SaveError):
+                    saves.import_save(self.game, path, log=lambda m: None)
+                self.assertEqual((acct / 'option.sav').read_bytes(), self.SAVE['option.sav'])
+        self.assertFalse((self.tmp / 'evil.sav').exists())
+        self.assertFalse((self.game / 'saves').exists() and
+                         [e for e in (self.game / 'saves').iterdir() if e.name.startswith('backup ')])
+
+    def test_a_link_in_the_zip_is_refused(self):
+        acct = saves.account_dir(self.game_with_save(self.game))
+        path = self.zip_of({'save/option.sav': b'o'})
+        with zipfile.ZipFile(path, 'a') as z:
+            info = zipfile.ZipInfo('save/slot_00/progress.sav')
+            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            z.writestr(info, '../../../outside')
+        with self.assertRaises(saves.SaveError):
+            saves.import_save(self.game, path, log=lambda m: None)
+        self.assertEqual((acct / 'option.sav').read_bytes(), self.SAVE['option.sav'])
+
+    def test_a_damaged_zip_changes_nothing(self):
+        acct = saves.account_dir(self.game_with_save(self.game))
+        path = self.zip_of({'save/option.sav': b'theirs' * 200, 'save/slot_00/progress.sav': b'p' * 300})
+        data = bytearray(path.read_bytes())
+        at = data.index(b'save/option.sav') + len('save/option.sav') + 4   # inside the first member's data
+        data[at] ^= 0xff
+        path.write_bytes(bytes(data))
+        with self.assertRaises(saves.SaveError):
+            saves.import_save(self.game, path, log=lambda m: None)
+        self.assertEqual((acct / 'option.sav').read_bytes(), self.SAVE['option.sav'])
+        self.assertFalse((self.game / 'profile' / 'save-tx' / 'import').exists())
+
+    def test_the_zip_of_the_games_menu_imports(self):
+        # runtime/save_share.c writes the same layout with stored and deflated members; Python's reader takes both
+        path = self.tmp / 'from-the-game.zip'
+        with zipfile.ZipFile(path, 'w') as z:
+            z.writestr(saves.MANIFEST, json.dumps({'format': saves.FORMAT, 'format_version': 1, 'exported_by': 'game',
+                                                   'title_id': '0400486024DEC000', 'game_version': '1.1.1'}))
+            z.writestr('save/option.sav', b'stored', zipfile.ZIP_STORED)
+            z.writestr('save/slot_01/progress.sav', b'deflated' * 50, zipfile.ZIP_DEFLATED)
+        r = saves.import_save(self.game, path, log=lambda m: None)   # a game that never ran: no backup
+        self.assertIsNone(r['backup'])
+        acct = saves.account_dir(self.game)
+        self.assertEqual((acct / 'slot_01' / 'progress.sav').read_bytes(), b'deflated' * 50)
+
+    @unittest.skipUnless(os.name == 'nt', 'the shell\'s known folders are Windows only')
+    def test_the_default_export_folder(self):
+        d = saves.default_export_dir()
+        self.assertTrue(d.is_dir())
+        self.assertIn(d, (winsys.known_folder('downloads'), winsys.known_folder('desktop'), Path.home()))
+
+
 class IconTest(unittest.TestCase):
     def test_navi(self):
         try:
@@ -2237,7 +2442,7 @@ class WindowTest(Tmp):
         r = subprocess.run([sys.executable, '-m', 'launcher', '--root', str(self.tmp / 'w'), '--selftest'],
                            cwd=ROOT, capture_output=True, text=True, timeout=180)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn('11 screens drawn', r.stdout)
+        self.assertIn('12 screens drawn', r.stdout)
 
 
 if __name__ == '__main__':
