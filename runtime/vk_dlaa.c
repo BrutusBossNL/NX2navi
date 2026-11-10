@@ -511,8 +511,6 @@ static int image2d(uint32_t w, uint32_t h, VkFormat f, VkImageUsageFlags usage, 
     return vkCreateImageView(c->device, &vi, NULL, view) == VK_SUCCESS;
 }
 
-// The images and views of a size, then its feature. The device must be idle: free_size waits for it, vk_dlaa_release
-// has. Whatever was not made is skipped, so a half-made size goes the same way.
 // A feature was released since the last one was made (destroy_size), and what follows from it (NX2NAVI_DLSS_IDLE_FREE).
 // A pause of 3,600 frames frees the gameplay feature (stale_sizes); the unpause makes it again, and the pause screen's
 // feature, which had stayed, then drew alternating bands of rows black or noise at every later pause, for as long as
@@ -521,7 +519,8 @@ static int image2d(uint32_t w, uint32_t h, VkFormat f, VkImageUsageFlags usage, 
 // settings. Giving the kept feature its own sizes again at each evaluation changed nothing. Features made one after
 // the other with none released in between do not show it (the gameplay feature, then the pause screen's, at every
 // first pause). So a feature is only ever made into that state: with a release since the last creation, the features
-// that stayed are released first (release_kept) and made again when their size is next evaluated.
+// that stayed are released first (release_kept) and made again when their size is next evaluated. With that rule none
+// of 5 runs in which the gameplay feature had been freed was striped.
 //   1 (default)  idle features are freed, and the kept ones are released before the next creation
 //   0            idle features are never freed
 //   2            idle features are freed and the kept ones stay (as before; shows the fault)
@@ -529,10 +528,12 @@ static int feat_released;
 
 static int idle_free(void) {
     static int m = -1;
-    if (m < 0) m = rt_knob("DLSS_IDLE_FREE", "1");
+    if (m < 0) m = cfg_int("NX2NAVI_DLSS_IDLE_FREE");
     return m;
 }
 
+// The images and views of a size, then its feature. The device must be idle: free_size waits for it, vk_dlaa_release
+// has. Whatever was not made is skipped, so a half-made size goes the same way.
 static void destroy_size(struct Size *e) {
     const VkCtx *c = vk_ctx();
     if (e->out_view) vkDestroyImageView(c->device, e->out_view, NULL);
