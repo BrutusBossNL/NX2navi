@@ -43,7 +43,7 @@ static const char *const known[] = {
     "DESC_TEMPLATE", "DEVICE_PROFILE", "DISCORD_APP_ID", "DISCORD_IMAGE", "DISCORD_RPC", "DLAA", "DLAA_CAM_KEEP", "DLSS_IDLE_FREE", "DLAA_JITTER", "DLAA_MV", "DLAA_MASKDEBUG", "DLAA_MVDEBUG", "DLAA_OBJMV", "DLAA_SURVEY", "DLAA_TIMES", "DLSS", "DLSS_CHAR_MASK", "DLSS_PRESET", "DLSS_REACTIVE", "DUMP", "DUMP_BUF", "DUMP_DIR",
     "DUMP_LOG", "DUMP_RAW", "DUMP_SHADERS", "DUMP_FILE", "DS3", "LOG_CS_BINDS", "LOG_TEX_FLAGS", "LOG_MESH", "MESH", "POOL", "NATIVE_TENSOR", "LOG_RCOND", "LOG_RT_SIZES", "DUMP_WHITE", "DUMP_AFTER", "DUMP_MOVIE", "SUBMIT_FINISH", "ACQUIRE_WAIT", "CRASH_FILTER_GUARD", "CS_FALLBACK", "EXEFS", "FEEDBACK", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES",
     "FLIGHT_SPIKE_MS", "FLIGHT_THUMBS", "FLIGHT_EVERY", "FLUSH_SPAN", "FLUSH_UPLOAD", "FOG_CULL", "FOLIAGE_SHADOW_CULL", "FOLIAGE_SHADOW_VRS", "FOV", "FOV_PATCH", "FG_HUDLESS_SHOW", "FG_MULT", "FPS60", "FPS_LIMIT", "FRAMEGEN", "FRAMEGEN_MULTIPLIER", "FREEZE_IDLE", "FREE_CORES",
-    "FULLSCREEN", "FXAA", "GAME_ASPECT", "GAME_RES", "GPA", "GPA_EMPTY", "GPA_TWIN", "GPA_TWIN_MAX_KB", "GPL", "GPL_DRAW_BUILD", "GPL_FEEDBACK", "PIPE_AHEAD", "PIPE_FAST_WORKERS", "GPU", "GPU_INDEX", "GPU_PASSES", "GPU_NAME", "HDR", "HDR_BLOWOUT", "HDR_CONTRAST",
+    "FULLSCREEN", "FXAA", "GAME_ASPECT", "GAME_RES", "GPA", "GPA_EMPTY", "GPA_TWIN", "GPA_TWIN_MAX_KB", "GPL", "GPL_DRAW_BUILD", "GPL_FEEDBACK", "PIPE_AHEAD", "PIPE_FAST_WORKERS", "PIPE_LINK_DRAW_MS", "GPU", "GPU_INDEX", "GPU_PASSES", "GPU_NAME", "HDR", "HDR_BLOWOUT", "HDR_CONTRAST",
     "HDR_EXPOSURE", "HDR_FLARE", "HDR_GAMMA", "HDR_GAME_NITS", "HDR_GRADE", "HDR_HIGHLIGHT_SAT", "HDR_HIGHLIGHTS", "HDR_HUE",
     "HDR_LIVE",
     "HDR_PEAK_NITS", "HDR_SATURATION", "HDR_SHADOWS", "HDR_TONEMAP", "HDR_UI_NITS", "HIGHFPS_FIX", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",
@@ -114,7 +114,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"POOL_CREATE_MS", "performance"}, {"POOL_LOAD_BACKLOG", "performance"}, {"POOL_LOAD_MS", "performance"},
     {"TIMER_1MS", "performance"}, {"PIPE_WAIT", "performance"}, {"PIPE_SKIP", "performance"}, {"ONESHOT_BUDGET", "performance"},
     {"CACHE_DIE", "performance"}, {"ONE_PER_CORE", "performance"},
-    {"LIB_PREBUILD", "performance"}, {"LIB_PREBUILD_THREADS", "performance"}, {"LIB_WARM", "performance"}, {"PIPE_LINK_MS", "performance"}, {"PIPE_AHEAD", "performance"}, {"PIPE_FAST_WORKERS", "performance"}, {"GPL_FEEDBACK", "performance"}, {"FRAME_HOLD_MS", "performance"}, {"PACE_SMOOTH", "performance"}, {"PIPE_PREBUILD", "performance"},
+    {"LIB_PREBUILD", "performance"}, {"LIB_PREBUILD_THREADS", "performance"}, {"LIB_WARM", "performance"}, {"PIPE_LINK_MS", "performance"}, {"PIPE_LINK_DRAW_MS", "performance"}, {"PIPE_AHEAD", "performance"}, {"PIPE_FAST_WORKERS", "performance"}, {"GPL_FEEDBACK", "performance"}, {"FRAME_HOLD_MS", "performance"}, {"PACE_SMOOTH", "performance"}, {"PIPE_PREBUILD", "performance"},
     {"COMPUTE_KEEP", "performance"},
     {"PREWARM_XLATE", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"},
     {"TEX_ALIAS", "performance"}, {"TEX_DISUSE", "performance"}, {"TEX_GEN_UNDO", "performance"}, {"TEX_REUSE", "performance"}, {"TEX_VRAM_PRESSURE", "performance"}, {"TEX_PROC_COMMIT_MB", "performance"}, {"ASTC_BC", "performance"}, {"LOD_GUARD", "performance"}, {"FIX_C0", "performance"}, {"FIX_ZERO", "performance"},
@@ -218,6 +218,7 @@ static const CfgMeta metas[] = {
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "any", "strict|any|fullscreen", RESTART},
     {"PIPE_LINK_MS", "6", "0..100", RESTART},   // vk_exec_draw.c link_budget
+    {"PIPE_LINK_DRAW_MS", "3", "1..50", RESTART},   // vk_exec_draw.c link_draw_ms
     {"PIPE_AHEAD", "1", "0|1", RESTART},        // vk_exec.c vk_exec_ahead, vk_pipeline.c vk_pipeline_hint
     {"GPL_FEEDBACK", "1", "0|1", RESTART},      // vk_pipeline.c gpl_feedback
     {"PIPE_FAST_WORKERS", "1", "0|1", RESTART}, // vk_pipeline.c lib_worker, fast_take

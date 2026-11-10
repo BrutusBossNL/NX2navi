@@ -3317,7 +3317,15 @@ static int pipe_skip_mode(void) {
 // cold it runs out after a few draws and the rest are skipped as before, so a burst of cold pipelines costs a frame
 // this much and no more. Measured on an RX 7900 XT, first walk through a village with no pipeline recorded: 2,349
 // draws skipped without the budget, with the libraries warm in both runs.
-#define LINK_DRAW_MS 3u
+static uint32_t link_draw_ms(void) {
+    static int ms = -1;
+    if (ms < 0) {
+        long long v = cfg_int("NX2NAVI_PIPE_LINK_DRAW_MS");
+        ms = v < 1 ? 1 : v > 50 ? 50 : (int)v;
+    }
+    return (uint32_t)ms;
+}
+#define LINK_DRAW_MS link_draw_ms()
 // How long a full-screen draw waits on for its pipeline once its frame budget is spent and the previous picture
 // cannot be held any longer (prepare_draw_ex): the longest optimised build of such a pipeline measured was 194 ms.
 #define FULLSCREEN_LAST_MS 500u
@@ -3327,7 +3335,8 @@ static uint64_t *link_budget(void) {
         long long ms = cfg_int("NX2NAVI_PIPE_LINK_MS");
         per_frame = (uint64_t)(ms < 0 ? 0 : ms > 100 ? 100 : ms) * 1000000ull;
         rt_log("vk_exec: draws wait up to %llu ms a frame in all for the fast link of a missing pipeline "
-               "(NX2NAVI_PIPE_LINK_MS)", (unsigned long long)(per_frame / 1000000));
+               "(NX2NAVI_PIPE_LINK_MS), %u ms at most each (NX2NAVI_PIPE_LINK_DRAW_MS)",
+               (unsigned long long)(per_frame / 1000000), LINK_DRAW_MS);
     }
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (f != frame) frame = f, left = per_frame;
