@@ -114,6 +114,15 @@ AMD FSR 3.1 loads AMD's `amd_fidelityfx_vk.dll`, which only the Windows build ca
 FSR 3.1 upscaling nor FSR 3.1 frame generation, and `taa = fsr3` or `framegen = fsr3` in `nx2navi.ini` leave the
 game's own scaling and swapchain as they are (the log says so).
 
+NVIDIA DLSS (RTX cards) needs the driver's own `libnvidia-ngx.so.1` on the library path (the proprietary driver's
+utilities package, `nvidia-utils` on Arch) and NVIDIA's DLSS library `libnvidia-ngx-dlss.so.<version>` beside
+`ocarina`. The AppImage's kit has the library in `bin/` with `libnvidia-ngx-dlss-NOTICE.txt`, which names its licence,
+and the build copies both beside `ocarina` (`tools/make_appimage.py --no-dlss` leaves it out). From a source checkout,
+or to use another DLSS version, put the library there yourself: NVIDIA publishes it as
+`lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.<version>` in [its DLSS repository](https://github.com/NVIDIA/DLSS), tagged
+`v<version>`, and `tools/dlss_pin.py` names the version the kit carries. Later builds keep a library they did not
+place. Without it DLSS does nothing on Linux.
+
 `tools/make_appimage.py` packs this kit into one `NX2navi-Linux-<version>-x86_64.AppImage` with its own Python, for
 players without a source checkout: it checks for the packages above, installs zbic with pip on its first run, picks
 `--jobs` from the memory, builds into `~/Games/Ocarina` (or the folder given after the dump) and writes `play.sh`
@@ -138,7 +147,8 @@ beside the game.
   `py -I tools\make_game.py --rebuild --out "C:\Games\Ocarina"` to draw them again (it skips everything else).
 - The build copies NVIDIA's DLSS library `nvngx_dlss.dll` (with `nvngx_dlss-NOTICE.txt`, which names its licence)
   and FSR 3.1's `amd_fidelityfx_vk.dll` beside `ocarina.exe` from the kit's `bin\`. To use another DLSS version, put
-  your own `nvngx_dlss.dll` there: later builds keep it.
+  your own `nvngx_dlss.dll` there: later builds keep it. On Linux the library is `libnvidia-ngx-dlss.so.<version>`
+  (see "Linux").
 - A kit with `bin\dlssg\` (made with `tools/make_kit.py --dlssg`) also brings DLSS Frame Generation on GeForce RTX 40
   and 50 cards: the build copies `nx2navi_dlssg.dll`, NVIDIA Streamline's runtime, `nvngx_dlssg.dll` and their licence
   texts beside `ocarina.exe`, and Frame generation in the Screen menu then offers DLSS too.
