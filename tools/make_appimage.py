@@ -5,9 +5,12 @@ player's PC from their own dump with tools/make_game.py, as NX2navi-Setup.exe do
 
 The AppImage holds no game files: the kit's tools/, recomp/, runtime/ and docs, the shader translator built by
 tools/build_xlate.py (bin/nx2navi_xlate), the pinned Vulkan Memory Allocator header, and a relocatable CPython 3.14
-(python-build-standalone, as `uv python install 3.14` puts in ~/.local/share/uv/python) with numpy, lz4, zstandard and
-fonttools. zbic, the GPL package that unpacks the game's program files, is not bundled: the AppImage installs it with
-pip into ~/.local/share/nx2navi/pydeps the first time it runs, as the Windows launcher downloads it.
+(python-build-standalone, as `uv python install 3.14` puts in ~/.local/share/uv/python) with numpy, lz4, zstandard,
+fonttools and pillow, and with --prompt-art the button art make_game.py's prompts step draws from (as make_kit.py
+--prompt-art: the pictures tools/prompt_art.py art_files names, into the kit's prompt-art folder; without it that step
+is skipped and the game keeps the Switch prompts). zbic, the GPL package that unpacks the game's program files, is not
+bundled: the AppImage installs it with pip into ~/.local/share/nx2navi/pydeps the first time it runs, as the Windows
+launcher downloads it.
 
 The compiler and the libraries come from the system (README-BuildKit.md, "Linux"): the AppImage checks for clang,
 clang++, lld and the headers before it starts, and names the packages for Arch, Fedora and Debian/Ubuntu.
@@ -24,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 KIT_DIRS = ('recomp', 'runtime')
 KIT_FILES = ('VERSION', 'LICENSE', 'LICENSE-ADDITIONS', 'THIRD_PARTY_NOTICES.md', 'nx2navi.ini.example')
 TOOLS_SKIP = ('vendor', 'xlate', '__pycache__')   # the translator ships built (bin/); its sources stay out
-PACKAGES = ('numpy==2.5.4', 'lz4==4.4.5', 'zstandard==0.25.0', 'fonttools==4.68.0')
+PACKAGES = ('numpy==2.5.4', 'lz4==4.4.5', 'zstandard==0.25.0', 'fonttools==4.68.0', 'pillow==12.3.0')
 
 APPRUN = r'''#!/bin/bash
 # NX2navi build kit for Linux: builds Ocarina of Time (Switch 2, game 1.1.1) from the player's own dump.
@@ -132,6 +135,9 @@ def main():
                     help='a relocatable CPython 3.14 folder (python-build-standalone, ~/.local/share/uv/python/cpython-3.14*)')
     ap.add_argument('--appimagetool', type=Path, required=True, help='appimagetool-x86_64.AppImage')
     ap.add_argument('--out', type=Path, default=ROOT / 'dist', help='where the AppImage goes (default dist/)')
+    ap.add_argument('--prompt-art', type=Path, nargs='+', metavar='FOLDER',
+                    help='folders holding XGamepad, P5Gamepad and Keyboard_Mouse (or those folders): the button art, as '
+                         'make_kit.py --prompt-art takes it (a release zip\'s prompt-art folder does too)')
     a = ap.parse_args()
 
     version = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
@@ -160,6 +166,10 @@ def main():
         shutil.copy2(xlate / f, kit / 'bin' / f)
     (kit / 'toolchain' / 'vma').mkdir(parents=True)
     shutil.copy2(ROOT / 'toolchain' / 'vma' / 'vk_mem_alloc.h', kit / 'toolchain' / 'vma' / 'vk_mem_alloc.h')
+    if a.prompt_art:
+        import prompt_art
+        n, size = prompt_art.copy_art(a.prompt_art, kit / prompt_art.FOLDER)
+        print(f'button art: {n} files, {size / 1e6:.1f} MB')
 
     py = app / 'usr' / 'python'
     shutil.copytree(a.python, py, symlinks=True)
