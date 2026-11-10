@@ -131,7 +131,12 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   ring of Vulkan `{x, y, z}` records filled on the GPU.
 - Pipelines: `VK_EXT_graphics_pipeline_library` where the driver has it: stage libraries compiled ahead, a fast link
   at a new state, an optimised pipeline replacing it from a background thread. A draw whose pipeline is not ready is
-  skipped when one of its pass's targets was rendered in the previous frame, and waits otherwise. Three things keep
+  skipped when its pass is one the game renders frame after frame: one of its targets was rendered in the last few
+  frames, or in eight frames or more at any time, which keeps the first frame after a loading screen from reading as
+  all new (`runtime/vk_target_frames.h`). A draw into a target rendered for the first time, and a full-screen draw,
+  wait instead, from one pool of 50 ms a presented frame (`pipe_frame_wait_ms`; `runtime/vk_exec_draw.c`
+  `prepare_draw_ex`, `frame_wait`); what is not ready when the pool is spent is skipped and built on a worker, so no
+  frame waits for pipelines much longer than that. Three things keep
   that short on a first visit (`runtime/vk_pipeline.c`): a pipeline whose fragment shader reads a target of its own
   pass is fast-linked like any other, the feedback loop flags being part of the fragment output library alone
   (`gpl_feedback`); the library workers also link the pipelines of skipped draws, so a burst of new materials is

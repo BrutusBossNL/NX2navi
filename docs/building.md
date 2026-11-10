@@ -322,6 +322,12 @@ A change to what the library warm logs when the driver's cache of stage librarie
 `runtime/vk_pipeline.c` `lw_main`) passes `python tests\warm_hint_check.py`, which builds the header alone and checks
 the added text by GPU vendor and by why the cache was cold. No game files.
 
+A change to which render passes count as drawn frame after frame (`runtime/vk_target_frames.h`: a draw into one is
+skipped while its pipeline builds, a draw into any other waits) passes `python tests\target_frames_check.py`, which
+builds the header alone and replays an area change after a loading screen from a player's log: the scene, probe and
+half-resolution passes are per-frame again at once, a lookup table, a volume's slices and an icon capture still wait,
+and an image taken over by another texture starts without the history of the one before. No GPU, no game files.
+
 The lifter (`recomp/`) and the CPU headers (`runtime/cpu.h`, `runtime/simd.h`) are checked against Unicorn. Every lifter
 change passes these, all run with `.venv`:
 

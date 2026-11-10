@@ -48,10 +48,11 @@ const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t
 // NULL returned with *pending = 1 until it is ready. A failed translation stays failed (*pending = 0).
 const GfxShader *gfx_shader_get_async(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
                                       const GfxShaderAnswers *a, int *pending);
-// As gfx_shader_get_async, but a shader queued for translation is moved to the front of the queue and waited for.
-// NULL when the translation failed.
+// As gfx_shader_get_async, but a shader queued for translation is moved to the front of the queue and waited for,
+// wait_ms at most (UINT32_MAX: until it is done). NULL when the translation failed, or with *pending = 1 when it was
+// still running at the end of the wait: it stays at the front of the queue.
 const GfxShader *gfx_shader_await(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
-                                  const GfxShaderAnswers *a);
+                                  const GfxShaderAnswers *a, uint32_t wait_ms, int *pending);
 uint64_t gfx_shader_async_done(void);                      // translations finished by the background worker
 void gfx_shader_counts(uint64_t *keys, uint64_t *translated);   // distinct keys in memory, translations done (NX2NAVI_TRACE=perf)
 void gfx_shader_disk_counts(uint64_t *sync, uint64_t *sync_ns, uint64_t *bg);   // disk cache reads on the render

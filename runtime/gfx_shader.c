@@ -2211,24 +2211,31 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
 }
 
 const GfxShader *gfx_shader_await(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
-                                  const GfxShaderAnswers *a) {
-    int pending;
+                                  const GfxShaderAnswers *a, uint32_t wait_ms, int *pending) {
     uint8_t ctl2[CONTROL_SIZE];
     control = nvn2_control(control, ctl2);
-    const GfxShader *s = gfx_shader_get_async(stage, control, code, code_size, a, &pending);
+    const GfxShader *s = gfx_shader_get_async(stage, control, code, code_size, a, pending);
     Req r;
-    if (!pending || !req_init(&r, stage, control, code, code_size, NULL, a)) return s;
+    if (!*pending) return s;
+    *pending = 0;
+    if (!req_init(&r, stage, control, code, code_size, NULL, a)) return s;
     uint64_t p0 = perf_begin();   // the wait counts as the render thread's translation time
+    uint64_t end = wait_ms == UINT32_MAX ? 0 : plat_now_ms() + wait_ms, now = 0;
     plat_mutex_lock(&X.lock);
     to_front(&X.lhead, &X.ltail, r.key);                   // queued: to the front, a worker takes it next
     to_front(&X.head, &X.tail, r.key);
     XWait *w;
-    while ((w = *wait_slot(r.key)) && !w->failed) plat_cond_wait(&X.done, &X.lock);
+    while ((w = *wait_slot(r.key)) && !w->failed && (!end || (now = plat_now_ms()) < end)) {
+        if (end) plat_cond_wait_ms(&X.done, &X.lock, (uint32_t)(end - now));
+        else plat_cond_wait(&X.done, &X.lock);
+    }
+    int failed = w && w->failed;
     plat_mutex_unlock(&X.lock);
     perf_end(PERF_XLATE, p0);
-    if (w) return NULL;                                    // failed: logged by the worker
-    s = gfx_shader_get_async(stage, control, code, code_size, a, &pending);
-    return pending ? NULL : s;
+    if (failed) return NULL;                               // logged by the worker
+    if (w) return *pending = 1, NULL;                      // the wait ended first
+    s = gfx_shader_get_async(stage, control, code, code_size, a, pending);
+    return *pending ? NULL : s;
 }
 
 uint64_t gfx_shader_async_done(void) { return (uint64_t)n_async; }

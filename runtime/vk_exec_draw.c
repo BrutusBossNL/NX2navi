@@ -43,10 +43,19 @@
 #define NVN_STAGE_CS 5
 #define NVN_STAGE_TASK 6   // NVN2
 #define NVN_STAGE_MESH 7
-// prepare_draw: how long a one-shot draw waits for its pipeline before it is skipped (NX2NAVI_ONESHOT_WAIT_MS, default
-// 30000). Such a draw renders into a target the previous frame did not (a volume, a LUT, a target made new at an area
-// change); skipped, the target can stay empty for the session, so the default waits. A lower value trades that risk for
-// a frame that never stalls longer than the value on a first-time pipeline.
+// prepare_draw: how long a one-shot draw waits for its shaders and pipeline before it is skipped. Such a draw renders
+// into a target that is neither recent nor steady (vk_target_frames.h: a volume, a lookup table, an icon, a target
+// made new at an area change); skipped, a target the game draws once stays as it was.
+// NX2NAVI_ONESHOT_BUDGET (default 1): the one-shot draws of a presented frame wait from that frame's wait pool
+// (frame_wait, shared with the full-screen draws), a mesh draw MESH_WAIT_MS at most. Until 0.7.1 each waited up to
+// NX2NAVI_ONESHOT_WAIT_MS (30 s) on the replay thread, which is what =0 still does: after a scene load every pass was
+// new or not recent, so the first frame waited for one pipeline after another, and for the whole compile of each mesh
+// pipeline (0.2 to 1.3 s cold): 5-14 s on an RTX 4080 SUPER with no pipeline recorded, and frames of 0.7 to 1 s at
+// area changes of a played install (vk_target_frames.h "Steady targets"), while the pipeline workers sat idle. A
+// draw skipped at the end of its wait comes back the next frame its target is drawn, when the target is recent and
+// the pipeline is built on a worker like any other; a target drawn only once whose pipeline took longer than the pool
+// stays as it was until the game draws it again. With the stage libraries in the driver's cache a fast link takes
+// 2 to 6 ms, so the pool covers the lookup tables of a load several times over.
 static uint32_t oneshot_wait_ms(void) {
     static int64_t ms = -1;
     if (ms < 0) {
@@ -58,31 +67,17 @@ static uint32_t oneshot_wait_ms(void) {
     return (uint32_t)ms;
 }
 #define ONESHOT_WAIT_MS oneshot_wait_ms()
-// NX2NAVI_ONESHOT_BUDGET=1: one-shot draws wait for their pipelines from a budget per presented frame instead of up to
-// ONESHOT_WAIT_MS each (oneshot_budget): one budget for passes of ONESHOT_LARGE_PX pixels or more (the scene, its
-// half-resolution buffers, shadow maps) and one for smaller passes (LUTs, icon captures, the smallest bloom levels).
-// After a scene load every pass is new, so every draw of the first frame counts as one-shot, and the frame waited for
-// one cold pipeline after another, 300-1200 ms each: 5-14 s on an RTX 4080 SUPER while the workers sat idle. A draw
-// skipped for the budget comes back next frame, when its pass is recent and its pipeline is built on a worker like any
-// other; a target drawn only once (a LUT baked at load) stays as it was until the game draws it again. Off by default
-// until play shows no target left empty that way.
-#define ONESHOT_LARGE_PX 400000u
-#define ONESHOT_BUDGET_LARGE_NS 100000000ull
-#define ONESHOT_BUDGET_SMALL_NS 300000000ull
+// A mesh pipeline has no stage libraries and so no fast link: the wait is for its whole build, a few milliseconds
+// when the pipeline cache holds it and 200 ms or more when it does not. A longer wait only finds out which.
+#define MESH_WAIT_MS 8u
 static int oneshot_budget_on(void) {
     static int on = -1;
     if (on < 0) {
-        on = rt_knob("ONESHOT_BUDGET", "0") == 1;
-        if (on) rt_log("vk_exec: one-shot draws wait for their pipelines from a per-frame budget (NX2NAVI_ONESHOT_BUDGET=1)");
+        on = rt_knob("ONESHOT_BUDGET", "1") == 1;
+        if (!on) rt_log("vk_exec: a one-shot draw waits up to %u ms for its shaders and pipeline, outside the frame's wait "
+                        "pool (NX2NAVI_ONESHOT_BUDGET=0)", ONESHOT_WAIT_MS);
     }
     return on;
-}
-// The wait budget left to this frame's one-shot draws (prepare_draw_ex), by pass size, reset at each presented frame.
-static uint64_t *oneshot_budget(int large) {
-    static uint64_t frame = ~0ull, left[2];
-    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-    if (f != frame) frame = f, left[0] = ONESHOT_BUDGET_SMALL_NS, left[1] = ONESHOT_BUDGET_LARGE_NS;
-    return &left[large != 0];
 }
 
 enum { W_PROGRAM, W_SHADER, W_PIPELINE, W_NO_VS, W_INDEX, W_UB, W_BIND, W_SSBO_ALIGN, W_SSBO_SLOT, W_RESTART, W_INDIRECT, W_MESH, W_COUNT };
@@ -945,11 +940,12 @@ static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, G
 }
 
 // *present: the program has this stage. Returns NULL when it has not or the translation failed. pending (graphics
-// stages, vk_pipeline_async_on): a shader not translated yet is queued and NULL returned with *pending = 1. await: a
-// shader queued earlier is waited for (gfx_shader_await) instead.
+// stages, vk_pipeline_async_on): a shader not translated yet is queued and NULL returned with *pending = 1. await_ms:
+// a shader queued earlier is waited for instead, that long at most (gfx_shader_await; UINT32_MAX: until it is done),
+// and *pending = 1 says the wait ended first.
 static int sf_mvprev;   // shader_for asks for the vertex shader's last-frame variant (per-object motion)
 
-static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pending, int await) {
+static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pending, uint32_t await_ms) {
     const uint8_t *ctl, *code;
     uint32_t len;
     *present = 0;
@@ -977,7 +973,9 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     }
     int gs = st == NVN_STAGE_VS ? GFX_STAGE_VS : st == NVN_STAGE_FS ? GFX_STAGE_FS : st == NVN_STAGE_TASK ? GFX_STAGE_TS
            : st == NVN_STAGE_MESH ? GFX_STAGE_MS : GFX_STAGE_CS;
-    const GfxShader *s = await ? gfx_shader_await(gs, ctl, code, len, &a)
+    int late = 0;
+    if (await_ms && !pending) pending = &late;
+    const GfxShader *s = await_ms ? gfx_shader_await(gs, ctl, code, len, &a, await_ms, pending)
                        : pending && (vk_pipeline_async_on() || a.mvprev) ? gfx_shader_get_async(gs, ctl, code, len, &a, pending)
                                                            : gfx_shader_get(gs, ctl, code, len, NULL, &a);
     if (pending && *pending) return NULL;
@@ -3341,6 +3339,61 @@ static int pipe_skip_mode(void) {
 // cold it runs out after a few draws and the rest are skipped as before, so a burst of cold pipelines costs a frame
 // this much and no more. Measured on an RX 7900 XT, first walk through a village with no pipeline recorded: 2,349
 // draws skipped without the budget, with the libraries warm in both runs.
+// NX2NAVI_PIPE_FRAME_WAIT_MS (default 50; 0 to 500): the wait pool of one presented frame. Its full-screen draws and
+// its one-shot draws (NX2NAVI_ONESHOT_BUDGET) wait for their shaders and pipelines from it, each for what the ones
+// before left, and are skipped once it is spent, so the pipelines of one frame hold the replay thread this long in
+// all and no longer (beside the fast links' own small budget, link_budget, and FULLSCREEN_LAST_MS).
+static uint64_t *frame_wait(void) {
+    static uint64_t frame = ~0ull, left, per_frame = ~0ull;
+    if (per_frame == ~0ull) {
+        long long ms = cfg_int("NX2NAVI_PIPE_FRAME_WAIT_MS");
+        per_frame = (uint64_t)(ms < 0 ? 0 : ms > 500 ? 500 : ms) * 1000000ull;
+        rt_log("vk_exec: the full-screen and one-shot draws of a frame wait up to %llu ms in all for their shaders and "
+               "pipelines (NX2NAVI_PIPE_FRAME_WAIT_MS), then are skipped while a worker builds them",
+               (unsigned long long)(per_frame / 1000000));
+    }
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != frame) frame = f, left = per_frame;
+    return &left;
+}
+
+// The milliseconds of pool not used up since t0, when the caller began to draw on it; UINT32_MAX without a pool.
+static uint32_t pool_ms(const uint64_t *pool, uint64_t t0) {
+    if (!pool) return UINT32_MAX;
+    uint64_t spent = kern_now_ns() - t0;
+    return spent < *pool ? (uint32_t)((*pool - spent) / 1000000) : 0;
+}
+
+static void pool_charge(uint64_t *pool, uint64_t t0) {
+    if (!pool) return;
+    uint64_t spent = kern_now_ns() - t0;
+    *pool = spent < *pool ? *pool - spent : 0;
+}
+
+// What a one-shot draw may wait for its pipeline from pool.
+static uint32_t oneshot_ms(const uint64_t *pool, int mesh) {
+    uint32_t ms = (uint32_t)(*pool / 1000000);
+    return mesh && ms > MESH_WAIT_MS ? MESH_WAIT_MS : ms;
+}
+
+// ---- wait accounting: what the replay thread spent on draws that found their pipeline or a shader missing
+// Counted from the miss to the draw's bind or skip, the look-ahead scan included, by the kind of wait the draw was
+// allowed; left: the draws skipped at the end of it. draw_stats_tick logs the sums with the skipped draws, so a
+// session's log says how much time the pipelines cost on this thread and which rule spent it.
+enum { WK_LINK, WK_FULL, WK_LAST, WK_ONESHOT, WK_ONESHOT_MESH, WK_SHADER, WK_N };
+static const char *const wk_names[WK_N] = {"a fast link", "full-screen", "full-screen with no picture to hold",
+                                           "one-shot", "one-shot mesh", "one-shot, for a shader"};
+static struct { uint64_t n[WK_N], ns[WK_N], max_ns[WK_N], left[WK_N], frame_ns, frame_max_ns, frame; } WS;
+
+static void wait_note(int kind, uint64_t t0, int left) {
+    uint64_t ns = kern_now_ns() - t0, f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    WS.n[kind]++, WS.ns[kind] += ns, WS.left[kind] += left != 0;
+    if (ns > WS.max_ns[kind]) WS.max_ns[kind] = ns;
+    if (f != WS.frame) WS.frame = f, WS.frame_ns = 0;
+    WS.frame_ns += ns;
+    if (WS.frame_ns > WS.frame_max_ns) WS.frame_max_ns = WS.frame_ns;
+}
+
 static uint32_t link_draw_ms(void) {
     static int ms = -1;
     if (ms < 0) {
@@ -3350,9 +3403,12 @@ static uint32_t link_draw_ms(void) {
     return (uint32_t)ms;
 }
 #define LINK_DRAW_MS link_draw_ms()
-// How long a full-screen draw waits on for its pipeline once its frame budget is spent and the previous picture
-// cannot be held any longer (prepare_draw_ex): the longest optimised build of such a pipeline measured was 194 ms.
-#define FULLSCREEN_LAST_MS 500u
+// How long a full-screen draw waits on for its pipeline once the frame's wait pool is spent and the previous picture
+// cannot be held any longer (prepare_draw_ex). Every such pipeline has a fast link (vk_pipeline.c gpl_feedback), so
+// the wait is for stage libraries: a few milliseconds from the driver's cache, and in the one case a player's session
+// shows the draw had its pipeline 18 ms into this wait. It was 500 ms while a pipeline with a feedback loop waited
+// for its whole optimised build; with the pool before it, a frame now waits under 100 ms for pipelines in all.
+#define FULLSCREEN_LAST_MS 40u
 static uint64_t *link_budget(void) {
     static uint64_t frame = ~0ull, left, per_frame = ~0ull;
     if (per_frame == ~0ull) {
@@ -3438,6 +3494,25 @@ static void draw_stats_tick(void) {
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (!DRS.frame) DRS.frame = f;
     if (f - DRS.frame < DRAW_STATS_FRAMES) return;
+    uint64_t waits = 0, wait_ns = 0;
+    for (int k = 0; k < WK_N; k++) waits += WS.n[k], wait_ns += WS.ns[k];
+    static uint64_t steady_logged;
+    if (waits || vk_exec_steady_passes != steady_logged) {
+        char line[900];
+        int o = snprintf(line, sizeof line, "vk_exec: over %llu frames %llu draws found a shader or pipeline missing and "
+                         "held the replay thread %.1f ms in all, %.1f ms in the worst frame; by the wait they were allowed:",
+                         (unsigned long long)(f - DRS.frame), (unsigned long long)waits, wait_ns / 1e6, WS.frame_max_ns / 1e6);
+        for (int k = 0; k < WK_N && o < (int)sizeof line - 160; k++)
+            if (WS.n[k])
+                o += snprintf(line + o, sizeof line - o, " %s %llu (%.1f ms, longest %.1f ms, %llu skipped at its end);",
+                              wk_names[k], (unsigned long long)WS.n[k], WS.ns[k] / 1e6, WS.max_ns[k] / 1e6,
+                              (unsigned long long)WS.left[k]);
+        snprintf(line + o, sizeof line - o, " %llu lookups found only steady targets and skipped a draw that would have "
+                 "waited as one-shot", (unsigned long long)(vk_exec_steady_passes - steady_logged));
+        rt_log("%s", line);
+        steady_logged = vk_exec_steady_passes;
+        memset(&WS, 0, sizeof WS);
+    }
     for (int m = 0; m < 2; m++) {
         uint64_t any = 0;
         for (int k = 0; k < SK_COUNT; k++) any += DRS.skipped[m][k];
@@ -3582,9 +3657,17 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         if (!(oneshot = !vk_exec_targets_recent(ex, skip >= 1)))   // skipped until ready
             return perf_count(PERF_CNT_SHADER_SKIP), draw_skipped(ex, mesh, SK_SHADER_PENDING);
         perf_count(PERF_CNT_ONESHOT_WAIT);
-        if (vs_wait) vs = shader_for(ex, vst, &has_vs, NULL, 1);
-        if (ts_wait) ts = shader_for(ex, NVN_STAGE_TASK, &has_ts, NULL, 1);
-        if (fs_wait) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, NULL, 1);
+        // from the frame's wait pool (NX2NAVI_ONESHOT_BUDGET=0: until each is translated); a shader the pool does not
+        // reach stays at the front of the translators' queue, and the draw is skipped like a per-frame one
+        uint64_t *pool = oneshot_budget_on() ? frame_wait() : NULL, x0 = kern_now_ns();
+        uint32_t ms;
+        if (vs_wait && (ms = pool_ms(pool, x0))) vs = shader_for(ex, vst, &has_vs, &vs_wait, ms);
+        if (ts_wait && (ms = pool_ms(pool, x0))) ts = shader_for(ex, NVN_STAGE_TASK, &has_ts, &ts_wait, ms);
+        if (fs_wait && (ms = pool_ms(pool, x0))) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, &fs_wait, ms);
+        pool_charge(pool, x0);
+        wait_note(WK_SHADER, x0, vs_wait || ts_wait || fs_wait);
+        if (vs_wait || ts_wait || fs_wait)
+            return perf_count(PERF_CNT_SHADER_SKIP), draw_skipped(ex, mesh, SK_SHADER_PENDING);
     }
     if (!vs || (has_fs && !fs) || (has_ts && !ts)) return draw_skipped(ex, mesh, SK_SHADER_FAILED);
     if (shader_skipped(vs) || shader_skipped(fs)) return draw_skipped(ex, mesh, SK_POOL_OFF);   // NX2NAVI_SKIP_SHADERS
@@ -3601,29 +3684,25 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     const VkPipeInfo *info = NULL;
     int pending;
     // A draw of at most 6 vertices over half the render area or more (a full-screen triangle or quad, a tile) waits for
-    // its pipeline: skipping it can leave a black tile. The waits share 50 ms per presented frame
-    // (NX2NAVI_PIPE_SKIP=fullscreen skips them instead). A one-shot draw waits without that budget, up to
-    // ONESHOT_WAIT_MS, or from its own per-frame budget with NX2NAVI_ONESHOT_BUDGET=1 (oneshot_budget). Everything else
-    // is skipped while its pipeline is built.
-    static uint64_t wait_frame;
-    static uint64_t wait_left_ns;
+    // its pipeline: skipping it can leave a black tile. Those waits and the one-shot draws' come from the frame's wait
+    // pool (frame_wait; NX2NAVI_PIPE_SKIP=fullscreen skips the full-screen draws instead, and with
+    // NX2NAVI_ONESHOT_BUDGET=0 a one-shot draw waits up to ONESHOT_WAIT_MS outside the pool). Everything else waits
+    // for its fast link from the small budget of link_budget and is skipped while its pipeline is built.
     uint32_t wait_ms = 0;
     uint64_t t0 = 0;
     uint64_t *budget = NULL;   // the per-frame budget a timed wait is charged to
     int linking = 0;           // the wait is the short one for a fast link (link_budget)
-    int large = (uint64_t)ex->pass_w * ex->pass_h >= ONESHOT_LARGE_PX;
+    int fullscreen = 0;        // the wait is a full-screen draw's
     if (oneshot > 0 && oneshot_budget_on()) {
-        budget = oneshot_budget(large);
-        wait_ms = (uint32_t)(*budget / 1000000);
+        budget = frame_wait();
+        wait_ms = oneshot_ms(budget, mesh);
         if (wait_ms) t0 = kern_now_ns();
     } else if (oneshot > 0) {
         wait_ms = ONESHOT_WAIT_MS;
     } else if (skip < 2 && count <= 6 && (uint64_t)sc.extent.width * sc.extent.height * 2 >= (uint64_t)ex->pass_w * ex->pass_h) {
-        uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-        if (f != wait_frame) wait_frame = f, wait_left_ns = 50000000;
-        wait_ms = (uint32_t)(wait_left_ns / 1000000);
+        budget = frame_wait(), fullscreen = 1;
+        wait_ms = (uint32_t)(*budget / 1000000);
         if (wait_ms) t0 = kern_now_ns();
-        budget = &wait_left_ns;
     } else {
         budget = link_budget();
         wait_ms = (uint32_t)(*budget / 1000000);
@@ -3636,7 +3715,8 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     // from the info the cache entry keeps.
     VkPipeline p;
     const char *why = NULL;
-    uint64_t w0 = 0;
+    uint64_t w0 = 0, m0 = 0;   // m0: when the lookup missed (wait_note)
+    int kind = WK_LINK;
     if (pipe_memo_on() && PM.valid && !memcmp(&PM.s, &s, sizeof s)) {
         info = PM.info, pending = 0;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
@@ -3646,6 +3726,8 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         // of the later draws' pipelines build on the workers from here on), inside this draw's wait budget.
         p = vk_pipeline_graphics_async(&s, &info, &pending, 0);
         if (pending) {
+            m0 = kern_now_ns();
+            kind = oneshot > 0 ? (mesh ? WK_ONESHOT_MESH : WK_ONESHOT) : fullscreen ? WK_FULL : WK_LINK;
             if (linking) t0 = kern_now_ns();
             else w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;
             vk_exec_ahead(ex);
@@ -3659,25 +3741,26 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         if (pending && oneshot < 0 && !vk_exec_targets_recent(ex, skip >= 1)) {
             perf_count(PERF_CNT_ONESHOT_WAIT);
             why = "one-shot";
+            kind = mesh ? WK_ONESHOT_MESH : WK_ONESHOT;
             if (!w0) w0 = kern_now_ns();
             if (oneshot_budget_on()) {
-                budget = oneshot_budget(large);
-                uint64_t b0 = kern_now_ns();
-                p = vk_pipeline_graphics_async(&s, &info, &pending, (uint32_t)(*budget / 1000000));
-                uint64_t spent = kern_now_ns() - b0;
-                *budget = spent < *budget ? *budget - spent : 0;
+                uint64_t *pool = frame_wait(), b0 = kern_now_ns();
+                p = vk_pipeline_graphics_async(&s, &info, &pending, oneshot_ms(pool, mesh));
+                pool_charge(pool, b0);
             } else {
                 p = vk_pipeline_graphics_async(&s, &info, &pending, ONESHOT_WAIT_MS);
             }
         }
         // A full-screen draw still pending after its budget: skipped, it leaves the frame black or unlit. While the
         // previous picture can stay on screen in its place (vk_frame_hold_left) that is what happens; once that time
-        // is used up the draw waits on, FULLSCREEN_LAST_MS at most, so that no such frame is shown.
-        if (pending && budget == &wait_left_ns && !vk_frame_hold_left()) {
+        // is used up the draw waits on, FULLSCREEN_LAST_MS at most, before such a frame is shown.
+        if (pending && fullscreen && !vk_frame_hold_left()) {
             why = "full-screen, nothing left to hold the picture";
+            kind = WK_LAST;
             if (!w0) w0 = kern_now_ns();
             p = vk_pipeline_graphics_async(&s, &info, &pending, FULLSCREEN_LAST_MS);
         }
+        if (m0) wait_note(kind, m0, pending), draw_stats_tick();
         PM.valid = !pending && p && info;
         if (PM.valid) PM.s = s, PM.info = info;
     }
