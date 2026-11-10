@@ -1058,8 +1058,27 @@ int vk_texture_commit_low(void) { return __atomic_load_n(&commit_low, __ATOMIC_R
 // content exists only in its image waits GPU_STALE_FRAMES, or GAP_TIMES the longest it stayed released before the game
 // took it back when that is longer. An overwritten entry has no content left to wait for (overwrite_others): it goes
 // with the intact ones, whether or not a descriptor still names it.
-#define STALE_FRAMES 120
-#define GPU_STALE_FRAMES 1800
+//
+// The waits here and DISUSE_FRAMES below are counts of presents, chosen at 60 presents a second: two seconds, thirty,
+// two minutes. The same count is less time at a higher frame rate: at 165 presents a second 1800 of them are 11 s, so
+// a render target the game came back to after 12 s was gone and a texture out of view for 11 s was retired. Each
+// count is therefore taken times the present rate over 60, measured over the last two seconds and never under 1
+// (presents_for): the waits are the same time at any frame rate, and no shorter where frames come slower than 60.
+static uint64_t presents_for(uint64_t at_60) {   // tex_lock held
+    static uint64_t t0, f0;
+    static double times = 1;
+    uint64_t now = plat_now_ns(), f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (!t0) {
+        t0 = now, f0 = f;
+    } else if (now - t0 >= 2000000000ull) {
+        double rate = (double)(f - f0) * 1e9 / (double)(now - t0) / 60.0;
+        times = rate > 1 ? rate : 1;
+        t0 = now, f0 = f;
+    }
+    return (uint64_t)((double)at_60 * times);
+}
+#define STALE_FRAMES presents_for(120)
+#define GPU_STALE_FRAMES presents_for(1800)
 #define GAP_TIMES 8
 static int idle(const Tex *e, uint64_t now) {
     return look_round - e->use_round >= IDLE_ROUNDS && now - e->use_frame >= STALE_FRAMES;
@@ -1074,8 +1093,9 @@ static uint64_t stale_after(const Tex *e) {
 static void drop_stale(uint64_t keep, uint64_t *count) {
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int dropped = 0;
+    const uint64_t stale = STALE_FRAMES;
     for (int any = 0; any < 2; any++)
-        for (Tex *e = rel_head, *next; e && now - e->rel_frame >= STALE_FRAMES; e = next) {   // in release order
+        for (Tex *e = rel_head, *next; e && now - e->rel_frame >= stale; e = next) {   // in release order
             if (dropped == PRESSURE_STEP || rel_bytes <= keep) return;
             next = e->rel_next;
             if (!e->bytes || (!any && !comes_back_intact(e) && !e->overwritten)) continue;
@@ -1171,7 +1191,12 @@ static uint64_t evict_idle(uint64_t want, uint64_t used, uint64_t budget) {   //
 // marks missed. NX2NAVI_TEX_DISUSE=2 retires and never destroys (stand-ins only, nothing freed): it tells the marks and
 // stand-ins from the freeing as the cause of a fault. Only while every module that indexes the pool was marked and two
 // reads arrived: an unmarked shader could sample what the marks call unused.
-#define DISUSE_FRAMES 1800
+// Two minutes, not the thirty seconds it was: a texture out of view that long and then seen again shows its stand-in
+// for the frames until its mark is read, which is a flash of missing ground or a dark object each time the camera
+// turns back, and a batch of such textures gave back 0.4 to 31 MiB in a recorded session. The textures of an area
+// left behind, which are what the memory grows by, still go two minutes after it.
+#define DISUSE_SECONDS 120
+#define DISUSE_FRAMES presents_for(DISUSE_SECONDS * 60)
 #define HOLDS_MAX 65536
 static nvn_hmap holds = {.klen = sizeof(TexKey)};   // value: 1
 static uint32_t marks_reads;
@@ -1240,10 +1265,10 @@ static uint64_t evict_disused(uint64_t want) {
     want -= retiring_bytes;
     Tex *v[EVICT_STEP];
     int nv = 0;
-    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), disuse = DISUSE_FRAMES;
     for (uint32_t i = 0; i < by_key.cap; i++) {   // the EVICT_STEP least recently sampled candidates, oldest first
         Tex *e = by_key.vals[i];
-        if (!e || e->released || e->retiring || !e->bytes || !comes_back_intact(e) || now - e->samp_frame < DISUSE_FRAMES)
+        if (!e || e->released || e->retiring || !e->bytes || !comes_back_intact(e) || now - e->samp_frame < disuse)
             continue;
         int at = nv;
         while (at > 0 && v[at - 1]->samp_frame > e->samp_frame) at--;
@@ -1289,7 +1314,7 @@ static uint64_t evict_disused(uint64_t want) {
         disuse_logs++;
         rt_log("vk: %d textures no shader sampled for %d s or more evicted (%.1f MiB), least recently sampled first; their "
                "images go once the texture pool sets no longer name them, and one sampled again is made again within a "
-               "few frames", n, DISUSE_FRAMES / 60, freed / 1048576.0);
+               "few frames", n, DISUSE_SECONDS, freed / 1048576.0);
     }
     return retiring_bytes;
 }

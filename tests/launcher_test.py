@@ -1425,6 +1425,36 @@ class MakeGameTest(Tmp):
         self.assertIn('stay in use', buf.getvalue())
         self.assertIn('shader cache packed', buf.getvalue())
 
+    def test_carried_update_warms_the_drivers_cache(self):
+        """An update that carries the shaders over runs the game's --warm-shaders, in the game folder; a run that
+        fails is said and does not stop the build, and without a built game or a preparation nothing runs."""
+        calls = []
+        for name, value in (('shader_carry', lambda out: True),
+                            ('shader_run', lambda cmd, cwd=None: calls.append((cmd, cwd)) or self.rc)):
+            self.addCleanup(setattr, self.mg, name, getattr(self.mg, name))
+            setattr(self.mg, name, value)
+        self.rc = 0
+        self.out.mkdir(parents=True, exist_ok=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.mg.step_shaders(self.out, update=True)
+        self.assertEqual(calls, [])                           # no exe, no prepared list
+        (self.out / self.mg.EXE_NAME).write_bytes(b'MZ')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.mg.step_shaders(self.out, update=True)
+        self.assertEqual(calls, [])                           # never prepared: nothing to build again
+        (self.out / 'shader-prepared.bin').write_bytes(bytes(16))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.mg.step_shaders(self.out, update=True)
+        self.assertEqual(calls, [([str(self.out / self.mg.EXE_NAME), '--warm-shaders'], str(self.out))])
+        self.assertIn("driver's cache warm", buf.getvalue())
+        self.rc = 3
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.mg.step_shaders(self.out, update=True)       # no exception: the game warms it itself
+        self.assertIn('did not finish (3)', buf.getvalue())
+        self.assertEqual(len(calls), 2)
+
     def test_romfs_failure_stops_the_build(self):
         ran, lifting, failed = [], threading.Event(), threading.Event()
 

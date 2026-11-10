@@ -1372,30 +1372,12 @@ def shader_carry(out):
     return (out / 'shader-prepared.bin').is_file() and bool(cache_identities(out))
 
 
-def step_shaders(out, update=False):
-    """Every shader of the game files into the game's shader cache and the driver's own cache, before the first start.
-    Its output is read as it comes: the counts nx2navi.exe prints become progress events, the other lines go on to
-    the log, and while nothing moves an event every few seconds keeps saying the step is running and for how long.
-    update: after a kit update the shaders prepared before stay in use and the game translates them again in the
-    background (shader_carry), so the update does not wait the minutes a full preparation takes."""
-    # The game translates with the copy beside it. The compile step refreshes that copy, but a kit that changes only
-    # the translator runs this step again alone (step_key), which would then prepare with the old one. Only a kit that
-    # has one: the compile step, which always runs first, stops a build without it.
-    for d in (KIT / 'bin', KIT / 'build' / 'xlate'):
-        if (d / XLATE_NAME).is_file():
-            note_cache_translator(out)
-            for name in (XLATE_NAME, 'nx2navi_xlate.id'):
-                copy_if_changed(d / name, out / name)
-            break
-    if update and shader_carry(out):
-        say('  the shaders prepared before this update stay in use; the game translates them again in the background')
-        if loose_shaders(out) >= PACK_LOOSE_MIN:
-            pack_shader_cache(out)
-        return
-    cmd = [sys.executable, '-u', str(KIT / 'tools' / 'prepare_shaders.py'), str(out), '--romfs', str(out / 'romfs'),
-           '--exefs', str(out / 'exefs'), '--no-list', '--exe', EXE_NAME]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8',
-                            errors='replace', bufsize=1)
+def shader_run(cmd, cwd=None):
+    """Runs a shader preparation command and returns its exit code. Its output is read as it comes: the counts
+    nx2navi.exe prints become progress events, the other lines go on to the log, and while nothing moves an event
+    every few seconds keeps saying the step is running and for how long."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding='utf-8', errors='replace', bufsize=1)
     t0 = time.monotonic()
     state = {'phase': None, 'done': 0, 'total': 0, 'moved': t0}
     lock = threading.Lock()
@@ -1435,6 +1417,56 @@ def step_shaders(out, update=False):
         proc.stdout.close()
         stop.set()
         beat.join()
+    return rc
+
+
+def warm_driver_cache(out):
+    """After an update that carries the shaders over: every prepared stage library is built into the graphics driver's
+    cache again (`nx2navi.exe --warm-shaders`). It takes seconds while the driver still has them. It takes minutes when
+    the update changed what a library is built with, which gives each one another entry in the driver's cache: without
+    this run every pipeline a draw first needed then compiled in play, which skipped that draw for some frames or made
+    it wait (on an RX 7900 XT 100 to 340 ms a library against 3 ms from the cache, after dynamic vertex input was
+    turned off for that driver). A run that fails is not an error of the build: the game checks the cache at every
+    start and warms it in the background itself (runtime/vk_pipeline.c lw_start)."""
+    exe = out / EXE_NAME
+    if not exe.is_file() or not (out / 'shader-prepared.bin').is_file():
+        return
+    say("  the prepared shaders are built into the graphics driver's cache again")
+    t0 = time.monotonic()
+    try:
+        rc = shader_run([str(exe), '--warm-shaders'], cwd=str(out))
+    except OSError as e:
+        rc = str(e)
+    if rc:
+        say(f'  that did not finish ({rc}); the game does it in the background while it runs')
+    else:
+        say(f"  driver's cache warm in {time.monotonic() - t0:.0f} s")
+
+
+def step_shaders(out, update=False):
+    """Every shader of the game files into the game's shader cache and the driver's own cache, before the first start
+    (shader_run reports its progress).
+    update: after a kit update the shaders prepared before stay in use and the game translates them again in the
+    background (shader_carry), so the update does not wait the minutes a full preparation takes; the driver's cache
+    gets their stage libraries again (warm_driver_cache)."""
+    # The game translates with the copy beside it. The compile step refreshes that copy, but a kit that changes only
+    # the translator runs this step again alone (step_key), which would then prepare with the old one. Only a kit that
+    # has one: the compile step, which always runs first, stops a build without it.
+    for d in (KIT / 'bin', KIT / 'build' / 'xlate'):
+        if (d / XLATE_NAME).is_file():
+            note_cache_translator(out)
+            for name in (XLATE_NAME, 'nx2navi_xlate.id'):
+                copy_if_changed(d / name, out / name)
+            break
+    if update and shader_carry(out):
+        say('  the shaders prepared before this update stay in use; the game translates them again in the background')
+        if loose_shaders(out) >= PACK_LOOSE_MIN:
+            pack_shader_cache(out)
+        warm_driver_cache(out)
+        return
+    cmd = [sys.executable, '-u', str(KIT / 'tools' / 'prepare_shaders.py'), str(out), '--romfs', str(out / 'romfs'),
+           '--exefs', str(out / 'exefs'), '--no-list', '--exe', EXE_NAME]
+    rc = shader_run(cmd)
     if rc:
         fail('preparing the shaders failed (the lines above say why); the game still runs, compiling shaders as it '
              'meets them. Run the build again to retry this step')

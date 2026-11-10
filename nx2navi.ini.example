@@ -71,8 +71,15 @@
 # Draws whose pipeline is still building: default waits on a reserved worker; draw is the previous scheduling.
 # pipe_wait = default
 # Which draws are dropped instead of waiting for their pipeline: strict (only draws into per-frame passes), any (also
-# draws into passes whose target a recent frame rendered) or fullscreen (those and full-screen draws).
-# pipe_skip = fullscreen
+# draws into passes whose target a recent frame rendered; full-screen draws wait, up to 50 ms a frame) or fullscreen
+# (those and full-screen draws: no wait, but a lighting or fog pass that is dropped shows as a black or unlit frame).
+# pipe_skip = any
+# How many milliseconds the draws of one frame may wait, in all, for a missing pipeline to be linked from the shader
+# libraries in the graphics driver's cache before they are dropped (0 to 100; 0: dropped at once, as before).
+# pipe_link_ms = 6
+# The graphics driver's cache of shader libraries is checked at every start and, when it lost them (a driver update,
+# a cache the driver emptied), filled again in the background while the game runs. 0: no check; force: at every start.
+# lib_warm = 1
 # How long (ms) a draw into a target no recent frame rendered waits for a pipeline built for the first time,
 # then is skipped. The default waits, as such a target (a lookup table, a new area's target) can stay empty if
 # skipped; a lower value caps the stall.
