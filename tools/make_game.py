@@ -39,7 +39,8 @@ The list goes to disk every 25 objects while the compile runs, so a compile that
 A kit with lib/libnx2navirt.a built by --make-runtime-lib for the same runtime/ and the same compiler links the
 runtime from it and compiles only the runtime files that include headers written per install. The new ocarina.exe
 replaces the old one only once it links (with lld when the toolchain has it), so a failed build leaves the last good
-one in place. Compiles run on every logical processor, the largest files first. The lifted code is built for this
+one in place. Compiles run on every logical processor, or on as many as the free memory allows (default_jobs; --jobs
+sets the number), the largest files first. The lifted code is built for this
 PC's x86-64 level (cpu_level), with MSYS2 CLANG64's clang when it sits beside the UCRT64 folder and reports the same
 version (fast_clang: the same objects, about a fifth faster).
 
@@ -905,6 +906,32 @@ def earlier_kits():
     except OSError:
         pass
     return sorted(kits)
+
+
+# Peak memory of one compile (tools/build_game.py JOB_MEM: 120 to 180 MiB for a chunk of lifted code, 568 MiB for the
+# largest file), and the share of the free memory the compiles may take in all; the rest stays with the system, the
+# RomFS step beside them and whatever else the player runs.
+JOB_MEM = 768 << 20
+JOB_MEM_SHARE = 0.8
+
+
+def default_jobs(cpus=None, free=None):
+    """(compiles at a time, why) without --jobs: one per logical processor, but no more than JOB_MEM_SHARE of the
+    free memory holds at JOB_MEM each, and at least one. One per processor alone took no account of memory: on a
+    PC with many threads and little free memory the compiles filled it, the largest files first as they start
+    together. cpus, free: the processor count and the free bytes instead of this machine's (tests); without a
+    reading of the free memory (tools/hostmem.py) the processor count alone decides, as before."""
+    cpus = cpus or os.cpu_count() or 4
+    if free is None:
+        try:
+            import hostmem
+            free = hostmem.available_ram()
+        except (ImportError, OSError, AttributeError):
+            free = None
+    if free is None:
+        return cpus, f'{cpus} processors, free memory unknown'
+    by_mem = max(1, int(free * JOB_MEM_SHARE) // JOB_MEM)
+    return min(cpus, by_mem), f'{cpus} processors, {free / 2 ** 30:.1f} GiB of free memory allow {by_mem}'
 
 
 SOURCE_WAIT, SOURCE_PAUSE = 60, 2   # seconds source_size waits for a drive in all, and between two tries
@@ -2028,13 +2055,17 @@ def build_main():
     ap.add_argument('--check', action='store_true', help='only check the game\'s version; builds nothing')
     ap.add_argument('--msys', default=r'C:\msys64\ucrt64',
                     help='MSYS2 UCRT64 folder (default C:\\msys64\\ucrt64; Windows only: Linux takes clang and lld from PATH)')
-    ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4, help='parallel compiles')
+    ap.add_argument('--jobs', type=int,
+                    help='parallel compiles (default: one per processor, fewer when the free memory is short)')
     ap.add_argument('--events', action='store_true', help='machine-readable progress lines on stdout ("@@" + JSON)')
     ap.add_argument('--make-runtime-lib', metavar='DIR', help='build the prebuilt runtime library of a release into DIR')
     ap.add_argument('--obj', help='with --make-runtime-lib: the folder for its objects')
     ap.add_argument('--until', choices=STEPS, help=argparse.SUPPRESS)   # tests: stop after this step
     a = ap.parse_args()
     EVENTS = a.events
+    jobs_why = '--jobs'
+    if not a.jobs or a.jobs < 1:
+        a.jobs, jobs_why = default_jobs()
     if a.make_runtime_lib:
         make_runtime_lib(a.make_runtime_lib, Path(a.msys), a.jobs, a.obj)
         return
@@ -2089,6 +2120,7 @@ def build_main():
     # steps of a build that will reach the compile step (the first step whose key is not current makes the rest run)
     if not WIN and any(state['steps'].get(n) != step_key(n, src.identity, out) for n in STEPS[:STEPS.index('compile') + 1]):
         preflight(msys, a.jobs)
+    say(f'compiles at a time: {a.jobs} ({jobs_why})')
     t0 = time.time()
     romfs_job = None
     runs = {'exefs': lambda: step_exefs(src, out), 'romfs': lambda: step_romfs(src, out, min(a.jobs, 8)),
