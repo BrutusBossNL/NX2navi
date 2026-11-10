@@ -1575,9 +1575,9 @@ static uint32_t *spirv_pool_rebind(const uint32_t *w, uint64_t n) {
 // (a uint per pool slot, vk_exec_draw.c "pool marks") and, after every access chain into a pool texture array, a store
 // of 1 into the slot it indexes. The stores of one warp to one slot are one memory transaction. The replay copies the
 // buffer out and clears it every few submissions; slots marked mean textures sampled. A module that indexes the pool
-// and cannot be marked (SPIR-V other than 1.3, a stage whose stores the device does not allow, no memory) is counted
-// in vk_pool_marks_missed, which keeps vk_texture.c from evicting by disuse: an unmarked shader could sample a texture
-// the marks call unused.
+// and cannot be marked (SPIR-V before 1.3 or after 1.6, a stage whose stores the device does not allow, no memory) is
+// counted in vk_pool_marks_missed, which keeps vk_texture.c from evicting by disuse: an unmarked shader could sample a
+// texture the marks call unused. make_module logs the first few by stage, version, size, hash and reason.
 volatile int32_t vk_pool_marks_missed;
 static int marks_on = -1, marks_vs_ok, marks_fs_ok;
 
@@ -1601,8 +1601,10 @@ int vk_pool_marks_enabled(void) {
 // its depth, sample mask or stencil reference, or already writes memory does not, as early tests would change what it
 // does. The caller passes early_ok only for a pipeline without alpha to coverage, which also drops samples after the
 // shader (ensure_init keeps alpha to coverage out of the dynamic state while marks are on, so a pipeline knows).
-// *status: 1 marked, 0 no pool texture access to mark, -1 one that could not be marked. NULL unless marked.
-static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, uint64_t *out_n, int *status) {
+// *status: 1 marked, 0 no pool texture access to mark, -1 one that could not be marked (*why says what stopped it).
+// NULL unless marked.
+static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, uint64_t *out_n, int *status,
+                                 const char **why) {
     enum { OP_TYPE_RUNTIME_ARRAY = 29, OP_TYPE_STRUCT_ = 30, OP_ACCESS_CHAIN_ = 65, OP_IN_BOUNDS_ACCESS_CHAIN = 66,
            OP_STORE_ = 62, OP_MEMBER_DECORATE_ = 72, OP_DECORATION_GROUP = 73, OP_GROUP_DECORATE = 74,
            OP_GROUP_MEMBER_DECORATE = 75, OP_DECORATE_ID = 332, OP_DECORATE_STRING = 5632, OP_MEMBER_DECORATE_STRING = 5633,
@@ -1610,19 +1612,19 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, ui
            OP_ATOMIC_LAST = 242, OP_KILL = 252, OP_TERMINATE_INVOCATION = 4416, OP_DEMOTE_TO_HELPER = 5380,
            EM_EARLY_FRAGMENT_TESTS = 9, BI_SAMPLE_MASK = 20, BI_FRAG_DEPTH = 22, BI_FRAG_STENCIL_REF = 5014,
            SC_STORAGE_BUFFER = 12, DEC_BLOCK = 2, DEC_ARRAY_STRIDE = 6, DEC_OFFSET_ = 35 };
-    *status = 0;
+    *status = 0, *why = NULL;
     if (n < 5) return NULL;
     uint32_t bound = w[3];
     if (!bound || bound > (1u << 22)) return NULL;
     uint32_t *bind = calloc(bound, sizeof *bind);   // per id: its Binding + 1 when its DescriptorSet is 2, else 0
     uint8_t *set2 = calloc(bound, 1);
-    if (!bind || !set2) return free(bind), free(set2), *status = -1, NULL;
+    if (!bind || !set2) return free(bind), free(set2), *status = -1, *why = "no memory", NULL;
     uint64_t ann_end = 0, fn_start = 0, em_end = 0;   // em_end: past the entry points and execution modes
     uint32_t uint_t = 0, c0 = 0, c1 = 0, ptr_u = 0, fs_entry = 0;
     int vertex_stage = 0, fragment_stage = 0, entries = 0, early = early_ok;
     for (uint64_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
-        if (!l || i + l > n) return free(bind), free(set2), *status = -1, NULL;
+        if (!l || i + l > n) return free(bind), free(set2), *status = -1, *why = "an instruction past the module's end", NULL;
         if (op == SPV_OP_FUNCTION) { fn_start = i; break; }
         if (op == SPV_OP_ENTRY_POINT || op == OP_EXECUTION_MODE || op == OP_EXECUTION_MODE_ID) em_end = i + l;
         if (op == SPV_OP_ENTRY_POINT && l >= 3) {
@@ -1670,22 +1672,32 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, ui
         i += l;
     }
     if (marked || !sites) return free(bind), free(set2), NULL;
-    if (w[1] != 0x00010300 || !ann_end || !fn_start || (vertex_stage && !marks_vs_ok) || (fragment_stage && !marks_fs_ok))
-        return free(bind), free(set2), *status = -1, NULL;
-    early = early && fragment_stage && entries == 1 && em_end && em_end <= ann_end;
-    uint64_t on = n + 3 + 20 + 30 + 9 * sites;   // the mode, decorations, at most 30 words of new types and the variable, 9 a site
+    *why = w[1] < 0x00010300 || w[1] > 0x00010600 ? "a SPIR-V version before 1.3 or after 1.6"
+         : !ann_end || !fn_start              ? "no decorations or no function"
+         : vertex_stage && !marks_vs_ok       ? "the GPU allows no stores in vertex-pipeline shaders"
+         : fragment_stage && !marks_fs_ok     ? "the GPU allows no stores in fragment shaders"
+                                              : NULL;
+    if (*why) return free(bind), free(set2), *status = -1, NULL;
+    early = early && fragment_stage && entries == 1 && em_end && em_end < ann_end;
+    // From SPIR-V 1.4 on an entry point lists every global variable its functions use, not only the inputs and outputs
+    // (the translator's mesh shaders are 1.4): each entry point gets the marks variable, a word more.
+    int iface = w[1] >= 0x00010400;
+    // the mode, a word per entry point, decorations, at most 30 words of new types and the variable, 9 a site
+    uint64_t on = n + 3 + (uint64_t)entries + 20 + 30 + 9 * sites;
     uint32_t *o = malloc(on * 4);
-    if (!o) return free(bind), free(set2), *status = -1, NULL;
+    if (!o) return free(bind), free(set2), *status = -1, *why = "no memory", NULL;
     uint32_t next = bound;
     uint32_t new_uint = uint_t ? 0 : (uint_t = next++), new_c0 = c0 ? 0 : (c0 = next++), new_c1 = c1 ? 0 : (c1 = next++);
     uint32_t rta = next++, st = next++, ptr_st = next++, var = next++, new_ptr_u = ptr_u ? 0 : (ptr_u = next++);
-    uint64_t p = 0;
-    if (early) {
-        memcpy(o, w, em_end * 4), p = em_end;
-        o[p++] = 3u << 16 | OP_EXECUTION_MODE, o[p++] = fs_entry, o[p++] = EM_EARLY_FRAGMENT_TESTS;
-        memcpy(o + p, w + em_end, (ann_end - em_end) * 4), p += ann_end - em_end;
-    } else {
-        memcpy(o, w, ann_end * 4), p = ann_end;
+    uint64_t p = 5;
+    memcpy(o, w, 5 * 4);
+    for (uint64_t i = 5; i < ann_end;) {   // the header up to the annotations' end: entry points widened, the mode added
+        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        if (early && i == em_end) o[p++] = 3u << 16 | OP_EXECUTION_MODE, o[p++] = fs_entry, o[p++] = EM_EARLY_FRAGMENT_TESTS;
+        memcpy(o + p, w + i, l * 4);
+        if (iface && op == SPV_OP_ENTRY_POINT && l >= 3) o[p] = (l + 1) << 16 | op, o[p + l] = var, p++;
+        p += l;
+        i += l;
     }
     o[p++] = 4u << 16 | SPV_OP_DECORATE, o[p++] = rta, o[p++] = DEC_ARRAY_STRIDE, o[p++] = 4;
     o[p++] = 5u << 16 | OP_MEMBER_DECORATE_, o[p++] = st, o[p++] = 0, o[p++] = DEC_OFFSET_, o[p++] = 0;
@@ -1742,7 +1754,8 @@ static int spirv_mark_list_test(const char *list) {
         uint64_t n = (uint64_t)sz / 4, mn = 0;
         uint32_t *pooled = spirv_pool_rebind(w, n);
         int st;
-        uint32_t *m = spirv_pool_mark(pooled ? pooled : w, n, 1, &mn, &st);
+        const char *why;
+        uint32_t *m = spirv_pool_mark(pooled ? pooled : w, n, 1, &mn, &st, &why);
         if (st > 0) {
             marked++;
             if (!plat_file_write_atomic(out, m, (size_t)mn * 4)) {
@@ -1751,6 +1764,7 @@ static int spirv_mark_list_test(const char *list) {
             }
         } else if (st < 0) {
             missed++;
+            printf("spirv: pool marks test: %s not markable: %s\n", in, why);
         } else {
             none++;
         }
@@ -1764,7 +1778,8 @@ static int spirv_mark_list_test(const char *list) {
 
 // early_ok: a fragment shader whose pipeline has no alpha to coverage (spirv_pool_mark)
 static VkShaderModule make_module(const uint32_t *w, uint64_t words, int early_ok) {
-    uint64_t fixed_n = 0;
+    const uint32_t *orig_w = w;   // for the log of a module the marks cannot take
+    uint64_t orig_words = words, fixed_n = 0;
     uint32_t *fixed = spirv_fixup(w, words, &fixed_n);
     if (fixed) w = fixed, words = fixed_n;
     uint32_t *pooled = spirv_pool_rebind(w, words);
@@ -1774,13 +1789,30 @@ static VkShaderModule make_module(const uint32_t *w, uint64_t words, int early_o
         if (vk_pool_marks_enabled()) {
             uint64_t mk_n = 0;
             int st;
-            uint32_t *mk = spirv_pool_mark(w, words, early_ok, &mk_n, &st);
+            const char *why;
+            uint32_t *mk = spirv_pool_mark(w, words, early_ok, &mk_n, &st, &why);
             if (mk) {
                 free(fixed);
                 w = fixed = mk, words = mk_n;
-            } else if (st < 0 && plat_inc32(&vk_pool_marks_missed) == 1) {
-                rt_log("vk_pipeline: a shader that indexes the texture pool could not be marked: textures are not evicted "
-                       "by disuse this run (NX2NAVI_TEX_DISUSE)");
+            } else if (st < 0) {
+                int nth = plat_inc32(&vk_pool_marks_missed);
+                // the hash is FNV-1a of the words make_module got, as vk_dump hashes a shader's SPIR-V; it differs
+                // from the translation's only where the pipeline patched the module first (added vertex outputs)
+                if (nth <= 8) {
+                    uint32_t model = ~0u;
+                    for (uint64_t i = 5; i < words;) {
+                        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+                        if (!l) break;
+                        if (op == SPV_OP_ENTRY_POINT && l >= 2) { model = w[i + 1]; break; }
+                        i += l;
+                    }
+                    const char *stage = model == 0 ? "vertex" : model <= 3 ? "tessellation or geometry" : model == 4 ? "fragment"
+                                      : model == 5 ? "compute" : model == 5364 ? "task" : model == 5365 ? "mesh" : "other";
+                    rt_log("vk_pipeline: a %s shader that indexes the texture pool could not be marked (SPIR-V %u.%u, %llu "
+                           "words, hash %016llx): %s%s", stage, w[1] >> 16 & 0xff, w[1] >> 8 & 0xff,
+                           (unsigned long long)words, (unsigned long long)fnv(FNV0, orig_w, (size_t)orig_words * 4), why,
+                           nth == 1 ? "; textures are not evicted by disuse this run (NX2NAVI_TEX_DISUSE)" : "");
+                }
             }
         }
     }
