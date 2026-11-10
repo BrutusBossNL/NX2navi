@@ -950,6 +950,14 @@ def cpu_level(clang, env):
     p = subprocess.run([str(clang), '-march=native', '-E', '-dM', '-x', 'c', os.devnull], capture_output=True,
                        text=True, env=probe_env, errors='replace')
     have = set(re.findall(r'^#define (__\w+) ', p.stdout, re.M)) if p.returncode == 0 else set()
+    level = 3 if CPU_V3 <= have else 2 if CPU_V2 <= have else 0
+    if level:
+        return level
+    # Where clang's own detection finds no level (a sandbox or a wrapper that hides the processor from it), Linux
+    # still names the processor's features in /proc/cpuinfo (cpu_flags). Only a level every listed feature proves is
+    # returned, so the lifted code never uses an instruction this processor lacks.
+    flags = cpu_flags()
+    have = {macro for flag, macro in CPUINFO_MACROS.items() if flags and flag in flags}
     return 3 if CPU_V3 <= have else 2 if CPU_V2 <= have else 0
 
 
@@ -1663,6 +1671,30 @@ def load_state(path):
 
 
 CPUINFO = Path('/proc/cpuinfo')
+# /proc/cpuinfo's names for the features of CPU_V2 and CPU_V3 (cpu_level's fallback)
+CPUINFO_MACROS = {'pni': '__SSE3__', 'ssse3': '__SSSE3__', 'sse4_1': '__SSE4_1__', 'sse4_2': '__SSE4_2__',
+                  'popcnt': '__POPCNT__', 'lahf_lm': '__LAHF_SAHF__', 'cx16': '__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16',
+                  'avx': '__AVX__', 'avx2': '__AVX2__', 'bmi1': '__BMI__', 'bmi2': '__BMI2__', 'f16c': '__F16C__',
+                  'fma': '__FMA__', 'abm': '__LZCNT__', 'movbe': '__MOVBE__', 'xsave': '__XSAVE__'}
+
+
+def cpu_flags():
+    """The features every logical processor has, as Linux lists them in /proc/cpuinfo (a feature is listed only when
+    the kernel runs with it); None where the file cannot be read or is not an x86 one (Windows, other processors).
+    One flags line per logical processor: a hybrid processor's cores can differ and the game runs on any of them, so
+    only what all of them have counts."""
+    if os.name == 'nt':
+        return None
+    try:
+        lines = CPUINFO.read_text(encoding='ascii', errors='replace').splitlines()
+    except OSError:
+        return None
+    flags = []
+    for line in lines:
+        key, _, rest = line.partition(':')
+        if key.strip() == 'flags':
+            flags.append(set(rest.split()))
+    return set.intersection(*flags) if flags else None   # no flags line: not x86 (its list is called Features)
 
 
 def cpu_tag():
@@ -1672,20 +1704,9 @@ def cpu_tag():
     compile key, so a game folder moved to a PC without them (or a new processor) is compiled again rather than kept
     with instructions the processor lacks. 'any' where it cannot be read."""
     if os.name != 'nt':
-        try:
-            lines = CPUINFO.read_text(encoding='ascii', errors='replace').splitlines()
-        except OSError:
+        have = cpu_flags()
+        if have is None:
             return 'any'
-        # One flags line per logical processor; a hybrid processor's cores can differ and the game runs on any of
-        # them, so only what all of them have counts.
-        flags = []
-        for line in lines:
-            key, _, rest = line.partition(':')
-            if key.strip() == 'flags':
-                flags.append(set(rest.split()))
-        if not flags:   # not x86 (its list is called Features)
-            return 'any'
-        have = set.intersection(*flags)
         return ''.join('1' if f in have else '0' for f in ('sse4_2', 'avx2', 'avx512f'))
     try:
         import ctypes
