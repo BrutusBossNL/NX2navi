@@ -513,6 +513,26 @@ static int image2d(uint32_t w, uint32_t h, VkFormat f, VkImageUsageFlags usage, 
 
 // The images and views of a size, then its feature. The device must be idle: free_size waits for it, vk_dlaa_release
 // has. Whatever was not made is skipped, so a half-made size goes the same way.
+// A feature was released since the last one was made (destroy_size), and what follows from it (NX2NAVI_DLSS_IDLE_FREE).
+// A pause of 3,600 frames frees the gameplay feature (stale_sizes); the unpause makes it again, and the pause screen's
+// feature, which had stayed, then drew alternating bands of rows black or noise at every later pause, for as long as
+// the game stayed paused: in each of the 8 scripted runs of pause, unpause, pause in which the gameplay feature had
+// been freed and in none of the 12 in which it had not, whatever the texture, write-back, HDR and frame generation
+// settings. Giving the kept feature its own sizes again at each evaluation changed nothing. Features made one after
+// the other with none released in between do not show it (the gameplay feature, then the pause screen's, at every
+// first pause). So a feature is only ever made into that state: with a release since the last creation, the features
+// that stayed are released first (release_kept) and made again when their size is next evaluated.
+//   1 (default)  idle features are freed, and the kept ones are released before the next creation
+//   0            idle features are never freed
+//   2            idle features are freed and the kept ones stay (as before; shows the fault)
+static int feat_released;
+
+static int idle_free(void) {
+    static int m = -1;
+    if (m < 0) m = rt_knob("DLSS_IDLE_FREE", "1");
+    return m;
+}
+
 static void destroy_size(struct Size *e) {
     const VkCtx *c = vk_ctx();
     if (e->out_view) vkDestroyImageView(c->device, e->out_view, NULL);
@@ -527,7 +547,7 @@ static void destroy_size(struct Size *e) {
         if (e->dist_view[i]) vkDestroyImageView(c->device, e->dist_view[i], NULL);
         if (e->dist[i]) vmaDestroyImage(c->vma, e->dist[i], e->dist_mem[i]);
     }
-    if (e->feat && N.release) N.release(e->feat);
+    if (e->feat && N.release) N.release(e->feat), feat_released = 1;
     memset(e, 0, sizeof *e);
 }
 
@@ -1412,6 +1432,7 @@ static void query_vram(void) {
 // Frees the sizes other than cur that no evaluation used for SIZE_STALE evaluations: the GPU finished with them long
 // ago (the CPU is never that many presents ahead), so their images and feature go at once.
 static void stale_sizes(const struct Size *cur) {
+    if (!idle_free()) return;
     for (int i = 0; i < DLSS_SIZES; i++) {
         struct Size *s = &D.sizes[i];
         if (s == cur || !s->out || D.evals < s->used + SIZE_STALE) continue;
@@ -1420,6 +1441,20 @@ static void stale_sizes(const struct Size *cur) {
         if (D.last == s) D.last = NULL;
         free_size(s);
     }
+}
+
+// Before a feature is made after a release (feat_released): the features of the other sizes go too, their images stay.
+// The GPU may still be running an evaluation of theirs, so it finishes first, as in free_size.
+static void release_kept(const struct Size *making) {
+    int n = 0;
+    for (int i = 0; i < DLSS_SIZES; i++) {
+        struct Size *s = &D.sizes[i];
+        if (s == making || !s->feat) continue;
+        if (!n++) vk_queue_lock(), vkDeviceWaitIdle(vk_ctx()->device), vk_queue_unlock();
+        N.release(s->feat), s->feat = NULL;
+        if (D.last == s) D.last = NULL;
+    }
+    if (n) rt_log("dlaa: %d kept DLSS feature(s) released before a new one is made after a release; made again when used", n);
 }
 
 static void evaluate(VkExec *ex, const VkExecTarget *dst) {
@@ -1481,6 +1516,8 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         goto evaluated;
     }
     if (!e->feat) {
+        if (feat_released && idle_free() == 1) release_kept(e);
+        feat_released = 0;
         p_setu(p, "CreationNodeMask", 1);
         p_setu(p, "VisibilityNodeMask", 1);
         p_setu(p, "Width", w);
