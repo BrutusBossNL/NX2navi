@@ -55,6 +55,7 @@ typedef struct Tex {
     int uploaded, released;
     uint32_t rel_serial;          // reg_serial when it was released: slots registered before then are stale (slot_resolve)
     uint64_t rel_frame;           // gfx_counters.frames when it was released (drop_stale)
+    uint32_t back_gap;            // most presents between a release and its taking back so far (stale_after)
     uint32_t n_up;                // uploads of this entry (vk_texture_debug)
     int last_ch;                  // last vk_mem_changed result of make_fresh: 1 written, 0 clean, -1 not tracked
     struct Tex *next_at;          // other entries at the same storage address
@@ -80,6 +81,11 @@ typedef struct Tex {
     uint8_t superseded;           // released, and another descriptor's entry was made at its address since (start_at)
     uint32_t rel_epoch;           // submit_epoch when it was released
     struct Tex *ru_prev, *ru_next;   // the reuse list of ik, newest release first
+    uint64_t gw_frame;            // gfx_counters.frames at its creation or newest GPU write (overwrite_others)
+    uint64_t scan_frame;          // one more than the frame vk_texture_gpu_written last looked for overwritten entries
+    uint64_t ow_frame;            // gfx_counters.frames when overwritten was set
+    uint8_t overwritten;          // released, and a texture at another address was drawn over its storage (overwrite_others)
+    uint8_t in_gwin;              // in gwin[]
 } Tex;
 
 // A slot keeps what vk_texture_by_id resolved for it, so a draw binding skips the key lookup and the address chain: the
@@ -324,11 +330,74 @@ static int format_compressed(VkFormat f) {   // vkCmdClearColorImage takes no bl
 // them move to new addresses, new descriptors whose images were made again: vkCreateImage, the memory requirements and
 // the binding of a dedicated allocation cost 8% of the replay in Kokiri Forest. The released entries of each parameter
 // set are kept in a list, newest release first; create_tex takes the one nearest in address of those released at least
-// two frames earlier, never during the current submission's replay, whose later parts may still use it.
+// two frames earlier, never during the current submission's replay, whose later parts may still use it, and an
+// overwritten one (below) before any other.
 static nvn_hmap reuse = {.klen = sizeof(ImgKey)};   // ImgKey -> the newest released reusable entry
 static int tex_reuse = -1;
 static uint64_t n_reused, n_reuse_new;   // since the last perf line: images taken from a released entry, made anew
 static uint64_t n_restarts;              // superseded entries taken back (start_at)
+
+// Moved render targets. Ocarina keeps about a thousand texture objects for its per-frame render targets and lays the
+// targets out anew every frame with a linear allocator in one GPU-only pool. A target early in that layout changes its
+// size with an effect on screen (811x811, then 778x778 a frame later in Kakariko Village), and every target after it
+// then lies about 100 KB further on: eleven targets, 55 MiB of images, at new addresses in each frame the size
+// changes, each a new entry with an image of its own, as few of them can lie in the pool memory itself (pool_fits).
+// The game finalizes an old texture object only when it needs the object again, 90 to 300 frames later, and a
+// descriptor in the texture pool goes on naming it, so the entries were neither released nor idle: after 6,000 frames
+// of walking through the village 1,043 of them held 6.1 GiB of device memory, against 233 MiB in the targets still
+// drawn, and once released they waited GPU_STALE_FRAMES more. A driver that charges device memory to the system's
+// commit kept the commit low from then on, and the idle textures of the area went and came back (commit_evict).
+//
+// On the console those targets are views of one pool's memory: when another target is drawn over a target's bytes, its
+// content is gone. overwrite_others says so here. When the GPU writes a texture in the GPU-only address window
+// (nvn_gpu_only), each entry at another address whose storage overlaps it is marked overwritten and released as if
+// the game had finalized it. Its image then goes to the next texture made with the same parameters (create_tex), or
+// away OVERWRITTEN_KEEP presents later (drop_overwritten), or as early as an intact entry's while memory is short
+// (drop_stale). Left alone are an entry at the same address (start_at decides about those), an entry the written
+// texture lies inside (a level or a layer of it, which a game draws through a texture of its own) and an entry
+// written in this frame or the one before: two layouts that take turns within a frame keep their images. The mark
+// goes when the game takes the entry back (entry_of).
+// gwin: the entries this applies to (reusable, in the window), sorted by address; gwin_span: the largest storage size
+// one of them had, which bounds how far below an address an overlapping entry can start.
+#define OVERWRITE_FRAMES 2
+#define OVERWRITTEN_KEEP 600
+static struct Tex **gwin;
+static int ngwin, cgwin;
+static uint64_t gwin_span;
+static uint64_t n_overwritten, n_over_drops;   // since the last perf line: entries marked, dropped by drop_overwritten
+
+static int gwin_lower(uint64_t a) {
+    int lo = 0, hi = ngwin;
+    while (lo < hi) {
+        int m = (lo + hi) / 2;
+        if (gwin[m]->key.addr < a) lo = m + 1;
+        else hi = m;
+    }
+    return lo;
+}
+
+static void gwin_add(Tex *e) {
+    if (ngwin == cgwin) {
+        cgwin = cgwin ? 2 * cgwin : 256;
+        if (!(gwin = realloc(gwin, sizeof *gwin * (size_t)cgwin))) rt_fatal("vk: out of memory for the render target list");
+    }
+    int i = gwin_lower(e->key.addr);
+    memmove(gwin + i + 1, gwin + i, sizeof *gwin * (size_t)(ngwin - i));
+    gwin[i] = e, ngwin++;
+    if (e->t.L.size > gwin_span) gwin_span = e->t.L.size;
+    e->in_gwin = 1;
+}
+
+static void gwin_remove(Tex *e) {
+    if (!e->in_gwin) return;
+    for (int i = gwin_lower(e->key.addr); i < ngwin && gwin[i]->key.addr == e->key.addr; i++)
+        if (gwin[i] == e) {
+            memmove(gwin + i, gwin + i + 1, sizeof *gwin * (size_t)(ngwin - i - 1));
+            ngwin--;
+            break;
+        }
+    e->in_gwin = 0;
+}
 
 static int tex_reuse_on(void) {
     if (tex_reuse < 0) {
@@ -677,16 +746,20 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         // again every frame, and DLSS's scene target (2560x1440 at a fixed address in Kokiri Forest) lost its image
         // to a moving target of the same size in between, and DLSS its history (vk_dlaa.c evaluate), several times a
         // second. Not one at this address either: its own descriptor comes back for it (start_at). Of the others the
-        // one nearest in address, so a target the allocator moves keeps the image it had.
+        // one nearest in address, so a target the allocator moves keeps the image it had; an overwritten one first
+        // (overwrite_others): nothing can ask for its content again.
         uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-        Tex *a = NULL;
-        uint64_t best = UINT64_MAX;
+        Tex *a = NULL, *kept = NULL;
+        uint64_t best = UINT64_MAX, best_kept = UINT64_MAX;
         int n = 0;
         for (Tex *q = nvn_hm_get(&reuse, &e->ik); q && n < 128; q = q->ru_next, n++) {
             if (q->rel_epoch == submit_epoch || now - q->rel_frame < 2 || q->key.addr == k->addr) continue;
             uint64_t dist = q->key.addr > k->addr ? q->key.addr - k->addr : k->addr - q->key.addr;
-            if (dist < best) best = dist, a = q;
+            if (q->overwritten) {
+                if (dist < best) best = dist, a = q;
+            } else if (dist < best_kept) best_kept = dist, kept = q;
         }
+        if (!a) a = kept;
         if (a) {
             img = a->pub.image, e->alloc = a->alloc;
             vk_exec_image_gone(img);   // the views and records of the texture it was
@@ -718,6 +791,8 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         e->bytes = own.size;
     }
     e->reusable = e->alloc && gpu_only;
+    e->gw_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (e->reusable && nvn_gpu_only(k->addr)) gwin_add(e);
     // A new image's handle can be one a destroyed image had. Views are purged with the image (destroy_tex), so none
     // should be cached under it: one that is was made from a destroyed texture's record after its purge, and would
     // reach this image's memory through the dead one's. Dropped here, and counted in the log.
@@ -839,6 +914,7 @@ static void rel_unlink(Tex *e) {
 
 static void destroy_tex(Tex *e) {
     own_remove(e);
+    gwin_remove(e);
     n_site[0]++;
     tex_gen_bump(e->key.addr);
     nvn_hm_del(&by_key, &e->key);
@@ -967,9 +1043,26 @@ int vk_texture_commit_low(void) { return __atomic_load_n(&commit_low, __ATOMIC_R
 // again, empty if it is a render target. Under commit pressure that a system-managed page file never relieves, dropping
 // young ones destroyed 2160p render targets about every frame for whole sessions. Frame generation also reads a frame's
 // depth target at the host present (vk_dlssg.c vk_dlssg_frame tags it), after the blit deferred destruction waits for.
+//
+// A released entry is not dead to the game. A descriptor registered for a render target still resolves to its released
+// entry (slot_resolve: a finalized slot with no live texture at its storage gets its own), and the game can sample it
+// or take it back long after the release. In Kakariko Village, with the system's commit low, render targets dropped at
+// STALE_FRAMES came back empty and the scene was drawn black for one frame every two to three seconds (interface
+// intact), for as long as the commit stayed low. So no entry goes while lookups still reach it (idle), and one whose
+// content exists only in its image waits GPU_STALE_FRAMES, or GAP_TIMES the longest it stayed released before the game
+// took it back when that is longer. An overwritten entry has no content left to wait for (overwrite_others): it goes
+// with the intact ones, whether or not a descriptor still names it.
 #define STALE_FRAMES 120
+#define GPU_STALE_FRAMES 1800
+#define GAP_TIMES 8
 static int idle(const Tex *e, uint64_t now) {
     return look_round - e->use_round >= IDLE_ROUNDS && now - e->use_frame >= STALE_FRAMES;
+}
+
+static uint64_t stale_after(const Tex *e) {
+    if (comes_back_intact(e) || e->overwritten) return STALE_FRAMES;
+    uint64_t gap = (uint64_t)e->back_gap * GAP_TIMES;
+    return gap > GPU_STALE_FRAMES ? gap : GPU_STALE_FRAMES;
 }
 
 static void drop_stale(uint64_t keep, uint64_t *count) {
@@ -979,10 +1072,24 @@ static void drop_stale(uint64_t keep, uint64_t *count) {
         for (Tex *e = rel_head, *next; e && now - e->rel_frame >= STALE_FRAMES; e = next) {   // in release order
             if (dropped == PRESSURE_STEP || rel_bytes <= keep) return;
             next = e->rel_next;
-            if (!e->bytes || (!any && !comes_back_intact(e))) continue;
+            if (!e->bytes || (!any && !comes_back_intact(e) && !e->overwritten)) continue;
+            if (now - e->rel_frame < stale_after(e) || (!e->overwritten && !idle(e, now))) continue;
             destroy_tex(e);
             dropped++, (*count)++;
         }
+}
+
+// Drops up to PRESSURE_STEP entries that were marked overwritten OVERWRITTEN_KEEP presents ago or earlier
+// (overwrite_others): the image reuse found no texture to give their images to in that time.
+static void drop_overwritten(void) {
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int dropped = 0;
+    for (Tex *e = rel_head, *next; e && now - e->rel_frame >= OVERWRITTEN_KEEP && dropped < PRESSURE_STEP; e = next) {
+        next = e->rel_next;
+        if (!e->overwritten || now - e->ow_frame < OVERWRITTEN_KEEP) continue;
+        destroy_tex(e);
+        dropped++, n_over_drops++;
+    }
 }
 
 // NX2NAVI_TEX_EVICT (default on; 0 = only released entries go under VRAM pressure, as before): above the VRAM pressure
@@ -1188,6 +1295,7 @@ static void sweep_pressure(void) {   // tex_lock held
         if (tex_evict && freed < over) evict_disused(over - freed);
     }
     if (rel_head) {
+        drop_overwritten();
         uint64_t cap = released_cap_bytes();
         if (rel_bytes > cap) drop_stale(cap, &n_cap_drops);
         if (rel_bytes > COMMIT_LOW_KEEP && commit_is_low()) drop_stale(COMMIT_LOW_KEEP, &n_commit_drops);
@@ -1870,7 +1978,10 @@ static Tex *entry_of(const tex_t *t) {
     }
     if (e->released) {
         e->samp_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);   // in use again, as a new one
+        uint64_t gap = e->samp_frame - e->rel_frame;
+        if (gap > e->back_gap) e->back_gap = gap > UINT32_MAX ? UINT32_MAX : (uint32_t)gap;
         e->released = 0, nreleased--, rel_unlink(e), n_site[2]++, tex_gen_bump(k.addr);
+        e->overwritten = 0;
         if (e->superseded) {   // its image may still be in use: the first barrier waits for all earlier work
             e->superseded = 0, e->reused = 1;
             n_restarts++;
@@ -1928,6 +2039,34 @@ static void wb_cfg_init(void) {
 // up to 9 frames in a row while a tile loads.
 static int wb_wanted(const Tex *e) { return e->t.L.size <= wb_limit || e->run < WB_RUN; }
 
+static void mark_released(Tex *e) {   // tex_lock held; e is not released
+    e->released = 1;
+    e->rel_epoch = submit_epoch;
+    e->rel_serial = reg_serial;
+    e->rel_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    nreleased++;
+    rel_append(e);
+    n_site[3]++;
+    tex_gen_bump(e->key.addr);
+}
+
+// e, in the GPU-only address window, is written by the GPU in frame fr: the entries its storage runs over are
+// overwritten (section "Moved render targets", above gwin).
+static void overwrite_others(const Tex *e, uint64_t fr) {
+    uint64_t lo = e->key.addr, hi = lo + e->t.L.size;
+    int released = 0;
+    for (int i = gwin_lower(lo > gwin_span ? lo - gwin_span : 0); i < ngwin && gwin[i]->key.addr < hi; i++) {
+        Tex *q = gwin[i];
+        uint64_t qlo = q->key.addr, qhi = qlo + q->t.L.size;
+        if (q->overwritten || qlo == lo || qhi <= lo || (lo >= qlo && hi <= qhi)) continue;
+        if (fr - q->gw_frame < OVERWRITE_FRAMES) continue;
+        q->overwritten = 1, q->ow_frame = fr;
+        n_overwritten++;
+        if (!q->released) mark_released(q), released = 1;
+    }
+    if (released) sweep_released();
+}
+
 void vk_texture_gpu_written(const tex_t *t) {
     if (!t || !t->mem) return;
     vk_exec_frame_written(t);
@@ -1935,6 +2074,12 @@ void vk_texture_gpu_written(const tex_t *t) {
     Tex *e = entry_of(t);
     if (e) {
         make_fresh(e);   // a partial render keeps what the storage held before
+        uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        e->gw_frame = now;
+        if (e->scan_frame != now + 1 && nvn_gpu_only(e->key.addr)) {   // once per frame and entry
+            e->scan_frame = now + 1;
+            overwrite_others(e, now);
+        }
         e->pub.gpu_owned = 1;
         e->chash_ok = 0;   // the image now holds the GPU's content: matching storage bytes no longer mean "unchanged"
         uint64_t f = vk_exec_recording_fence();
@@ -1968,14 +2113,7 @@ void vk_texture_release(const tex_t *t) {
     lock();
     Tex *e = nvn_hm_get(&by_key, &k);
     if (e && !e->released) {
-        e->released = 1;
-        e->rel_epoch = submit_epoch;
-        e->rel_serial = reg_serial;
-        e->rel_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-        nreleased++;
-        rel_append(e);
-        n_site[3]++;
-        tex_gen_bump(k.addr);
+        mark_released(e);
         sweep_released();
     }
     unlock();
@@ -2268,15 +2406,17 @@ void vk_texture_new_submit(void) {
         rt_log("perf: frame %llu: released textures kept %d (%.0f MiB of own memory), dropped past the size limit %llu, "
                "under VRAM pressure %llu, under commit pressure %llu; idle live textures evicted %llu (%.1f MiB); "
                "unsampled ones evicted %llu (%.1f MiB), back %llu, held %u (marks read %u); images reused %llu, made "
-               "%llu, pool bindings not tried %llu, superseded taken back %llu",
+               "%llu, pool bindings not tried %llu, superseded taken back %llu; render targets overwritten at another "
+               "address %llu, dropped unused %llu",
                (unsigned long long)f * 60, nreleased, rel_bytes / 1048576.0, (unsigned long long)n_cap_drops,
                (unsigned long long)n_pressure_drops, (unsigned long long)n_commit_drops, (unsigned long long)n_evict,
                n_evict_bytes / 1048576.0, (unsigned long long)n_disuse, n_disuse_bytes / 1048576.0,
                (unsigned long long)n_disuse_back, holds.n, marks_reads, (unsigned long long)n_reused,
-               (unsigned long long)n_reuse_new, (unsigned long long)n_bind_skips, (unsigned long long)n_restarts);
+               (unsigned long long)n_reuse_new, (unsigned long long)n_bind_skips, (unsigned long long)n_restarts,
+               (unsigned long long)n_overwritten, (unsigned long long)n_over_drops);
         n_cap_drops = n_pressure_drops = n_commit_drops = n_evict = n_evict_bytes = 0;
         n_disuse = n_disuse_bytes = n_disuse_back = 0;
-        n_reused = n_reuse_new = n_bind_skips = n_restarts = 0;
+        n_reused = n_reuse_new = n_bind_skips = n_restarts = n_overwritten = n_over_drops = 0;
     }
     unlock();
 }

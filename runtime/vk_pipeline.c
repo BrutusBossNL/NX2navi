@@ -79,7 +79,7 @@ static struct {
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src, f_full_subgroups;
     int cache_control;                 // pipelineCreationCacheControl: a create can ask for the pipeline caches only
-    int feedback;                      // NX2NAVI_PIPE_FEEDBACK: 1 count pipeline cache hits, 2 also log each compute build
+    int feedback;                      // NX2NAVI_PIPE_FEEDBACK: 1 count pipeline cache hits, 2 also log each compute and graphics build
     uint64_t cache_loaded;             // bytes of pipeline-cache.bin the driver took at boot
     int pv_last;                       // provokingVertexLast enabled: NVN's default is the last vertex
     VkShaderStageFlags sg32_stages;    // stages that accept requiredSubgroupSize = 32 (0: not available)
@@ -509,11 +509,19 @@ typedef struct { VkStructureType sType; const void *pNext; VkPipelineCreateFlags
 // copy, reading through a null entry, with compute and library builds running beside the autosave.
 static PlatMutex cache_rw = PLAT_MUTEX_INIT;
 
+// A pipeline cache of this thread's own that its creates build into in place of P.cache; VK_NULL_HANDLE (every thread
+// but the background builder of large compute shaders) for P.cache itself. A create into it does not hold cache_rw, so
+// a build of minutes does not keep pipeline-cache.bin from being saved; bg_merge moves its content into P.cache.
+static __thread VkPipelineCache own_cache;
+static volatile uint32_t cache_merges;   // bg_merge's merges into P.cache: new content for autosave_once to save
+
 static VkResult pipe_create_in(int kind, void *ci, VkPipeline *pipe, VkPipelineCache cache) {
-    if (cache) plat_mutex_lock_shared(&cache_rw);
+    int shared = cache && !own_cache;
+    if (cache && own_cache) cache = own_cache;
+    if (shared) plat_mutex_lock_shared(&cache_rw);
     VkResult r = kind == 2 ? vkCreateComputePipelines(P.device, cache, 1, ci, NULL, pipe)
                            : vkCreateGraphicsPipelines(P.device, cache, 1, ci, NULL, pipe);
-    if (cache) plat_mutex_unlock_shared(&cache_rw);
+    if (shared) plat_mutex_unlock_shared(&cache_rw);
     return r;
 }
 
@@ -723,14 +731,30 @@ static int ensure_init(void) {
     } else {
         rt_log("vk_pipeline: descriptor update templates unavailable: sets are written with write structs");
     }
-    // NX2NAVI_VK_DYN_VERTEX=0/1 forces dynamic vertex input off or on. Default off on Intel's frozen Windows driver for its
-    // older integrated GPUs (UHD 630, Ice Lake: Vulkan 1.3.215 and older), which draws nothing with it.
+    // NX2NAVI_VK_DYN_VERTEX=0/1 forces dynamic vertex input off or on. Default off on two drivers:
+    // - Intel's frozen Windows driver for its older integrated GPUs (UHD 630, Ice Lake: Vulkan 1.3.215 and older), which
+    //   draws nothing with it.
+    // - AMD's driver for RDNA 3 and newer (vk_caps.amd_llpc), which compiles a pipeline with dynamic vertex input again
+    //   at every boot: neither pipeline-cache.bin nor the driver's own disk cache gives it back. Measured on an
+    //   RX 7900 XT (26.10.1) with NX2NAVI_PIPE_FEEDBACK=2, booting one save twice from an empty cache: the second boot
+    //   compiled all 622 recorded non-mesh pipelines again at 83 ms each, with the module and state hashes of the first
+    //   boot (the same with NX2NAVI_GPL=0, so it is not the pipeline libraries or their layouts), while the mesh
+    //   pipelines, which have no vertex input, came from the file. With the vertex layout in the pipeline the second
+    //   boot built 787 pipelines in 170 ms and the third 898 of 898 from the file in 233 ms, with no build left for the
+    //   scene. A player's file of 3,979 records used the whole boot budget (PREWARM_PIPE_MS, 20 s) at every boot; with
+    //   the vertex layout in the pipeline its third boot built 4,273 pipelines in 0.9 s. The price is more pipelines,
+    //   one per vertex layout (787 records against 692 for that boot); records written with dynamic vertex input still
+    //   prebuild, each for the layout of the draw that recorded it. The RDNA 1 and 2 branch (vk_caps.amd_sc) is not
+    //   measured and keeps dynamic vertex input.
     const char *dv = cfg_get("NX2NAVI_VK_DYN_VERTEX");   // no fixed default: it depends on the GPU, see above
     int intel_legacy = c->props.vendorID == 0x8086 && c->props.apiVersion <= VK_MAKE_API_VERSION(0, 1, 3, 215);
-    int dv_on = dv && *dv ? strcmp(dv, "0") != 0 : !intel_legacy;
+    int dv_on = dv && *dv ? strcmp(dv, "0") != 0 : !intel_legacy && !vk_caps.amd_llpc;
     P.dyn_vi = dv_on && c->has_vertex_input_dynamic_state && PROC(set_vi, "vkCmdSetVertexInputEXT");
     if (!dv_on && c->has_vertex_input_dynamic_state)
-        rt_log("vk_pipeline: dynamic vertex input off (%s)", dv && *dv ? "NX2NAVI_VK_DYN_VERTEX=0" : "Intel's older Windows driver draws nothing with it");
+        rt_log("vk_pipeline: dynamic vertex input off (%s)",
+               dv && *dv ? "NX2NAVI_VK_DYN_VERTEX=0"
+               : intel_legacy ? "Intel's older Windows driver draws nothing with it"
+               : "AMD's driver compiles pipelines that have it again at every boot");
     if (c->has_eds3) {
         P.dyn_clamp = e3.extendedDynamicState3DepthClampEnable && P.f_depth_clamp && PROC(set_clamp, "vkCmdSetDepthClampEnableEXT");
         P.dyn_poly = e3.extendedDynamicState3PolygonMode && PROC(set_poly, "vkCmdSetPolygonModeEXT");
@@ -2227,7 +2251,8 @@ static VkPipelineCreateFlags noopt_flag(void) {
 // with the prewarm, the stage library prebuild and every cache save, so a log tells whether a slow boot compiled or
 // read its pipelines: on NVIDIA the driver's own disk cache is kept per executable, so a renamed or new exe gets nothing
 // from it, and only pipeline-cache.bin can make its first boot quick. =2 also logs every compute build with a hash of
-// its final module, so two runs can be compared for a module that changes between them.
+// its final module, and every graphics pipeline build with the hashes of its final modules and of its fixed state, so
+// two runs can be compared for a module or a state that changes between them.
 enum { FB_GRAPHICS, FB_LIBRARY, FB_COMPUTE, FB_KINDS };
 static struct {
     PlatMutex lock;
@@ -2375,7 +2400,7 @@ static uint32_t vs_union_missing(const VkPipeState *s, GfxShaderIo fin[32]) {
 
 static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Layout *l, uint32_t fs_off) {
     VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE;
-    uint64_t vw, fw;
+    uint64_t vw, fw, vm_hash = 0, fm_hash = 0;   // the hashes: of the final modules, for the PIPE_FEEDBACK 2 line
     const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
     uint32_t *vpatched = NULL, *fpatched = NULL;
     int mesh = is_mesh(s);
@@ -2426,9 +2451,9 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
             fcode = fpatched = r;
         }
         // A bound colour target outside the shader's output map gets write mask 0 (target_wmask)
-        if (fcode) fm = make_module(fcode, fw, !k->a2c);
+        if (fcode) fm = make_module(fcode, fw, !k->a2c), fm_hash = mm_hash;
     }
-    vm = make_module(vcode, vw, 0);
+    vm = make_module(vcode, vw, 0), vm_hash = mm_hash;
     free(vpatched), free(fpatched);
     VkPipeline pipe = VK_NULL_HANDLE;
     if (!vm || (s->fs && !fm) || (mesh && s->ts && !tm)) goto out;
@@ -2531,6 +2556,21 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     } else {
         perf_count(PERF_CNT_PIPE_BUILT);
         fb_note(FB_GRAPHICS, &fb);
+        if (P.feedback >= 2) {   // the state hash: what the create info takes from the key besides the modules
+            uint64_t st = fnv(fnv(FNV0, cba, sizeof cba), k->color, sizeof k->color);
+            if (!P.dyn_vi)   // the vertex layout is pipeline state then (zero in a mesh pipeline's key)
+                st = fnv(fnv(fnv(fnv(st, k->attr_fmt, sizeof k->attr_fmt), k->attr_off, sizeof k->attr_off),
+                             k->attr_bind, sizeof k->attr_bind), k->rate, sizeof k->rate);
+            uint32_t bits[] = {(uint32_t)mesh, k->topo_class, k->minus_w, k->clamp, k->poly_mode, k->samples, k->a2c,
+                               k->logic_op, k->n_color, k->fbl, k->dsb, l->set1 != 0, fs_off, pi.flags, k->depth, k->stencil};
+            rt_log("vk_pipeline: graphics: modules %016llx %016llx, state %016llx (mesh %d, topology class %u, samples %u, "
+                   "colors %u, feedback loop %u, depth format %u, stage-independent layout %d, flags 0x%x), %s, %.1f ms",
+                   (unsigned long long)vm_hash, (unsigned long long)fm_hash, (unsigned long long)fnv(st, bits, sizeof bits),
+                   mesh, (unsigned)k->topo_class, (unsigned)k->samples, (unsigned)k->n_color, (unsigned)k->fbl,
+                   (unsigned)k->depth, l->set1 != 0, (unsigned)pi.flags,
+                   pb_last ? "from pipeline-binaries.bin" : fb.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT ? "from pipeline-cache.bin" : "compiled",
+                   (double)fb.duration / 1e6);
+        }
     }
 out:
     if (vm) vkDestroyShaderModule(P.device, vm, NULL);
@@ -4394,6 +4434,25 @@ static double bg_growth_cap(void) {
     return cap;
 }
 
+// The builder compiles into a pipeline cache of its own (own_cache at pipe_create_in), not into P.cache. A create into
+// P.cache holds cache_rw shared from start to end, and the cache is only saved at a moment when nobody holds it: on an
+// RX 7900 XT (26.10.1) the largest of these shaders (4,874,502 SPIR-V words) was still compiling 590 s after the boot,
+// pipeline-cache.bin was not written once in that time, and the game was closed before the build ended, so the next
+// boot found neither that shader nor the pipelines built in play and started the same build again. bg_merge moves the
+// result into P.cache when the build is done, at a moment with no build into P.cache running: the lock is tried as
+// cache_save tries it, because a waiting exclusive request would hold back every new build.
+static void bg_merge(VkPipelineCache own, int built) {
+    int locked = 0;
+    while (built && !LB.stop && !(locked = plat_mutex_trylock(&cache_rw))) plat_sleep_ms(2);
+    if (locked) {
+        VkResult r = vkMergePipelineCaches(P.device, P.cache, 1, &own);
+        plat_mutex_unlock(&cache_rw);
+        if (r == VK_SUCCESS) cache_merges++;
+        else rt_log("vk_pipeline: background compute build: its cache did not merge into %s (%d)", P.cache_path, (int)r);
+    }
+    vkDestroyPipelineCache(P.device, own, NULL);
+}
+
 static void bg_main(void *arg) {
     (void)arg;
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
@@ -4466,8 +4525,13 @@ static void bg_main(void *arg) {
             else BG.failed++, rt_log("vk_pipeline: background compute build: %s", why ? why : "no layout");
             continue;
         }
+        VkPipelineCache own = VK_NULL_HANDLE;
+        VkPipelineCacheCreateInfo oci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        if (P.cache && vkCreatePipelineCache(P.device, &oci, NULL, &own) != VK_SUCCESS) own = VK_NULL_HANDLE;
         double t0 = now_ms();
+        own_cache = own;   // without one the build goes into P.cache as before
         VkPipeline pipe = compute_create(cs, l, 0);
+        own_cache = VK_NULL_HANDLE;
         double ms = now_ms() - t0;
         plat_mutex_lock(&P.lock);
         if (flight) cs_flight_remove(cs);
@@ -4479,6 +4543,7 @@ static void bg_main(void *arg) {
             vkDestroyPipeline(P.device, pipe, NULL);
         }
         plat_mutex_unlock(&P.lock);
+        if (own) bg_merge(own, pipe != VK_NULL_HANDLE);   // after the entry: a dispatch waiting for it does not wait for this
         if (plat_xchg32(&BG.raised, 0)) plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
         if (pipe) BG.built++, BG.ms += ms;
         else BG.failed++;
@@ -5103,14 +5168,15 @@ static void autosave_once(void) {
     if (now - last_ms < 20000) return;
     VkPipeStats s;
     vk_pipeline_stats(&s);
-    if (s.graphics + s.compute == last_n) return;
+    uint64_t n = s.graphics + s.compute + cache_merges;   // a merge comes after its pipeline was counted (bg_main)
+    if (n == last_n) return;
     // Only at a moment with no build running (cache_save): while one runs the save waits for the next tick, 500 ms
     // on, before it logs or flushes anything, so a busy stretch does not repeat the statistics lines every tick.
     if (P.cache && P.cache_path[0]) {
         if (!plat_mutex_trylock(&cache_rw)) return;
         plat_mutex_unlock(&cache_rw);
     }
-    last_n = s.graphics + s.compute, last_ms = now;
+    last_n = n, last_ms = now;
     save_with(0);
 }
 
