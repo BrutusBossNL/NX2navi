@@ -32,6 +32,7 @@
 #include "platform/platform.h"
 #include "vk_dlaa.h"
 #include "vk_dlssg.h"
+#include "vk_fg.h"
 
 #define WEAK __attribute__((weak))
 
@@ -47,6 +48,28 @@ static void wait_until(uint64_t at) {
     uint64_t now = kern_now_ns();
     if (at > now + 1500000) plat_wait_ns(at - now - 1000000);
     while (kern_now_ns() < at) plat_yield();
+}
+
+// NX2NAVI_PACE_SMOOTH (default 1; 0 = off): a picture goes out no sooner than seven eighths of the recent interval
+// after the one before it. The game's frames reach the present thread in uneven steps although each costs about the
+// same: with the replay on the submitting thread, work held for an event is replayed with the next frame, so pictures
+// came 13 to 31 ms apart around a mean of 22 ms in a village (5th to 95th percentile), which shows as judder at a
+// frame rate that would look even. Only the early ones wait, a few milliseconds each, so the rate stays what it was;
+// the recent interval is a moving average over about four pictures of intervals under 100 ms, so the floor follows
+// a scene that gets lighter within a second. Not with frame generation, which paces its own presents.
+static uint64_t pace_avg_ns;   // the present thread's
+
+static uint64_t pace_smooth(uint64_t at, uint64_t last, uint64_t now) {
+    static int on = -1;
+    if (on < 0) on = cfg_bool("NX2NAVI_PACE_SMOOTH");
+    if (!on || !last || !pace_avg_ns || vk_fg_active() || vk_dlssg_active()) return at;
+    uint64_t floor = last + pace_avg_ns / 8 * 7;
+    return floor > at && floor < now + 50000000ull ? floor : at;
+}
+
+static void pace_shown(uint64_t interval_ns) {
+    if (interval_ns >= 100000000ull) return;   // a load or a hitch is not the rate
+    pace_avg_ns = pace_avg_ns ? pace_avg_ns + (uint64_t)(((int64_t)interval_ns - (int64_t)pace_avg_ns) / 4) : interval_ns;
 }
 
 static void present_main(void *arg) {
@@ -72,9 +95,11 @@ static void present_main(void *arg) {
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
         uint64_t t0 = kern_now_ns();
-        wait_until(j.at);
+        wait_until(pace_smooth(j.at, last, t0));
         uint64_t t1 = kern_now_ns();
+        if (last) pace_shown(t1 - last);
         vk_present_flip();
+        perfmon_shown(t1);   // the overlay's frame times: the pictures as shown
         // NX2NAVI_TRACE=present: one line per present: the host present's interval, the interval of the game's present
         // calls (when the host present went out before back-edge pacing), the wait and how far past its target it went
         if (rt_trace & RT_TRACE_PRESENT)
