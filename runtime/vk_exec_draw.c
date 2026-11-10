@@ -5003,7 +5003,44 @@ static void mesh_count_note(VkExec *ex, const VkMemSpan *src) {
     ex->recorded++;
 }
 
-static int mesh_ring_entry(VkExec *ex, const VkMemSpan *src, VkDeviceSize *at) {
+// NX2NAVI_MESH_AHEAD (default 1; 0 = each draw by itself, "ab" switches with the A/B blocks): the copy of a record
+// cannot be recorded inside a pass, so every indirect mesh draw ended its pass, and a pass that draws its meshes one
+// after another was cut into as many pieces (a village: 45 of them a frame, each with a gap of its own on the GPU).
+// The first such draw of a run now fills the entries of the ones that follow it as well, with nothing but state,
+// draws and counter reports between them (vk_exec.c op_linear, vk_exec_mesh_run): those draws then find their entry
+// and stay in the pass. The culling compute that writes the records cannot run inside that run, and an entry is taken
+// only by the draw it was filled for, at the same record address, while no other op was replayed since
+// (vk_exec_brk). In the village 42 of the 45 draws a frame are served that way: 3 gaps with these copies a frame
+// where there were 41 (0.04 ms of GPU time for 0.22), and about 40 passes fewer to begin and end.
+enum { MESH_AHEAD = 64 };
+static struct { const p_draw_mesh_ind *d; uint64_t ind; VkDeviceSize at; } mesh_ahead[MESH_AHEAD];
+static int mesh_ahead_n, mesh_ahead_i;
+static uint32_t mesh_ahead_brk;
+static uint64_t mesh_ahead_taken, mesh_ahead_own;   // since the start: draws served by an entry filled ahead; the others
+
+static int mesh_ahead_on(void) {
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("MESH_AHEAD", "1");
+    return RT_KNOB_ON(mode);
+}
+
+static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan *src, VkDeviceSize *at) {
+    if ((rt_trace & RT_TRACE_PERF) && (mesh_ahead_taken + mesh_ahead_own) % 20000 == 19999) {
+        char stops[160];
+        vk_exec_mesh_run_stops(stops, sizeof stops);
+        rt_log("perf: indirect mesh draws: %llu so far, %llu of them with their record filled ahead by an earlier draw of "
+               "their pass; the runs ended: %s", (unsigned long long)(mesh_ahead_taken + mesh_ahead_own + 1),
+               (unsigned long long)mesh_ahead_taken, stops);
+    }
+    if (mesh_ahead_i < mesh_ahead_n) {
+        if (mesh_ahead[mesh_ahead_i].d == d && mesh_ahead[mesh_ahead_i].ind == d->ind && mesh_ahead_brk == vk_exec_brk) {
+            *at = mesh_ahead[mesh_ahead_i++].at;
+            mesh_ahead_taken++;
+            return 1;
+        }
+        mesh_ahead_n = mesh_ahead_i = 0;   // the walk went another way: the entries left are never drawn from
+    }
+    mesh_ahead_own++;
     if (!mesh_ring) {
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 12ull * MESH_RING,
                                  .usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
@@ -5021,6 +5058,27 @@ static int mesh_ring_entry(VkExec *ex, const VkMemSpan *src, VkDeviceSize *at) {
     VkBufferCopy cp = {src->offset, *at, 4};
     vkCmdCopyBuffer(ex->cb, src->buffer, mesh_ring, 1, &cp);
     mesh_count_note(ex, src);
+    mesh_ahead_n = mesh_ahead_i = 0;
+    if (mesh_ahead_on()) {
+        const void *run[MESH_AHEAD];
+        int n = vk_exec_mesh_run(d, run, MESH_AHEAD);
+        for (int i = 0; i < n; i++) {
+            const p_draw_mesh_ind *f = run[i];
+            VkMemSpan ip;
+            if (!vk_mem_resolve(f->ind, 12, &ip) || ip.offset % 4) break;   // that draw reports it when the walk gets there
+            VK_MEM_USE(ip);
+            VkDeviceSize fa = 12ull * (mesh_ring_next++ % MESH_RING);
+            vk_gpu_gap_note(VK_GAP_MESH_RING, 12);
+            vkCmdFillBuffer(ex->cb, mesh_ring, fa + 4, 8, 1);
+            VkBufferCopy fc = {ip.offset, fa, 4};
+            vkCmdCopyBuffer(ex->cb, ip.buffer, mesh_ring, 1, &fc);
+            mesh_count_note(ex, &ip);
+            ex->recorded += 2;
+            mesh_ahead[mesh_ahead_n].d = f, mesh_ahead[mesh_ahead_n].ind = f->ind, mesh_ahead[mesh_ahead_n].at = fa;
+            mesh_ahead_n++;
+        }
+        mesh_ahead_brk = vk_exec_brk;
+    }
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                            .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
                            .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
@@ -5052,7 +5110,7 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
     c0_binst = 0;
     VK_MEM_USE(ip);
     VkDeviceSize at;
-    if (!mesh_ring_entry(ex, &ip, &at)) return warn_once(W_MESH, "the indirect mesh ring could not be created: skipped");
+    if (!mesh_ring_entry(ex, d, &ip, &at)) return warn_once(W_MESH, "the indirect mesh ring could not be created: skipped");
     if (!prepare_draw_ex(ex, NVN_DRAW_PRIMITIVE_TRIANGLES, 0x7fffffff, 0, 1)) return;
     vk_exec_frame.draws++;
     static uint32_t n_logged;
