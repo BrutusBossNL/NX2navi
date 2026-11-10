@@ -64,6 +64,7 @@ by a JSON object (launcher/build.py reads them): {"ev": "step", "step": ..., "st
 """
 import argparse
 import concurrent.futures
+import errno
 import hashlib
 import json
 import os
@@ -75,6 +76,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parents[1]
@@ -163,6 +165,16 @@ def fail(msg):
     with OUT_LOCK:
         print(f'\nerror: {msg}', file=sys.stderr, flush=True)
     sys.exit(1)
+
+
+def error_text(e):
+    """An exception in a line a player can read: what the system said and about which file for a file error, the
+    full disk named as such, else the exception's kind and message."""
+    if isinstance(e, OSError) and e.strerror:
+        if e.errno == errno.ENOSPC:
+            return f'the disk is full ({e.filename})' if e.filename else 'the disk is full'
+        return e.strerror + (f': {e.filename}' if e.filename else '')
+    return f'{type(e).__name__}: {e}' if str(e) else type(e).__name__
 
 
 class Background:
@@ -373,6 +385,19 @@ def exefs_digest(out):
 ROMFS_READ_AHEAD = 64 << 20   # total file bytes requested from workers in one group
 
 
+def unreadable(rel, err):
+    """Ends the build on a game file that could not be read while the RomFS image was packed, naming the file. A
+    file that does not match the dump's own checksum (nup.NupError) means the dump is damaged: a copy that went
+    wrong or a dump that was cut short, which only a new copy or a new dump mends."""
+    if isinstance(err, nup.NupError):
+        why = str(err).split(': ', 1)[-1]   # without nup.py's "file <number>: ", which says nothing to a player
+        if why.startswith('damaged (') and why.endswith(')'):
+            why = why[len('damaged ('):-1]
+        fail(f'the dump is damaged: {rel}: {why}. Copy the dump to this PC again, or dump the game again, and then '
+             'try again')
+    fail(f'cannot read {rel} from the game files: {error_text(err)}')
+
+
 def romfs_read_groups(files):
     group, buffered = [], 0
     for entry in files:
@@ -409,28 +434,54 @@ def step_romfs(src, out, jobs):
 
     def load(e):   # small files are read whole on a worker; big ones are streamed by the writer
         _, ref, size = e
-        return None if size > ROMFS_READ_AHEAD else b''.join(src.romfs_chunks(ref))
+        if size > ROMFS_READ_AHEAD:
+            return None
+        try:
+            return b''.join(src.romfs_chunks(ref))
+        except (nup.NupError, OSError) as err:   # handed to the writer, which knows the file's name
+            return err
 
-    with open(part, 'wb', buffering=16 << 20) as img, concurrent.futures.ThreadPoolExecutor(jobs) as ex:
-        for batch, group in enumerate(romfs_read_groups(files)):
-            for (rel, ref, size), data in zip(group, ex.map(load, group)):
-                pad = -pos % ALIGN
-                if pad:
-                    img.write(b'\0' * pad)
-                    h.update(b'\0' * pad)
-                    pos += pad
-                offset = pos
-                for chunk in ((data,) if data is not None else src.romfs_chunks(ref)):
-                    img.write(chunk)
-                    h.update(chunk)
-                    pos += len(chunk)
-                if pos - offset != size:
-                    fail(f'{rel} changed size while packing the RomFS: expected {size} bytes, read {pos - offset}')
-                entries.append({'path': rel, 'offset': offset, 'size': size})
-                done += size
-            emit('progress', step='romfs', done=done, total=total, unit='bytes')
-            if batch % 40 == 0:
-                say(f'  RomFS {done / 1e9:5.1f} of {total / 1e9:.1f} GB, {time.time() - t0:.0f} s')
+    def pieces(rel, ref, data):
+        """The file's bytes; a file of the game files that cannot be read, or does not match its checksum in the
+        dump, ends the step with its name (unreadable)."""
+        if isinstance(data, Exception):
+            unreadable(rel, data)
+        if data is not None:
+            yield data
+            return
+        try:
+            yield from src.romfs_chunks(ref)
+        except (nup.NupError, OSError) as err:
+            unreadable(rel, err)
+
+    try:
+        with open(part, 'wb', buffering=16 << 20) as img, concurrent.futures.ThreadPoolExecutor(jobs) as ex:
+            for batch, group in enumerate(romfs_read_groups(files)):
+                for (rel, ref, size), data in zip(group, ex.map(load, group)):
+                    pad = -pos % ALIGN
+                    if pad:
+                        img.write(b'\0' * pad)
+                        h.update(b'\0' * pad)
+                        pos += pad
+                    offset = pos
+                    for chunk in pieces(rel, ref, data):
+                        img.write(chunk)
+                        h.update(chunk)
+                        pos += len(chunk)
+                    if pos - offset != size:
+                        fail(f'{rel} changed size while packing the RomFS: expected {size} bytes, read {pos - offset}')
+                    entries.append({'path': rel, 'offset': offset, 'size': size})
+                    done += size
+                emit('progress', step='romfs', done=done, total=total, unit='bytes')
+                if batch % 40 == 0:
+                    say(f'  RomFS {done / 1e9:5.1f} of {total / 1e9:.1f} GB, {time.time() - t0:.0f} s')
+    except BaseException:
+        # a failed image is of no use, the next run writes it anew: up to 26 GB of it would only fill the disk
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     part.replace(dst / 'romfs.bin')
     index = {'status': 'pass', 'romfs_size': pos, 'romfs_sha256': h.hexdigest(), 'files': entries}
     (dst / 'index.json').write_text(json.dumps(index), encoding='utf-8')
@@ -1949,6 +2000,20 @@ def out_path(arg):
 
 
 def main():
+    """The build (build_main), with every error it does not report itself reported as fail reports one: the launcher
+    shows the message of the error event (launcher/build.py Run), and an exception that only printed its traceback
+    reached the player as "the build stopped (exit code 1)". The traceback still goes to the log."""
+    try:
+        build_main()
+    except nup.NupError as e:
+        fail(f'the dump is damaged: {e}. Copy the dump to this PC again, or dump the game again, and then try again')
+    except Exception as e:   # noqa: BLE001 - whatever it is, the player gets its message
+        with OUT_LOCK:
+            traceback.print_exc()
+        fail(f'the build stopped: {error_text(e)}')
+
+
+def build_main():
     global EVENTS
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--nup', help='the game as one .nup file')

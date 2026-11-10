@@ -2482,6 +2482,53 @@ class MakeGameTest(Tmp):
             self.mg.step_romfs(Src(), self.out, 2)
         self.assertIn('GB free for the RomFS image', err.getvalue())
 
+    def test_a_damaged_dump_names_the_file(self):
+        """A dump whose table of contents is whole but one data byte differs (a copy that went wrong): the RomFS
+        step ends with an error that names the file, which the launcher shows, and leaves no partial image."""
+        raw = bytearray(self.nup.read_bytes())
+        raw[raw.find(self.romfs['dir/b.bin']) + 100] ^= 0xFF
+        self.nup.write_bytes(raw)
+        events, lines = [], []
+        run = build.Run(build.command(self.layout, ['--nup', self.nup, '--out', self.out, '--msys', self.msys,
+                                                    '--until', 'romfs']), events.append, lines.append)
+        self.assertEqual(run.wait(), 1)
+        errors = [e['message'] for e in events if e['ev'] == 'error']
+        self.assertEqual(len(errors), 1, lines)
+        self.assertIn('the dump is damaged: dir/b.bin: size or sha256 differs', errors[0])
+        self.assertIn('dump the game again', errors[0])
+        self.assertNotIn('file 6', errors[0])              # the dump's own number for the file
+        self.assertEqual(run.error, errors[0])             # what the launcher's job shows as its error
+        self.assertFalse(any('Traceback' in ln for ln in lines))
+        self.assertEqual(sorted(p.name for p in (self.out / 'romfs').iterdir()), [])
+        state = json.loads((self.out / 'build-cache' / 'state.json').read_text())
+        self.assertNotIn('romfs', state['steps'])
+
+    def test_an_unexpected_error_reaches_the_launcher_with_its_message(self):
+        """An exception make_game.py does not report itself ends the build as fail() ends it: an error event with
+        the exception's message, not only a traceback and "the build stopped (exit code 1)"."""
+        made_up_game(self.out)
+
+        def broken(out, cache):
+            raise ValueError('the patch table has no line 12')
+
+        def full(out, cache):
+            raise OSError(28, 'No space left on device', str(out / 'build-cache' / 'lift' / 'main_0001.c'))
+        with mock.patch.object(self.mg, 'EVENTS', False):   # --events sets it: back to what it was afterwards
+            code, text = self.main_rebuild(broken, None, '--events')
+            self.assertEqual(code, 1)
+            errors = [json.loads(ln[2:]) for ln in text.splitlines() if ln.startswith('@@') and '"error"' in ln]
+            self.assertEqual([e['message'] for e in errors],
+                             ['the build stopped: ValueError: the patch table has no line 12'])
+            self.assertIn('Traceback (most recent call last)', text)   # the log still has where it came from
+            self.assertIn('error: the build stopped: ValueError', text)
+            code, text = self.main_rebuild(full, None, '--events')
+            self.assertEqual(code, 1)
+            self.assertIn('error: the build stopped: the disk is full (', text)
+            self.assertIn('main_0001.c)', text)
+        self.assertEqual(self.mg.error_text(FileNotFoundError(2, 'No such file or directory', 'x.bin')),
+                         'No such file or directory: x.bin')
+        self.assertEqual(self.mg.error_text(MemoryError()), 'MemoryError')
+
     def main_rebuild(self, lift, compile_, *more):
         """make_game.main() --rebuild in this process on self.out, with the given functions in place of the lift and
         the compile. Returns (the SystemExit code or 0, what it printed)."""
