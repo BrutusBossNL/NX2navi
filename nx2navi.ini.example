@@ -611,6 +611,12 @@
 # working. 0 (default): only the threads that wait for that event or thread are woken. With trace = sched the
 # "sched:" line counts both ("signals woke ..., left ... asleep").
 # sync_wake_all = 0
+# 1 (default): a thread of its own writes the log lines, to the log file and the console, so a write that stalls (a
+# busy disk, a virus scanner, a console that scrolls) no longer holds the thread that logged, which is often the one
+# that draws the frame. A crash, a fatal error and the end of the game write out what is still queued first. 0: each
+# line is written by the thread that logs it, as before. Either way a "log: ... writes of the log took over 2 ms" line
+# counts the slow writes and says whose time they took.
+# log_async = 1
 # 1: the frame-time summary also splits the replay by op kind (draw, bind, transfer), which says where a stalled frame
 # went. The clock reads cost a fraction of a millisecond a frame, so it is off by default.
 # replay_time = 0
