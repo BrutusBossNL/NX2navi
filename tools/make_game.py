@@ -35,6 +35,7 @@ therefore lifts and compiles again but keeps the unpacked game files, and --rebu
 compile step keeps every object with the dependency list clang wrote for it (build-cache/obj/objects.json) and
 compiles a file again only when it, a header it includes, the flags or the compiler changed; the kit's own folder
 is not part of that key, so a kit in another folder (the launcher keeps each version in its own) reuses the objects.
+The list goes to disk every 25 objects while the compile runs, so a compile that is cut short keeps what it finished.
 A kit with lib/libnx2navirt.a built by --make-runtime-lib for the same runtime/ and the same compiler links the
 runtime from it and compiles only the runtime files that include headers written per install. The new ocarina.exe
 replaces the old one only once it links (with lld when the toolchain has it), so a failed build leaves the last good
@@ -788,6 +789,8 @@ class ObjectCache:
         return 1
 
     def save(self):
+        """Whole or not at all: written beside the file and moved over it, so a process that ends in the middle
+        (Cancel) leaves the last complete objects.json."""
         tmp = self.path.with_suffix('.tmp')
         tmp.write_text(json.dumps(self.entries), encoding='utf-8')
         tmp.replace(self.path)
@@ -877,6 +880,11 @@ def source_size(src):
             time.sleep(SOURCE_PAUSE)
 
 
+# compile_all writes the object cache to disk after this many more objects, and at most this often (seconds): the
+# cache of a whole game is some megabytes, and writing it after every object would take longer than the compiles.
+CACHE_SAVE_EVERY, CACHE_SAVE_PAUSE = 25, 2.0
+
+
 def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=None, alts=None):
     """Compile each (source, object) whose object is not current in cache. cmd_for(src, dst) -> argv without the
     dependency-file options; salt identifies the compiler. Returns (compiled, reused, failures) with failures as
@@ -884,7 +892,10 @@ def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=No
     compile time grows with size, and a big file that started last would run on alone after the others finished.
     stop() true makes the compiles not yet started end at once, unrecorded (a step beside this one failed).
     alts(src, dst) -> (keys, kits): the keys earlier versions gave the same compile, and the folders of their kits; an
-    object recorded under one of them is taken over (ObjectCache.adopt) instead of compiled again."""
+    object recorded under one of them is taken over (ObjectCache.adopt) instead of compiled again.
+    Each object is recorded when its compile ends, whichever started first, and the cache goes to disk every
+    CACHE_SAVE_EVERY objects: a compile that is cut short (Cancel ends the process, a crash, a power cut) keeps the
+    objects finished until then, where it used to keep none and the next run compiled the whole game again."""
     todo, keys = [], {}
     adopted = 0
     for src, dst in srcs:
@@ -911,10 +922,14 @@ def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=No
         return src, dst, dep, p.returncode, p.stderr[-1500:]
 
     done, bad = reused, []
+    unsaved, saved_at = 0, time.monotonic()
     if progress:
         progress(done, len(srcs))
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as ex:
-        for src, dst, dep, rc, err in ex.map(cc, todo):
+        # submitted largest first, taken as they end: in submission order every result would wait for the largest
+        # file's, and nothing would be recorded during the minutes that one compiles
+        for result in concurrent.futures.as_completed([ex.submit(cc, job) for job in todo]):
+            src, dst, dep, rc, err = result.result()
             done += 1
             if rc is None:   # not started (stop)
                 continue
@@ -923,6 +938,13 @@ def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=No
                 cache.forget(dst)
             else:
                 cache.record(dst, keys[dst], dep, src)
+                unsaved += 1
+            if unsaved >= CACHE_SAVE_EVERY and time.monotonic() - saved_at >= CACHE_SAVE_PAUSE:
+                try:
+                    cache.save()
+                except OSError:   # the save at the end still reports a disk that cannot be written
+                    pass
+                unsaved, saved_at = 0, time.monotonic()
             if progress:
                 progress(done, len(srcs))
     cache.save()

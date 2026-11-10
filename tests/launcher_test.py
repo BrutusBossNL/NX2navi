@@ -1679,6 +1679,74 @@ class MakeGameTest(Tmp):
         self.assertEqual((compiled, bad), (3, []))
         self.assertEqual(order.read_text().split(), ['big.c', 'mid.c', 'small.c'])
 
+    def fake_compiles(self, count, held=None):
+        """count sources of growing size in a folder, and a stand-in for the compiler process (subprocess.run in
+        make_game.py) that writes the object and its dependency file. held: (name, event) makes that one source's
+        compile wait for the event. Returns (sources and objects, the stand-in, the object folder)."""
+        src, obj = self.tmp / 'src', self.tmp / 'obj'
+        src.mkdir()
+        obj.mkdir()
+        srcs = []
+        for i in range(count):
+            (src / f'f{i:02d}.c').write_text(f'int f{i};' + ' ' * (10 * i) + '\n')
+            srcs.append((src / f'f{i:02d}.c', obj / f'f{i:02d}.o'))
+
+        def run(cmd, **kw):
+            dep, out, source = cmd[cmd.index('-MF') + 1], cmd[cmd.index('-o') + 1], cmd[-1]
+            if held and Path(source).name == held[0]:
+                held[1].wait(20)
+            Path(out).write_bytes(b'object')
+            Path(dep).write_text(out.replace('\\', '/') + ': ' + source.replace('\\', '/') + '\n')
+            return mock.Mock(returncode=0, stderr='')
+        return srcs, run, obj
+
+    def test_a_cut_compile_keeps_its_finished_objects(self):
+        """The object cache goes to disk every CACHE_SAVE_EVERY objects while the compile runs, so a compile that
+        ends in the middle (Cancel ends the process) keeps what it finished; it used to be written only at the end."""
+        srcs, run, obj = self.fake_compiles(60)
+        on_disk = []
+
+        class Cut(Exception):
+            pass
+
+        def cut_at_40(done, total):
+            path = obj / 'objects.json'
+            on_disk.append(len(json.loads(path.read_text())) if path.is_file() else 0)
+            if done == 40:
+                raise Cut   # the process ends here
+
+        def go(progress=None):
+            cache = self.mg.ObjectCache(obj / 'objects.json')
+            return self.mg.compile_all(srcs, lambda s, d: ['cc', '-c', '-o', str(d), str(s)], cache, 1,
+                                       dict(os.environ), progress)
+        with mock.patch.object(self.mg.subprocess, 'run', run), mock.patch.object(self.mg, 'CACHE_SAVE_PAUSE', 0):
+            with self.assertRaises(Cut):
+                go(cut_at_40)
+            self.assertEqual(on_disk[24:27], [0, 25, 25])   # nothing before the 25th object, then all 25
+            self.assertFalse((obj / 'objects.tmp').exists())
+            self.assertEqual(go()[:2], (35, 25))            # the next run compiles only the 35 not saved
+            self.assertEqual(go()[:2], (0, 60))
+
+    def test_objects_are_recorded_while_the_largest_file_compiles(self):
+        """The largest file starts first and can compile for minutes: the objects that finish meanwhile are recorded
+        and saved, not held back until the largest one is done."""
+        release = threading.Event()
+        srcs, run, obj = self.fake_compiles(30, held=('f29.c', release))   # f29.c is the largest
+        seen = []
+
+        def progress(done, total):
+            path = obj / 'objects.json'
+            if not release.is_set() and path.is_file() and len(json.loads(path.read_text())) >= 25:
+                seen.append(done)
+                release.set()   # 25 others are on disk while the largest still compiles
+        cache = self.mg.ObjectCache(obj / 'objects.json')
+        with mock.patch.object(self.mg.subprocess, 'run', run), mock.patch.object(self.mg, 'CACHE_SAVE_PAUSE', 0):
+            compiled, reused, bad = self.mg.compile_all(srcs, lambda s, d: ['cc', '-c', '-o', str(d), str(s)], cache,
+                                                        4, dict(os.environ), progress)
+        self.assertEqual((compiled, reused, bad), (30, 0, []))
+        self.assertTrue(seen, 'nothing was saved before the largest file finished')
+        self.assertEqual(len(json.loads((obj / 'objects.json').read_text())), 30)
+
     def test_runtime_split(self):
         tainted = self.mg.per_install_names()
         self.assertTrue({'layout.h', 'patches.h', 'romfs_config.h'} <= tainted)
