@@ -54,7 +54,9 @@
 # without the interrupt, 0 = off (the old scheduling).
 # async_preempt = 1
 # Replay NVN submissions on their own thread, at most one frame behind the game, 0 or 1. Default: off. Helps where the
-# game waits for the GPU; adds up to a frame of latency.
+# game waits for the GPU and in heavy scenes (15 to 18 percent more frames per second in a village); adds up to a frame
+# of latency, and can show a dark or flickering frame now and then: the other thread reads vertex and buffer memory
+# the game has sometimes rewritten by then.
 # replay_async = 0
 # EXPERIMENTAL, THE GAME CRASHES WITH 1. 1 lifts the virtual core gate: guest threads run without the console's limit
 # of one thread per core, and the game keeps per-core data without locks. With 1 the game crashes or hangs,

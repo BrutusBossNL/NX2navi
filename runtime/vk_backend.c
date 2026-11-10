@@ -552,6 +552,7 @@ static uint64_t vk_be_submit(const uint64_t *handles, int n) {
         if (!it.h) rt_fatal("vk: out of memory (replay queue)");
         memcpy(it.h, handles, sizeof *it.h * (size_t)n);
     }
+    vk_usnap_take(handles, n);   // the uniform blocks as they are now: the game writes on once this returns
     return replay_enqueue(&it);
 }
 static void vk_be_finish(void) { vk_sync_start(); replay_drain(DR_FINISH); vk_present_drain(); vk_sync_finish(); }
