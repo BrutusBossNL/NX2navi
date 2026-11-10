@@ -1097,6 +1097,11 @@ static VkDescriptorBufferInfo c0_info(VkExec *ex, int st) {
     int k = st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : 2;
     // vk_c0_fill reads the storage slots, and the uniform slots and dispatch size for compute or the base instance for
     // graphics: equal inputs give the same bank, so neither the fill nor the 2 KiB compare is needed.
+    // A vertex or fragment bank depends on the storage slots and the base instance alone (the rest of its inputs record
+    // is zero): those two are compared without building and comparing the whole 1.8 KiB record on every draw.
+    if (k < 2 && B.c0_valid[k] && B.c0_in[k].binst == c0_binst &&
+        !memcmp(B.c0_in[k].ssbo, ex->ssbo[st], sizeof B.c0_in[k].ssbo))
+        return (VkDescriptorBufferInfo){B.c0_buf[k], B.c0_off[k], VK_C0_BYTES};
     typeof(B.c0_in[0]) in;
     memset(&in, 0, sizeof in);
     memcpy(in.ssbo, ex->ssbo[st], sizeof in.ssbo);
@@ -2944,9 +2949,10 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                 }
             } else {
                 kind = 1;
-                vk_texture_lock();   // tex_info looks up with the texture lock held
+                int locked = 0;   // tex_info looks up with the texture lock held; kept descriptors (pb_take) need none
                 for (uint32_t k = 0; k < cnt; k++) {
                     if (pb_take(ex, b, nd + k, k, &o[k])) continue;
+                    if (!locked) vk_texture_lock(), locked = 1;
                     int slot = r->slot + (int)k;
                     uint64_t h = 0;
                     if (img) h = slot >= 0 && slot < 32 ? ex->img[st][slot] : 0;
@@ -2957,7 +2963,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                     o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
                     pb_keep(nd + k, &o[k]);
                 }
-                vk_texture_unlock();
+                if (locked) vk_texture_unlock();
             }
         } else {
             rt_fatal("vk: binding %u has an unknown kind %d", (unsigned)b->binding, (int)b->kind);
@@ -3144,6 +3150,13 @@ static void bind_vertex_buffers(VkExec *ex) {
     // (vk_mem_gen, read before any resolve), resolves to that buffer again: most draws change one stream or none.
     uint64_t gen = vk_mem_gen();
     int same_gen = B.vb_valid && B.vgen == gen;
+    // Most draws change no stream at all: with every range as it was bound and no pool or mirror change, the loop
+    // below would take each buffer from B again and return at the compare after it.
+    if (same_gen && !memcmp(B.vin, ex->vbuf, sizeof B.vin)) {
+        int same = 1;
+        for (int b = 0; !dyn && b < 16 && same; b++) same = B.vstr[b] == ex->pipe.vstream[b].stride;
+        if (same) return;
+    }
     for (int b = 0; b < 17; b++) {
         vb[b] = Z.zbuf, vo[b] = 0, vsz[b] = ZERO_BYTES, vstr[b] = b < 16 ? ex->pipe.vstream[b].stride : 0;
         if (b == VK_PIPE_ZERO_BINDING) continue;
