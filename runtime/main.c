@@ -631,7 +631,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-vkexec")) return probe_vkexec();
     if (!strcmp(mode, "--probe-astc")) return probe_astc();
     if (!strcmp(mode, "--probe-zstd")) return probe_zstd();
-    if (!strcmp(mode, "--probe-input")) return probe_input();
+    if (!strcmp(mode, "--probe-input")) return probe_gamepad();
     if (!strcmp(mode, "--probe-vkdevice")) return probe_vkdevice();
     if (!strcmp(mode, "--probe-movie")) return probe_movie();
     if (!strcmp(mode, "--prepare-shaders")) return vk_pipeline_prepare_shaders();

@@ -1195,7 +1195,7 @@ void input_motion_start(void) {
 // --probe-input: the gamepad path on SDL's virtual test gamepad (NX2NAVI_TEST_PAD). The pad thread comes up, a poll
 // reads the gamepad, polls are quick, and while an update takes as long as a device search (up_test_ns) the polls go on
 // with their last state instead of waiting for it. Needs no game files and no controller.
-int probe_input(void) {
+int probe_gamepad(void) {
     int fails = 0;
     cfg_setenv("NX2NAVI_TEST_PAD", "20000,-12000,0,0");
     uint64_t b = 0;
