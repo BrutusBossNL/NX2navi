@@ -147,6 +147,11 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   once. `NX2NAVI_HDR_LIVE=0` leaves the HDR path out of a run that starts with HDR off.
 - ASTC textures are uploaded as they are where the device samples ASTC, and decoded by a compute shader everywhere
   else (`vk_astc.c`); under 20 GiB of video memory the decoder encodes them to BC3.
+- Texture detail (`texture_detail`, `vk_texture.c` "texture detail"): on a card with little video memory the large
+  mipmapped ASTC textures the CPU fills are made without their largest mip level (reduced) or their two largest (low),
+  which is three quarters and fifteen sixteenths of their memory. The image holds the game's levels from the one it
+  starts at, and uploads, views and sampler LOD clamps count from there. A texture a shader reads by texel position, or
+  whose size it uses, is made whole (`gfx_shader.c` `reflect_exact`). `auto` picks by the device-local budget.
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
   `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder

@@ -67,7 +67,7 @@ static const char *const known[] = {
     "WALK_KEY", "WALK_SCALE", "WB_EXACT", "WB_FENCE_LIMIT", "WB_MERGE", "WB_NO_REUP", "WB_MERGE_MAX", "WB_PROBE", "WB_SPLIT", "WB_LAZY", "WB_LAZY_TOUCH", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_KEEP", "XLATE_PROCS",
     "ZSTD_CHECK", "ZSTD_NATIVE",
     "BIND_REUSE", "DYN_DELTA", "STG_ARENA", "SUBMIT_BATCH", "ASTC_GPU_DESWIZZLE", "ASTC_SCRATCH_KEEP", "ASTC_ARENA",
-    "TEXUP_LOG_MS", "DYN_RES", "DYN_RES_TARGET", "DYN_RES_STEP",
+    "TEXUP_LOG_MS", "DYN_RES", "DYN_RES_TARGET", "DYN_RES_STEP", "TEXTURE_DETAIL",
     "RECORDER_CORE", "RECORDER_PRIO", "REPLAY_TIME", "LOCK_TIME", "POOL_CREATE_BUDGET", "POOL_CREATE_MS", "POOL_LOAD_BACKLOG", "POOL_LOAD_MS",
     "VMA_BLOCK_MB", "ASTC_BC_PROBE", "SYNC_WAKE_ALL", "LOG_ASYNC",
 };
@@ -80,6 +80,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"FULLSCREEN", "display"}, {"WINDOW_SIZE", "display"}, {"PERF_OVERLAY", "display"}, {"VK_PRESENT", "display"},
     {"GPU_INDEX", "display"}, {"MONITOR", "display"}, {"OUTPUT_RES", "display"}, {"GAME_ASPECT", "display"}, {"GAME_RES", "display"}, {"RENDER_SCALE", "display"}, {"UPSCALER", "display"},
     {"SHARPNESS", "display"}, {"ASPECT", "display"}, {"FOV", "display"}, {"ANISO", "display"},
+    {"TEXTURE_DETAIL", "display"},
     {"COLOR_PRESET", "display"},
     {"COLOR_BRIGHTNESS", "display"}, {"COLOR_CONTRAST", "display"}, {"COLOR_SATURATION", "display"},
     {"COLOR_GAMMA", "display"}, {"HDR", "display"}, {"HDR_LIVE", "display"}, {"HDR_PEAK_NITS", "display"}, {"HDR_GAME_NITS", "display"},
@@ -152,6 +153,7 @@ static const CfgMeta metas[] = {
     {"GAME_RES", "1440", "1080|1440|1800|2160|2880|window", RESTART},   // widescreen.c: the picture's height
     {"ASPECT", "fit", "fit|stretch", LIVE}, {"FOV", "100", "70..140", LIVE},
     {"ANISO", "game", "game|2|4|8|16", LIVE},   // vk_texture.c sampler_features, vk_sampler_aniso_live
+    {"TEXTURE_DETAIL", "auto", "auto|full|reduced|low", RESTART},   // vk_texture.c "texture detail", read at the first texture
     // colour adjustment (vk_color.c); the preset is the menu's, the four values are what the present uses
     {"COLOR_PRESET", "default", "default|vivid|clarity|custom", LIVE}, {"COLOR_BRIGHTNESS", "0", "-30..30", LIVE},
     {"COLOR_CONTRAST", "100", "70..150", LIVE}, {"COLOR_SATURATION", "100", "50..200", LIVE},

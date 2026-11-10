@@ -344,6 +344,9 @@ Runtime probes, each a mode of `nx2navi.exe` (the list is at the top of `runtime
 part of `--probe-vkexec` translate shaders of the census below: they look for `build/<ver>/shaders/jobs.json` of the
 exe's own version first, then of the other one.
 `--probe-vkmem` also checks CPU-backed texture uploads and rewrites, GPU-written texture aliases, and memory write watches.
+A change to the texture detail (`runtime/vk_texture.c` "texture detail": `detail_skip`, `upload`, `astc_bl_regions`)
+passes it three times, with `NX2NAVI_TEXTURE_DETAIL` set to `full`, `reduced` and `low`: each time ASTC textures are
+uploaded and rewritten, and every level and layer of their images must hold the game's level it stands for.
 `--probe-prewarm` runs the boot's pipeline stages without the game, from the caches next to the exe (it skips when
 there are none): the pipeline cache load, the shader prewarm, the recorded pipelines and the compute pipeline prebuild,
 with a `mem: boot stage` log line after each that gives the device memory and the process commit so far. It then asks

@@ -71,6 +71,7 @@ int vk_ngxfg_wanted(void);              // vk_dlaa.c: DLSS's frame generation th
 int vk_ngxfg_max(void);                 // ... and how many frames it may generate per rendered one (0: it cannot)
 int vk_ffx_available(void);             // vk_ffx.cpp: FSR 3.1 upscaling can run (asked without loading the library)
 int vk_ffx_framegen_available(void);    // ... and FSR 3.1 frame generation
+int vk_texture_detail_auto(void);       // vk_texture.c: the texture detail auto picks on this card, 0 full to 2 low
 double frame_step_limit_hz(void);
 int frame_limit_follows_display(void);
 int frame_limit_adjustable(void);
@@ -672,6 +673,19 @@ static void row_shadow_res(void) {
     opt_choice_list("NX2NAVI_SHADOW_RES", UI_MENU_SHADOW_RES, vals, names, N, UI_MENU_SHADOW_RES_DESC);
 }
 
+// Texture detail (vk_texture.c "texture detail"): large surface textures made without their largest one or two mip
+// levels. Read when the first texture is made, so the row notes the restart. The automatic entry names the level it
+// picks on this card.
+static void row_texture_detail(void) {
+    static const char *const vals[] = {"auto", "full", "reduced", "low"};
+    static const UiTextId level[] = {UI_MENU_TEX_DETAIL_FULL, UI_MENU_TEX_DETAIL_REDUCED, UI_MENU_TEX_DETAIL_LOW};
+    static char picked[96];   // the row keeps the pointer for the frame
+    int a = vk_texture_detail_auto();
+    snprintf(picked, sizeof picked, menu_text(UI_MENU_TEX_DETAIL_AUTO), menu_text(level[a < 0 || a > 2 ? 0 : a]));
+    const char *names[] = {picked, menu_text(level[0]), menu_text(level[1]), menu_text(level[2])};
+    opt_choice_list("NX2NAVI_TEXTURE_DETAIL", UI_MENU_TEX_DETAIL, vals, names, 4, UI_MENU_TEX_DETAIL_DESC);
+}
+
 static void row_shadow_scale(void) {
     static const char *const vals[] = {"1", "2", "3", "4"};
     static const char *const names[] = {"960 (1x)", "1920 (2x)", "2880 (3x)", "3840 (4x)"};
@@ -1074,6 +1088,7 @@ static void tab_screen(float scale) {
     static const char *const aniso[] = {"game", "2", "4", "8", "16"};
     const char *aniso_names[] = {menu_text(UI_MENU_ANISO_GAME), "2x", "4x", "8x", "16x"};
     opt_choice_list("NX2NAVI_ANISO", UI_MENU_ANISO, aniso, aniso_names, 5, UI_MENU_ANISO_DESC);
+    row_texture_detail();
     opt_end();
 }
 

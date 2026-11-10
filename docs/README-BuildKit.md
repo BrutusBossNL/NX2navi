@@ -148,7 +148,9 @@ beside the game.
   driver keeps the prepared shaders' libraries in that cache, and a smaller limit drops the oldest as new ones come in
   (a 2048 MB cache could not hold them): every start then builds them again in the background, and play stutters, with
   some things missing for a few frames, until that is done. The log's `library warm` lines say when this happens.
-- **Screen** in the menu has Texture filtering (anisotropic, up to 16x, at once), Upscaling (DLSS on NVIDIA RTX cards,
+- **Screen** in the menu has Texture filtering (anisotropic, up to 16x, at once), Texture detail (Reduced and Low
+  leave out the largest versions of the big surface textures so that the game fits the video memory of 6 and 8 GB
+  cards; Automatic picks by the card), Upscaling (DLSS on NVIDIA RTX cards,
   FSR 3.1 on any card where `amd_fidelityfx_vk.dll` loads), Frame generation (NVIDIA DLSS on RTX 40 and 50 cards, with
   a DLSS multiplier of 2x, or 3x and 4x on RTX 50 cards; FSR 3.1 on any card where it loads; it needs DLSS or FSR 3.1
   upscaling on, and the frame limit then counts the frames on screen; with no limit chosen it is the display's refresh
