@@ -2530,7 +2530,7 @@ static void support_fill(uint8_t *b, float w, float h, float point_size) {
     memcpy(b + 1408, pcss_params(), 16);   // pcss (translator patch 0010): soft sun shadows in the cascade compares
     memcpy(b + 1424, shadow_spread_params(), 16);    // shadow_spread (translator patch 0011): sun shadow filter width
     for (int i = 0; i < 73; i++) memcpy(b + 192 + 16 * i, &one, 4);   // render scale 1: the host renders at guest size
-    if (vk_hdr_wanted()) {   // read by the game's tonemap only, once vk_hdr.c tonemap_splice has grown its block past the translator's
+    if (vk_hdr_armed()) {   // read by the game's tonemap only, once vk_hdr.c tonemap_splice has grown its block past the translator's
         float hdr[16];
         vk_hdr_support(hdr);
         memcpy(b + 1440, hdr, sizeof hdr);
