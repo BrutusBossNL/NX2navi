@@ -432,6 +432,20 @@ refuses: no manifest, another format or game, a newer format, paths outside the 
 job with a fake
 `make_game.py` (with and without the prompts row), and the window's selftest when a display is there.
 
+What goes wrong around a build is tested the same way, on made-up folders and stand-in processes: an update that
+stops in its compile (the game stays installed, home says how to finish, the install goes on from the unpacked
+files), `start.pyw` on a version that cannot be imported (exit code 86 at once, no message box, with a version to go
+back to), a cut RomFS image and the free space, the object cache written while the compile runs and kept when it is
+cut, a RomFS step that does not repeat the lift, the update's duration text and the warm-up's bar, a damaged dump
+named by its file and an unexpected error by its message, the file check's result in its row and on home, the
+game's FATAL line after exit codes 70 and 71, the job count by free memory and the build's priority class, a line
+handler that raises and a log that cannot be written, one forced update check a minute and GitHub's reset time, a
+game folder with characters outside the Basic Multilingual Plane (its `modules.c` compiled when a C compiler is
+there), the file check at both piece sizes against the check as it was, the disk space of every step and the build
+tools' test compile, and the prompt tool's unpacking. Two tests record the logic of `tools/romfs_check.py` and of
+the three prompt scripts (their code without comments and docstrings) beside `SCAN_TOOL` and `PROMPT_TOOLS`: they
+fail when that logic changes, to ask whether the step must run again on every install.
+
 ## Requirements and limits
 
 - Windows 10 or 11, x86-64; the build's own requirements (README-BuildKit.md): 16 GB of RAM, about 30 GB free for
