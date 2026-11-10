@@ -307,9 +307,12 @@ the wait on it, timed waits keep their time, a cancel ends any wait, and 4,000 s
 each seen. It runs a second time with `NX2NAVI_SYNC_WAKE_ALL=1`. No game files.
 
 A change to the log queue (`runtime/logq.c`) passes `python tests\logq_check.py`, which builds it with the platform
-layer and a destination of its own: 160,000 lines from eight threads arrive whole and in each thread's order, a
-destination that takes 30 ms a write does not hold the threads that log, one that stops while four times the queue's
-size is logged loses nothing, and `logq_sync` returns with everything written. No game files.
+layer and a destination of its own: 160,000 lines from eight threads arrive whole and in each thread's order, a line
+logged while the queue's lock is taken waits and does not pass the lines queued before it, a destination that takes
+30 ms a write does not hold the threads that log, the line about slow writes comes once in ten seconds, a destination
+that stops while four times the queue's size is logged loses nothing, and `logq_sync` returns with everything written.
+The test passes on a busy machine too: it waits for the queue to empty instead of for a time, and counts slow lines
+instead of timing one. No game files.
 
 A change to the button prompts (`tools/make_romfs_patches.py --prompts`, `tools/button_icons.py`) passes
 `.venv-py314\Scripts\python tests\romfs_prompts_test.py`, which runs the tool on a RomFS it makes itself (no game
