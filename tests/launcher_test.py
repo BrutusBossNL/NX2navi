@@ -18,7 +18,7 @@ Run: python tests/launcher_test.py   (Python 3.14 for the zstd tests; the window
   a source checkout's build/xlate/), the prompts step with a stand-in prompt tool, the object cache of the compile
   step with the system's C compiler, and its windres call under folders with spaces (a script in windres's place)
 - jobs: an install driven by a fake make_game.py, with and without the prompts row
-- the look: the colour schemes, the background picture's fitting and kept copy, the sound effects (off by default,
+- the look: the colour schemes, the background picture's fitting and kept copy, the sound effects (low by default,
   only the game's own select and back sounds, decoded from a made-up .bwav)
 - the window: --selftest draws every screen (skipped without a display)
 """
@@ -2599,9 +2599,10 @@ class LookTest(Tmp):
         self.assertAlmostEqual(peak / 32767, sound.LEVELS['high'], delta=0.01)
         self.assertFalse(sound.Sounds(self.tmp / 'empty', 'high').game)
 
-    def test_only_the_games_sounds_play_and_only_once_turned_on(self):
+    def test_only_the_games_sounds_play_at_low_unless_set(self):
         sound = self.sound
-        self.assertEqual(settings.DEFAULTS['sounds'], 'off')
+        self.assertEqual(settings.DEFAULTS['sounds'], 'low')
+        self.assertEqual(sound.DEFAULT_LEVEL, 'low')
         self.assertEqual(set(gamefiles.SOUNDS), set(sound.EFFECTS))
         empty = self.tmp / 'empty'
         self.game_sounds()
@@ -2616,27 +2617,29 @@ class LookTest(Tmp):
             self.assertTrue(quiet.load_game())                 # the game's sounds, once decoded
             quiet.play('select')
             self.assertEqual(popen.call_count, 1)
-            s = sound.Sounds(self.layout.cache)                # no level given, as a new launcher.json has it
+            s = sound.Sounds(self.layout.cache)                # no level given, as a new launcher.json has it: low
+            self.assertEqual(s.level, 'low')
             s.play('select')
-            s.set_level('nonsense')                            # a level launcher.json cannot hold: off
+            self.assertEqual(popen.call_count, 2)
+            s.set_level('off')                                 # the player turned them off
             s.play('select')
-            self.assertEqual(popen.call_count, 1)
-            s.set_level('low')
+            self.assertEqual(popen.call_count, 2)
+            s.set_level('nonsense')                            # a level launcher.json cannot hold: the default
+            self.assertEqual(s.level, 'low')
             s.play('back')
             s.play('move')                                     # the cursor has no sound
             s.play('no such effect')
-            self.assertEqual(popen.call_count, 2)
+            self.assertEqual(popen.call_count, 3)
             with open(popen.call_args[0][0][1], 'rb') as f:
                 self.assertEqual(f.read(4), b'RIFF')
-            s.set_level('off')
-            s.play('select')
-            self.assertEqual(popen.call_count, 2)
+            peak = max(abs(v) for v in struct.unpack_from('<8h', s.wav('back'), 44))
+            self.assertAlmostEqual(peak / 32767, sound.LEVELS['low'], delta=0.01)
 
     def test_the_look_settings_survive_and_fall_back(self):
         path = self.tmp / 'launcher.json'
         s = settings.Settings(path)
         self.assertEqual((s['theme'], s['background'], s['background_dim'], s['animations'], s['sounds']),
-                         ('kokiri', '', 40, True, 'off'))
+                         ('kokiri', '', 40, True, 'low'))
         s['theme'], s['sounds'], s['background_dim'] = 'shadow', 'high', 60
         s.save()
         t = settings.Settings(path)

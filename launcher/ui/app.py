@@ -918,7 +918,7 @@ class App:
         def sounds(d):
             keys = [k for k, _ in SOUND_LEVELS]
             now = self.settings.get('sounds')
-            at = keys.index(now) if now in keys else 0
+            at = keys.index(now if now in keys else sound.DEFAULT_LEVEL)
             self.settings['sounds'] = keys[max(0, min(len(keys) - 1, at + d))]
             self.settings.save()
             self.sounds.set_level(self.settings['sounds'])
@@ -946,9 +946,10 @@ class App:
             Row('divider'),
             Row('toggle', 'Animations', on=animations, get=lambda: bool(self.settings.get('animations')),
                 desc=('A gliding cursor, sliding screens and drifting sparks.',)),
-            Row('enum', 'Sounds', get=lambda: dict(SOUND_LEVELS).get(self.settings.get('sounds'), 'Off'),
+            Row('enum', 'Sounds', get=lambda: dict(SOUND_LEVELS).get(self.settings.get('sounds'),
+                                                                     dict(SOUND_LEVELS)[sound.DEFAULT_LEVEL]),
                 left=lambda: sounds(-1), right=lambda: sounds(1),
-                desc=('The game\'s select and back sounds. Off by default.',)),
+                desc=('The game\'s select and back sounds. Low by default.',)),
             Row('divider'),
             Row('action', 'Back', on=lambda: self.show('home', self.home_row('Customize Launcher')), height=40,
                 desc=('Back to the main menu.',)),

@@ -47,7 +47,7 @@ Customize Launcher (on the home screen) makes the look the player's own:
 - Animations (on by default): the cursor glides from row to row, a new screen slides into place, sparks drift up
   over the backdrop and Navi bobs in the title band with a pulsing halo (`App.animate`). They move by the time that
   passed, stand still while the window is hidden or minimised, and Off stops them all.
-- Sounds (off by default; Low, Medium or High): two of the game's own interface sounds, the decide and cancel sounds
+- Sounds (Low by default; Off, Medium or High): two of the game's own interface sounds, the decide and cancel sounds
   of its menus, when a row is chosen or a choice changes and when the player goes back. The launcher decodes them
   from the player's built game or dump into `data/cache/sounds` (`gamefiles.extract_sounds`:
   `Sound/Resource/Stream/SE_Sys_Do00.bwav` and `SE_Sys_Cancel00.bwav`, the files `runtime/menu_sound.c` plays in the
@@ -377,7 +377,7 @@ pruning, unsafe archives, the background update (a release staged beside the run
 `staged.json` marker, a staged release installed after a restart, no install while the game runs, the install once
 it exited, nothing by itself with Install Updates Automatically off, a failed staging tried again after the next
 check), the font decoding on a system font wrapped like the game's, the look (every colour scheme complete, the
-background picture cut to the window's shape and kept, the sound effects as WAVs and off by default), `make_game.py`
+background picture cut to the window's shape and kept, the sound effects as WAVs and low by default), `make_game.py`
 on a synthetic
 `.nup` (events, skipped steps, `--rebuild` without the dump, step keys, the shaders key following the translator the
 build uses), the RomFS step beside the lift and compile

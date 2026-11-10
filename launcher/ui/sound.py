@@ -3,11 +3,11 @@ going back, read from the player's game (launcher/gamefiles.py extract_sounds de
 runtime/menu_sound.c plays them in the in-game menu). No sound ships with the launcher and none is made here: until
 the player's game has been read, and for a sound it does not hold, the launcher is silent.
 
-They are off until the player picks a loudness in Customize Launcher (the Sounds row). An effect is the game's sound
-as a 16-bit WAV in memory, scaled to the loudness. Windows plays it with PlaySound from that memory; elsewhere the WAV
-goes to a file in the cache folder and the first of pw-play, paplay and aplay found plays it. One effect sounds at a
-time: a new one cuts the last. Moving the cursor makes no sound, as it would cut a choice's sound short every time
-the pointer lands on a row of the next screen.
+They play at Low until the player picks another loudness, or Off, in Customize Launcher (the Sounds row). An effect
+is the game's sound as a 16-bit WAV in memory, scaled to the loudness. Windows plays it with PlaySound from that
+memory; elsewhere the WAV goes to a file in the cache folder and the first of pw-play, paplay and aplay found plays
+it. One effect sounds at a time: a new one cuts the last. Moving the cursor makes no sound, as it would cut a
+choice's sound short every time the pointer lands on a row of the next screen.
 
     select    a row was chosen, a switch or a choice changed, Play, the end of a build    the game's decide sound
     back      back to the screen before, something could not be done                      the game's cancel sound
@@ -21,6 +21,7 @@ import subprocess
 import numpy as np
 
 LEVELS = {'off': 0.0, 'low': 0.18, 'medium': 0.4, 'high': 0.75}   # the Sounds choice: the loudest sample's share of full scale
+DEFAULT_LEVEL = 'low'   # a new launcher.json's (launcher/settings.py DEFAULTS), also for a value it cannot hold
 EFFECTS = ('select', 'back')   # the names play takes: the game's sounds of gamefiles.SOUNDS
 
 
@@ -50,10 +51,10 @@ class Sounds:
     """Plays the effects at the level of the Sounds choice. Every failure is silent: a PC without a sound device, or
     without a player program, just has a quiet launcher."""
 
-    def __init__(self, cache_dir, level='off', log=None):
+    def __init__(self, cache_dir, level=DEFAULT_LEVEL, log=None):
         self.cache = cache_dir
         self.log = log or (lambda line: None)
-        self.level = None     # set_level below: 'off' unless the player chose a loudness
+        self.level = None     # set_level below: DEFAULT_LEVEL unless the player chose another
         self.game = {}        # the game's sounds decoded from the player's files: name -> (rate, channels, samples)
         self.wavs = {}        # name -> WAV bytes at the current level (Windows plays from this memory: it must stay)
         self.files = {}       # name -> the WAV file elsewhere
@@ -88,7 +89,7 @@ class Sounds:
         return bool(game)
 
     def set_level(self, level):
-        level = level if level in LEVELS else 'off'
+        level = level if level in LEVELS else DEFAULT_LEVEL
         if level == self.level:
             return
         self.stop()
