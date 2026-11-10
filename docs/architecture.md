@@ -116,10 +116,11 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   at a new state, an optimised pipeline replacing it from a background thread. A draw whose pipeline is not ready is
   skipped when one of its pass's targets was rendered in the previous frame, and waits otherwise. Compute pipelines
   are compiled outside the pipeline lock, and one compile serves every thread that needs it. The boot builds the
-  pipeline of every compute shader play recorded, but keeps only those of the shaders dispatched most recently
-  (`compute-used.bin`, `compute_keep`): the others go into the pipeline cache and are destroyed, and their first
-  dispatch creates them from it. A kept pipeline holds driver memory whether it is used or not, and the recorded list
-  grows with the play history (`runtime/vk_pipeline.c`, "compute pipelines the boot keeps").
+  pipeline of every compute shader play recorded or the shader preparation listed, but keeps only those of the shaders
+  dispatched most recently (`compute-used.bin`, `compute_keep`): the others go into the pipeline cache and are
+  destroyed, and their first dispatch creates them from it. A kept pipeline holds driver memory whether it is used or
+  not, and the list has thousands of compute shaders a session never dispatches (`runtime/vk_pipeline.c`, "compute
+  pipelines the boot keeps").
 - The game's tensor-core upscaler is replaced by a decode-and-scale pass (`vk_tonemap.c`); `vk_fsr.c` runs AMD FSR 1
   (EASU, RCAS) on the present when the window is larger than the picture.
 - HDR (`vk_hdr.c`): the game tonemaps its scene into a float target, upscales it, draws the HUD into a second float

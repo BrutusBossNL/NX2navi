@@ -4295,11 +4295,12 @@ static int cs_flight_remove(const GfxShader *cs) {   // 1 when a dispatch waited
 }
 
 // ---- compute pipelines the boot keeps (compute-used.bin next to pipeline-keys.bin; NX2NAVI_COMPUTE_KEEP)
-// The boot prebuild (lb_compute) used to build the pipeline of every compute shader play ever recorded and keep all of
-// them for the process. A pipeline that exists holds driver memory whether or not anything dispatches it, and the list
-// only grows with the play history: on an RTX 5090 (NVIDIA 621.01) a history of 4,066 compute shaders held 2.3 GiB of
-// device memory and a matching share of the process's commit from the title screen on, while a boot into the first
-// village dispatched 95 of them. That is memory an 8 to 12 GB card needs for textures.
+// The boot prebuild (lb_compute) used to build the pipeline of every compute shader of the warm list (the ones play
+// recorded and the prepared ones, shader-prepared.bin) and keep all of them for the process. A pipeline that exists
+// holds driver memory whether or not anything dispatches it: on an RTX 5090 (NVIDIA 621.01) the 4,066 compute shaders
+// of an installed copy's list (42,344 variants, 42,142 of them prepared) held 2.3 GiB of device memory and a matching
+// share of the process's commit from the title screen on, while a boot into the first village dispatched 95 of them.
+// That is memory an 8 to 12 GB card needs for textures, and a copy with prepared shaders pays it from its first boot.
 // So the boot keeps only the pipelines of the NX2NAVI_COMPUTE_KEEP (default 512) compute shaders dispatched most
 // recently, and builds every other one into the pipeline cache and destroys it at once (lb_compute keep 0): the cache
 // then holds it, so its first dispatch creates it without compiling, and no pipeline of an unused shader stays. On

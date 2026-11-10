@@ -2685,9 +2685,9 @@ static void outside_watch(uint64_t frame) {
 // One line per boot stage (vk_pipeline.c calls it after the pipeline cache load, the shader prewarm, the recorded
 // pipelines and the compute pipeline prebuild): the device-local memory in use, the part of it VMA did not allocate
 // (outside_watch's "outside VMA": pipelines and the driver's own, before the swapchain and the upscaler exist), and the
-// process's commit and working set. Subtracting two lines gives what a stage left behind: with a long play history the
-// boot's compute pipelines alone held 2.3 GiB of device memory on an RTX 5090 (4,066 pipelines kept, 95 of them
-// dispatched before the first village), which is what this line was added to place.
+// process's commit and working set. Subtracting two lines gives what a stage left behind: on an installed copy with
+// its prepared shader list the boot's compute pipelines alone held 2.3 GiB of device memory on an RTX 5090 (4,066
+// pipelines kept, 95 of them dispatched before the first village), which is what this line was added to place.
 void vk_mem_stage_log(const char *stage) {
     VkCtx *c = vk_ctx();
     double proc, used, limit;
