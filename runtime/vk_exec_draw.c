@@ -3433,6 +3433,7 @@ uint32_t vk_exec_pending_draws_take(void) {
 static int draw_skipped(const VkExec *ex, int mesh, int why) {
     DRS.skipped[mesh][why]++;
     if (why == SK_SHADER_PENDING || why == SK_PIPE_PENDING) pending_draws++;
+    if (why == SK_PIPE_PENDING) perf_count(PERF_CNT_PIPE_SKIP);   // skipped draws only: a lookup that then waited is none
     if (!(DRS.first[mesh] >> why & 1)) {
         DRS.first[mesh] |= 1u << why;
         rt_log("vk: first %s draw skipped because: %s (program %llu)", mesh ? "mesh" : "vertex", sk_names[why],
@@ -3617,9 +3618,10 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         char tg[512];
         wait_logs++;
         vk_exec_targets_describe(ex, tg, sizeof tg);
-        rt_log("vk_exec: frame %llu: a draw waited %.1f ms for its pipeline (%s%s): %u vertices, pass %ux%u, %s",
+        rt_log("vk_exec: frame %llu: a draw waited %.1f ms for its pipeline (%s%s%s): %u vertices, pass %ux%u, %s",
                (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1, waited / 1e6, why,
-               pending ? ", skipped after all" : "", count, ex->pass_w, ex->pass_h, tg);
+               s.feedback ? ", feedback loop" : "", pending ? ", skipped after all" : "", count, ex->pass_w, ex->pass_h,
+               tg);
     }
     if (pending) return draw_skipped(ex, mesh, SK_PIPE_PENDING);   // a background worker is building it: skipped until it is ready
     if (!p || !info) return draw_skipped(ex, mesh, SK_PIPE_FAILED);

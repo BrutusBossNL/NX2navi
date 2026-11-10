@@ -75,7 +75,7 @@ static struct {
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
-    struct { uint64_t links, wlinks, dlinks, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
+    struct { uint64_t links, wlinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
     int vs_outs_all;                   // NX2NAVI_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src, f_full_subgroups;
@@ -133,6 +133,7 @@ typedef struct Pipe {
     uint8_t link_queued;               // a waiting draw queued its fast link to the workers (LibJob p), not yet run
     uint8_t used;                      // compute: a dispatch of this run asked for it (vk_pipeline_compute)
     uint8_t pre;                       // compute: built and kept by the boot prebuild (lb_compute) or bg_main
+    uint64_t t_miss;                   // graphics: when a draw first missed it (ns), 0 once it is usable (ready_note)
     size_t key_size;
     uint8_t key[];
 } Pipe;
@@ -2813,6 +2814,8 @@ static VkPipeline lib_build(Lib *b, int kind, const VkPipeState *s, const GKey *
         plat_mutex_lock(&P.lock);
         P.g.lib_n[kind]++, P.g.lib_ms[kind] += ms;
         if (ms > P.g.lib_max[kind]) P.g.lib_max[kind] = ms;
+        if (kind == LIB_PR && ((const PrKey *)(const void *)b->key)->missing) P.g.pr_added++, P.g.pr_added_ms += ms;
+        if (ms >= 25) P.g.lib_slow[kind]++, P.g.lib_slow_ms[kind] += ms;
     }
     if (!pipe && ++P.g.lib_fail <= 8) rt_log("vk_pipeline: gpl: stage library %d not built", kind);
     b->pipe = pipe, b->building = 0;
@@ -2898,6 +2901,18 @@ static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, F
     ok->kind = LIB_FO, ok->n_color = k->n_color, ok->samples = k->samples, ok->a2c = k->a2c, ok->logic_op = k->logic_op;
     ok->blend_en = k->blend_en, ok->depth = k->depth, ok->stencil = k->stencil, ok->wmask = k->wmask;
     memcpy(ok->color, k->color, sizeof ok->color), memcpy(ok->blend, k->blend, sizeof ok->blend);
+}
+
+// p, which a draw missed, has its first usable pipeline: how long that took is how long its draws were skipped or
+// waited. fast 0: it had no fast link and this is the optimised build. Caller holds P.lock.
+static void ready_note(Pipe *p, int fast) {
+    if (!p->t_miss) return;
+    double ms = (double)(plat_now_ns() - p->t_miss) / 1e6;
+    p->t_miss = 0;
+    P.g.ready_n[ms < 4 ? 0 : ms < 8 ? 1 : ms < 17 ? 2 : ms < 50 ? 3 : ms < 150 ? 4 : 5]++;
+    P.g.ready_ms += ms;
+    if (ms > P.g.ready_max) P.g.ready_max = ms;
+    P.g.ready_nofast += !fast;
 }
 
 // A fast-linked pipeline for s from its stage libraries. Caller holds P.lock.
@@ -3185,6 +3200,7 @@ static void u_run(LibJob *lj) {
             VkPipeline f = gpl_link(&lj->s, &lj->k, lj->l, 1, &final);   // releases P.lock while linking
             if (f && !p->info.pipeline) {
                 p->fast = p->info.pipeline = f;
+                ready_note(p, 1);
                 job_lower(p->job);   // its job now only does the optimised build
             } else if (f) {
                 vkDestroyPipeline(P.device, f, NULL);   // the job published one meanwhile
@@ -3258,6 +3274,7 @@ static void pipe_worker(void *arg) {
             j->p->fast_tried = 1;
             if (f && !j->p->info.pipeline) {
                 j->p->fast = j->p->info.pipeline = f, P.g.wlinks++;
+                ready_note(j->p, 1);
                 plat_cond_broadcast(&done_cv);
                 j->low = 1, j->worker = -1, P.g.requeued++;
                 j->prev = NULL, j->next = A.low;
@@ -3274,6 +3291,7 @@ static void pipe_worker(void *arg) {
         VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
         plat_mutex_lock(&P.lock);
         if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
+        ready_note(j->p, 0);
         if (pipe && j->p->fast) P.g.swaps++;
         j->p->building = 0;
         j->p->job = NULL;
@@ -3354,6 +3372,7 @@ int vk_pipeline_async_on(void) { return A.on; }
 static void promote(Pipe *p) {
     Job *j = p->job;
     if (!j || !j->low) return;
+    if (j->prebuild && !j->demanded && !p->info.pipeline) p->t_miss = plat_now_ns();
     j->low = 0, j->demanded = 1;
     if (j->worker < 0) {
         if (j->prev) j->prev->next = j->next;
@@ -3424,6 +3443,7 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
     }
     j->p = p;
     p->building = 1, p->job = j;
+    if (mode != 2) p->t_miss = plat_now_ns();
     if (mode == 2) {
         j->prev = A.low_tail;
         if (A.low_tail) A.low_tail->next = j;
@@ -3593,6 +3613,7 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
         if (final) p->fast_tried = 1;
         if (f && !p->info.pipeline) {
             p->fast = p->info.pipeline = f;
+            ready_note(p, 1);
             job_lower(p->job);
             plat_cond_broadcast(&done_cv);
         } else if (f) {
@@ -3613,7 +3634,6 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
     VkPipeline pipe = p ? p->info.pipeline : VK_NULL_HANDLE;
     plat_mutex_unlock(&P.lock);
     if (wait) {
-        perf_count(PERF_CNT_PIPE_SKIP);
         if (pending) *pending = 1;
         return VK_NULL_HANDLE;
     }
@@ -3649,6 +3669,7 @@ static void warm_builder(void *arg) {
         VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
         plat_mutex_lock(&P.lock);
         if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
+        ready_note(j->p, 0);
         if (pipe && j->p->fast) P.g.swaps++;
         j->p->building = 0;
         j->p->job = NULL;
@@ -5749,6 +5770,12 @@ static void save_with(uint32_t wait_ms) {
                P.g.link_max, (unsigned long long)P.g.link_fail, (unsigned long long)P.g.defer,
                (unsigned long long)P.g.swaps, (unsigned long long)P.g.requeued, (unsigned long long)P.g.slow,
                (unsigned long long)P.g.dlinks, P.g.dlinks ? P.g.dlink_ms / P.g.dlinks : 0.0, P.g.dlink_max);
+        uint64_t rn = P.g.ready_n[0] + P.g.ready_n[1] + P.g.ready_n[2] + P.g.ready_n[3] + P.g.ready_n[4] + P.g.ready_n[5];
+        rt_log("vk_pipeline: gpl: pipelines a draw missed were usable after under 4 ms %llu, 4-8 ms %llu, 8-17 ms %llu, "
+               "17-50 ms %llu, 50-150 ms %llu, longer %llu (avg %.1f ms, longest %.0f ms); %llu of them had no fast link",
+               (unsigned long long)P.g.ready_n[0], (unsigned long long)P.g.ready_n[1], (unsigned long long)P.g.ready_n[2],
+               (unsigned long long)P.g.ready_n[3], (unsigned long long)P.g.ready_n[4], (unsigned long long)P.g.ready_n[5],
+               rn ? P.g.ready_ms / (double)rn : 0.0, P.g.ready_max, (unsigned long long)P.g.ready_nofast);
         if (U.waits || U.queued)
             rt_log("vk_pipeline: gpl: library jobs for waiting draws: %llu queued, %llu built by a worker, %llu by the "
                    "thread that needed them (no worker free), %llu waits ended at their limit; %llu fast links on the %d "
@@ -5757,8 +5784,13 @@ static void save_with(uint32_t wait_ms) {
                    (unsigned long long)U.timeouts, (unsigned long long)U.links, U.lib_workers);
         static const char *const kn[4] = {"vertex input", "pre-rasterization", "fragment shader", "fragment output"};
         for (int i = 0; i < 4; i++)
-            rt_log("vk_pipeline: gpl: %s libraries %llu (avg %.2f ms, max %.2f ms)", kn[i], (unsigned long long)P.g.lib_n[i],
-                   P.g.lib_n[i] ? P.g.lib_ms[i] / P.g.lib_n[i] : 0.0, P.g.lib_max[i]);
+            rt_log("vk_pipeline: gpl: %s libraries %llu (avg %.2f ms, max %.2f ms; %llu of 25 ms or more, %.0f ms in all)",
+                   kn[i], (unsigned long long)P.g.lib_n[i], P.g.lib_n[i] ? P.g.lib_ms[i] / P.g.lib_n[i] : 0.0, P.g.lib_max[i],
+                   (unsigned long long)P.g.lib_slow[i], P.g.lib_slow_ms[i]);
+        if (P.g.pr_added)
+            rt_log("vk_pipeline: gpl: %llu of the pre-rasterization libraries had outputs added for their fragment shaders "
+                   "(avg %.1f ms): another module than the one the preparation built, so the driver's cache has none of them",
+                   (unsigned long long)P.g.pr_added, P.g.pr_added_ms / (double)P.g.pr_added);
         if (LB.n)
             rt_log("vk_pipeline: gpl: prebuilt libraries a draw used: pre-rasterization %llu, fragment shader %llu; "
                    "compute pipelines built on the replay thread %llu", (unsigned long long)P.g.pre_used[LIB_PR],
