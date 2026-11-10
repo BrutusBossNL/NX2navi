@@ -13,7 +13,7 @@ downloads included, and keeps the game up to date. This page is the same build b
   NVIDIA).
 - Your own dump of the game as a `.nup` file (or its `exefs` and `romfs` folders), with the 1.1.1 update: program
   `0400486024DEC000`, main build `e0f3ccfa`. Other versions are refused.
-- About 30 GB free on the disk you build to, besides the dump.
+- About 34 GB free on the disk you build to, besides the dump.
 
 ## One-time setup (about 15 minutes)
 
@@ -58,7 +58,7 @@ last draws the Xbox, PlayStation, Steam Deck and keyboard and mouse button promp
 meanwhile. If it stops, run the same command again: finished steps are skipped.
 
 When it says `finished`, start `C:\Games\Ocarina\ocarina.exe`. You can delete `C:\Games\Ocarina\build-cache` (about
-5 GB) afterwards.
+1.5 GB) afterwards.
 
 ## Linux
 

@@ -788,12 +788,12 @@ class App:
             dump_desc = ('Choose your own dump of Ocarina of Time with the 1.1.1 update, as one .nup file. None was '
                          'found in Downloads, Desktop or Documents.',)
         gd = self.game_dir()
-        need = 30
+        need = 34
         free = free_gb(gd) + partial_image_gb(gd)   # Begin Installation removes the partial image (begin_install)
         folder_desc = (f'The game is built into this folder. {free:.0f} GB free on {drive_of(gd)}; the game needs '
                        f'about {need} GB. Select this row to choose another folder.',)
         ready = bool(dump)
-        begin_desc = (f'Build Ocarina of Time on this PC from your own dump. It takes 10 to 25 minutes, once, and '
+        begin_desc = (f'Build Ocarina of Time on this PC from your own dump. It takes 20 to 45 minutes, once, and '
                       f'downloads 170 MB of build tools. The game needs about {need} GB on {drive_of(gd)} '
                       f'({free:.0f} GB free).',) if ready else \
             ('Choose your dump first: select Game Dump above.',)
@@ -887,8 +887,8 @@ class App:
             return
         gd = self.game_dir()
         drop_partial_image(gd)   # before the free space is measured
-        if free_gb(gd) < 31 and not (Path(gd) / 'romfs' / 'romfs.bin').is_file():
-            self.message = f'{drive_of(gd)} has {free_gb(gd):.0f} GB free; the game needs about 30 GB.'
+        if free_gb(gd) < 34 and not (Path(gd) / 'romfs' / 'romfs.bin').is_file():
+            self.message = f'{drive_of(gd)} has {free_gb(gd):.0f} GB free; the game needs about 34 GB.'
             self.render()
             return
         self.settings['game_dir'] = gd
@@ -1486,7 +1486,7 @@ class App:
             self.toggle('Hide Launcher While Playing', 'hide_while_playing',
                         'Hide this window while the game runs; it comes back when you quit the game.'),
             self.toggle('Keep Build Cache', 'keep_cache',
-                        'Keep the translated code and compiled files (about 5 GB) in the game folder, so an update '
+                        'Keep the translated code and compiled files (about 1.5 GB) in the game folder, so an update '
                         'compiles only what changed. Off: they are deleted after each build.'),
             self.channel_row(),
             *([self.discord_row(gd)] if gd and Path(gd).is_dir() else []),
@@ -1686,7 +1686,7 @@ class App:
             self.show('job')
 
     def drop_build_cache(self):
-        """Keep Build Cache off: delete the lifted C and the objects (about 5 GB) but keep state.json, which an
+        """Keep Build Cache off: delete the lifted C and the objects (about 1.5 GB) but keep state.json, which an
         update needs to rebuild without the dump; the next build then lifts and compiles everything again."""
         gd = self.settings.get('game_dir')
         if not gd:

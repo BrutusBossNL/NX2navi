@@ -15,7 +15,7 @@ PENDING, RUNNING, DONE, SKIPPED, FAILED = 'pending', 'running', 'done', 'skipped
 
 # Failures whose message says all there is to say: the log gets one line for them (failure_line), not a traceback.
 # A refused update check wrote 22 lines of two tracebacks into launcher.log each time.
-PLAIN_FAILURES = (feed.FeedError,)
+PLAIN_FAILURES = (feed.FeedError, build.BuildError)
 
 
 def failure_line(e):

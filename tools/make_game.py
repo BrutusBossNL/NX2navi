@@ -1160,7 +1160,10 @@ SPACE_IMAGE_MARGIN = 1 * GiB   # beside the RomFS image, as step_romfs asks
 def space_needs(runs, out, image_bytes=0, carried=False):
     """[(what, bytes)] this build will write into the game folder, for the steps it runs (steps_to_run).
     image_bytes: the size of the RomFS image when that step runs; carried: the shaders step keeps the shaders
-    prepared before (step_shaders update) and writes none."""
+    prepared before (step_shaders update) and writes none. A game folder that already holds translations (a
+    preparation that was cut short, or one repeated with the same translator) is not asked for the shaders' space: the
+    preparation then writes only what is missing, which may be nothing, and asking for all of it would stop a build
+    that has the room it needs."""
     needs = []
     if 'romfs' in runs:
         needs.append(('the RomFS image', image_bytes + SPACE_IMAGE_MARGIN))
@@ -1168,9 +1171,21 @@ def space_needs(runs, out, image_bytes=0, carried=False):
         lifted = (out / 'build-cache' / 'lift' / 'layout.json').is_file()
         needs.append(('the build cache (the translated code and its compiled files)',
                       SPACE_REBUILD if lifted else SPACE_BUILD_CACHE))
-    if 'shaders' in runs and not carried:
+    if 'shaders' in runs and not carried and not shaders_begun(out):
         needs.append(('the prepared shaders', SPACE_SHADERS))
     return needs
+
+
+def shaders_begun(out):
+    """True when the game's shader cache holds a translation already: its pack, or a loose file."""
+    cache = out / 'shader-cache'
+    if (cache / 'shader-cache.pack').is_file():
+        return True
+    try:
+        with os.scandir(cache) as it:
+            return any(e.name.endswith('.spv') for e in it)
+    except OSError:
+        return False
 
 
 def check_space(out, needs):

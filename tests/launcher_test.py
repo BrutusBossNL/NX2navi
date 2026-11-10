@@ -2862,6 +2862,15 @@ class MakeGameTest(Tmp):
         self.assertEqual([n for _, n in mg.space_needs(['lift', 'compile', 'shaders'], self.out, carried=True)], [gib])
         self.assertEqual(mg.space_needs(['shaders'], self.out, carried=True), [])
         self.assertEqual(mg.space_needs([], self.out), [])
+        # a shader cache that was begun is not asked for the whole preparation's space again
+        (self.out / 'shader-cache').mkdir()
+        self.assertEqual([n for _, n in mg.space_needs(['shaders'], self.out)], [4 * gib])
+        (self.out / 'shader-cache' / '0123.spv').write_bytes(b'')
+        self.assertEqual(mg.space_needs(['shaders'], self.out), [])
+        (self.out / 'shader-cache' / '0123.spv').unlink()
+        (self.out / 'shader-cache' / 'shader-cache.pack').write_bytes(b'')
+        self.assertEqual(mg.space_needs(['shaders'], self.out), [])
+        shutil.rmtree(self.out / 'shader-cache')
 
         def check(free, needs):
             err = io.StringIO()
@@ -4424,7 +4433,7 @@ def mock_app(test, game):
 class BeginInstallTest(Tmp):
     def test_a_cut_romfs_image_does_not_block_the_install(self):
         """Begin Installation removes the romfs.bin.part an install that was cut short left before it measures the
-        free space, so the 31 GB it asks for are not short by the part's size."""
+        free space, so the 34 GB it asks for are not short by the part's size."""
         import collections
         game = self.tmp / 'game'
         part = game / 'romfs' / 'romfs.bin.part'

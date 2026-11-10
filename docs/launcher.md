@@ -14,7 +14,7 @@ it. The code is `launcher/`, the release is made by `tools/make_launcher.py`, an
    drive, and proposes `<launcher>\game` as the install folder (or `X:\Games\NX2navi` on the drive with the most
    free space when that drive has less than 40 GB). Both rows can be changed.
 3. Selects **Begin Installation**. The launcher downloads the build tools (about 170 MB, once), checks the dump,
-   unpacks it, translates and compiles the game: 10 to 25 minutes. It keeps the PC awake meanwhile.
+   unpacks it, translates and compiles the game: 20 to 45 minutes. It keeps the PC awake meanwhile.
 4. Selects **Play**. The launcher hides while the game runs and comes back when it exits.
 
 From then on the launcher looks for a new version when it opens and every hour while it runs, also while it is
@@ -278,7 +278,7 @@ When the new version fails to start (exit code 86 from `start.pyw`, or any error
 `data/logs/crash.log` and shows it in a message box only when there is no version to go back to, when Steam started
 it, or when the six seconds are over (`quiet_exit`): a box holds the exit code back until it is closed, and the
 broken version then stayed the current one. The game is never rebuilt while it
-runs. Keep Build Cache off deletes the lifted C and the objects (about 5 GB) after each build but keeps
+runs. Keep Build Cache off deletes the lifted C and the objects (about 1.5 GB) after each build but keeps
 `build-cache/state.json`, so updates still rebuild without the dump (compiling everything).
 
 ## Sharing a save
@@ -450,7 +450,7 @@ fail when that logic changes, to ask whether the step must run again on every in
 
 ## Requirements and limits
 
-- Windows 10 or 11, x86-64; the build's own requirements (README-BuildKit.md): 16 GB of RAM, about 30 GB free for
+- Windows 10 or 11, x86-64; the build's own requirements (README-BuildKit.md): 16 GB of RAM, about 34 GB free for
   the game and 1.5 GB for the launcher and its tools, a Vulkan 1.3 GPU.
 - The programs are not signed: SmartScreen warns on the first start of the setup.
 - English only for now.
