@@ -1,5 +1,7 @@
 """Build NX2navi-Linux-<version>-x86_64.AppImage: the Linux build kit as one file, which builds Ocarina of Time on the
-player's PC from their own dump with tools/make_game.py, as NX2navi-Setup.exe does on Windows.
+player's PC from their own dump with tools/make_game.py, as NX2navi-Setup.exe does on Windows. Started without
+arguments on a desktop it opens a window to install, update and play (tools/appimage_gui.py, which runs AppRun
+with --events and reads its progress lines).
 
     python3 tools/make_appimage.py --python <standalone CPython 3.14> --appimagetool <appimagetool> [--out dist]
                                    [--dlss libnvidia-ngx-dlss.so.<version> | --no-dlss]
@@ -45,6 +47,7 @@ usage() {
     cat <<EOF
 NX2navi $(cat "$KIT/VERSION") - build Ocarina of Time (Switch 2, game 1.1.1) natively for Linux from your own dump.
 
+  $(basename "${APPIMAGE:-$0}")                                     a window to install, update and play (on a desktop)
   $(basename "${APPIMAGE:-$0}") <your game.nup> [game folder]       build (default folder: ~/Games/Ocarina)
   $(basename "${APPIMAGE:-$0}") --check <your game.nup>             only check the dump's version
   $(basename "${APPIMAGE:-$0}") --make-game <make_game.py options>  run tools/make_game.py directly
@@ -54,7 +57,18 @@ everything the build writes comes from your dump, so keep it to yourself.
 EOF
 }
 
+# No arguments on a desktop (a double-click): the window (tools/appimage_gui.py), which runs this file with --events.
+if [ $# -eq 0 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    exec "$PY" -I "$KIT/tools/appimage_gui.py" --apprun "$HERE/AppRun" --icon "$HERE/nx2navi.png"
+fi
 case "$1" in ""|-h|--help) usage; exit 0 ;; esac
+
+# --events: the window's mode. make_game.py prints its "@@" progress lines (--events), and the steps around it print
+# theirs (deps, dlss) in the same form.
+EVENTS=()
+ev() { [ ${#EVENTS[@]} -gt 0 ] && printf '@@{"ev":"%s","step":"%s"%s}\n' "$1" "$2" "${3:+,$3}"; return 0; }
+if [ "$1" = --events ]; then EVENTS=(--events); shift; fi
+ev step deps '"state":"start"'
 
 missing=()
 for tool in clang clang++ ld.lld; do command -v "$tool" >/dev/null || missing+=("$tool"); done
@@ -73,14 +87,17 @@ Install the compiler and libraries, then run this again:
   Debian, Ubuntu:
     sudo apt install clang lld libsdl3-dev libopus-dev libvpx-dev libdav1d-dev libzstd-dev libvulkan-dev
 EOF
+    ev error deps '"message":"missing packages"'
     exit 1
 fi
 
 if ! PYTHONPATH="$PYDEPS" "$PY" -c 'import zbic' 2>/dev/null; then
     echo "Installing zbic (GPL-2.0, unpacks the game's program files) into $PYDEPS ..."
     "$PY" -m pip install --quiet --disable-pip-version-check --target "$PYDEPS" zbic || {
-        echo "error: pip could not install zbic (it needs the internet once)" >&2; exit 1; }
+        echo "error: pip could not install zbic (it needs the internet once)" >&2
+        ev error deps '"message":"pip could not install zbic (it needs the internet once)"'; exit 1; }
 fi
+ev step deps '"state":"done"'
 
 # One compile per 4 GB of RAM at most: with 16 GB, one per thread beside the RomFS image fills memory and swap.
 mem_gb=$(awk '/MemTotal/ {print int($2 / 1048576)}' /proc/meminfo)
@@ -125,8 +142,12 @@ get_dlss() {
 }
 
 echo "Building into $OUT with $jobs compiles at a time (${mem_gb} GB of RAM); this takes 10 to 25 minutes."
-run_make_game --nup "$NUP" --out "$OUT" --jobs "$jobs" || exit $?
-get_dlss
+run_make_game --nup "$NUP" --out "$OUT" --jobs "$jobs" "${EVENTS[@]+"${EVENTS[@]}"}" || exit $?
+if [ -e /proc/driver/nvidia/version ] && [ -z "${NX2NAVI_NO_DLSS:-}" ]; then
+    ev step dlss '"state":"start"'; get_dlss; ev step dlss '"state":"done"'
+else
+    ev step dlss '"state":"skip"'
+fi
 
 # play.sh: the environment the game wants on this machine, then the game
 {
