@@ -78,6 +78,13 @@
 # recorder_core = auto
 # Submissions handed to the GPU queue together in one call, 1 to 16 (1 = each one at once).
 # submit_batch = 4
+# Occlusion query results are read back from the video card in batches, 0 or 1. Default: on. 0 reads each query with a
+# call of its own, as before, which on AMD's Windows driver held every frame's "GPU done" back by about 4 ms.
+# oq_batch = 1
+# How many milliseconds a submit call waits for the game's own signal that the frame's data is written, when the
+# frame's commands begin with a wait for that signal (0 to 100; 0: the frame is set aside at once and drawn at its
+# present, as before).
+# gate_wait_ms = 10
 # Dynamic resolution, 0 or 1, applied at once: with a DLSS upscaling mode, the scene resolution follows the GPU time
 # per frame toward dyn_res_target milliseconds (1 to 100), one DLSS step at a time, each held for dyn_res_step frames
 # (8 to 600), from the DLSS mode set down to performance. Default: off.
@@ -292,6 +299,11 @@
 # sparkles), black and white blocks on her and on Link, shadows blown up. Default: on, except on NVIDIA's driver,
 # which keeps them anyway; 1 also asks NVIDIA's driver. The first start after a change compiles the pipelines again.
 # vk_nan_preserve = 1
+# Test for NaN in the game's shaders on the bits of the number instead of as a float, 0 or 1, so that no shader
+# compiler can leave a test out. Default: on with AMD's driver for RX 5000 and RX 6000 cards (the one whose shader
+# compiler reads "AMD proprietary shader compiler" in the log), where the black and white blocks were reported; off
+# elsewhere. The first start after a change compiles the pipelines again.
+# vk_nan_bits = 1
 
 [display]
 # Device profile: auto (the Steam Deck when this is one), desktop or deck. On a Steam Deck the keys this file does not

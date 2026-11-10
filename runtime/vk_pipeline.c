@@ -87,6 +87,8 @@ static struct {
     VkShaderStageFlags sg32_stages;    // stages that accept requiredSubgroupSize = 32 (0: not available)
     int reconverge;                    // modules with subgroup ops get MaximallyReconvergesKHR (spirv_reconverge)
     uint32_t nan_preserve;             // float widths that get SignedZeroInfNanPreserve (spirv_nan_preserve): NP_16|NP_32|NP_64
+    int nan_bits;                      // NaN tests as integer bit tests (spirv_nan_bits)
+    volatile uint32_t nan_bits_tests, nan_bits_selects, nan_bits_modules;   // rewritten so far (the first log line)
     VkDynamicState dyn[32];
     uint32_t n_dyn;
     PFN_vkCmdPushDescriptorSetKHR push;
@@ -658,6 +660,12 @@ static void nan_preserve_init(VkCtx *c) {
                    (fc.shaderSignedZeroInfNanPreserveFloat32 ? NP_32 : 0) |
                    (fc.shaderSignedZeroInfNanPreserveFloat64 ? NP_64 : 0);
     P.nan_preserve = want && (can & NP_32) ? can : 0;
+    // NX2NAVI_VK_NAN_BITS: 1 every driver, 0 none; unset: AMD's driver for RDNA 1 and 2 (spirv_nan_bits)
+    const char *nb = cfg_get("NX2NAVI_VK_NAN_BITS");
+    P.nan_bits = nb && *nb ? strcmp(nb, "0") != 0 : vk_caps.amd_sc;
+    if (P.nan_bits)
+        rt_log("vk_pipeline: game shaders test for NaN on the bits of the number, not as a float (%s)",
+               nb && *nb ? "NX2NAVI_VK_NAN_BITS=1" : "AMD's driver for RDNA 1 and 2");
     if (P.nan_preserve)
         rt_log("vk_pipeline: game shaders keep NaN, infinity and signed zero (SignedZeroInfNanPreserve for %s32%s-bit "
                "floats%s)", can & NP_16 ? "16, " : "", can & NP_64 ? ", 64" : "", set ? ", NX2NAVI_VK_NAN_PRESERVE=1" : "");
@@ -1478,6 +1486,125 @@ static uint32_t *spirv_nan_preserve(const uint32_t *w, uint64_t n, uint32_t widt
     return o;
 }
 
+// NaN tests that no compiler can drop (P.nan_bits). The game's shaders and the translator's own guards test for NaN with
+// OpIsNan: 48,717 of an install's 54,959 translated modules, 26 tests each on average (the game's unordered
+// comparisons, and the guard that keeps NaN out of every float colour output, patch 0027, so that one NaN texel does not
+// spread through bloom and blur into blocks of black and white). SignedZeroInfNanPreserve asks the driver to keep NaN,
+// but whether a compiler that reasons about floats keeps an isnan through every optimisation is up to it. The reports
+// of black and white blocks, on Navi, on Link next to her and on bright surfaces seen from inside a house, come from
+// RX 5000 and 6000 cards (#41, #110, #117), whose Windows driver compiles with "AMD proprietary shader compiler"
+// (vk_caps.amd_sc); RDNA 3 and 4 (LLPC) draw the same scenes clean. It is not known whether that compiler keeps the
+// mode: on it each float32 test becomes integer arithmetic on the bits, which means the same under any float
+// assumption:
+//   isnan(x)  ->  (bitcast<uint>(x) & 0x7fffffff) > 0x7f800000
+// for scalars and vectors of 32-bit floats; tests of 16- and 64-bit floats stay. A float32 select with a constant
+// operand whose bits are a NaN (an integer mask such as 0xffffffff that the translator types as float) becomes a
+// select of the bits (issue #156: on an RX 9070 XT without the mode such a select between 1 and -1 gave 2^32).
+// NULL: nothing to change (or no memory); *tests and *selects count what changed.
+static uint32_t *spirv_nan_bits(const uint32_t *w, uint64_t n, uint64_t *out_n, uint32_t *tests, uint32_t *selects) {
+    enum { OP_UNDEF = 1, OP_TYPE_BOOL = 20, OP_SPEC_CONSTANT = 50, OP_SPEC_CONSTANT_COMPOSITE = 51, OP_STORE = 62,
+           OP_BITCAST = 124, OP_IS_NAN = 156, OP_SELECT = 169, OP_UGREATER = 172, OP_BITWISE_AND = 199 };
+    *tests = *selects = 0;
+    if (n < 5 || w[3] >= (1u << 22)) return NULL;
+    uint32_t bound = w[3];
+    uint32_t *rtype = calloc(bound, sizeof *rtype), *vec_comp = calloc(bound, sizeof *vec_comp);
+    uint8_t *f32 = calloc(bound, 1), *vec_n = calloc(bound, 1), *nan_const = calloc(bound, 1);
+    uint32_t *o = NULL;
+    if (!rtype || !vec_comp || !f32 || !vec_n || !nan_const) goto out;
+    uint32_t tu = 0, uvec[5] = {0};   // uint32 and its vectors by component count
+    uint64_t fn_at = 0;
+    int vec_used[5] = {0};
+    // Ids that are not results of the instruction's second word, inside functions: first assignment wins anyway, as
+    // a definition comes before its uses (OpPhi operands aside, which this never reads).
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        if (!l || i + l > n) goto out;
+        const uint32_t *a = w + i + 1;
+        if (!fn_at) {
+            if (op == SPV_OP_FUNCTION) fn_at = i;
+            else if (op == SPV_OP_TYPE_FLOAT && l >= 3 && a[0] < bound && a[1] == 32) f32[a[0]] = 1;
+            else if (op == SPV_OP_TYPE_INT && l >= 4 && a[1] == 32 && a[2] == 0 && !tu) tu = a[0];
+            else if (op == SPV_OP_TYPE_VECTOR && l >= 4 && a[0] < bound && a[2] >= 2 && a[2] <= 4) {
+                vec_comp[a[0]] = a[1], vec_n[a[0]] = (uint8_t)a[2];
+                if (tu && a[1] == tu && !uvec[a[2]]) uvec[a[2]] = a[0];
+            } else if ((op == SPV_OP_CONSTANT || op == SPV_OP_CONSTANT_COMPOSITE || op == SPV_OP_CONSTANT_NULL ||
+                        op == OP_UNDEF || op == SPV_OP_VARIABLE || op == OP_SPEC_CONSTANT ||
+                        op == OP_SPEC_CONSTANT_COMPOSITE) && l >= 3 && a[1] < bound) {
+                rtype[a[1]] = a[0];
+                if (op == SPV_OP_CONSTANT && l == 4 && a[0] < bound && f32[a[0]] && (a[2] & 0x7fffffffu) > 0x7f800000u)
+                    nan_const[a[1]] = 1;
+            }
+        }
+        if (fn_at) {
+            int no_result = op == OP_STORE || op == 63 || op == 64 || op == 8 || op == 317 || (op >= 246 && op <= 255) ||
+                            op == 99 || op == 224 || op == 225 || op == 228 || op == 56 || op == 218 || op == 219 ||
+                            op == 5294 || op == 5295 || op == 4416 || op == 5380 || op == 5364 || op == 5365;
+            if (!no_result && op != SPV_OP_FUNCTION && l >= 3 && a[1] < bound && !rtype[a[1]]) rtype[a[1]] = a[0];
+            if (op == OP_IS_NAN && l == 4 && a[2] < bound) {
+                uint32_t t = rtype[a[2]];
+                if (t < bound && f32[t]) ++*tests;
+                else if (t < bound && vec_n[t] && vec_comp[t] < bound && f32[vec_comp[t]]) ++*tests, vec_used[vec_n[t]] = 1;
+            } else if (op == OP_SELECT && l == 6 && a[0] < bound && f32[a[0]] && a[3] < bound && a[4] < bound &&
+                       (nan_const[a[3]] || nan_const[a[4]])) {
+                ++*selects;
+            }
+        }
+        i += l;
+    }
+    if (!fn_at || (!*tests && !*selects)) goto out;
+    // the declarations go right before the first function: uint32 and its vectors where missing, then the constants
+    uint32_t next = bound, decl[64], nd = 0;
+    if (!tu) tu = next++, decl[nd++] = 4u << 16 | SPV_OP_TYPE_INT, decl[nd++] = tu, decl[nd++] = 32, decl[nd++] = 0;
+    uint32_t c_mag = next++, c_inf = next++, cv_mag[5] = {0}, cv_inf[5] = {0};
+    for (int k = 2; k <= 4; k++)
+        if (vec_used[k] && !uvec[k])
+            uvec[k] = next++, decl[nd++] = 4u << 16 | SPV_OP_TYPE_VECTOR, decl[nd++] = uvec[k], decl[nd++] = tu, decl[nd++] = (uint32_t)k;
+    decl[nd++] = 4u << 16 | SPV_OP_CONSTANT, decl[nd++] = tu, decl[nd++] = c_mag, decl[nd++] = 0x7fffffffu;
+    decl[nd++] = 4u << 16 | SPV_OP_CONSTANT, decl[nd++] = tu, decl[nd++] = c_inf, decl[nd++] = 0x7f800000u;
+    for (int k = 2; k <= 4; k++) {
+        if (!vec_used[k]) continue;
+        cv_mag[k] = next++, cv_inf[k] = next++;
+        decl[nd++] = (uint32_t)(3 + k) << 16 | SPV_OP_CONSTANT_COMPOSITE, decl[nd++] = uvec[k], decl[nd++] = cv_mag[k];
+        for (int j = 0; j < k; j++) decl[nd++] = c_mag;
+        decl[nd++] = (uint32_t)(3 + k) << 16 | SPV_OP_CONSTANT_COMPOSITE, decl[nd++] = uvec[k], decl[nd++] = cv_inf[k];
+        for (int j = 0; j < k; j++) decl[nd++] = c_inf;
+    }
+    uint64_t cap = n + nd + 10ull * *tests + 12ull * *selects;
+    o = malloc(cap * 4);
+    if (!o) goto out;
+    memcpy(o, w, fn_at * 4);
+    uint64_t p = fn_at;
+    memcpy(o + p, decl, nd * 4), p += nd;
+    for (uint64_t i = fn_at; i < n;) {
+        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        uint32_t t = op == OP_IS_NAN && l == 4 && a[2] < bound ? rtype[a[2]] : 0;
+        int k = t && t < bound ? (f32[t] ? 1 : vec_n[t] && vec_comp[t] < bound && f32[vec_comp[t]] ? vec_n[t] : 0) : 0;
+        if (k) {
+            uint32_t ut = k == 1 ? tu : uvec[k], mag = k == 1 ? c_mag : cv_mag[k], inf = k == 1 ? c_inf : cv_inf[k];
+            uint32_t bits = next++, low = next++;
+            o[p++] = 4u << 16 | OP_BITCAST, o[p++] = ut, o[p++] = bits, o[p++] = a[2];
+            o[p++] = 5u << 16 | OP_BITWISE_AND, o[p++] = ut, o[p++] = low, o[p++] = bits, o[p++] = mag;
+            o[p++] = 5u << 16 | OP_UGREATER, o[p++] = a[0], o[p++] = a[1], o[p++] = low, o[p++] = inf;
+        } else if (op == OP_SELECT && l == 6 && a[0] < bound && f32[a[0]] && a[3] < bound && a[4] < bound &&
+                   (nan_const[a[3]] || nan_const[a[4]])) {
+            uint32_t x = next++, y = next++, s = next++;
+            o[p++] = 4u << 16 | OP_BITCAST, o[p++] = tu, o[p++] = x, o[p++] = a[3];
+            o[p++] = 4u << 16 | OP_BITCAST, o[p++] = tu, o[p++] = y, o[p++] = a[4];
+            o[p++] = 6u << 16 | OP_SELECT, o[p++] = tu, o[p++] = s, o[p++] = a[2], o[p++] = x, o[p++] = y;
+            o[p++] = 4u << 16 | OP_BITCAST, o[p++] = a[0], o[p++] = a[1], o[p++] = s;
+        } else {
+            memcpy(o + p, w + i, l * 4), p += l;
+        }
+        i += l;
+    }
+    o[3] = next;
+    *out_n = p;
+out:
+    free(rtype), free(vec_comp), free(f32), free(vec_n), free(nan_const);
+    return o;
+}
+
 static int spirv_mark_list_test(const char *list);   // texture pool marks, below
 
 // --selftest (main.c): spirv_nan_preserve on a small fragment module, without a device. Returns the number of failures.
@@ -1523,6 +1650,42 @@ int vk_pipeline_spirv_selftest(void) {
         failures++;
     }
     printf("spirv: SignedZeroInfNanPreserve rewrite: %s\n", failures ? "FAIL" : "ok");
+    {   // spirv_nan_bits: a scalar and a vec2 isnan, a select on a NaN constant; no uint32 type in the module
+        static const uint32_t m[] = {
+            0x07230203, 0x00010300, 0, 20, 0,
+            2u << 16 | 17, 1,                         // OpCapability Shader
+            3u << 16 | 14, 0, 1,                      // OpMemoryModel Logical GLSL450
+            5u << 16 | 15, 5, 1, 0x6e69616d, 0,       // OpEntryPoint GLCompute %1 "main"
+            2u << 16 | 19, 2,                         // %2 void
+            3u << 16 | 33, 3, 2,                      // %3 fn
+            3u << 16 | 22, 4, 32,                     // %4 float
+            2u << 16 | 20, 5,                         // %5 bool
+            4u << 16 | 23, 6, 4, 2,                   // %6 vec2
+            4u << 16 | 23, 7, 5, 2,                   // %7 bvec2
+            4u << 16 | 43, 4, 8, 0xffffffffu,         // %8 = NaN bits
+            4u << 16 | 43, 4, 9, 0x3f800000u,         // %9 = 1.0
+            5u << 16 | 44, 6, 10, 8, 9,               // %10 = vec2(%8, %9)
+            3u << 16 | 41, 5, 11,                     // %11 = OpConstantTrue
+            5u << 16 | 54, 2, 1, 0, 3,                // %1 = OpFunction
+            2u << 16 | 248, 12,                       // OpLabel
+            4u << 16 | 156, 5, 13, 9,                 // %13 = OpIsNan bool %9
+            4u << 16 | 156, 7, 14, 10,                // %14 = OpIsNan bvec2 %10
+            6u << 16 | 169, 4, 15, 11, 9, 8,          // %15 = OpSelect float %11 %9 %8
+            1u << 16 | 253, 1u << 16 | 56};           // OpReturn, OpFunctionEnd
+        uint64_t on = 0;
+        uint32_t tests = 0, sels = 0, isnan_left = 0, ugt = 0, int32 = 0, bitcasts = 0;
+        uint32_t *o = spirv_nan_bits(m, sizeof m / 4, &on, &tests, &sels);
+        for (uint64_t i = 5; o && i < on;) {
+            uint32_t op = o[i] & 0xffff, l = o[i] >> 16;
+            if (!l) break;
+            isnan_left += op == 156, ugt += op == 172, int32 += op == 21 && o[i + 2] == 32, bitcasts += op == 124;
+            i += l;
+        }
+        int bad = !o || tests != 2 || sels != 1 || isnan_left || ugt != 2 || int32 != 1 || bitcasts != 5 || o[3] <= 20;
+        printf("spirv: integer NaN tests rewrite: %s\n", bad ? "FAIL" : "ok");
+        failures += bad;
+        free(o);
+    }
     const char *list = cfg_get("NX2NAVI_SPV_MARK_TEST");
     if (list && *list) failures += spirv_mark_list_test(list);
     return failures;
@@ -1866,6 +2029,18 @@ static VkShaderModule make_module(const uint32_t *w, uint64_t words, int early_o
     if (np) {
         free(fixed);
         w = fixed = np, words = np_n;
+    }
+    uint64_t nb_n = 0;
+    uint32_t nb_tests = 0, nb_sels = 0;
+    uint32_t *nb = P.nan_bits ? spirv_nan_bits(w, words, &nb_n, &nb_tests, &nb_sels) : NULL;
+    if (nb) {
+        free(fixed);
+        w = fixed = nb, words = nb_n;
+        __atomic_fetch_add(&P.nan_bits_tests, nb_tests, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&P.nan_bits_selects, nb_sels, __ATOMIC_RELAXED);
+        if (__atomic_add_fetch(&P.nan_bits_modules, 1, __ATOMIC_RELAXED) == 1)
+            rt_log("vk_pipeline: first module with NaN tests made integer: %u tests, %u selects of NaN bits", nb_tests,
+                   nb_sels);
     }
     if (P.feedback >= 2) mm_hash = fnv(FNV0, w, (size_t)words * 4);
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)words * 4, .pCode = w};

@@ -1192,6 +1192,72 @@ static int cont_ready(const Cont *c) {
     return !c->at || vk_exec_event_met(nvn_op_payload(c->at)) || vk_exec_submit_seq - c->since > CONT_MAX;
 }
 
+// ---- the gate: a submission that begins with a wait for the CPU's signal (NX2NAVI_GATE_WAIT_MS, default 10; 0 off)
+// Ocarina's main queue begins with a wait for an event the game signals from the CPU once it has written what the
+// frame reads (vk_exec_xfer.c "events the CPU signals"). The render thread submits that queue without waiting for the
+// signal, and polls the event afterwards, a millisecond at a time, before it presents. In Hyrule Field the signal
+// came 1 to 2 ms after the submit call in about every other frame: the main thread first waits for the previous
+// frame's fence and reads back what it needs. The submission then took its copies (the mirror sync and the uniform
+// snapshot, 1.1 to 1.7 ms), met the wait unmet and was held; the render thread polled, presented, and the present
+// replayed the frame (vk_backend.c held_resume) under a value the game's fence does not stand for, so the game's next
+// wait for that fence returned with the GPU still at work and the frame after was replayed inside its submit call
+// again: frames of 23 and 15 ms in turn where each takes 17.
+// So when a submission would stop at such a wait before it has recorded anything, the submit call waits for the
+// signal here, before the copies are taken, as the console's GPU waits at the wait itself: the copies are then
+// taken after the game has finished writing, and the frame is replayed in the call the game's fence stands for.
+// Only state may precede the wait in the command buffer, and the event must be one the CPU has signalled before;
+// the wait ends after NX2NAVI_GATE_WAIT_MS at the latest, and the submission is then held as before.
+static struct { uint64_t n, ns, late; } GW;   // since the last perf line: waits, their time, waits that ran out
+
+static const void *gate_first_wait(const op_hdr *h) {
+    for (int k = 0; k < 256; k++) {
+        if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_) return NULL;
+        const void *a = nvn_op_payload(h);
+        switch (h->op) {
+        case OP_WAIT_EVENT: return a;
+        case OP_JUMP: h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target; continue;
+        // state the walk only stores: nothing is recorded and nothing reaches the CPU before the wait
+        case OP_BEGIN: case OP_SET_RT: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM:
+        case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_UBO:
+        case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
+        case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: case OP_BLEND_COLOR: case OP_DEPTH_CLAMP:
+        case OP_RASTER_DISCARD: case OP_PRIM_RESTART: case OP_PUSH_CC:
+            break;
+        default: return NULL;   // a draw, a copy, a signal, a call: the walk decides, as before
+        }
+        h = nvn_op_next(h);
+    }
+    return NULL;
+}
+
+void vk_exec_gate_wait(const uint64_t *handles, int n) {
+    static int64_t cap_ns = -1;
+    if (cap_ns < 0) {
+        int ms = cfg_int("NX2NAVI_GATE_WAIT_MS");
+        cap_ns = ms > 0 ? (int64_t)ms * 1000000 : 0;
+    }
+    if (!cap_ns || n < 1 || !handles[0] || !gfx_submit_queue || !evo_enabled()) return;
+    const void *w = gate_first_wait(nvn_op_first(handles[0]));
+    if (!w || vk_exec_event_holds_now(w) || !vk_exec_event_cpu_known((const void *)((const p_wait_event *)w)->val)) return;
+    uint64_t t0 = kern_now_ns(), now = t0;
+    for (unsigned i = 0; !vk_exec_event_holds_now(w); i++) {
+        if ((i & 15) == 15 && (now = kern_now_ns()) - t0 >= (uint64_t)cap_ns) {
+            GW.late++;
+            break;
+        }
+        if (i < 20000) plat_pause();
+        else plat_yield();
+    }
+    GW.n++, GW.ns += kern_now_ns() - t0;
+    if (GW.n >= 600) {
+        if (rt_trace & RT_TRACE_PERF)
+            rt_log("perf: gate: %llu submissions waited for the CPU's signal before their copies, %.2f ms on average; "
+                   "%llu waited %lld ms without it and were held", (unsigned long long)GW.n, (double)GW.ns / (double)GW.n / 1e6,
+                   (unsigned long long)GW.late, (long long)(cap_ns / 1000000));
+        GW.n = GW.ns = GW.late = 0;
+    }
+}
+
 int vk_exec_held_ready(void) {
     for (int s = 0; evo_pending && s < EVO_QUEUES; s++)
         if (evq[s].head && cont_ready(evq[s].head)) return 1;
