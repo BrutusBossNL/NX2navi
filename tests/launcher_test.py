@@ -719,6 +719,63 @@ class FeedTest(Tmp):
         self.assertTrue(any(h.get('Authorization') == 'Bearer secret' for _, h in srv.hits))
         self.assertEqual(feed.plain_notes('## Head\n- **One**\n* `Two`\n<!-- x -->'), ['Head', 'One', 'Two'])
 
+    def test_a_refused_check_says_when_to_try_again(self):
+        """GitHub's answer to a request over the hourly allowance carries the time the allowance is whole again:
+        the message names it, and the log gets one line for the failed check, not two tracebacks."""
+        srv = self.serve_github()
+        reset = int(time.time()) + 1500
+        self.routes['/repos/o/r/releases?per_page=20'] = (
+            403, {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': str(reset)}, b'{"message": "rate limit"}')
+        f = {'type': 'github', 'repo': 'o/r', 'api': srv.url.rstrip('/')}
+        with self.assertRaises(feed.FeedError) as c:
+            feed.latest(f, 'stable')
+        at = time.strftime('%H:%M', time.localtime(reset))
+        self.assertRegex(str(c.exception), rf'^GitHub refused the request \(rate limit\); try again after {at} '
+                                           r'\(in 2[45] minutes\)$')
+        # the header's forms
+        now = 1700000000
+        text = feed.retry_text
+        self.assertTrue(text({'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': str(now + 61)}, now)
+                        .endswith(' (in 2 minutes)'))
+        self.assertTrue(text({'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': str(now + 60)}, now)
+                        .endswith(' (in 1 minute)'))
+        self.assertEqual(text({'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': str(now - 5)}, now), 'in a minute')
+        self.assertTrue(text({'Retry-After': '120'}, now).endswith(' (in 2 minutes)'))
+        self.assertTrue(text({'Retry-After': '120'}, now).startswith('after '))
+        self.assertEqual(text({'X-RateLimit-Remaining': '12', 'X-RateLimit-Reset': str(now + 600)}, now), '')
+        for nothing in ({}, None, {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': 'soon'},
+                        {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': str(now + 10 ** 6)}):
+            self.assertEqual(text(nothing, now), '')
+        # a refusal without the headers keeps the old advice
+        self.routes['/repos/o/r/releases?per_page=20'] = (403, {}, b'{}')
+        with self.assertRaises(feed.FeedError) as c:
+            feed.latest(f, 'stable')
+        self.assertEqual(str(c.exception), 'GitHub refused the request (rate limit); try again in an hour')
+        # the job: one line in the log
+        ctx = Context(self.layout)
+        self.addCleanup(ctx._file.close)
+        ctx.settings['feed_repo'] = 'o/r'
+        with mock.patch.object(feed, 'GITHUB_API', srv.url.rstrip('/')):
+            j = jobs.CheckJob(ctx).run_inline()
+        self.assertEqual((j.result, j.error), ('failed', 'GitHub refused the request (rate limit); try again in an hour'))
+        ctx._file.flush()
+        log = (self.layout.logs / 'launcher.log').read_text(encoding='utf-8').splitlines()[1:]
+        self.assertEqual(len(log), 1, log)
+        self.assertIn('FeedError: GitHub refused the request (rate limit); try again in an hour (HTTPError: HTTP Error '
+                      '403', log[0])
+        self.assertNotIn('Traceback', log[0])
+
+    def test_other_failures_keep_their_traceback(self):
+        ctx = Context(self.layout)
+        self.addCleanup(ctx._file.close)
+        j = jobs.Job(ctx, [])
+        j.run = lambda: [][1]
+        j.run_inline()
+        ctx._file.flush()
+        log = (self.layout.logs / 'launcher.log').read_text(encoding='utf-8')
+        self.assertIn('Traceback (most recent call last)', log)
+        self.assertIn('IndexError', log)
+
     def test_url_feed_and_update(self):
         z = make_app_zip(self.tmp, '0.9.0')
         (self.tmp / feed.MANIFEST).write_text(json.dumps(manifest_for(z, '0.9.0')))
@@ -3730,6 +3787,29 @@ class UpdateTextTest(Tmp):
             self.assertIn(app.UPDATE_TAKES, text)
             self.assertIn('saves and settings stay', text)
         self.assertIn('half an hour or more', app.UPDATE_TAKES)
+
+
+class ForcedCheckTest(Tmp):
+    def test_one_forced_update_check_a_minute(self):
+        """Selecting the Updates row (or F5) again within a minute of the last check starts no request: 25 of them
+        in 90 seconds used up GitHub's hourly allowance for a player."""
+        from launcher.ui import app
+        App, a = mock_app(self, self.tmp / 'game')
+        a.screen = 'home'
+        with mock.patch('launcher.ui.app.jobs.CheckJob') as check:
+            a.check_started = time.time() - 10
+            App.check_now(a, force=True)
+            check.assert_not_called()
+            self.assertEqual(a.message, 'NX2navi looked for updates less than a minute ago.')
+            a.show.assert_called_once_with('home', a.focus)
+            a.check_started = time.time() - app.FORCED_CHECK_PAUSE - 1
+            App.check_now(a, force=True)
+            check.assert_called_once()
+            self.assertGreater(a.check_started, time.time() - 5)
+            # the launcher's own checks (at start, every hour) are not held back by it
+            a.check, a.check_started = None, time.time() - 10
+            App.check_now(a)
+            self.assertEqual(check.call_count, 2)
 
 
 class StartScriptTest(Tmp):

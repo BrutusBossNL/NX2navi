@@ -174,6 +174,10 @@ directly. Every address is https (plain http only to this PC), a redirect to htt
 sent on when a redirect leaves the host it was meant for (`launcher/net.py`). A manifest that does not give a file's
 size and sha256 is refused.
 
+GitHub allows an address 60 such requests an hour. The Updates row and F5 therefore start no check within a minute
+of the last one (`FORCED_CHECK_PAUSE`), and a check GitHub refuses says when the allowance is whole again, from the
+answer's `X-RateLimit-Reset` (`feed.retry_text`). A failed check is one line in `launcher.log`.
+
 ### In the background
 
 The player never waits for a download and play is never interrupted. A check that finds a newer release (the check

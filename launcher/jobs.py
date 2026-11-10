@@ -13,6 +13,16 @@ RECHECK = 3600   # seconds between update checks while the launcher stays open, 
 
 PENDING, RUNNING, DONE, SKIPPED, FAILED = 'pending', 'running', 'done', 'skipped', 'failed'
 
+# Failures whose message says all there is to say: the log gets one line for them (failure_line), not a traceback.
+# A refused update check wrote 22 lines of two tracebacks into launcher.log each time.
+PLAIN_FAILURES = (feed.FeedError,)
+
+
+def failure_line(e):
+    """A failure in one line for the log: its kind, its message and what it came from."""
+    cause = e.__cause__
+    return f'{type(e).__name__}: {e}' + (f' ({type(cause).__name__}: {cause})' if cause else '')
+
 STEPS = {
     'tools': ('Gather Build Tools', 'Downloading the compiler and libraries the build uses. This happens once and '
                                     'takes about 170 MB.'),
@@ -230,7 +240,7 @@ class Job:
                 self.result = 'cancelled'
             else:
                 self.result, self.error = 'failed', str(e) or type(e).__name__
-                self.ctx.log(traceback.format_exc())
+                self.ctx.log(failure_line(e) if isinstance(e, PLAIN_FAILURES) else traceback.format_exc())
         finally:
             for s in self.steps:
                 if s.state == RUNNING:

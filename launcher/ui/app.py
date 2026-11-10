@@ -184,6 +184,11 @@ def drop_partial_image(game_dir):
         pass
 
 
+# Seconds after an update check before the Updates row or F5 starts another. Each check is a request to GitHub,
+# which allows 60 an hour for an address: a player who selected the row 25 times in 90 seconds used the allowance
+# up, and every check of the next hour was refused.
+FORCED_CHECK_PAUSE = 60
+
 # How long an update's rebuild takes, for the Updates row. No single figure holds: a version that changed little
 # compiles a few files and links, minutes; one that changed the lifter translates and compiles the game's code again,
 # and one that changed what the shaders are built with builds all of them into the graphics driver's cache again
@@ -1311,6 +1316,11 @@ class App:
         if self.check and self.check.result is None:
             return
         if not force and time.time() - self.settings.get('last_check', 0) < 600 and self.release:
+            return
+        if force and time.time() - self.check_started < FORCED_CHECK_PAUSE:
+            self.message = 'NX2navi looked for updates less than a minute ago.'
+            if self.screen == 'home':
+                self.show('home', self.focus)
             return
         self.check_error = ''
         self.check_started = time.time()
