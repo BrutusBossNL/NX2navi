@@ -1567,6 +1567,22 @@ int plat_module_of(uintptr_t addr, char *name, size_t cap, uintptr_t *base) {
     return snprintf(name, cap, "%s", n ? n + 1 : d.dli_fname) < (int)cap;
 }
 
+typedef struct { uintptr_t *pc; int n, max; } StackWalk;
+
+static _Unwind_Reason_Code stack_step(struct _Unwind_Context *ctx, void *p) {
+    StackWalk *w = p;
+    uintptr_t ip = _Unwind_GetIP(ctx);
+    if (!ip || w->n == w->max) return _URC_END_OF_STACK;
+    w->pc[w->n++] = ip;
+    return _URC_NO_REASON;
+}
+
+int plat_stack(uintptr_t *pc, int max) {
+    StackWalk w = {pc, 0, max};
+    _Unwind_Backtrace(stack_step, &w);
+    return w.n;
+}
+
 int plat_exe_path(char *out, size_t cap) {
     ssize_t n = readlink("/proc/self/exe", out, cap - 1);
     if (n <= 0 || (size_t)n >= cap - 1) return 0;
@@ -2373,6 +2389,22 @@ static void spawn_close_from(posix_spawn_file_actions_t *fa, int from) {
     if (posix_spawn_file_actions_addclosefrom_np) posix_spawn_file_actions_addclosefrom_np(fa, from);
 }
 
+// The calling thread's mask with every processor this process uses, for the time of a posix_spawn: a child starts
+// with the mask of the thread that spawned it, and after plat_cpu_reserve no thread has them all (the recording thread
+// has its core alone, every other thread lacks that core). The game plat_restart starts would begin without the core,
+// take the next fast one for its own recording thread, and so have one core fewer after every Restart.
+// 1 when the mask was widened: *saved is then the mask to put back.
+static int spawn_mask_whole(cpu_set_t *saved) {
+    cpu_set_t whole;
+    plat_mutex_lock(&cpu_lock);
+    int taken = cpu_taker != 0;
+    CPU_OR(&whole, &cpu_taken, &cpu_others);
+    plat_mutex_unlock(&cpu_lock);
+    if (!taken || sched_getaffinity(0, sizeof *saved, saved)) return 0;
+    CPU_OR(&whole, &whole, saved);
+    return !CPU_EQUAL(&whole, saved) && !sched_setaffinity(0, sizeof whole, &whole);
+}
+
 int plat_restart(void) {
     // the arguments, NUL-separated, from /proc/self/cmdline
     static char args[16384];
@@ -2399,8 +2431,11 @@ int plat_restart(void) {
     posix_spawnattr_setsigdefault(&at, &all);
     posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
     setenv(RESTART_WAIT, wait, 1);
+    cpu_set_t mask;
+    int whole = spawn_mask_whole(&mask);
     pid_t pid;
     int e = posix_spawn(&pid, exe, &fa, &at, argv, environ);
+    if (whole) sched_setaffinity(0, sizeof mask, &mask);
     unsetenv(RESTART_WAIT);
     posix_spawnattr_destroy(&at);
     posix_spawn_file_actions_destroy(&fa);

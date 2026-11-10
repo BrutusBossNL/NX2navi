@@ -24,7 +24,7 @@ Versions are the ones the build was verified with; newer patch releases are fine
 MSYS2 packages, after `pacman -Syuu` (run it twice; the first pass updates the core and exits):
 
 ```sh
-pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-{clang,lld,ninja,gcc,make,pkgconf,sdl3,opus,libvpx,zstd,vulkan-devel,\
+pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-{clang,lld,ninja,gcc,make,pkgconf,sdl3,opus,libvpx,dav1d,zstd,vulkan-devel,\
 vulkan-memory-allocator,vulkan-validation-layers,shaderc,spirv-tools} base-devel git unzip
 ```
 
@@ -213,7 +213,7 @@ Requirements:
 - Packages on Arch:
 
   ```sh
-  pacman -S --needed clang lld ninja make sdl3 opus libvpx zstd vulkan-headers vulkan-icd-loader \
+  pacman -S --needed clang lld ninja make sdl3 opus libvpx dav1d zstd vulkan-headers vulkan-icd-loader \
       vulkan-validation-layers shaderc spirv-tools dotnet-sdk uv git
   ```
 
@@ -278,6 +278,13 @@ Before a commit:
   `git config core.hooksPath .githooks` runs it before each local commit.
 - `build\<ver>\nx2navi.exe --selftest`: layout, dispatch table and host-function registry, without game files.
 
+GPU page faults: `NX2NAVI_VA_REPORT=1` keeps the driver's GPU address bind/unbind reports
+(VK_EXT_device_address_binding_report, `runtime/vk_vaddr.c`); `=2` also keeps the host call stack of ranges of 1 MiB
+or more. After a lost device, the log names the reports whose range covered each faulting page, or the nearest ranges
+when none did, and `vaddr-history.txt` beside the log holds the whole history. Stack frames are module offsets: add
+the executable's load address (the link map's base) before looking them up in `ocarina.map`. Each bind and unbind
+costs a callback, and `=2`'s stack walks enough to hide a timing-dependent fault.
+
 A change to the in-game menu's look (`runtime/ui/menu_skin.cpp`, `option_rows.cpp`, `perf_panel.cpp`) can be looked at
 without game files: `python tools/menu_preview.py` builds the menu's own drawing code with the host's clang++ and
 writes the Screen tab, the full performance overlay and the boot screen to `build/menu-preview/` (`menu.png`,
@@ -321,6 +328,11 @@ files); a change to the settings passes `nx2navi.exe --probe-cfg`.
 A change to what the library warm logs when the driver's cache of stage libraries is cold (`runtime/vk_warm_hint.h`,
 `runtime/vk_pipeline.c` `lw_main`) passes `python tests\warm_hint_check.py`, which builds the header alone and checks
 the added text by GPU vendor and by why the cache was cold. No game files.
+
+A change to the mouse camera's stick deflection (`runtime/input_map.c` `input_mouse_stick`) passes
+`python tests\mouse_stick_check.py`, which builds that file with the rest of the runtime stubbed and checks the
+deflection at each camera speed: a slow movement is divided by the factor, a fast flick reaches full tilt. No game
+files.
 
 The lifter (`recomp/`) and the CPU headers (`runtime/cpu.h`, `runtime/simd.h`) are checked against Unicorn. Every lifter
 change passes these, all run with `.venv`:

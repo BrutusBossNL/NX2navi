@@ -141,8 +141,9 @@ static int create_instance(void) {
         rt_log("vk: NX2NAVI_VK_VALIDATION set but %s is not installed; continuing without", layers[0]);
         validate = 0;
     }
-    // DLSS Frame Generation: Streamline's plugins call its naming functions even when they say it is off
-    if (validate || (vk_dlssg_wanted() && instance_ext_present(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)))
+    // DLSS Frame Generation: Streamline's plugins call its naming functions even when they say it is off; the GPU
+    // address history (vk_vaddr.c) gets the driver's binding reports through a messenger
+    if (validate || ((vk_dlssg_wanted() || vk_vaddr_wanted()) && instance_ext_present(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)))
         ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     // armed, not wanted: the menu switches HDR on during the run (vk_hdr.c), and the extensions are fixed here
     if (vk_hdr_armed() && instance_ext_present(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))   // HDR10 surface formats
@@ -168,6 +169,7 @@ static int create_instance(void) {
             .pfnUserCallback = debug_cb};
         if (f) f(g_vk.instance, &mi, NULL, &g_vk.messenger);
     }
+    vk_vaddr_start(g_vk.instance);
     return 1;
 }
 
@@ -299,6 +301,7 @@ typedef struct {
     VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR mrc;
     VkPhysicalDeviceMaintenance5FeaturesKHR m5;
     VkPhysicalDevicePipelineBinaryFeaturesKHR pbin;
+    VkPhysicalDeviceAddressBindingReportFeaturesEXT abr;
 } FeatureChain;
 
 static int create_device(void) {
@@ -361,6 +364,12 @@ static int create_device(void) {
         ext[n_ext++] = VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME;
         CHAIN(fbl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT);
         CHAIN(lr, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR);
+    }
+    // The GPU address history for a lost device's report (vk_vaddr.c, NX2NAVI_VA_REPORT=1)
+    int want_va = vk_vaddr_wanted() && has_ext(ep, ne, VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+    if (want_va) {
+        ext[n_ext++] = VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME;
+        CHAIN(abr, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT);
     }
     vk_dlaa_device_exts(ep, ne, ext, &n_ext, 40);   // NGX's; the eight slots after it stay for the eight below
     // FSR 3.1 (vk_ffx.cpp): its Vulkan back end looks vkGetBufferMemoryRequirements2KHR up by that name, which resolves
@@ -431,6 +440,7 @@ static int create_device(void) {
     else if (!h->textureCompressionBC) miss = "textureCompressionBC";
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
     if (!c->fault.deviceFault) g_vk.has_device_fault = 0;
+    if (vk_vaddr_wanted()) vk_vaddr_device(want_va && c->abr.reportAddressBinding);
     if (g_vk.has_vrs) {   // the rate is set per draw; no rate attachment and no per-primitive rates
         c->vrs.attachmentFragmentShadingRate = c->vrs.primitiveFragmentShadingRate = VK_FALSE;
         if (!c->vrs.pipelineFragmentShadingRate) g_vk.has_vrs = 0;
@@ -537,6 +547,7 @@ static void destroy_all(void) {
             (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.instance, "vkDestroyDebugUtilsMessengerEXT");
         if (f) f(g_vk.instance, g_vk.messenger, NULL);
     }
+    vk_vaddr_stop(g_vk.instance);
     if (g_vk.instance) vkDestroyInstance(g_vk.instance, NULL);
     g_errors_total += g_vk.validation_errors;
     memset(&g_vk, 0, sizeof g_vk);
@@ -596,6 +607,7 @@ void vk_device_fault_report(VkResult r) {
     if (!get) {
         rt_log("vk: device lost; no fault report (VK_EXT_device_fault %s)", c && c->has_device_fault ? "has no entry point"
                                                                                                     : "not enabled");
+        vk_vaddr_dump();   // the history still names what held a page another report (the kernel's log) gives
         plat_mutex_unlock(&lock);
         return;
     }
@@ -613,13 +625,16 @@ void vk_device_fault_report(VkResult r) {
         rt_log("vk: device fault: \"%s\" (%u address infos, %u vendor infos, vendor binary %llu bytes)", info.description,
                n.addressInfoCount, n.vendorInfoCount, (unsigned long long)binary);
         // The faulting access lies in the precision-aligned range around the reported address.
-        for (uint32_t i = 0; i < n.addressInfoCount; i++)
+        for (uint32_t i = 0; i < n.addressInfoCount; i++) {
             rt_log("vk: device fault address %u: %s at %#llx, precision %#llx", i, fault_address_type(ai[i].addressType),
                    (unsigned long long)ai[i].reportedAddress, (unsigned long long)ai[i].addressPrecision);
+            vk_vaddr_fault(ai[i].reportedAddress, ai[i].addressPrecision);
+        }
         for (uint32_t i = 0; i < n.vendorInfoCount; i++)
             rt_log("vk: device fault vendor info %u: \"%s\" code %#llx data %#llx", i, vi[i].description,
                    (unsigned long long)vi[i].vendorFaultCode, (unsigned long long)vi[i].vendorFaultData);
     }
+    vk_vaddr_dump();
     free(ai);
     free(vi);
     plat_mutex_unlock(&lock);
