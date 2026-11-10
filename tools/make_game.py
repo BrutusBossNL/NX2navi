@@ -1125,6 +1125,107 @@ def preflight(msys, jobs, sources=None):
     say(f'check: {len(sources)} runtime files and the libraries pass, {time.time() - t0:.0f} s')
 
 
+def steps_to_run(state, identity, out, until=None):
+    """The steps from exefs to shaders this build will run, as main's loop decides it: a step whose key is not the
+    recorded one, and every step after one that runs but those that read nothing of it (UNAFFECTED). until: the
+    step the build stops after (--until). For the checks made before the long steps (space_needs, probe_toolchain)."""
+    runs = []
+    for name in STEPS[:STEPS.index('shaders') + 1]:
+        if (any((earlier, name) not in UNAFFECTED for earlier in runs)
+                or state['steps'].get(name) != step_key(name, identity, out)):
+            runs.append(name)
+        if name == until:
+            break
+    return runs
+
+
+GiB = 1 << 30
+# Disk space the steps after the RomFS image take in the game folder, the least each is known to need: a build that
+# has less is sure to stop, half an hour in when it is the shaders. Measured on a 0.7.1 game folder: the lifted C
+# 1.16 GiB, its objects 0.34 GiB and the new exe beside the old one 0.3 GiB; with the lifted C already there only
+# the changed files and the exe. A full shader preparation writes every translation as a loose file (a player's
+# pack of two translators' translations held 8,290 MiB, 327,560 files) and the game's shader programs and pipeline
+# cache, 0.84 GiB. Folding the translations into their pack takes as much again, but a pack that cannot be written
+# does not stop the build (pack_shader_cache), so it is not asked for here.
+SPACE_BUILD_CACHE, SPACE_REBUILD, SPACE_SHADERS = 2 * GiB, 1 * GiB, 4 * GiB
+SPACE_IMAGE_MARGIN = 1 * GiB   # beside the RomFS image, as step_romfs asks
+
+
+def space_needs(runs, out, image_bytes=0, carried=False):
+    """[(what, bytes)] this build will write into the game folder, for the steps it runs (steps_to_run).
+    image_bytes: the size of the RomFS image when that step runs; carried: the shaders step keeps the shaders
+    prepared before (step_shaders update) and writes none."""
+    needs = []
+    if 'romfs' in runs:
+        needs.append(('the RomFS image', image_bytes + SPACE_IMAGE_MARGIN))
+    if 'compile' in runs:
+        lifted = (out / 'build-cache' / 'lift' / 'layout.json').is_file()
+        needs.append(('the build cache (the translated code and its compiled files)',
+                      SPACE_REBUILD if lifted else SPACE_BUILD_CACHE))
+    if 'shaders' in runs and not carried:
+        needs.append(('the prepared shaders', SPACE_SHADERS))
+    return needs
+
+
+def check_space(out, needs):
+    """Stops the build before its first long step when the game folder's disk cannot hold what the build will
+    write (space_needs), naming each part and how much is missing. Only the RomFS image's space was looked at,
+    and only when that step began: a disk that held the image but not the build cache or the shaders stopped the
+    build in the compile or, after half an hour, in the shader preparation. What an earlier run left of the image
+    counts as free: the RomFS step removes it (step_romfs)."""
+    need = sum(n for _, n in needs)
+    if not need:
+        return
+    free = shutil.disk_usage(out).free
+    try:
+        free += (out / 'romfs' / 'romfs.bin.part').stat().st_size
+    except OSError:
+        pass
+    if free >= need:
+        return
+    parts = ', '.join(f'{n / 1e9:.1f} GB for {what}' for what, n in needs)
+    fail(f'{out} has {free / 1e9:.1f} GB free and this build needs {need / 1e9:.1f} GB there: {parts}. Free '
+         f'{(need - free) / 1e9:.1f} GB more on that disk, or build into a folder on another one')
+
+
+def probe_toolchain(msys, work):
+    """Windows, before the long steps of a build whose compile step will run: an empty program is compiled and
+    linked with the installed toolchain, against the libraries the game links and with the linker the compile step
+    uses, in the folder work. Build tools that are incomplete, or that security software keeps from starting or
+    from writing an exe, stopped the build in its compile step, after the RomFS image and the lift, ten minutes and
+    more in; this takes a second. (Linux tries its compiler on the runtime's own sources: preflight.)"""
+    clang, clangxx, env, _ = toolchain(msys)
+    repair = (f'If the launcher installed these tools, delete the folder {msys.parent} and try again: it unpacks '
+              f'them anew. If you installed MSYS2 yourself, install the packages README-BuildKit.md lists')
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        src, obj, exe = work / 'probe.c', work / 'probe.o', work / ('probe.exe' if WIN else 'probe')
+        src.write_text('int main(void) { return 0; }\n', encoding='ascii')
+        ld = ['-fuse-ld=lld'] if (msys / 'bin' / 'ld.lld.exe').is_file() else []
+        steps = (('compile', clang, [str(clang), '-c', '-std=gnu11', '-O1', '-o', str(obj), str(src)]),
+                 ('link', clangxx, [str(clangxx), *ld, '-o', str(exe), str(obj), '-L', str(msys / 'lib'), *LINK_LIBS]))
+        for what, tool, cmd in steps:
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, env=env, errors='replace')
+            except OSError as e:
+                fail(f'{tool} does not start ({error_text(e)}): the build tools are damaged, or security software '
+                     f'blocks them. {repair}')
+            if not p.returncode:
+                continue
+            said = (p.stderr.strip().splitlines() or [f'exit code {p.returncode}'])[-1][-300:]
+            if what == 'compile':
+                fail(f'{tool} cannot compile a test program ({said}): the build tools are incomplete, or security '
+                     f'software blocks them. {repair}')
+            lacking = sorted(set(re.findall(r'unable to find library (-l\S+)', p.stderr)))
+            fail('the build tools cannot link the game: '
+                 + (f'{msys / "lib"} lacks {", ".join(lacking)}' if lacking else f'the linker says: {said}')
+                 + f'. {repair}')
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    say('check: the build tools compile and link a test program')
+
+
 def runtime_sources():
     """(source, object name) of every runtime file this OS's build compiles: the Win32 files on Windows, the SDL
     window's (*_sdl.*) and platform/linux.c elsewhere (tools/build_game.py's foreign_os)."""
@@ -2133,6 +2234,13 @@ def build_main():
         # the compile step's key does not name the level: without this a finished compile reads as done before
         state['steps'].pop('compile', None)
     keep_awake()
+    # What can be known to fail later is looked at now: the disk space of every step that will run, and on Windows
+    # that the build tools compile and link (not for a build the tests stop before its compile step, --until)
+    ahead = steps_to_run(state, src.identity, out, a.until)
+    check_space(out, space_needs(ahead, out, sum(src.romfs_size(ref) for _, ref in src.romfs) if 'romfs' in ahead else 0,
+                                 a.rebuild and shader_carry(out)))
+    if WIN and 'compile' in ahead:
+        probe_toolchain(msys, cache / 'toolchain-check')
     # Linux: the compiler, headers and libraries are the system's, so they are tried on the runtime before the long
     # steps of a build that will reach the compile step (the first step whose key is not current makes the rest run)
     if not WIN and any(state['steps'].get(n) != step_key(n, src.identity, out) for n in STEPS[:STEPS.index('compile') + 1]):

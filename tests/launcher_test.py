@@ -1351,6 +1351,12 @@ class MakeGameTest(Tmp):
         self.layout.pydeps.mkdir(parents=True, exist_ok=True)
         (self.layout.pydeps / 'zbic.py').write_text('def decompress(b):\n    return b\n')
         self.out = self.tmp / 'game out'
+        # the made-up build tools above are empty files: a build in this process does not try them
+        # (test_the_build_tools_are_tried_before_the_long_steps does, with a stand-in compiler)
+        self.real_probe = make_game.probe_toolchain
+        probe = mock.patch.object(make_game, 'probe_toolchain', lambda msys, work: None)
+        probe.start()
+        self.addCleanup(probe.stop)
 
     def run_mg(self, *args):
         events, lines = [], []
@@ -2655,6 +2661,127 @@ class MakeGameTest(Tmp):
                             str(gen / 'modules.c')], capture_output=True, text=True, errors='replace', env=env)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         self.assertIn(str(out / 'exefs').encode('utf-8'), obj.read_bytes())   # the path's own bytes are in the object
+
+    def test_the_disk_space_of_every_step_is_checked_first(self):
+        """Before its first long step the build adds up what its steps will write into the game folder and stops
+        when the disk cannot hold it, naming each part and how much is missing; it looked at the RomFS image's
+        space only, and only when that step began."""
+        import collections
+        mg, gib = self.mg, 1 << 30
+        usage = collections.namedtuple('usage', 'total used free')
+        self.out.mkdir()
+        first = mg.space_needs(['exefs', 'romfs', 'lift', 'compile', 'shaders'], self.out, 26_240_000_000)
+        self.assertEqual([n for _, n in first], [26_240_000_000 + gib, 2 * gib, 4 * gib])
+        (self.out / 'build-cache' / 'lift').mkdir(parents=True)
+        (self.out / 'build-cache' / 'lift' / 'layout.json').write_text('[]')
+        self.assertEqual([n for _, n in mg.space_needs(['lift', 'compile', 'shaders'], self.out, carried=True)], [gib])
+        self.assertEqual(mg.space_needs(['shaders'], self.out, carried=True), [])
+        self.assertEqual(mg.space_needs([], self.out), [])
+
+        def check(free, needs):
+            err = io.StringIO()
+            with mock.patch.object(mg.shutil, 'disk_usage', lambda p: usage(500 * gib, 0, free)), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                try:
+                    mg.check_space(self.out, needs)
+                    return ''
+                except SystemExit:
+                    return err.getvalue()
+        self.assertEqual(check(40 * gib, first), '')
+        text = check(30 * gib, first)
+        self.assertIn('has 32.2 GB free and this build needs 33.8 GB there', text)
+        self.assertIn('27.3 GB for the RomFS image, 2.1 GB for the build cache', text)
+        self.assertIn('4.3 GB for the prepared shaders. Free 1.5 GB more on that disk', text)
+        self.assertEqual(check(0, []), '')   # nothing to write: nothing asked
+        # what a cut run left of the image is the RomFS step's to remove: it counts as free
+        image = [('the RomFS image', 10 << 20)]
+        self.assertIn('needs 0.0 GB there', check(19 << 19, image))   # 9.5 MiB free for 10 MiB
+        (self.out / 'romfs').mkdir()
+        (self.out / 'romfs' / 'romfs.bin.part').write_bytes(bytes(1 << 20))
+        self.assertEqual(check(19 << 19, image), '')
+
+    def test_an_update_without_room_stops_before_its_lift(self):
+        import collections
+        made_up_game(self.out)
+        usage = collections.namedtuple('usage', 'total used free')
+        ran = []
+        with mock.patch.object(self.mg.shutil, 'disk_usage', lambda p: usage(10 ** 12, 0, 200 << 20)):
+            code, text = self.main_rebuild(lambda out, cache: ran.append('lift'), lambda *a, **k: ran.append('compile'),
+                                           '--until', 'compile')
+        self.assertEqual((code, ran), (1, []))
+        self.assertIn('has 0.2 GB free and this build needs 2.1 GB there: 2.1 GB for the build cache', text)
+        with mock.patch.object(self.mg.shutil, 'disk_usage', lambda p: usage(10 ** 12, 0, 50 << 30)):
+            code, text = self.main_rebuild(lambda out, cache: ran.append('lift'), lambda *a, **k: ran.append('compile'),
+                                           '--until', 'compile')
+        self.assertEqual((code, ran), (0, ['lift', 'compile']))
+
+    def test_the_steps_a_build_will_run(self):
+        mg = self.mg
+        made_up_game(self.out)
+        state = json.loads((self.out / 'build-cache' / 'state.json').read_text())
+        ident = state['input']
+        self.assertEqual(mg.steps_to_run(state, ident, self.out, 'compile'), ['lift', 'compile'])
+        for name in ('lift', 'compile'):
+            state['steps'][name] = mg.step_key(name, ident, self.out)
+        self.assertEqual(mg.steps_to_run(state, ident, self.out, 'compile'), [])
+        del state['steps']['romfs']   # the lift reads nothing of the RomFS step: it does not follow it
+        self.assertEqual(mg.steps_to_run(state, ident, self.out, 'compile'), ['romfs', 'compile'])
+        self.assertEqual(mg.steps_to_run({'steps': {}}, ident, self.out, 'romfs'), ['exefs', 'romfs'])
+
+    def test_the_build_tools_are_tried_before_the_long_steps(self):
+        """On Windows a build whose compile step will run first compiles and links an empty program with the
+        installed tools; tools that do not work stop it there with what is wrong and how to mend it."""
+        mg = self.mg
+        work = self.tmp / 'check'
+        seen = []
+
+        def compiler(compile_rc=0, link_rc=0, stderr='', start=None):
+            def run(cmd, **kw):
+                seen.append(cmd)
+                if start:
+                    raise start
+                if '-c' in cmd:
+                    self.assertTrue(Path(cmd[-1]).is_file())   # the test program is there to compile
+                    return mock.Mock(returncode=compile_rc, stderr=stderr)
+                return mock.Mock(returncode=link_rc, stderr=stderr)
+            return run
+
+        def probe(**kw):
+            err = io.StringIO()
+            with mock.patch.object(mg.subprocess, 'run', compiler(**kw)), \
+                    mock.patch.object(mg, 'toolchain', lambda msys: (msys / 'bin' / 'clang.exe', msys / 'bin' /
+                                                                     'clang++.exe', dict(os.environ), msys)), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                try:
+                    self.real_probe(self.msys, work)
+                    return ''
+                except SystemExit:
+                    return err.getvalue()
+        self.assertEqual(probe(), '')
+        self.assertEqual([Path(c[0]).name for c in seen], ['clang.exe', 'clang++.exe'])
+        self.assertTrue(set(mg.LINK_LIBS) <= set(seen[1]))   # linked against what the game links
+        self.assertFalse(work.exists())
+        text = probe(compile_rc=1, stderr="clang: error: unable to execute command: program not executable\n")
+        self.assertIn('clang.exe cannot compile a test program (clang: error: unable to execute command', text)
+        self.assertIn(f'delete the folder {self.msys.parent} and try again', text)
+        text = probe(link_rc=1, stderr='ld.lld: error: unable to find library -lSDL3\n'
+                                       'ld.lld: error: unable to find library -lopus\nclang++: error: linker failed\n')
+        self.assertIn(f'the build tools cannot link the game: {self.msys / "lib"} lacks -lSDL3, -lopus.', text)
+        text = probe(link_rc=1, stderr='ld.lld: error: undefined symbol: WinMain\n')
+        self.assertIn('the linker says: ld.lld: error: undefined symbol: WinMain', text)
+        text = probe(start=PermissionError(13, 'Access is denied'))
+        self.assertIn('clang.exe does not start (Access is denied)', text)
+        self.assertIn('security software', text)
+        self.assertFalse(work.exists())
+        # the build calls it on Windows when the compile step will run, and not for a build that only draws prompts
+        made_up_game(self.out)
+        called = []
+        with mock.patch.object(mg, 'probe_toolchain', lambda msys, work: called.append(work)), \
+                mock.patch.object(mg, 'WIN', True):
+            self.main_rebuild(lambda out, cache: None, lambda *a, **k: None, '--until', 'compile')
+            self.assertEqual(called, [self.out / 'build-cache' / 'toolchain-check'])
+            self.main_rebuild(lambda out, cache: None, lambda *a, **k: None, '--until', 'compile')
+        self.assertEqual(len(called), 1)   # the second build had nothing to compile
 
     def main_rebuild(self, lift, compile_, *more):
         """make_game.main() --rebuild in this process on self.out, with the given functions in place of the lift and

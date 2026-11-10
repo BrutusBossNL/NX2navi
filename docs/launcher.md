@@ -125,7 +125,11 @@ A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the too
    complete. No MSYS2 shell or pacman runs. Then zbic: the wheel for the bundled Python from PyPI, checked against
    PyPI's sha256, into `pydeps/`.
 2. **Inspect Your Game** to **Compile**: `tools/make_game.py --nup <dump> --out <game> --msys <toolchain> --events`,
-   whose `@@` progress lines drive the rows (check, exefs, romfs, lift, compile). How it keeps the build short:
+   whose `@@` progress lines drive the rows (check, exefs, romfs, lift, compile). Before the first long step it
+   looks at what can be known to fail later: the disk space of every step that will run (the RomFS image and 1 GiB,
+   2 GiB for the build cache, 4 GiB for the prepared shaders; `check_space` names each part and how much is
+   missing), and that the build tools compile and link an empty program (`probe_toolchain`). How it keeps the build
+   short:
    - The RomFS image (26 GB, mostly disk work) is packed beside the lift and the compile (processor work), so a first
      build takes about as long as the longer of the two. Only `romfs.c`, which includes the RomFS index's
      `romfs_config.h`, waits for the image.
