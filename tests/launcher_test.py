@@ -19,7 +19,7 @@ Run: python tests/launcher_test.py   (Python 3.14 for the zstd tests; the window
   step with the system's C compiler, and its windres call under folders with spaces (a script in windres's place)
 - jobs: an install driven by a fake make_game.py, with and without the prompts row
 - the look: the colour schemes, the background picture's fitting and kept copy, the sound effects (off by default,
-  the game's own interface sounds decoded from a made-up .bwav)
+  only the game's own select and back sounds, decoded from a made-up .bwav)
 - the window: --selftest draws every screen (skipped without a display)
 """
 import contextlib
@@ -2514,42 +2514,6 @@ class LookTest(Tmp):
         with self.assertRaises(self.picture.PictureError):
             self.picture.read_ppm(b'P5\n1 1\n255\n\0')
 
-    def test_the_effects_are_short_wavs(self):
-        sound = self.sound
-        for name in sound.EFFECTS:
-            samples = sound.synth(name)
-            self.assertAlmostEqual(float(abs(samples).max()), 1.0, places=5, msg=name)
-            self.assertLess(len(samples) / sound.RATE, 1.0, name)
-            self.assertLess(abs(float(samples[-1])), 0.01, name)   # it ends at nothing: no click
-            wav = sound.wav_bytes(samples, 0.4)
-            self.assertEqual(wav[:4] + wav[8:16], b'RIFFWAVEfmt ')
-            self.assertEqual(struct.unpack_from('<I', wav, 4)[0], len(wav) - 8)
-            self.assertEqual(struct.unpack_from('<HHIIHH', wav, 20), (1, 1, sound.RATE, sound.RATE * 2, 2, 16))
-            peak = max(abs(v) for v in struct.unpack_from(f'<{len(samples)}h', wav, 44))
-            self.assertAlmostEqual(peak / 32767, 0.4, delta=0.01)
-
-    def test_sounds_are_off_until_the_player_turns_them_on(self):
-        sound = self.sound
-        self.assertEqual(settings.DEFAULTS['sounds'], 'off')
-        with mock.patch.object(sound.os, 'name', 'posix'), mock.patch.object(sound.shutil, 'which',
-                                                                             return_value='/usr/bin/aplay'), \
-                mock.patch.object(sound.subprocess, 'Popen') as popen:
-            s = sound.Sounds(self.tmp)                     # no level given, as a new launcher.json has it
-            s.play('move')
-            popen.assert_not_called()
-            s.set_level('nonsense')                        # a level launcher.json cannot hold: off
-            s.play('move')
-            popen.assert_not_called()
-            s.set_level('low')
-            s.play('move')
-            s.play('no such effect')
-            popen.assert_called_once()
-            path = Path(popen.call_args[0][0][1])
-            self.assertEqual(path.read_bytes()[:4], b'RIFF')
-            s.set_level('off')
-            s.play('move')
-            popen.assert_called_once()
-
     @staticmethod
     def bwav(channels, rate=48000):
         """A .bwav of channels given as (codec, pan, samples, data): the header, 0x4c bytes a channel, the data."""
@@ -2565,6 +2529,18 @@ class LookTest(Tmp):
             out += data
         return bytes(out)
 
+    def game_sounds(self, names=('Do', 'Cancel')):
+        """A dump folder whose RomFS holds the given interface sounds; decoded into this layout's cache."""
+        dump = self.tmp / 'dump'
+        (dump / 'exefs').mkdir(parents=True, exist_ok=True)
+        (dump / 'exefs' / 'main').write_bytes(b'')
+        stream = dump / 'romfs' / 'Sound' / 'Resource' / 'Stream'
+        stream.mkdir(parents=True, exist_ok=True)
+        loud = struct.pack('<4h', 0, 16000, -16000, 8000)
+        for name in names:
+            (stream / f'SE_Sys_{name}00.bwav').write_bytes(self.bwav([(0, 0, 4, loud), (0, 1, 4, loud)]))
+        return gamefiles.extract_sounds(self.layout, '', str(dump))
+
     def test_the_games_interface_sounds(self):
         sound = self.sound
         # one PCM16 channel in the middle: both sides, at 0.707
@@ -2577,42 +2553,53 @@ class LookTest(Tmp):
         self.assertEqual(gamefiles.bwav_to_pcm(both), (48000, [(256, 256), (-256, -256), (1792, 0)]))
         for bad in (b'', b'RIFF' + bytes(60), mono[:0x30], self.bwav([(7, 2, 3, bytes(6))]), mono[:-2]):
             self.assertIsNone(gamefiles.bwav_to_pcm(bad))
-        # from a dump folder into data/cache/sounds, and from there into the effects
-        dump = self.tmp / 'dump'
-        (dump / 'exefs').mkdir(parents=True)
-        (dump / 'exefs' / 'main').write_bytes(b'')
-        stream = dump / 'romfs' / 'Sound' / 'Resource' / 'Stream'
-        stream.mkdir(parents=True)
-        loud = struct.pack('<4h', 0, 16000, -16000, 8000)
-        (stream / 'SE_Sys_Cursor00.bwav').write_bytes(self.bwav([(0, 0, 4, loud), (0, 1, 4, loud)]))
-        (stream / 'SE_Sys_Do00.bwav').write_bytes(b'not a sound')
-        got = gamefiles.extract_sounds(self.layout, '', str(dump))
-        self.assertEqual(set(got), {'move'})
+        # from a dump folder into data/cache/sounds, and from there into the effects: the decide sound only here
+        got = self.game_sounds(('Do',))
+        (self.tmp / 'dump' / 'romfs' / 'Sound' / 'Resource' / 'Stream' / 'SE_Sys_Cancel00.bwav').write_bytes(b'no sound')
+        self.assertEqual(set(got), {'select'})
         self.assertEqual(gamefiles.cached_sounds(self.layout), got)
         with mock.patch.object(sound.os, 'name', 'posix'), mock.patch.object(sound.shutil, 'which', return_value=None):
             s = sound.Sounds(self.layout.cache, 'high')
-        self.assertEqual(set(s.game), {'move'})
-        wav = s.wav('toggle')                                  # the cursor's sound: the game's, stereo at its rate
+        self.assertEqual(set(s.game), {'select'})
+        wav = s.wav('select')                                  # the game's sound: stereo at its rate, at the level
+        self.assertEqual(wav[:4] + wav[8:16], b'RIFFWAVEfmt ')
+        self.assertEqual(struct.unpack_from('<I', wav, 4)[0], len(wav) - 8)
         self.assertEqual(struct.unpack_from('<HHI', wav, 20), (1, 2, 48000))
         peak = max(abs(v) for v in struct.unpack_from('<8h', wav, 44))
-        self.assertAlmostEqual(peak / 32767, sound.LEVELS['high'] * 0.6, delta=0.01)
-        self.assertEqual(struct.unpack_from('<HHI', s.wav('select'), 20), (1, 1, sound.RATE))   # no decide sound: the chime
+        self.assertAlmostEqual(peak / 32767, sound.LEVELS['high'], delta=0.01)
         self.assertFalse(sound.Sounds(self.tmp / 'empty', 'high').game)
 
-    def test_the_cursor_is_quiet_right_after_a_choice(self):
+    def test_only_the_games_sounds_play_and_only_once_turned_on(self):
         sound = self.sound
+        self.assertEqual(settings.DEFAULTS['sounds'], 'off')
+        self.assertEqual(set(gamefiles.SOUNDS), set(sound.EFFECTS))
+        empty = self.tmp / 'empty'
+        self.game_sounds()
         with mock.patch.object(sound.os, 'name', 'posix'), mock.patch.object(sound.shutil, 'which',
                                                                              return_value='/usr/bin/aplay'), \
-                mock.patch.object(sound.subprocess, 'Popen') as popen, \
-                mock.patch.object(sound.time, 'monotonic') as clock:
-            clock.return_value = 100.0
-            s = sound.Sounds(self.tmp, 'low')
-            s.play('select')
-            clock.return_value = 100.1
-            s.play('move')                                 # the pointer landing on the next screen's row
+                mock.patch.object(sound.subprocess, 'Popen') as popen:
+            quiet = sound.Sounds(empty, 'high')                # before the game has been read: nothing to play
+            quiet.play('select')
+            quiet.play('back')
+            popen.assert_not_called()
+            quiet.cache = self.layout.cache
+            self.assertTrue(quiet.load_game())                 # the game's sounds, once decoded
+            quiet.play('select')
             self.assertEqual(popen.call_count, 1)
-            clock.return_value = 100.4
-            s.play('move')
+            s = sound.Sounds(self.layout.cache)                # no level given, as a new launcher.json has it
+            s.play('select')
+            s.set_level('nonsense')                            # a level launcher.json cannot hold: off
+            s.play('select')
+            self.assertEqual(popen.call_count, 1)
+            s.set_level('low')
+            s.play('back')
+            s.play('move')                                     # the cursor has no sound
+            s.play('no such effect')
+            self.assertEqual(popen.call_count, 2)
+            with open(popen.call_args[0][0][1], 'rb') as f:
+                self.assertEqual(f.read(4), b'RIFF')
+            s.set_level('off')
+            s.play('select')
             self.assertEqual(popen.call_count, 2)
 
     def test_the_look_settings_survive_and_fall_back(self):

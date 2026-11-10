@@ -21,7 +21,7 @@ Mouse, keyboard (arrows, Enter or Space, Esc, F5) and an XInput gamepad (d-pad o
 The look is the player's (Customize Launcher): art.set_theme fills the palette every picture is drawn from, a picture
 of the player's own can replace the backdrop (picture.py), and unless Animations is off the cursor glides between
 rows, a new screen slides in, sparks drift over the backdrop and Navi bobs in the title band (animate). sound.py
-plays a short chime for a move, a change, a choice and the end of a job.
+plays the game's own decide and cancel sounds, read from the player's game, for a choice and for going back.
 """
 import argparse
 import math
@@ -482,10 +482,7 @@ class App:
         if not idx:
             return
         pos = idx.index(self.focus) if self.focus in idx else 0
-        was = self.focus
         self.focus = idx[max(0, min(len(idx) - 1, pos + d))]
-        if self.focus != was:
-            self.sounds.play('move')
         self.render()
 
     def focused(self):
@@ -503,7 +500,8 @@ class App:
             r.pick = max(0, min(len(r.actions) - 1, getattr(r, 'pick', 0) + d))
         else:
             return
-        self.sounds.play('move' if r.kind == 'pair' else 'toggle')
+        if r.kind != 'pair':   # a switch or a choice changed
+            self.sounds.play('select')
         self.render()
 
     def activate(self):
@@ -511,10 +509,10 @@ class App:
         if not r or not r.enabled:
             return
         if r.kind == 'toggle':
-            self.sounds.play('toggle')
+            self.sounds.play('select')
             r.on(not r.get())
         elif r.kind == 'enum':
-            self.sounds.play('toggle')
+            self.sounds.play('select')
             r.right()
         elif r.kind == 'pair':
             self.sounds.play('select')
@@ -572,7 +570,6 @@ class App:
             r = self.rows[i]
             if r.kind == 'pair':
                 r.pick = 0 if e.x < (r.rect[0] + r.rect[2]) / 2 else 1
-            self.sounds.play('move')
             self.render()
         elif i is not None and self.rows[i].kind == 'pair':
             r = self.rows[i]
@@ -608,12 +605,12 @@ class App:
             return
         if r.kind == 'toggle' and r.value_rect:
             x0, _, x1, _ = r.value_rect
-            self.sounds.play('toggle')
+            self.sounds.play('select')
             r.on(e.x < (x0 + x1) / 2)
             self.render()
         elif r.kind == 'enum' and r.value_rect:
             x0, _, x1, _ = r.value_rect
-            self.sounds.play('toggle')
+            self.sounds.play('select')
             (r.left if e.x < x0 + (x1 - x0) / 3 else r.right)()
             self.render()
         elif r.kind == 'pair':
@@ -925,7 +922,7 @@ class App:
             self.settings['sounds'] = keys[max(0, min(len(keys) - 1, at + d))]
             self.settings.save()
             self.sounds.set_level(self.settings['sounds'])
-            self.sounds.play('toggle')   # the new loudness, heard at once
+            self.sounds.play('select')   # the new loudness, heard at once
 
         bg_desc = ('Use a picture of your own as the background.',)
         if self.look_message:
@@ -951,7 +948,7 @@ class App:
                 desc=('A gliding cursor, sliding screens and drifting sparks.',)),
             Row('enum', 'Sounds', get=lambda: dict(SOUND_LEVELS).get(self.settings.get('sounds'), 'Off'),
                 left=lambda: sounds(-1), right=lambda: sounds(1),
-                desc=('The game\'s cursor, select and back sounds. Off by default.',)),
+                desc=('The game\'s select and back sounds. Off by default.',)),
             Row('divider'),
             Row('action', 'Back', on=lambda: self.show('home', self.home_row('Customize Launcher')), height=40,
                 desc=('Back to the main menu.',)),
@@ -973,7 +970,7 @@ class App:
             self.ctx.log(f'background: {path}: {e!r}')
             self.look_message = str(e) if isinstance(e, picture.PictureError) else \
                 f'{Path(path).name} could not be used as the background: {e}'
-            self.sounds.play('error')
+            self.sounds.play('back')
             self.show('customize', self.focus)
             return
         self.look_message = ''
@@ -1224,7 +1221,7 @@ class App:
             self.render()
             return
         self.ctx.log(f'play: {exe}')
-        self.sounds.play('start')
+        self.sounds.play('select')
         if self.settings.get('hide_while_playing'):
             self.root.withdraw()
         self.root.after(1000, self.watch_game)
@@ -1502,7 +1499,7 @@ class App:
         winsys.keep_awake(False)
         self.ctx.log(f'job {j.kind}: {j.result} {j.error}')
         if j.result in ('ok', 'failed'):
-            self.sounds.play('done' if j.result == 'ok' else 'error')
+            self.sounds.play('select' if j.result == 'ok' else 'back')
         if j.result == 'ok':
             if j.after == 'restart':
                 if winsys.restart(self.layout, ['--continue-update', versions.display(self.layout.version)]):

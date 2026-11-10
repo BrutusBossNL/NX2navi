@@ -27,7 +27,6 @@ FONTS = {   # role -> RomFS path; the window sets all its text in Cetra Display
     'title': 'Font2/Scalable/CetraDisplayPro-Medium.Nin_Ounce_NVN2.bfotf.zs',
 }
 SOUNDS = {   # the window's sound effect (launcher/ui/sound.py) -> the game's interface sound
-    'move': 'Sound/Resource/Stream/SE_Sys_Cursor00.bwav',
     'select': 'Sound/Resource/Stream/SE_Sys_Do00.bwav',
     'back': 'Sound/Resource/Stream/SE_Sys_Cancel00.bwav',
 }
@@ -398,8 +397,8 @@ def cached_sounds(layout):
 
 
 def extract_sounds(layout, game_dir='', dump=''):
-    """Decode the game's cursor, select and back sounds into data/cache/sounds as WAV files; {effect: path} of the
-    ones found."""
+    """Decode the game's select and back sounds into data/cache/sounds as WAV files; {effect: path} of the ones
+    found."""
     romfs = open_romfs(layout, game_dir, dump)
     if romfs is None:
         return {}
