@@ -103,6 +103,7 @@ typedef struct {
     view_t cview;
     uint8_t chas_view, used, has_view;
     uint8_t cheld;                // ce is NULL as the texture was evicted by disuse, valid while cgen is (held_out)
+    uint8_t cwant;                // a shader sampled its stand-in (vk_pool_marks_read): slot_resolve makes it at once
     uint64_t khash;               // hash of the descriptor key and view, 0 for CPU-written textures (vk_texture_slot_khash_locked)
     view_t v;
     tex_t t;
@@ -131,6 +132,30 @@ static uint64_t ru_same_n, ru_same_bytes;   // re-uploads skipped: the pages wer
 static int tex_alias = -1;
 static uint64_t n_alias_copied, n_alias_upload, n_alias_uninit, n_alias_kept, n_alias_released;
 static uint32_t submit_epoch = 1;   // bumped per queue submit: draw bindings check a texture's storage once per submit
+// The thresholds further down that count presents (STALE_FRAMES, GPU_STALE_FRAMES, OVERWRITTEN_KEEP, DISUSE_FRAMES)
+// were set at 60 presents a second. Without a limit the game presents 85 to 240 a second (a menu), and "120 presents"
+// was then half a second and "30 s without a sample" 7 to 20 s: under memory pressure textures went three times as
+// readily as meant, and the ones still on screen showed their dark stand-ins until they were made again.
+// tex_rate is the presents per second as a multiple of 60 in 1/256 (256 at 60 or fewer), the highest of the last RATE_N
+// seconds so that one slow second does not shorten the thresholds; PRESENTS(n) is n presents at 60 in today's presents.
+#define RATE_N 8
+static uint32_t tex_rate = 256;
+#define PRESENTS(n) ((uint64_t)(n) * tex_rate >> 8)
+
+static void rate_tick(void) {   // each submission, tex_lock held
+    static uint64_t t0, f0;
+    static uint32_t ring[RATE_N], at;
+    uint64_t t = kern_now_ns(), f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (!t0) t0 = t, f0 = f;
+    if (t - t0 < 1000000000ull) return;
+    uint64_t r = (f - f0) * 256ull * 1000000000ull / ((t - t0) * 60);
+    ring[at++ % RATE_N] = r < 256 ? 256 : r > 2048 ? 2048 : (uint32_t)r;
+    t0 = t, f0 = f;
+    uint32_t m = 256;
+    for (int i = 0; i < RATE_N; i++)
+        if (ring[i] > m) m = ring[i];
+    tex_rate = m;
+}
 // Mirrored textures the GPU wrote into, sorted by address (vk_texture_cpu_stale, vk_texture_write_back). Changed under
 // tex_lock and owned_lock; read under either.
 static PlatMutex owned_lock = PLAT_MUTEX_INIT;
@@ -396,7 +421,7 @@ static uint64_t n_restarts;              // superseded entries taken back (start
 // gwin: the entries this applies to (reusable, in the window), sorted by address; gwin_span: the largest storage size
 // one of them had, which bounds how far below an address an overlapping entry can start.
 #define OVERWRITE_FRAMES 2
-#define OVERWRITTEN_KEEP 600
+#define OVERWRITTEN_KEEP PRESENTS(600)
 static struct Tex **gwin;
 static int ngwin, cgwin;
 static uint64_t gwin_span;
@@ -1091,8 +1116,8 @@ int vk_texture_commit_low(void) { return __atomic_load_n(&commit_low, __ATOMIC_R
 // content exists only in its image waits GPU_STALE_FRAMES, or GAP_TIMES the longest it stayed released before the game
 // took it back when that is longer. An overwritten entry has no content left to wait for (overwrite_others): it goes
 // with the intact ones, whether or not a descriptor still names it.
-#define STALE_FRAMES 120
-#define GPU_STALE_FRAMES 1800
+#define STALE_FRAMES PRESENTS(120)
+#define GPU_STALE_FRAMES PRESENTS(1800)
 #define GAP_TIMES 8
 static int idle(const Tex *e, uint64_t now) {
     return look_round - e->use_round >= IDLE_ROUNDS && now - e->use_frame >= STALE_FRAMES;
@@ -1204,10 +1229,19 @@ static uint64_t evict_idle(uint64_t want, uint64_t used, uint64_t budget) {   //
 // marks missed. NX2NAVI_TEX_DISUSE=2 retires and never destroys (stand-ins only, nothing freed): it tells the marks and
 // stand-ins from the freeing as the cause of a fault. Only while every module that indexes the pool was marked and two
 // reads arrived: an unmarked shader could sample what the marks call unused.
-#define DISUSE_FRAMES 1800
+#define DISUSE_FRAMES PRESENTS(1800)
+#define DISUSE_SECONDS 30
 #define HOLDS_MAX 65536
 static nvn_hmap holds = {.klen = sizeof(TexKey)};   // value: 1
 static uint32_t marks_reads;
+// Whether the scene is being drawn, from the marks: marks_peak is the most slots one read marked lately (in 1/256,
+// halving in about a minute of reads), marks_live the reads in a row that marked at least a quarter of it. A pause
+// screen, a menu or a fade draws next to nothing through the pool for longer than DISUSE_SECONDS: every texture of the
+// scene behind it then counted as unsampled, went under memory pressure, and the scene came back as stand-ins.
+// evict_disused waits for two such reads in a row: the first one after a pause is what notes the scene's textures as
+// sampled again.
+static uint64_t marks_peak;
+static uint32_t marks_live;
 static int resolve_held;            // slot_resolve left the slot out for a held key or a retired entry
 static uint64_t n_disuse, n_disuse_bytes, n_disuse_back;   // since the last perf line
 static uint64_t n_retire_cancel, n_retire_freed;           // since the last perf line
@@ -1267,7 +1301,7 @@ static int held_out(const TexKey *k) {
 // tex_lock held; returns the bytes retired (freed a few submissions later), counting those still retiring as freed
 static uint64_t evict_disused(uint64_t want) {
     if (!want || !vk_pool_marks_enabled() || __atomic_load_n(&vk_pool_marks_missed, __ATOMIC_RELAXED) || marks_reads < 2 ||
-        vk_sync_fence_done() < evict_wait)
+        marks_live < 2 || vk_sync_fence_done() < evict_wait)
         return 0;
     if (retiring_bytes >= want) return retiring_bytes;   // what is on its way out covers it
     want -= retiring_bytes;
@@ -1322,7 +1356,7 @@ static uint64_t evict_disused(uint64_t want) {
         disuse_logs++;
         rt_log("vk: %d textures no shader sampled for %d s or more evicted (%.1f MiB), least recently sampled first; their "
                "images go once the texture pool sets no longer name them, and one sampled again is made again within a "
-               "few frames", n, DISUSE_FRAMES / 60, freed / 1048576.0);
+               "few frames", n, DISUSE_SECONDS, freed / 1048576.0);
     }
     return retiring_bytes;
 }
@@ -1331,8 +1365,10 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
     lock();
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (n > (uint32_t)ntslots) n = (uint32_t)ntslots;
+    uint32_t marked = 0;
     for (uint32_t id = 0; id < n; id++) {
         if (!marks[id] || !tslots[id].used) continue;
+        marked++;
         TexSlot *s = &tslots[id];
         if (s->ce && s->cgen == agen[sinfo[id] & 0xffff]) {   // what the slot resolves to now
             if (s->ce->retiring) retire_cancel(s->ce);   // not expected: retiring bumps the slot's generation
@@ -1348,10 +1384,15 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
         } else if (holds.n && nvn_hm_del(&holds, &k)) {   // the stand-in was sampled: the next pool refresh makes it
             n_disuse_back++;
             s->cheld = 0;
+            s->cwant = 1;   // on screen as a stand-in: made at the next refresh, whatever the frame's creation time
             tex_gen_bump(k.addr);
         }
     }
     marks_reads++;
+    marks_peak -= marks_peak >> 14;
+    if ((uint64_t)marked << 8 > marks_peak) marks_peak = (uint64_t)marked << 8;
+    if (marked >= 16 && ((uint64_t)marked << 10) >= marks_peak) marks_live += marks_live < 1000;
+    else marks_live = 0;
     unlock();
 }
 
@@ -2321,6 +2362,17 @@ uint32_t vk_texture_entry_gen(void) { return tex_gen; }
 // registered slot, and most of a pool is stale descriptors (storage freed or reused); with a budget a lookup creates at
 // most that many entries, only for mapped storage, and notes the slots it left for later (create_deferred).
 static int create_budget = -1, create_deferred;
+// A slot whose stand-in a shader sampled is on screen as that stand-in: its texture is made by the next lookup even
+// with the budget at 0 (the frame's creation time spent, vk_exec_draw.c pool_create_ns), WANT_PER_FRAME of them a
+// present. Left to the budget, it stayed dark for as long as the refresh had no time over, about a second in a town.
+#define WANT_PER_FRAME 32
+static int want_take(void) {
+    static uint64_t frame = ~0ull;
+    static int left;
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != frame) frame = f, left = WANT_PER_FRAME;
+    return left > 0 ? left-- : 0;
+}
 
 void vk_texture_create_budget_locked(int n) { create_budget = n, create_deferred = 0; }
 int vk_texture_create_deferred_locked(void) { int d = create_deferred; create_deferred = 0; return d; }
@@ -2368,8 +2420,12 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         // evicted by disuse: the pool refresh keeps the stand-in, without spending the creation budget on it
         if (pool_ctx && holds.n && nvn_hm_get(&holds, &k)) resolve_held = 1;
         else if (create_budget < 0) e = entry_of(&s->t);
-        else if (!create_budget) create_deferred = 1;
-        else if (mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size)) e = entry_of(&s->t), create_budget--;
+        else if (!create_budget && !(s->cwant && want_take())) create_deferred = 1;
+        else if (mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size)) {
+            e = entry_of(&s->t);
+            if (create_budget > 0) create_budget--;
+        }
+        if (e) s->cwant = 0;
     }
     if (e && e->retiring) {   // retired by disuse: the pool refresh gets the stand-in, any other lookup takes it back
         if (pool_ctx) e = NULL, resolve_held = 1;
@@ -2504,6 +2560,7 @@ void vk_texture_new_submit(void) {
     if (round_checks && (uint64_t)round_checks * 2 >= pool_slots) look_round++;   // the last one walked the pool
     round_checks = 0;
     if (!++submit_epoch) submit_epoch = 1;
+    rate_tick();
     sweep_pressure();
     static uint64_t log_at;
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) / 60;
