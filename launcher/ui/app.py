@@ -127,6 +127,31 @@ def exit_code_text(code):
     return f'{shown} ({meaning})' if meaning else shown
 
 
+FATAL_TAIL = 256 << 10   # bytes of the game's log last_fatal reads from its end
+FATAL_SHOWN = 240        # characters of a FATAL line the home screen shows; the launcher's log has all of it
+
+
+def last_fatal(game_dir):
+    """The last FATAL line of the game's latest run, without its "FATAL: ", or ''. The game writes one before it
+    exits with 70 (runtime/dispatch.c rt_fatal) or 71 (runtime/main.c crash_handler) into logs/nx2navi.log, which
+    each run starts anew (runtime/main.c log_open). A line this launcher added for an earlier run's end
+    (note_exit_in_log) ends the search: what stands before it is not this run's."""
+    if not game_dir:
+        return ''
+    try:
+        with open(Path(game_dir) / 'logs' / 'nx2navi.log', 'rb') as f:
+            f.seek(max(0, f.seek(0, 2) - FATAL_TAIL))
+            lines = f.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return ''
+    for line in reversed(lines):
+        if line.startswith('[launcher] the game ended'):
+            return ''
+        if line.startswith('FATAL: '):
+            return line[len('FATAL: '):].strip()
+    return ''
+
+
 def note_exit_in_log(game_dir, text):
     """Adds the exit code to the end of the game's log, so a log a player sends shows how the run ended even when the
     process died before it could write a line itself."""
@@ -1347,8 +1372,17 @@ class App:
         self.root.lift()
         if code not in (0, None):
             text = exit_code_text(code)
-            self.ctx.log(f'the game ended with code {text}')
-            self.message = f'The game ended with code {text}. Its log is logs\\nx2navi.log in the game folder.'
+            # 70 and 71 follow a FATAL line of the game's own, which names the error: the player gets that line
+            # and the launcher's log too, where the exit code alone said only that there was one
+            fatal = last_fatal(self.game_dir()) if code & 0xFFFFFFFF in (70, 71) else ''
+            if fatal:
+                shown = fatal if len(fatal) <= FATAL_SHOWN else fatal[:FATAL_SHOWN].rstrip() + '…'
+                self.ctx.log(f'the game ended with code {code & 0xFFFFFFFF}; its log says: FATAL: {fatal}')
+                self.message = (f'The game ended with a fatal error (code {code & 0xFFFFFFFF}): {shown}. Its log is '
+                                'logs\\nx2navi.log in the game folder.')
+            else:
+                self.ctx.log(f'the game ended with code {text}')
+                self.message = f'The game ended with code {text}. Its log is logs\\nx2navi.log in the game folder.'
             note_exit_in_log(self.game_dir(), text)
         if self.install_staged('the game exited'):
             return

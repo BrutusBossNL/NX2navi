@@ -3483,6 +3483,67 @@ class WhilePlayingTest(Tmp):
             App.watch_game(a)
         a.root.deiconify.assert_called_once()
 
+    def ended(self, code, log_text):
+        """watch_game after the game ended with code, its log holding log_text; (the stand-in window, the log)."""
+        from launcher.ui.app import App
+        log = self.tmp / 'logs' / 'nx2navi.log'
+        log.parent.mkdir(exist_ok=True)
+        if log_text is not None:
+            log.write_text(log_text, encoding='utf-8')
+        a = mock.MagicMock()
+        a.settings = {'game_dir': str(self.tmp)}
+        a.game_dir.return_value = str(self.tmp)
+        a.game_proc = mock.MagicMock(returncode=code)
+        a.game_proc.poll.return_value = code
+        a.install_staged.return_value = False
+        with mock.patch('launcher.ui.app.saves.game_running', return_value=False):
+            App.watch_game(a)
+        return a, log
+
+    def test_a_fatal_exit_shows_the_games_fatal_line(self):
+        """Exit codes 70 and 71 follow a FATAL line in the game's log: the home screen and launcher.log name it."""
+        try:
+            from launcher.ui import app
+        except ImportError as e:
+            self.skipTest(f'no window toolkit: {e}')
+        fatal = 'vk: vkQueueSubmit2 of 3 held submissions up to value 83931 failed (-4)'
+        a, log = self.ended(70, f'[host] log: x\nFATAL: an earlier one\n[host] more\nFATAL: {fatal}\n'
+                                '[host] fatal: memory commit: this process 9000 MB, the system 30000 of 32000 MB\n')
+        self.assertEqual(a.message, f'The game ended with a fatal error (code 70): {fatal}. Its log is '
+                                    'logs\\nx2navi.log in the game folder.')
+        a.ctx.log.assert_called_once_with(f'the game ended with code 70; its log says: FATAL: {fatal}')
+        self.assertIn('[launcher] the game ended with code 70', log.read_text(encoding='utf-8'))
+        # the crash report's exit code, and a line longer than the home screen shows
+        long = 'access violation (0xc0000005) at host 0x7ff6 (nx2navi+0x1234), reading address 0x10 ' + 'x' * 300
+        a, log = self.ended(71, f'FATAL: {long}\n  a line of the report\n')
+        self.assertIn('(code 71): access violation (0xc0000005)', a.message)
+        self.assertIn('…. Its log is', a.message)
+        self.assertLess(len(a.message), app.FATAL_SHOWN + 120)
+        self.assertIn(long, a.ctx.log.call_args[0][0])   # the launcher's log has the whole line
+        # a log that still ends with an earlier run's end has no FATAL line of this run
+        a, _ = self.ended(70, None)
+        self.assertIn('The game ended with code 70 (a fatal error', a.message)
+        # any other exit code reads no FATAL line; no log at all is no error
+        a, log = self.ended(0xC0000005, f'FATAL: {fatal}\n')
+        self.assertEqual(a.message, 'The game ended with code 0xC0000005 (access violation). Its log is '
+                                    'logs\\nx2navi.log in the game folder.')
+        log.unlink()
+        self.assertEqual(app.last_fatal(self.tmp), '')
+        self.assertEqual(app.last_fatal(''), '')
+
+    def test_the_fatal_line_is_looked_for_in_the_logs_end(self):
+        try:
+            from launcher.ui import app
+        except ImportError as e:
+            self.skipTest(f'no window toolkit: {e}')
+        log = self.tmp / 'logs' / 'nx2navi.log'
+        log.parent.mkdir()
+        log.write_bytes(b'FATAL: far back\n' + b'[host] a line\n' * 40000 + b'FATAL: near the end \xff\n[host] last\n')
+        self.assertGreater(log.stat().st_size, app.FATAL_TAIL)
+        self.assertEqual(app.last_fatal(self.tmp), 'near the end \ufffd')
+        log.write_bytes(b'FATAL: far back\n' + b'[host] a line\n' * 40000)
+        self.assertEqual(app.last_fatal(self.tmp), '')
+
 
 class MemorySettings(dict):
     """The launcher's settings (launcher/settings.py) without their file."""
