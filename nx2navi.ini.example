@@ -154,6 +154,15 @@
 # made again within a few frames. The first start after changing it builds the pipelines again. 0: such textures stay.
 # 2 (diagnosis): the same marks, and such textures give way to stand-ins in the texture pool, but none is freed.
 # tex_disuse = 1
+# Percent of the video memory in use above which textures give way: first those the game released, then those no
+# shader sampled for a while (tex_disuse); each is made again when used. The default lies under the 87 percent past
+# which game memory gets no copy in video memory (memory = mirror), which costs far more frame time than a texture
+# uploaded again. 0: textures never give way for video memory.
+# tex_vram_pressure = 80
+# Megabytes this process may commit before textures give way as they do while the system's commit runs low (Windows
+# counts video memory against the commit). Default: the installed memory, at least 24576, so that it does not depend
+# on the size of the page file. 0: no bound of its own; only the system's commit counts.
+# tex_proc_commit_mb = 32768
 # 1: a texture the game releases or takes back, with nothing else changed at its address, puts the texture table's
 # slots there back in a state they were in before, and they are not all looked up again (large towns release and take
 # back thousands a second). 0: every release and take-back counts as a new state.
