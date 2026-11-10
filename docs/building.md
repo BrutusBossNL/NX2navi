@@ -145,6 +145,10 @@ of them.
    93 ms (vertex) and 242 ms (fragment) on average against 0.3 and 0.6 ms from the cache, and a first walk through a
    village skipped 11,180 draws and made 94 draws wait 5.5 s in all, against 1,605 skipped (1,473 of them in the
    scene's first frames) and 60 ms of waits with the cache warm.
+   A frame that still lacks draws when it is presented is not shown: the previous picture stays on screen
+   (`runtime/vk_backend.c` `frame_hold`, `NX2NAVI_FRAME_HOLD_MS`, an allowance of 120 ms that fills again at an eighth
+   of the clock's rate). On a first walk through a village with nothing recorded, 21 of the 23 such frames were held
+   back; in a player's session a hit by a boulder had shown one black frame, its lighting pass skipped after 50 ms.
    When the driver's shader compiler crashes on a variant (NVIDIA 615.78.08 on an RTX 5080 does, issue #30),
    `prepare_shaders.py` runs the driver step again with `--warm-shaders`, up to three times, without the variants the
    driver was building at the crash. `shader-prepare-skip.txt` next to the exe lists them with the GPU and driver
