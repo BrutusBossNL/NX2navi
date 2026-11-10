@@ -482,7 +482,7 @@ static void free_views(void *arg) {   // completion thread, once the submission 
 uint64_t vk_exec_steady_passes;   // lookups a steady target alone made per-frame (vk_exec_targets_recent)
 
 static TfrTarget tfr_of(const VkExecTarget *t) {
-    return (TfrTarget){(uint64_t)(uintptr_t)t->image, t->level, t->base_layer, t->tex ? t->tex->serial : 0};
+    return (TfrTarget){(uint64_t)(uintptr_t)t->image, t->level, t->base_layer, t->img ? t->img->addr : 0};
 }
 
 static int steady_on(void) {
@@ -522,7 +522,7 @@ void vk_exec_targets_describe(VkExec *ex, char *buf, size_t cap) {
         int w = snprintf(buf + n, cap - n, "%s%c%d fmt %d %ux%u L%u seen %llu/%llu in %u frames", n ? "; " : "",
                          i < 8 ? 'c' : 'd', i < 8 ? i : 0, (int)t->format, t->width, t->height, t->base_layer,
                          (unsigned long long)(e ? e->last : 0), (unsigned long long)(e ? e->prev : 0),
-                         e && e->serial == ft.serial ? e->n : 0);
+                         e && e->owner == ft.owner ? e->n : 0);
         if (w < 0) break;
         n += (size_t)w;
     }

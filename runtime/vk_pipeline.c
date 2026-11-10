@@ -3819,6 +3819,18 @@ VkPipeline vk_pipeline_graphics_async(const VkPipeState *s, const VkPipeInfo **i
     return graphics(s, info, A.on, pending, wait_ms);
 }
 
+double vk_pipeline_building_ms(const VkPipeState *s) {
+    if (!s->vs || !P.ready) return 0;
+    GKey k;
+    gkey_fill(s, &k);
+    uint64_t h = key_hash(&k, sizeof k);
+    plat_mutex_lock(&P.lock);
+    const Pipe *p = pipe_find(&k, sizeof k, h);
+    double ms = p && p->building && !p->info.pipeline && p->t_miss ? (double)(plat_now_ns() - p->t_miss) / 1e6 : 0;
+    plat_mutex_unlock(&P.lock);
+    return ms;
+}
+
 // ---- boot prewarm from the key file (comment at "pipeline keys")
 
 static int id_cmp(const void *x, const void *y) { return memcmp(x, y, 32); }

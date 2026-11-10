@@ -11,8 +11,8 @@
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
-static TfrTarget T(uint64_t image, uint32_t level, uint32_t layer, uint64_t serial) {
-    return (TfrTarget){image, level, layer, serial};
+static TfrTarget T(uint64_t image, uint32_t level, uint32_t layer, uint64_t owner) {
+    return (TfrTarget){image, level, layer, owner};
 }
 
 // The verdict with the steady rule and without it; *by: only the steady rule made it per-frame.
@@ -84,7 +84,8 @@ int main(void) {
     tfr_note(&scene_d, f2), tfr_note(&icon, f2);
     CHECK(pass(&icon, 1, &scene_d, f2, 1, 1, NULL) == 0, "an icon's first capture is one-shot though its depth buffer is recent");
     CHECK(pass(&icon, 1, &scene_d, f2, 1, 0, NULL) == 0, "and was before the rule");
-    // an image taken over by another texture starts again: the per-frame history of its handle is not the new texture's
+    // an image handed on to a texture at other storage starts again: the per-frame history of its handle is not the
+    // new texture's
     TfrTarget reused = T(scene.image, 0, 0, 500);
     CHECK(tfr_steady(&scene, f2 + 300) == 1, "the scene target is steady");
     CHECK(pass(&reused, 1, NULL, f2 + 300, 1, 1, NULL) == 0, "the same image as another texture is not steady");

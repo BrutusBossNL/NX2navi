@@ -18,12 +18,14 @@
 // frames before, so each draw with a new pipeline waited on the replay thread, and a mesh draw, whose pipeline has no
 // fast link, for its whole compile. One player's session shows it three times at area changes: frames of 954, 1015
 // and 684 ms, six mesh draws waiting 52 to 660 ms each in passes whose targets had been rendered in thousands of
-// frames. An entry therefore also counts the frames its subresource was rendered in, for as long as it is the same
-// guest texture (its initialization serial: an image taken over by another texture starts again at none). From
-// TFR_STEADY frames on the target is one the game draws again and again, and its draws are skipped while a pipeline
-// builds, as in any other frame, however long ago the last one was. A target generated once never gets there; one
-// generated again at every area load would after TFR_STEADY loads, by when its pipelines are recorded and prebuilt
-// at the start.
+// frames. An entry therefore also counts the frames its subresource was rendered in, for as long as the image is the
+// texture at the same storage (its owner, the storage GPU address the texture cache keys the image by: an image
+// handed on to a texture elsewhere starts again at none). The guest's texture object does not serve as the owner:
+// the game initializes its render target objects anew every frame at the same storage, so a count kept per object
+// never passed one. From TFR_STEADY frames on the target is one the game draws again and again, and its draws are
+// skipped while a pipeline builds, as in any other frame, however long ago the last one was. A target generated once
+// never gets there; one generated again at every area load would after TFR_STEADY loads, by when its pipelines are
+// recorded and prebuilt at the start.
 #pragma once
 
 #include <stdint.h>
@@ -33,9 +35,9 @@
 #define TFR_RECENT 4
 #define TFR_STEADY 8
 
-// One render target of a pass: the image handle as a number, the subresource, the guest texture's serial (0 unknown).
-typedef struct { uint64_t image; uint32_t level, layer; uint64_t serial; } TfrTarget;
-typedef struct { uint64_t image; uint32_t level, layer, n; uint64_t last, prev, serial; } TargetFrames;
+// One render target of a pass: the image handle as a number, the subresource, the image's owner (0 unknown).
+typedef struct { uint64_t image; uint32_t level, layer; uint64_t owner; } TfrTarget;
+typedef struct { uint64_t image; uint32_t level, layer, n; uint64_t last, prev, owner; } TargetFrames;
 static TargetFrames tfr[TFR_SETS * TFR_WAYS];
 
 // The target's entry, or with make the entry it takes (the set's oldest, an empty one first); NULL without make
@@ -55,7 +57,7 @@ static inline TargetFrames *tfr_find(const TfrTarget *t, int make) {
 // The target is rendered in frame stamp.
 static inline void tfr_note(const TfrTarget *t, uint64_t stamp) {
     TargetFrames *e = tfr_find(t, 1);
-    if (e->serial != t->serial) e->serial = t->serial, e->n = 0;   // another texture has the image now: its own count
+    if (e->owner != t->owner) e->owner = t->owner, e->n = 0;   // another texture has the image now: its own count
     if (e->last != stamp) e->prev = e->last, e->last = stamp, e->n += e->n < UINT32_MAX;
 }
 
@@ -73,10 +75,10 @@ static inline int tfr_recent(const TfrTarget *t, uint64_t stamp) {
 // No frame before stamp rendered the target.
 static inline int tfr_first(const TfrTarget *t, uint64_t stamp) { return !tfr_before(t, stamp); }
 
-// TFR_STEADY frames or more before stamp rendered the target as the texture it is now.
+// TFR_STEADY frames or more before stamp rendered the target under the owner it has now.
 static inline int tfr_steady(const TfrTarget *t, uint64_t stamp) {
     const TargetFrames *e = tfr_find(t, 0);
-    return e && e->serial == t->serial && e->n - (e->last == stamp) >= TFR_STEADY;
+    return e && e->owner == t->owner && e->n - (e->last == stamp) >= TFR_STEADY;
 }
 
 // Whether the pass with the n_color colour targets c and the depth target d (NULL: none) is one the game renders

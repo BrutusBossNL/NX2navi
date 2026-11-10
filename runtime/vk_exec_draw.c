@@ -68,7 +68,10 @@ static uint32_t oneshot_wait_ms(void) {
 }
 #define ONESHOT_WAIT_MS oneshot_wait_ms()
 // A mesh pipeline has no stage libraries and so no fast link: the wait is for its whole build, a few milliseconds
-// when the pipeline cache holds it and 200 ms or more when it does not. A longer wait only finds out which.
+// when the pipeline cache holds it and 200 ms or more when it does not. A longer wait only finds out which, and one
+// that has been building for longer than this is a compile: the draws that meet it in the frames after wait for
+// nothing (oneshot_ms). Before that rule a first visit waited 8 to 13 ms for each of 17 mesh draws over nine frames,
+// up to four in one frame, and every one of them was skipped at the end.
 #define MESH_WAIT_MS 8u
 static int oneshot_budget_on(void) {
     static int on = -1;
@@ -3370,10 +3373,12 @@ static void pool_charge(uint64_t *pool, uint64_t t0) {
     *pool = spent < *pool ? *pool - spent : 0;
 }
 
-// What a one-shot draw may wait for its pipeline from pool.
-static uint32_t oneshot_ms(const uint64_t *pool, int mesh) {
+// What a one-shot draw with the state s may wait for its pipeline from pool.
+static uint32_t oneshot_ms(const uint64_t *pool, int mesh, const VkPipeState *s) {
     uint32_t ms = (uint32_t)(*pool / 1000000);
-    return mesh && ms > MESH_WAIT_MS ? MESH_WAIT_MS : ms;
+    if (!mesh || !ms) return ms;
+    if (vk_pipeline_building_ms(s) > MESH_WAIT_MS) return 0;   // a compile (MESH_WAIT_MS)
+    return ms > MESH_WAIT_MS ? MESH_WAIT_MS : ms;
 }
 
 // ---- wait accounting: what the replay thread spent on draws that found their pipeline or a shader missing
@@ -3403,12 +3408,19 @@ static uint32_t link_draw_ms(void) {
     return (uint32_t)ms;
 }
 #define LINK_DRAW_MS link_draw_ms()
-// How long a full-screen draw waits on for its pipeline once the frame's wait pool is spent and the previous picture
-// cannot be held any longer (prepare_draw_ex). Every such pipeline has a fast link (vk_pipeline.c gpl_feedback), so
-// the wait is for stage libraries: a few milliseconds from the driver's cache, and in the one case a player's session
-// shows the draw had its pipeline 18 ms into this wait. It was 500 ms while a pipeline with a feedback loop waited
-// for its whole optimised build; with the pool before it, a frame now waits under 100 ms for pipelines in all.
+// How long the full-screen draws of a frame wait on for their pipelines, in all, once the frame's wait pool is spent
+// and the previous picture cannot be held any longer (prepare_draw_ex, last_wait). Every such pipeline has a fast link
+// (vk_pipeline.c gpl_feedback), so the wait is for stage libraries: a few milliseconds from the driver's cache, and
+// in the one case a player's session shows the draw had its pipeline 18 ms into this wait. It was 500 ms for each
+// draw while a pipeline with a feedback loop waited for its whole optimised build; with the pool before it, a frame
+// now waits under 100 ms for pipelines in all.
 #define FULLSCREEN_LAST_MS 40u
+static uint64_t *last_wait(void) {
+    static uint64_t frame = ~0ull, left;
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != frame) frame = f, left = FULLSCREEN_LAST_MS * 1000000ull;
+    return &left;
+}
 static uint64_t *link_budget(void) {
     static uint64_t frame = ~0ull, left, per_frame = ~0ull;
     if (per_frame == ~0ull) {
@@ -3695,7 +3707,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     int fullscreen = 0;        // the wait is a full-screen draw's
     if (oneshot > 0 && oneshot_budget_on()) {
         budget = frame_wait();
-        wait_ms = oneshot_ms(budget, mesh);
+        wait_ms = oneshot_ms(budget, mesh, &s);
         if (wait_ms) t0 = kern_now_ns();
     } else if (oneshot > 0) {
         wait_ms = ONESHOT_WAIT_MS;
@@ -3745,7 +3757,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             if (!w0) w0 = kern_now_ns();
             if (oneshot_budget_on()) {
                 uint64_t *pool = frame_wait(), b0 = kern_now_ns();
-                p = vk_pipeline_graphics_async(&s, &info, &pending, oneshot_ms(pool, mesh));
+                p = vk_pipeline_graphics_async(&s, &info, &pending, oneshot_ms(pool, mesh, &s));
                 pool_charge(pool, b0);
             } else {
                 p = vk_pipeline_graphics_async(&s, &info, &pending, ONESHOT_WAIT_MS);
@@ -3753,12 +3765,15 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         }
         // A full-screen draw still pending after its budget: skipped, it leaves the frame black or unlit. While the
         // previous picture can stay on screen in its place (vk_frame_hold_left) that is what happens; once that time
-        // is used up the draw waits on, FULLSCREEN_LAST_MS at most, before such a frame is shown.
-        if (pending && fullscreen && !vk_frame_hold_left()) {
+        // is used up the draw waits on, from the FULLSCREEN_LAST_MS of its frame, before such a frame is shown.
+        uint64_t *last = pending && fullscreen && !vk_frame_hold_left() ? last_wait() : NULL;
+        if (last && *last >= 1000000) {
             why = "full-screen, nothing left to hold the picture";
             kind = WK_LAST;
             if (!w0) w0 = kern_now_ns();
-            p = vk_pipeline_graphics_async(&s, &info, &pending, FULLSCREEN_LAST_MS);
+            uint64_t b0 = kern_now_ns();
+            p = vk_pipeline_graphics_async(&s, &info, &pending, (uint32_t)(*last / 1000000));
+            pool_charge(last, b0);
         }
         if (m0) wait_note(kind, m0, pending), draw_stats_tick();
         PM.valid = !pending && p && info;
@@ -3766,7 +3781,8 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     }
     uint64_t waited = w0 ? kern_now_ns() - w0 : 0;
     static int wait_logs;
-    if (why && waited >= 2000000 && wait_logs < 200) {
+    // also a one-shot draw skipped at the end of its wait, however short: its target may not be drawn again
+    if (why && (waited >= 2000000 || (pending && kind == WK_ONESHOT)) && wait_logs < 200) {
         char tg[512];
         wait_logs++;
         vk_exec_targets_describe(ex, tg, sizeof tg);
