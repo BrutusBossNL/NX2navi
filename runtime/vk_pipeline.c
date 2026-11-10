@@ -4748,12 +4748,189 @@ static void lb_state(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     LB.samples = (uint8_t)(1u << bf);
 }
 
+// ---- the driver's cache of stage libraries, warmed again during play
+//
+// The preparation (lb_warm_prepared) builds every prepared variant's stage library once, so the driver's disk cache
+// holds it and the library a draw needs later takes a few milliseconds instead of a compile: 3 ms against 100 ms for
+// a vertex and 340 ms for a fragment library on an RX 7900 XT (driver 26.10.1). The driver's cache does not outlive
+// everything, though: a driver update empties it, the AMD driver keeps a limited amount and drops old entries, and a
+// change to what a library is built with (the dynamic states it lists, as when dynamic vertex input was turned off for
+// this driver) gives every library another entry. After any of them each pipeline a draw first needs compiles cold:
+// the draw is skipped for the frames that takes, or waits for it. Measured on that card with the cache cold, a walk
+// through a village not seen before skipped 11,180 draws while their pipelines built and 94 draws waited 5.5 s in
+// all, one of them 1.9 s.
+//
+// So every start checks: a sample of the prepared fragment libraries is built (lw_probe), and when their median time
+// says the cache is cold, the whole prepared list is built again into the driver's cache on a few idle-priority
+// threads while the game runs (lw_worker), as the preparation does but without stopping play. shader-warm.txt beside
+// the caches says where that stands: "warming" while it runs, so a start after a run that ended meanwhile goes on,
+// and "done" with the driver and a count of the times the cache was cold again right after a finished warm. At two in
+// a row the driver does not keep stage libraries at all and warming stops being tried (NX2NAVI_LIB_WARM=0 turns it off;
+// =force warms at every start).
+#define LW_SAMPLE 12
+#define LW_COLD_MS 15.0
+#define LW_MAX_THREADS 6
+static struct {
+    GfxWarmEnt *e;
+    size_t n;
+    volatile int64_t next, done;
+    volatile int32_t running, stop, started;
+    PlatThread *th[LW_MAX_THREADS + 1];
+    int threads, strikes;
+    double t0;
+    char stamp[PLAT_PATH_MAX * 2 + 32], id[64];
+} LW;
+
+static void lw_stamp(const char *state, int strikes) {
+    char line[128];
+    int n = snprintf(line, sizeof line, "%s %s %d\n", state, LW.id, strikes);
+    if (!plat_file_write_atomic(LW.stamp, line, (size_t)n)) rt_log("vk_pipeline: cannot write %s", LW.stamp);
+}
+
+// One prepared vertex or fragment variant's library into the driver's cache; its time in ms, negative when the
+// variant is on the skip list, not in the shader cache or of another stage.
+static double lw_build(const GfxWarmEnt *e) {
+    if (e->stage != GFX_STAGE_VS && e->stage != GFX_STAGE_FS) return -1;
+    if (skip_listed(e->iid)) return -1;
+    int owned = 0;
+    const GfxShader *sh = gfx_shader_load_private(e->iid, &owned);
+    if (!sh) return -1;
+    double t0 = now_ms();
+    int st = gfx_shader_stage(sh);
+    if (st == GFX_STAGE_VS || st == GFX_STAGE_FS) lb_library(sh, st == GFX_STAGE_VS, 0);
+    double ms = now_ms() - t0;
+    if (owned) gfx_shader_release_private(sh);
+    return ms;
+}
+
+static void lw_worker(void *arg) {
+    (void)arg;
+    plat_thread_priority(PLAT_PRIO_IDLE);
+    for (;;) {
+        size_t i = (size_t)plat_inc64(&LW.next) - 1;
+        if (i >= LW.n || LW.stop) break;
+        lw_build(&LW.e[i]);
+        int64_t d = plat_inc64(&LW.done);
+        if (d % 8000 == 0)
+            rt_log("vk_pipeline: library warm: %lld of %zu prepared variants in %.0f s", (long long)d, LW.n,
+                   (now_ms() - LW.t0) / 1000);
+    }
+    if (!plat_dec32(&LW.running) && !LW.stop) {
+        lw_stamp("done", LW.strikes);
+        rt_log("vk_pipeline: library warm: done, %zu prepared variants in %.0f s on %d idle threads; new pipelines "
+               "link from the driver's cache from here on", LW.n, (now_ms() - LW.t0) / 1000, LW.threads);
+    }
+}
+
+// The median time of LW_SAMPLE prepared fragment libraries spread over the list; negative without that many.
+static double lw_probe(void) {
+    double ms[LW_SAMPLE];
+    int got = 0;
+    size_t step = LW.n / LW_SAMPLE ? LW.n / LW_SAMPLE : 1, at = (size_t)(plat_now_ns() / 1000) % step;
+    for (size_t i = at; i < LW.n && got < LW_SAMPLE && !LW.stop; i += step)
+        for (size_t j = i; j < i + step && j < LW.n; j++) {   // the next fragment variant from here
+            if (LW.e[j].stage != GFX_STAGE_FS) continue;
+            double t = lw_build(&LW.e[j]);
+            if (t >= 0) ms[got++] = t;
+            break;
+        }
+    if (got < LW_SAMPLE / 2) return -1;
+    for (int i = 1; i < got; i++)
+        for (int j = i; j > 0 && ms[j] < ms[j - 1]; j--) {
+            double t = ms[j];
+            ms[j] = ms[j - 1], ms[j - 1] = t;
+        }
+    return ms[got / 2];
+}
+
+static void lw_main(void *arg) {
+    (void)arg;
+    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+    char was[16] = "", id[64] = "";
+    int strikes = 0;
+    uint64_t size = 0;
+    char *f = (char *)plat_file_read(LW.stamp, &size);
+    if (f && size < 200) {
+        char line[200];
+        memcpy(line, f, size), line[size] = 0;
+        if (sscanf(line, "%15s %63s %d", was, id, &strikes) < 2) was[0] = 0;
+    }
+    free(f);
+    int same = !strcmp(id, LW.id), resume = same && !strcmp(was, "warming");
+    const char *mode = cfg_value("NX2NAVI_LIB_WARM");
+    double median = resume ? 0 : lw_probe();
+    if (LW.stop) return;
+    int cold = median > LW_COLD_MS || !strcmp(mode, "force");
+    if (!resume && !cold) {
+        if (same && strikes) lw_stamp("done", 0);   // the driver kept them this time
+        rt_log("vk_pipeline: library warm: the driver's cache has the prepared libraries (a sample's median %.1f ms)",
+               median);
+        return;
+    }
+    if (!resume && same && strikes >= 2 && strcmp(mode, "force")) {
+        rt_log("vk_pipeline: library warm: the prepared libraries are cold again (a sample's median %.0f ms) after two "
+               "finished warms on this driver: it does not keep them, so pipelines compile when a draw first needs "
+               "them (NX2NAVI_LIB_WARM=force warms anyway)", median);
+        return;
+    }
+    LW.strikes = resume ? strikes : same && !strcmp(was, "done") ? strikes + 1 : 0;
+    lw_stamp("warming", LW.strikes);
+    int cpus = (int)plat_cpu_usable(), t = cpus / 4;
+    t = t < 2 ? 2 : t > LW_MAX_THREADS ? LW_MAX_THREADS : t;
+    if (resume)
+        rt_log("vk_pipeline: library warm: going on with the warm an earlier run began: %zu prepared variants on %d "
+               "idle threads", LW.n, t);
+    else
+        rt_log("vk_pipeline: library warm: the driver's cache does not have the prepared libraries (a sample's median "
+               "%.0f ms; a driver update or a change of what they are built with): building %zu prepared variants "
+               "into it on %d idle threads while the game runs. Until it is done, a pipeline a draw first needs may "
+               "compile, which skips that draw for some frames or makes it wait", median, LW.n, t);
+    LW.t0 = now_ms();
+    LW.running = t;
+    int started = 0;
+    for (int i = 0; i < t; i++)
+        if ((LW.th[1 + started] = plat_thread_new(lw_worker, NULL, "lib warm"))) started++;
+    LW.threads = started;
+    if (plat_add32(&LW.running, started - t) == 0 && !started) rt_log("vk_pipeline: library warm: no thread started");
+}
+
+// Boot, once the library state is known (lb_state): the prepared list is read and the check starts on its own thread.
+static void lw_start(void) {
+    const char *mode = cfg_value("NX2NAVI_LIB_WARM");
+    if (!P.gpl || !strcmp(mode, "0") || plat_xchg32(&LW.started, 1)) return;
+    char dir[PLAT_PATH_MAX * 2], path[PLAT_PATH_MAX * 2 + 32];
+    if (!cache_dir(dir, sizeof dir)) return;
+    snprintf(path, sizeof path, "%s/shader-prepared.bin", dir);
+    snprintf(LW.stamp, sizeof LW.stamp, "%s/shader-warm.txt", dir);
+    uint64_t size = 0;
+    uint8_t *f = plat_file_read(path, &size);
+    size_t n = f && size >= 16 ? (size_t)(size - 16) / 36 : 0;
+    LW.e = n ? calloc(n, sizeof *LW.e) : NULL;
+    for (size_t i = 0; LW.e && i < n; i++)
+        memcpy(LW.e[i].iid, f + 16 + 36 * i + 4, 32), LW.e[i].stage = f[16 + 36 * i], LW.e[i].prio = f[16 + 36 * i + 1];
+    free(f);
+    if (!LW.e) return;   // nothing prepared (a build without the preparation step)
+    LW.n = n;
+    VkPhysicalDeviceProperties pp;
+    vkGetPhysicalDeviceProperties(vk_ctx()->phys, &pp);
+    snprintf(LW.id, sizeof LW.id, "%04x:%04x:%08x", pp.vendorID, pp.deviceID, pp.driverVersion);
+    LW.th[0] = plat_thread_new(lw_main, NULL, "lib warm check");
+}
+
+static void lw_stop(void) {
+    plat_xchg32(&LW.stop, 1);
+    for (int i = 0; i <= LW_MAX_THREADS; i++)
+        if (LW.th[i]) plat_thread_join(LW.th[i]), LW.th[i] = NULL;
+}
+
 // Boot: compute shaders of the warm list (recorded and prepared), then the first KEEP recorded graphics variants.
 static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     const char *e = cfg_value("NX2NAVI_LIB_PREBUILD"), *ke = cfg_get("NX2NAVI_LIB_PREBUILD_KEEP");
     const char *te = cfg_get("NX2NAVI_LIB_PREBUILD_THREADS");   // no fixed default: 2 when unset (1 under 4 CPUs)
     const char *be = cfg_get("NX2NAVI_LIB_PREBUILD_BIG");       // SPIR-V words; LB_BIG_WORDS when unset, 0 no limit
     if (!A.on || !cfg_bool("NX2NAVI_LIB_PREBUILD")) return;
+    lb_state(pr_hist, fs_hist);   // the libraries' state, also for lw_start
+    lw_start();
     LB.big_words = be && *be ? strtoull(be, NULL, 10) : LB_BIG_WORDS;
     char dir[PLAT_PATH_MAX * 2];
     if (cache_dir(dir, sizeof dir)) skip_init(dir);
@@ -4773,7 +4950,6 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
         return;
     }
     LB.n = n;
-    lb_state(pr_hist, fs_hist);
     LB.idle = 1;
     int cpus = (int)plat_cpu_usable();
     // Two threads by default, not half the CPUs. On a 32-thread CPU with NVIDIA's driver, 16 builders kept the driver's
@@ -4802,6 +4978,7 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
 }
 
 static void lb_stop(void) {
+    lw_stop();
     plat_xchg32(&LB.stop, 1);
     for (int i = 0; i < LB.threads; i++)
         if (LB.th[i]) plat_thread_join(LB.th[i]), LB.th[i] = NULL;

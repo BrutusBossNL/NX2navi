@@ -173,11 +173,13 @@ void vk_color_release(void);   // before the device goes away
 // The brightness, contrast, saturation and gamma values (as the settings write them) of a colour profile, NULL for
 // custom or an unknown name (vk_color.c).
 const char *const *vk_color_preset(const char *name);
-// HDR output (vk_hdr.c). vk_hdr_wanted: NX2NAVI_HDR, read once. vk_hdr_surface_format: the HDR10 surface format when wanted
-// and offered (1). vk_hdr_set_active: gfx_present.c says whether the swapchain is HDR10 (vk_hdr_active). vk_hdr_encode:
+// HDR output (vk_hdr.c). vk_hdr_armed: the HDR path is set up for this run (decided at the start). vk_hdr_wanted:
+// NX2NAVI_HDR as the menu has it now. vk_hdr_surface_format: the HDR10 surface format when wanted and offered (1). vk_hdr_set_active: gfx_present.c says whether the swapchain is HDR10 (vk_hdr_active). vk_hdr_encode:
 // like vk_color_record, src's crop as PQ code values (RGBA16F, crop {0, 0, w, h}). vk_hdr_ui_target / vk_hdr_ui_compose:
 // the in-game menu's RGBA8 target, then blended onto the swapchain image. vk_hdr_to_srgb8: 10-bit PQ pixels to sRGB bytes.
+int vk_hdr_armed(void);
 int vk_hdr_wanted(void);
+int vk_hdr_needs_restart(void);   // the menu's HDR row: the value set takes effect at the next start
 void vk_hdr_off(void);   // probes that read back 8-bit swapchain pixels: SDR whatever the setting
 int vk_hdr_surface_format(const VkSurfaceFormatKHR *f, uint32_t n, VkSurfaceFormatKHR *out);
 void vk_hdr_metadata(VkSwapchainKHR sc, int new_sc);

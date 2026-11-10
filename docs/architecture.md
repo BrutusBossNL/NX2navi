@@ -124,6 +124,11 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   holds the HDR picture relative to the HUD's white; the game's FSR 1 pass loses its output clamp; the present reads
   the float picture in place of the window texture and `shaders/hdr_encode.comp` writes PQ for an HDR10 swapchain.
   `NX2NAVI_HDR=native` reports an HDR10 display to the game, which then renders and presents its own PQ picture.
+  The menu switches between off and `1` during a run: the splice, the HDR extensions and the settings in the support
+  buffer are there from the start whatever is set (`vk_hdr_armed`), the spliced tonemap returns the game's SDR result
+  while the swapchain is SDR, and a change of the setting makes the swapchain again in the other format
+  (`gfx_present.c` `window_settings_live`). Only `native` waits for a restart, as the game asks about the display
+  once. `NX2NAVI_HDR_LIVE=0` leaves the HDR path out of a run that starts with HDR off.
 - ASTC textures are uploaded as they are where the device samples ASTC, and decoded by a compute shader everywhere
   else (`vk_astc.c`); under 20 GiB of video memory the decoder encodes them to BC3.
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.

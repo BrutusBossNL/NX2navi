@@ -1178,8 +1178,9 @@ static uint64_t stale_after(const Tex *e) {
 static void drop_stale(uint64_t keep, uint64_t *count) {
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int dropped = 0;
+    const uint64_t stale = STALE_FRAMES;
     for (int any = 0; any < 2; any++)
-        for (Tex *e = rel_head, *next; e && now - e->rel_frame >= STALE_FRAMES; e = next) {   // in release order
+        for (Tex *e = rel_head, *next; e && now - e->rel_frame >= stale; e = next) {   // in release order
             if (dropped == PRESSURE_STEP || rel_bytes <= keep) return;
             next = e->rel_next;
             if (!e->bytes || (!any && !comes_back_intact(e) && !e->overwritten)) continue;
@@ -1275,8 +1276,12 @@ static uint64_t evict_idle(uint64_t want, uint64_t used, uint64_t budget) {   //
 // marks missed. NX2NAVI_TEX_DISUSE=2 retires and never destroys (stand-ins only, nothing freed): it tells the marks and
 // stand-ins from the freeing as the cause of a fault. Only while every module that indexes the pool was marked and two
 // reads arrived: an unmarked shader could sample what the marks call unused.
-#define DISUSE_FRAMES PRESENTS(1800)
-#define DISUSE_SECONDS 30
+// Two minutes, not the thirty seconds it was: a texture out of view that long and then seen again shows its stand-in
+// for the frames until its mark is read, which is a flash of missing ground or a dark object each time the camera
+// turns back, and a batch of such textures gave back 0.4 to 31 MiB in a recorded session. The textures of an area
+// left behind, which are what the memory grows by, still go two minutes after it.
+#define DISUSE_SECONDS 120
+#define DISUSE_FRAMES PRESENTS(DISUSE_SECONDS * 60)
 #define HOLDS_MAX 65536
 static nvn_hmap holds = {.klen = sizeof(TexKey)};   // value: 1
 static uint32_t marks_reads;
@@ -1353,10 +1358,10 @@ static uint64_t evict_disused(uint64_t want) {
     want -= retiring_bytes;
     Tex *v[EVICT_STEP];
     int nv = 0;
-    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), disuse = DISUSE_FRAMES;
     for (uint32_t i = 0; i < by_key.cap; i++) {   // the EVICT_STEP least recently sampled candidates, oldest first
         Tex *e = by_key.vals[i];
-        if (!e || e->released || e->retiring || !e->bytes || !comes_back_intact(e) || now - e->samp_frame < DISUSE_FRAMES)
+        if (!e || e->released || e->retiring || !e->bytes || !comes_back_intact(e) || now - e->samp_frame < disuse)
             continue;
         int at = nv;
         while (at > 0 && v[at - 1]->samp_frame > e->samp_frame) at--;

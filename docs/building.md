@@ -127,7 +127,17 @@ of them.
 
    Without this step the first launch compiles shaders and pipelines during play and stutters until the caches fill.
    The AMD driver keeps its pipeline cache per exe path and holds a limited amount: preparing another build folder can
-   evict this one's. `nx2navi.exe --warm-shaders` rebuilds it from the shader cache.
+   evict this one's. `nx2navi.exe --warm-shaders` rebuilds it from the shader cache. A driver update empties the
+   driver's cache too, and a change to what a stage library is built with gives every library another entry in it.
+   So an update that carries the prepared shaders over runs `--warm-shaders` (`tools/make_game.py`
+   `warm_driver_cache`: seconds while the libraries are there, minutes when they are not), and the game itself checks
+   at every start: it builds a sample of the prepared fragment libraries and, when their median time says the cache
+   is cold, builds the whole prepared list into the driver's cache again on idle-priority threads while it runs
+   (`runtime/vk_pipeline.c` `lw_start`, `NX2NAVI_LIB_WARM`; `shader-warm.txt` next to the caches says where that
+   stands). With the cache cold every pipeline a draw first needs compiles in play: on an RX 7900 XT a library took
+   93 ms (vertex) and 242 ms (fragment) on average against 0.3 and 0.6 ms from the cache, and a first walk through a
+   village skipped 11,180 draws and made 94 draws wait 5.5 s in all, against 1,605 skipped (1,473 of them in the
+   scene's first frames) and 60 ms of waits with the cache warm.
    When the driver's shader compiler crashes on a variant (NVIDIA 615.78.08 on an RTX 5080 does, issue #30),
    `prepare_shaders.py` runs the driver step again with `--warm-shaders`, up to three times, without the variants the
    driver was building at the crash. `shader-prepare-skip.txt` next to the exe lists them with the GPU and driver

@@ -2532,7 +2532,7 @@ static void support_fill(uint8_t *b, float w, float h, float point_size) {
     memcpy(b + 1408, pcss_params(), 16);   // pcss (translator patch 0010): soft sun shadows in the cascade compares
     memcpy(b + 1424, shadow_spread_params(), 16);    // shadow_spread (translator patch 0011): sun shadow filter width
     for (int i = 0; i < 73; i++) memcpy(b + 192 + 16 * i, &one, 4);   // render scale 1: the host renders at guest size
-    if (vk_hdr_wanted()) {   // read by the game's tonemap only, once vk_hdr.c tonemap_splice has grown its block past the translator's
+    if (vk_hdr_armed()) {   // read by the game's tonemap only, once vk_hdr.c tonemap_splice has grown its block past the translator's
         float hdr[16];
         vk_hdr_support(hdr);
         memcpy(b + 1440, hdr, sizeof hdr);
@@ -3251,21 +3251,51 @@ static void foliage_shadow_cull(const VkExec *ex, VkPipeState *s) {
 //   buffer or g-buffer with a colour target the frame before did not use: half-resolution effect buffers in fights).
 //   Passes with none (volumes, LUTs, shadow layers seen for the first time) still wait, and so do passes whose only
 //   recent target is the depth buffer while a colour target is rendered for the first time (item icon captures).
-// fullscreen (2, default): as any, and full-screen draws into such passes are skipped instead of waiting from their
+//   Full-screen draws into such passes wait from their budget of 50 ms a presented frame. The default: a skipped
+//   full-screen draw is a lighting, fog or tone mapping pass that leaves its target as it was, which shows as a black
+//   or unlit frame with the interface intact, and with the stage libraries in the driver's cache the wait is a
+//   millisecond (vk_pipeline.c lw_start keeps them there).
+// fullscreen (2): as any, and full-screen draws into such passes are skipped instead of waiting from their
 //   budget. A full-screen pass whose stage libraries are cold in the driver cache took 86 ms on average (up to 194 ms)
 //   in a fight on an RX 9070: three frames in a row each spent the 50 ms budget, and some of the draws were skipped
-//   after all. Skipping costs the pass for the frames until the pipeline is ready.
+//   after all. Skipping costs the pass for the frames until the pipeline is ready. It was the default until the
+//   libraries were kept warm.
+// Any other draw whose pipeline is missing waits for its fast link from a small budget per presented frame
+// (link_budget) before it is skipped.
 static int pipe_skip_mode(void) {
     static int mode = -1;
     if (mode < 0) {
         const char *e = cfg_value("NX2NAVI_PIPE_SKIP");
         mode = !strcmp(e, "strict") || !strcmp(e, "0") ? 0 : !strcmp(e, "fullscreen") || !strcmp(e, "2") ? 2 : 1;
         static const char *const what[3] = {"only draws into per-frame passes (NX2NAVI_PIPE_SKIP=strict)",
-                                            "draws into passes with a target the previous frame rendered",
+                                            "draws into passes with a target the previous frame rendered; full-screen "
+                                            "draws wait (NX2NAVI_PIPE_SKIP=any)",
                                             "those and full-screen draws (NX2NAVI_PIPE_SKIP=fullscreen)"};
         rt_log("vk_exec: draws skipped while their pipeline builds: %s", what[mode]);
     }
     return mode;
+}
+
+// NX2NAVI_PIPE_LINK_MS (default 6; 0 = off): how long the draws of one presented frame may wait, in all, for the fast
+// link of a pipeline that is missing, LINK_DRAW_MS at most each. A draw into a per-frame pass used to be skipped at
+// once and for as long as its pipeline built, also when its stage libraries were in the driver's cache and the link
+// took under a millisecond: geometry seen for the first time (ground, a wall, a character) was missing for a frame or
+// more and then appeared. With the libraries warm the wait ends within the budget and nothing is skipped; with them
+// cold it runs out after a few draws and the rest are skipped as before, so a burst of cold pipelines costs a frame
+// this much and no more. Measured on an RX 7900 XT, first walk through a village with no pipeline recorded: 2,349
+// draws skipped without the budget, with the libraries warm in both runs.
+#define LINK_DRAW_MS 3u
+static uint64_t *link_budget(void) {
+    static uint64_t frame = ~0ull, left, per_frame = ~0ull;
+    if (per_frame == ~0ull) {
+        long long ms = cfg_int("NX2NAVI_PIPE_LINK_MS");
+        per_frame = (uint64_t)(ms < 0 ? 0 : ms > 100 ? 100 : ms) * 1000000ull;
+        rt_log("vk_exec: draws wait up to %llu ms a frame in all for the fast link of a missing pipeline "
+               "(NX2NAVI_PIPE_LINK_MS)", (unsigned long long)(per_frame / 1000000));
+    }
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != frame) frame = f, left = per_frame;
+    return &left;
 }
 
 // The previous draw's shaders, kept while its program, bound pipeline state, the vertex and fragment stages' first 32
@@ -3463,6 +3493,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     uint32_t wait_ms = 0;
     uint64_t t0 = 0;
     uint64_t *budget = NULL;   // the per-frame budget a timed wait is charged to
+    int linking = 0;           // the wait is the short one for a fast link (link_budget)
     int large = (uint64_t)ex->pass_w * ex->pass_h >= ONESHOT_LARGE_PX;
     if (oneshot > 0 && oneshot_budget_on()) {
         budget = oneshot_budget(large);
@@ -3476,6 +3507,12 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         wait_ms = (uint32_t)(wait_left_ns / 1000000);
         if (wait_ms) t0 = kern_now_ns();
         budget = &wait_left_ns;
+    } else {
+        budget = link_budget();
+        wait_ms = (uint32_t)(*budget / 1000000);
+        if (wait_ms > LINK_DRAW_MS) wait_ms = LINK_DRAW_MS;
+        linking = wait_ms != 0;
+        if (!wait_ms) budget = NULL;
     }
     // The previous draw's pipeline while its state repeats (PM, NX2NAVI_PIPE_MEMO=0 turns it off): the cache key is made
     // from the state alone, and a pipeline once found only changes from its fast link to its optimised build, read
@@ -3487,13 +3524,21 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         info = PM.info, pending = 0;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
     } else {
-        w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;   // the clock is read only for draws that may wait
-        p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
+        if (linking) {   // nearly every draw finds its pipeline: the clock is read only for one that did not
+            p = vk_pipeline_graphics_async(&s, &info, &pending, 0);
+            if (pending) {
+                t0 = kern_now_ns();
+                p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
+            }
+        } else {
+            w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;   // the clock is read only for draws that may wait
+            p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
+        }
         if (t0 && budget) {
             uint64_t spent = kern_now_ns() - t0;
             *budget = spent < *budget ? *budget - spent : 0;
         }
-        why = oneshot > 0 ? "one-shot, shader" : wait_ms ? "full-screen" : NULL;
+        why = oneshot > 0 ? "one-shot, shader" : linking ? NULL : wait_ms ? "full-screen" : NULL;
         if (pending && oneshot < 0 && !vk_exec_targets_recent(ex, skip >= 1)) {
             perf_count(PERF_CNT_ONESHOT_WAIT);
             why = "one-shot";
