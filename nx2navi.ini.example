@@ -123,8 +123,11 @@
 # ASTC texture decoding: native (the GPU's own ASTC support), gpu (a compute shader), cpu, or auto (native when the GPU
 # has it, gpu otherwise).
 # astc = auto
-# With astc = gpu: re-encode the decoded ASTC textures to BC3, a quarter of the video memory, textures slightly blockier,
-# 0 or 1. Default: on when the GPU has less than 5 GB of video memory, off otherwise.
+# With GPU ASTC decoding, 1 requests BC3 compression. Slight blocking is possible. 0 keeps RGBA8, which uses about
+# four times as much memory for these textures and can exhaust memory while loading.
+# Leave this setting commented for automatic selection. The renderer requests BC3 when the largest device-local GPU
+# heap is under 20 GiB or the system reports less than 47 GiB of RAM (allowing for a nominal 48 GiB PC). If the RAM
+# size is unknown, only the GPU heap decides. Look for "NX2NAVI_ASTC_BC unset" in the game log to see the decision.
 # astc_bc = 1
 # Game memory shared with the GPU: auto (mirror on a discrete GPU, import on an integrated one), import (host memory
 # imported into Vulkan), mirror (pools used as buffers get a copy in video memory) or verify (mirror plus a check of
