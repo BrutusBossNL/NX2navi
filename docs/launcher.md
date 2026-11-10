@@ -155,7 +155,10 @@ A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the too
    `romfs-check.json` beside the game, and for each damaged texture puts a stand-in, another texture of the same kind
    under the damaged one's name, in `mods/Damaged file stand-ins`, so the game can load what needs it. A damaged file
    of any other kind is only reported: only a clean dump restores it. In play the game logs a file it keeps opening
-   and cannot load (runtime/romfs.c `open_note`).
+   and cannot load (runtime/romfs.c `open_note`). The launcher shows what the check found (`jobs.Job.note_scan`):
+   the count in the step's row ("4 Flagged, 3 Stand-Ins"), and after a job in which the check ran a sentence on the
+   home screen and in `launcher.log`. The four files the check flags on every copy of the game (`jobs.SCAN_EXPECTED`)
+   are told as that, with nothing for the player to do; other files are counted and `romfs-check.json` named.
 6. The game's Cetra Display is decoded for the window.
 
 ## Updating

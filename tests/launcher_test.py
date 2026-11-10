@@ -2573,7 +2573,8 @@ import json, sys, time
 def ev(**k): print('@@' + json.dumps(k), flush=True)
 if '--fail' in open(sys.argv[0] + '.mode').read():
     ev(ev='step', step='check', state='start'); ev(ev='error', message='this is not game version 1.1.1'); sys.exit(1)
-for s in ('check', 'exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts'):
+mode = open(sys.argv[0] + '.mode').read()
+for s in ('check', 'exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts') + (('scan',) if '--scan' in mode else ()):
     ev(ev='step', step=s, state='start')
     if s == 'compile':
         ev(ev='progress', step=s, done=5, total=10, unit='files'); ev(ev='phase', step=s, phase='link')
@@ -2631,6 +2632,78 @@ class JobTest(Tmp):
         self.assertEqual(j.result, 'failed')
         self.assertIn('1.1.1', j.error)
         self.assertEqual(j.step('check').state, jobs.FAILED)
+
+    def scan_job(self, mode, report):
+        """An install whose fake build ran (mode 'ok --scan') or kept (mode 'ok') the check of the game files, with
+        report as the romfs-check.json the check left in the game folder."""
+        self.patch_tools()
+        ctx = self.make_ctx(mode)
+        game = self.tmp / 'game'
+        game.mkdir()
+        if report is not None:
+            (game / 'romfs-check.json').write_text(json.dumps(report))
+        j = jobs.InstallJob(ctx, self.tmp / 'g.nup', game).run_inline()
+        self.assertEqual(j.result, 'ok', j.error)
+        ctx._file.flush()
+        return j, (ctx.layout.logs / 'launcher.log').read_text(encoding='utf-8')
+
+    def test_the_file_check_result_is_shown(self):
+        """What the check of the game files found reaches the player: the count in the scan row, a sentence for the
+        home screen and a line in the log. The files flagged on every copy are told as expected, with nothing to
+        do; nothing tells the player to dump again."""
+        known = sorted(jobs.SCAN_EXPECTED)
+        textures = [p for p in known if p.startswith('Tex/')]
+        report = {'status': 'pass', 'files': 186587, 'damaged': {p: 'no compressed frame at its start' for p in known},
+                  'repaired': {p: 'Tex/Other.bntx.zs' for p in textures},
+                  'not_repaired': [p for p in known if p not in textures]}
+        j, log = self.scan_job('ok --scan', report)
+        self.assertEqual(j.step('scan').state, jobs.DONE)
+        self.assertEqual(j.step('scan').value, '4 Flagged, 3 Stand-Ins')
+        self.assertEqual(j.note, 'The file check flagged 4 game files, the same as in every copy of the game: 3 textures '
+                                 'got a stand-in, and nothing needs doing.')
+        self.assertIn('file check: The file check flagged 4 game files', log)
+        for text in (j.note, j.step('scan').value):
+            self.assertNotIn('dump', text.lower())
+
+    def test_other_damaged_files_are_counted_and_pointed_to(self):
+        report = {'damaged': {'Tex/A_Nrm.bntx.zs': 'no compressed frame at its start', 'Model/B.bfres.zs': 'x'},
+                  'repaired': {'Tex/A_Nrm.bntx.zs': 'Tex/C_Nrm.bntx.zs'}, 'not_repaired': ['Model/B.bfres.zs']}
+        j, _ = self.scan_job('ok --scan', report)
+        self.assertEqual(j.step('scan').value, '2 Flagged, 1 Stand-In')
+        self.assertIn('flagged 2 game files as damaged: 1 texture got a stand-in', j.note)
+        self.assertIn('romfs-check.json', j.note)
+        self.assertNotIn('dump', j.note.lower())
+        self.assertEqual(jobs.scan_summary(['Model/B.bfres.zs'], 0)[1],
+                         'The file check flagged 1 game file as damaged: none got a stand-in, so what uses them still '
+                         'loads. romfs-check.json in the game folder lists them.')
+
+    def test_a_clean_or_kept_file_check_says_nothing_on_home(self):
+        j, _ = self.scan_job('ok --scan', {'damaged': {}, 'repaired': {}, 'not_repaired': []})
+        self.assertTrue(j.step('scan').value.startswith('Done'))
+        self.assertEqual(j.note, '')
+        shutil.rmtree(self.tmp / 'game')
+        shutil.rmtree(self.tmp / 'app')
+        # the check was done by an earlier build (the fake build has no scan step): the row has the count, home nothing
+        j, _ = self.scan_job('ok', {'damaged': {p: 'x' for p in jobs.SCAN_EXPECTED}, 'repaired': {}})
+        self.assertEqual(j.step('scan').state, jobs.SKIPPED)
+        self.assertEqual(j.step('scan').value, 'Unchanged · 4 Flagged, 0 Stand-Ins')
+        self.assertEqual(j.note, '')
+        self.assertIsNone(build.scan_report(self.tmp / 'no game'))
+        (self.tmp / 'game' / 'romfs-check.json').write_text('not json')
+        self.assertIsNone(build.scan_report(self.tmp / 'game'))
+
+    def test_home_shows_the_file_check_note(self):
+        App, a = mock_app(self, self.tmp / 'game')
+        a.job = mock.Mock(kind='install', result='ok', error='', after=None,
+                          note='The file check flagged 4 game files, the same as in every copy of the game: 3 '
+                               'textures got a stand-in, and nothing needs doing.')
+        a.settings['keep_cache'] = True
+        with mock.patch('launcher.ui.app.winsys.keep_awake'):
+            App.job_finished(a)
+            self.assertEqual(a.message, 'The game is built. Select Play. ' + a.job.note)
+            a.job.note = ''
+            App.job_finished(a)
+        self.assertEqual(a.message, 'The game is built. Select Play.')
 
     def test_an_install_goes_on_from_the_unpacked_game_files(self):
         """Begin Installation into a folder whose game files an earlier run unpacked builds on from them (--rebuild

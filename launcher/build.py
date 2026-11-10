@@ -148,6 +148,17 @@ def built_version(game_dir):
     return ''
 
 
+def scan_report(game_dir):
+    """What the check of the game files found (tools/romfs_check.py writes <game>/romfs-check.json): (the paths of
+    the damaged files, how many of them got a stand-in), or None when the folder has no readable report."""
+    try:
+        with open(os.path.join(str(game_dir), 'romfs-check.json'), encoding='utf-8') as f:
+            report = json.load(f)
+        return sorted(report['damaged']), len(report.get('repaired') or ())
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def can_rebuild(game_dir):
     st = build_state(game_dir)
     return st.get('version') == 2 and all(s in st.get('steps', {}) for s in ('exefs', 'romfs'))

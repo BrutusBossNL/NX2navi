@@ -1625,6 +1625,9 @@ class App:
                 self.message = 'The game is rebuilt and up to date.' if j.kind == 'rebuild' else \
                     f'NX2navi is now {versions.display(self.layout.version)}.'
                 self.release = None
+            note = getattr(j, 'note', '')   # what the file check found (jobs.Job.note_scan)
+            if note and j.after is None:
+                self.message = f'{self.message} {note}'.strip()
             self.reload_fonts_if_new()
             self.show(self.job_return)
             if j.kind == 'install' and self.settings.get('auto_check'):
