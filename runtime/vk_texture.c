@@ -1474,6 +1474,11 @@ static void retire_cancel(Tex *e) {
     retiring_bytes -= e->bytes;
     if (holds.n) nvn_hm_del(&holds, &e->key);
     n_retire_cancel++, n_disuse_back++;
+    // In use as of now: while retired the pool refresh left it out, so it carries no use stamp of that time and
+    // counted as idle the moment it came back. A sweep over the budget (sweep_pressure calls retire_sweep and then
+    // evict_idle) could evict it in the same call that took it back.
+    e->use_round = look_round;
+    e->use_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     tex_gen_bump(e->key.addr);
 }
 
