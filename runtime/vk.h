@@ -342,6 +342,7 @@ void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDevic
 int vk_mem_class_of(uint64_t addr);               // VK_MCLS_* of the pool at addr (NONE when unbacked)
 void vk_mem_census(uint64_t frame);               // at each present: pool census and traffic, logged at frame 1800 and,
                                                   // with NX2NAVI_TRACE=perf, every 1800 frames
+void vk_mem_stage_log(const char *stage);         // one line after a boot stage: device memory, process commit
 // VRAM in use and its budget, summed over the DEVICE_LOCAL heaps. exact 1: VK_EXT_memory_budget (the whole process),
 // 0: this allocator's own allocations against the heap sizes. 0 when unknown.
 int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact);
@@ -680,7 +681,8 @@ VkPipeline vk_pipeline_graphics(const VkPipeState *s, const VkPipeInfo **info);
 // wait_ms > 0 waits up to that long for a pending pipeline first. Pipelines built in a run are recorded to
 // pipeline-keys.bin next to the pipeline cache and prebuilt at the next boot (NX2NAVI_PIPE_PREBUILD=0: not).
 VkPipeline vk_pipeline_graphics_async(const VkPipeState *s, const VkPipeInfo **info, int *pending, uint32_t wait_ms);
-// rt_boot calls it unless --shot is given; NX2NAVI_PIPE_SYNC=1 makes it a no-op. Probes never call it.
+// rt_boot calls it unless --shot is given; NX2NAVI_PIPE_SYNC=1 makes it a no-op. Of the probes only --probe-prewarm
+// calls it.
 void vk_pipeline_async_enable(void);
 int vk_pipeline_async_on(void);   // 1 after vk_pipeline_async_enable: graphics shaders are translated in the background too
 // Boot prewarm, before the guest runs (rt_boot): loads the shaders pipeline-keys.bin names, translating the ones not

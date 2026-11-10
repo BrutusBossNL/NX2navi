@@ -104,6 +104,11 @@
 # threads mostly wait on the graphics driver's lock: 16 on NVIDIA spent about 8 cores spinning in the driver.
 # lib_prebuild = 1
 # lib_prebuild_threads = 2
+# How many compute pipelines the start builds and keeps: those of the compute shaders the game used most recently.
+# Every other known one is built into the pipeline cache and released again, and made from the cache when the game
+# first uses it (well under a millisecond). all: the start keeps every compute shader the game ever used, as versions up
+# to 0.6.1 did; with a long play history that held more than 2 GB of video memory. 0: none are kept.
+# compute_keep = 512
 # 1: very large compute shaders that no cache holds are built on one background thread after the start. 0: each is
 # built when the game first uses it, which can hold that frame for a second or two.
 # lib_prebuild_big_bg = 1

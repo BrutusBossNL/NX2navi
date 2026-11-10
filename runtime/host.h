@@ -378,4 +378,5 @@ int probe_gamepad(void);                                   // input.c
 int probe_movie(void);                                     // movie_probe.c: host VP9 movie::Decoder on one RomFS movie
 int vk_pipeline_prepare_shaders(void);                     // vk_pipeline.c: --prepare-shaders (tools/prepare_shaders.py)
 int vk_pipeline_warm_shaders(void);                        // vk_pipeline.c: --warm-shaders (tools/build_game.py)
+int vk_pipeline_probe_prewarm(void);                       // vk_pipeline.c: --probe-prewarm
 int vk_pipeline_spirv_selftest(void);                      // vk_pipeline.c: --selftest, the SPIR-V rewrites without a device

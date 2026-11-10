@@ -2682,6 +2682,39 @@ static void outside_watch(uint64_t frame) {
     last = out, seen = 1;
 }
 
+// One line per boot stage (vk_pipeline.c calls it after the pipeline cache load, the shader prewarm, the recorded
+// pipelines and the compute pipeline prebuild): the device-local memory in use, the part of it VMA did not allocate
+// (outside_watch's "outside VMA": pipelines and the driver's own, before the swapchain and the upscaler exist), and the
+// process's commit and working set. Subtracting two lines gives what a stage left behind: with a long play history the
+// boot's compute pipelines alone held 2.3 GiB of device memory on an RTX 5090 (4,066 pipelines kept, 95 of them
+// dispatched before the first village), which is what this line was added to place.
+void vk_mem_stage_log(const char *stage) {
+    VkCtx *c = vk_ctx();
+    double proc, used, limit;
+    float ram_used, ram_total, ws;
+    plat_commit_info(&proc, &used, &limit);
+    plat_mem_info(&ram_used, &ram_total, &ws);
+    const double M = 1048576.0;
+    uint64_t usage = 0, blocks = 0;
+    int budget = c && c->has_memory_budget;
+    if (budget) {
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT bp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, .pNext = &bp};
+        vkGetPhysicalDeviceMemoryProperties2(c->phys, &p2);
+        VmaBudget vb[VK_MAX_MEMORY_HEAPS] = {0};
+        if (c->vma) vmaGetHeapBudgets(c->vma, vb);
+        for (uint32_t h = 0; h < c->mem_props.memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++)
+            if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                usage += bp.heapUsage[h], blocks += vb[h].statistics.blockBytes;
+    }
+    char dev[96] = "device memory unknown (no VK_EXT_memory_budget)";
+    if (budget)
+        snprintf(dev, sizeof dev, "device memory in use %.0f MiB, outside VMA %.0f MiB", usage / M,
+                 usage > blocks ? (usage - blocks) / M : 0.0);
+    rt_log("mem: boot stage, after %s: %s; process commit %.0f MB, working set %.0f MB; system commit %.0f of %.0f MB",
+           stage, dev, proc, (double)ws, used, limit);
+}
+
 // With NX2NAVI_TRACE=perf every 600 frames: what holds device-local memory, to see what grows over a long session.
 // VMA's blocks and allocations on the device-local heaps, texture entries with their own memory, the VRAM mirrors and
 // the objects waiting for their last submission to retire.
