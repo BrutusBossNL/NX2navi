@@ -128,7 +128,9 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   their stand-in, and the frame's later refreshes skip them (`runtime/vk_exec_draw.c` `pool_refill`). An area load
   spreads over several frames instead of holding one for 200-400 ms.
 - Mesh and task shaders run as `VK_EXT_mesh_shader`; indirect mesh draws read NVN's `{count, first}` record through a
-  ring of Vulkan `{x, y, z}` records filled on the GPU.
+  ring of Vulkan `{x, y, z}` records filled on the GPU. The copy cannot be recorded inside a pass, so the first such
+  draw of a pass fills the records of the mesh draws that follow it too, and the pass is not cut at each of them
+  (`runtime/vk_exec_draw.c` `mesh_ring_entry`).
 - Pipelines: `VK_EXT_graphics_pipeline_library` where the driver has it: stage libraries compiled ahead, a fast link
   at a new state, an optimised pipeline replacing it from a background thread. A draw whose pipeline is not ready is
   skipped when its pass is one the game renders frame after frame: one of its targets was rendered in the last few
