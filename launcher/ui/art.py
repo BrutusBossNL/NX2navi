@@ -19,7 +19,7 @@ import numpy as np
 
 # ---------------------------------------------------------------- colours
 
-# The first colour scheme, Kokiri Forest: bronze wood on a misty dark green.
+# The first colour scheme, Forest: bronze wood on a misty dark green.
 BASE = {
     'window': '#06180d',
     'panel': '#3a2b22',
@@ -64,19 +64,19 @@ GROUPS = {
 # None to keep each colour's own, saturation factor, lightness factor, saturation added), applied to the first
 # scheme's colours (recolor), so a scheme keeps the first one's light and dark steps. 'set': colours given as they are.
 THEMES = {
-    'kokiri': {'label': 'Kokiri Forest'},
-    'death_mountain': {'label': 'Death Mountain', 'wood': (14, 0.95, 0.80, 0), 'accent': (16, 1.05, 1.0, 0),
+    'forest': {'label': 'Forest'},
+    'volcano': {'label': 'Volcano', 'wood': (14, 0.95, 0.80, 0), 'accent': (16, 1.05, 1.0, 0),
                        'scene': (6, 1.0, 1.0, 0.25), 'glow': (30, 1.0, 1.0, 0), 'text': (30, 1.0, 1.0, 0)},
-    'zora': {'label': "Zora's Domain", 'wood': (207, 0.75, 0.92, 0), 'accent': (188, 0.95, 1.0, 0),
+    'lake': {'label': 'Lake', 'wood': (207, 0.75, 0.92, 0), 'accent': (188, 0.95, 1.0, 0),
              'scene': (200, 1.0, 1.05, 0.2), 'glow': (185, 1.0, 1.0, 0), 'text': (200, 0.55, 1.02, 0)},
-    'gerudo': {'label': 'Gerudo Valley', 'wood': (26, 1.15, 1.0, 0), 'accent': (352, 0.9, 1.0, 0),
+    'desert': {'label': 'Desert', 'wood': (26, 1.15, 1.0, 0), 'accent': (352, 0.9, 1.0, 0),
                'scene': (318, 0.8, 0.95, 0.15), 'glow': (45, 1.0, 1.0, 0), 'text': (36, 1.0, 1.0, 0)},
-    'temple': {'label': 'Temple of Time', 'wood': (220, 0.22, 0.95, 0), 'accent': (46, 0.95, 1.02, 0),
+    'temple': {'label': 'Temple', 'wood': (220, 0.22, 0.95, 0), 'accent': (46, 0.95, 1.02, 0),
                'scene': (222, 0.55, 1.0, 0.05), 'glow': (48, 1.0, 1.0, 0.5), 'text': (48, 0.45, 1.02, 0)},
-    'shadow': {'label': 'Shadow Temple', 'wood': (268, 0.55, 0.78, 0), 'accent': (286, 0.75, 1.0, 0),
+    'shadow': {'label': 'Shadow', 'wood': (268, 0.55, 0.78, 0), 'accent': (286, 0.75, 1.0, 0),
                'scene': (272, 0.9, 0.8, 0.2), 'glow': (280, 1.0, 1.0, 0.2), 'text': (270, 0.5, 1.0, 0)},
 }
-DEFAULT_THEME = 'kokiri'
+DEFAULT_THEME = 'forest'
 
 
 def recolor(hexcolor, hue, sat=1.0, light=1.0, add=0.0):

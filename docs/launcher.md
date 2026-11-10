@@ -35,10 +35,10 @@ drawn in code (`launcher/ui/art.py`); no texture, font or sound of the game is i
 
 Customize Launcher (on the home screen) makes the look the player's own:
 
-- Color Scheme: Kokiri Forest (the colours above), Death Mountain, Zora's Domain, Gerudo Valley, Temple of Time and
-  Shadow Temple. A scheme is the first one with its woods, accents, backdrop and glow turned to other hues
-  (`art.THEMES`, `art.recolor`), so each keeps the same light and dark steps and the same readable text. The window is
-  drawn again in the new colours at once.
+- Color Scheme: Forest (the colours above), Volcano, Lake, Desert, Temple and Shadow. A scheme is the first one with
+  its woods, accents, backdrop and glow turned to other hues (`art.THEMES`, `art.recolor`), so each keeps the same
+  light and dark steps and the same readable text. The window is drawn again in the new colours at once. The names
+  are plain words, not the game's.
 - Background: a picture of the player's own behind the panels instead of the scheme's backdrop (`launcher/ui/picture.py`:
   PNG, JPEG, WebP, BMP, GIF or TIFF, read with Pillow). It is cut to the window's shape around its middle and kept as
   `data/background.npy`, so the launcher needs the file no more; Background Dimming darkens it (0 to 80 %) for the

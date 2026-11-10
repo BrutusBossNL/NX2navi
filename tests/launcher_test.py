@@ -2447,7 +2447,7 @@ class LookTest(Tmp):
 
     def test_every_colour_scheme_has_every_colour(self):
         art = self.art
-        self.assertEqual(art.theme_palette('kokiri'), art.BASE)   # the first scheme is the colours as written
+        self.assertEqual(art.theme_palette('forest'), art.BASE)   # the first scheme is the colours as written
         for name, t in art.THEMES.items():
             pal = art.theme_palette(name)
             self.assertEqual(set(pal), set(art.BASE), name)
@@ -2462,15 +2462,15 @@ class LookTest(Tmp):
         art = self.art
         held = art.PALETTE
         try:
-            self.assertEqual(art.set_theme('zora'), 'zora')
+            self.assertEqual(art.set_theme('lake'), 'lake')
             self.assertIs(art.PALETTE, held)
             self.assertNotEqual(held['panel'], art.BASE['panel'])
             self.assertEqual(held['salmon'], art.BASE['salmon'])        # a warning stays a warning in every scheme
-            self.assertEqual(art.set_theme('no such scheme'), 'kokiri')
+            self.assertEqual(art.set_theme('no such scheme'), 'forest')
             self.assertEqual(dict(held), art.BASE)
-            self.assertEqual(art.set_theme(None), 'kokiri')             # launcher.json without the key
+            self.assertEqual(art.set_theme(None), 'forest')             # launcher.json without the key
         finally:
-            art.set_theme('kokiri')
+            art.set_theme('forest')
 
     def test_recolor_keeps_light_and_dark(self):
         import colorsys
@@ -2639,14 +2639,14 @@ class LookTest(Tmp):
         path = self.tmp / 'launcher.json'
         s = settings.Settings(path)
         self.assertEqual((s['theme'], s['background'], s['background_dim'], s['animations'], s['sounds']),
-                         ('kokiri', '', 40, True, 'low'))
+                         ('forest', '', 40, True, 'low'))
         s['theme'], s['sounds'], s['background_dim'] = 'shadow', 'high', 60
         s.save()
         t = settings.Settings(path)
         self.assertEqual((t['theme'], t['sounds'], t['background_dim']), ('shadow', 'high', 60))
         path.write_text(json.dumps({'theme': 5, 'animations': 'yes', 'background_dim': '40'}))
         u = settings.Settings(path)                        # values of the wrong kind: the defaults
-        self.assertEqual((u['theme'], u['animations'], u['background_dim']), ('kokiri', True, 40))
+        self.assertEqual((u['theme'], u['animations'], u['background_dim']), ('forest', True, 40))
 
 
 # ---------------------------------------------------------------- the window

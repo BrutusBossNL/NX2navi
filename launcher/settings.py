@@ -15,7 +15,7 @@ DEFAULTS = {
     'desktop_shortcut': True,
     'save_export_dir': '',        # where Saves > Export Save writes its zip; empty: the Downloads folder
     'export_with_log': True,      # Export Save adds the game's latest log and nx2navi.ini (for a bug report)
-    'theme': 'kokiri',            # the colour scheme (launcher/ui/art.py THEMES)
+    'theme': 'forest',            # the colour scheme (launcher/ui/art.py THEMES)
     'background': '',             # the picture the player chose as the background; its fitted copy is data/background.npy
     'background_dim': 40,         # how much that picture is darkened, in percent
     'animations': True,           # the cursor glides, screens slide in, sparks drift, Navi bobs
