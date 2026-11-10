@@ -205,7 +205,7 @@ class Romfs:
     def dictionary(self, dict_id):
         if self.dicts is None:
             self.dicts = {}
-            pack = zstandard.ZstdDecompressor().decompressobj().decompress(self.raw(DICTIONARIES))
+            pack = unpack(self.raw(DICTIONARIES))
             for lo, hi in sarc_members(pack).values():
                 d = zstandard.ZstdCompressionDict(pack[lo:hi])
                 self.dicts[d.dict_id()] = d
@@ -218,7 +218,27 @@ class Romfs:
             return raw, None
         dict_id = zstandard.get_frame_parameters(raw).dict_id
         d = self.dictionary(dict_id) if dict_id else None
-        return zstandard.ZstdDecompressor(dict_data=d).decompressobj().decompress(raw), d
+        return unpack(raw, d), d
+
+
+# How much of a packed file unpack gives the decompressor at a time.
+PIECE = 1 << 16
+
+
+def unpack(raw, dictionary=None):
+    """The contents of a zstd frame, with the dictionary it was packed with; bytes after the frame are left out.
+
+    The file goes to the decompressor in pieces of PIECE bytes and the pieces' outputs are joined once. Given the
+    whole file in one call, the library returns one bytes object that it grows by copying as the output comes: made-up
+    data of the size of the interface texture archive, 69 MB packed and 244 MB unpacked, took 21 s that way on a
+    fast PC against 0.3 s in pieces. Players' builds waited 44 to 52 s before this tool's first folder, most of
+    its minute."""
+    out, parts = zstandard.ZstdDecompressor(dict_data=dictionary).decompressobj(), []
+    for at in range(0, len(raw), PIECE):
+        parts.append(out.decompress(raw[at:at + PIECE]))
+        if out.eof:
+            break
+    return b''.join(parts)
 
 
 def sarc_members(data):

@@ -3024,6 +3024,119 @@ class FileCheckTest(Tmp):
         self.assertNotEqual(logic_digest(a), logic_digest(c))
 
 
+# make_game.PROMPT_TOOLS, and the logic_digest of the three scripts that draw the button prompts when that value was
+# last looked at, as SCAN_LOGIC for the file check: a change to their logic fails
+# PromptToolsTest.test_the_prompt_tools_logic_is_the_recorded_one. If the change can alter what the tools write, give
+# PROMPT_TOOLS a new value (every install then draws its prompts again) and record both here; if it cannot, record
+# only the new digests.
+PROMPT_LOGIC = ('ad59f2c4533f6ea2630b916ef5f3695f72daffe9b2b7663eea4168a4f08e4249',
+                {'pad_prompts.py': '1b008475289e0dabfefb8c61969c719c6faa79bbfc8504593e5fe1e79d4d4d33',
+                 'prompt_art.py': '87edacabcddb4952f5862373815d7d46a05c67f350e0734025ae4d2f83b12038',
+                 'button_icons.py': '3804e371a030965bc9eb4226f333b611651f25efaa67ee523b404edc3257818a'})
+
+
+def load_pad_prompts():
+    """tools/pad_prompts.py as a module. Where fontTools is not installed, the names the tool and
+    tools/button_icons.py import from it get empty stand-ins for the import: the tests here use the tool's reading
+    of the game files only, which needs none of them. The module is not left in sys.modules."""
+    import types
+    stubs = {}
+    try:
+        import fontTools  # noqa: F401
+    except ImportError:
+        for name, classes in (('fontTools', ()), ('fontTools.pens', ()), ('fontTools.ttLib', ('TTFont',)),
+                              ('fontTools.pens.basePen', ('BasePen',)), ('fontTools.pens.boundsPen', ('BoundsPen',)),
+                              ('fontTools.pens.recordingPen', ('RecordingPen',)),
+                              ('fontTools.pens.reverseContourPen', ('ReverseContourPen',)),
+                              ('fontTools.pens.t2CharStringPen', ('T2CharStringPen',)),
+                              ('fontTools.pens.transformPen', ('TransformPen',))):
+            stubs[name] = types.ModuleType(name)
+            for cls in classes:
+                setattr(stubs[name], cls, type(cls, (), {}))
+    with mock.patch.dict(sys.modules, stubs):
+        for name in ('pad_prompts', 'button_icons'):
+            sys.modules.pop(name, None)
+        import pad_prompts
+    return pad_prompts
+
+
+class PromptToolsTest(Tmp):
+    """tools/pad_prompts.py reads the game's files in pieces: the same bytes as in one call, without the minutes one
+    call took on the 244 MB texture archive. And the prompts step's key no longer follows the scripts' bytes."""
+
+    def setUp(self):
+        super().setUp()
+        try:
+            import zstandard  # noqa: F401
+            self.pp = load_pad_prompts()
+        except ImportError as e:
+            self.skipTest(f'needs zstandard and Pillow: {e}')
+
+    def test_a_file_unpacks_to_the_same_bytes_in_pieces(self):
+        import random
+        import zstandard
+        pp = self.pp
+        seven = bytes(i % 7 for i in range(256))
+        big = random.Random(5).randbytes(24 << 20).translate(seven)   # packs to several pieces
+        small = b'a small file ' * 100
+        samples = [bytes([65 + i % 7]) * 40 + f'sample {i} of the dictionary'.encode() * 3 for i in range(400)]
+        dic = zstandard.train_dictionary(4096, samples)
+        z = zstandard.ZstdCompressor(level=3)
+        with_dict = zstandard.ZstdCompressor(level=3, dict_data=dic).compress(b''.join(samples[:50]))
+        no_size = zstandard.ZstdCompressor(level=3, write_content_size=False).compress(big[:3 << 20])
+
+        def whole(raw, d=None):   # as the tool read a file before: the whole file in one call
+            return zstandard.ZstdDecompressor(dict_data=d).decompressobj().decompress(raw)
+        packed = z.compress(big)
+        self.assertGreater(len(packed), 4 * pp.PIECE)
+        for name, raw, d in (('large', packed, None), ('small', z.compress(small), None), ('empty', z.compress(b''), None),
+                             ('with a dictionary', with_dict, dic), ('no size in its frame', no_size, None),
+                             ('bytes after the frame', z.compress(small) + bytes(300 << 10), None),
+                             ('two frames', z.compress(small) + packed, None)):
+            self.assertEqual(pp.unpack(raw, d), whole(raw, d), name)
+            with mock.patch.object(pp, 'PIECE', 1000):
+                self.assertEqual(pp.unpack(raw, d), whole(raw, d), name)
+        self.assertEqual(pp.unpack(packed), big)
+        with self.assertRaises(zstandard.ZstdError):
+            pp.unpack(packed[:64] + bytes(300 << 10) + packed[64 + (300 << 10):])
+        # the tool's reader of extracted game files: plain files, packed ones, and one packed with a dictionary of
+        # the game's dictionary archive
+        root = self.tmp / 'romfs'
+        for path, data in (('Font2/plain.bin', small), ('UI/big.bntx.zs', packed), ('UI/dict.bntx.zs', with_dict),
+                           (pp.DICTIONARIES, z.compress(sarc({'zs.zsdic': dic.as_bytes()})))):
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_bytes(data)
+        romfs = pp.Romfs(root)
+        self.assertEqual(romfs.load('Font2/plain.bin'), (small, None))
+        self.assertEqual(romfs.load('UI/big.bntx.zs'), (big, None))
+        content, used = romfs.load('UI/dict.bntx.zs')
+        self.assertEqual((content, used.dict_id()), (b''.join(samples[:50]), dic.dict_id()))
+
+    def test_the_prompts_key_is_the_one_installs_have(self):
+        import make_game
+        kit = self.tmp / 'kit'
+        art = kit / 'prompt-art' / 'XGamepad' / 'Default'
+        art.mkdir(parents=True)
+        (art / 'T_X_A_White.png').write_bytes(b'picture')
+        out = self.tmp / 'game'
+        out.mkdir()
+        ident = 'nup C:\\dumps\\game.nup 28000000000 1760000000'
+        released = 'ad59f2c4533f6ea2630b916ef5f3695f72daffe9b2b7663eea4168a4f08e4249'   # the scripts of 0.7.1
+        with mock.patch.object(make_game, 'KIT', kit):
+            pictures = make_game.tree_digest(kit / 'prompt-art', ('**/*.png',))
+            binds = make_game.sha256_bytes(b'[]')
+            self.assertEqual(make_game.step_key('prompts', ident, out),
+                             f'prompts-1|{ident}|{pictures}|{released}|{binds}|missing')
+
+    def test_the_prompt_tools_logic_is_the_recorded_one(self):
+        import make_game
+        now = (make_game.PROMPT_TOOLS, {name: logic_digest(ROOT / 'tools' / name) for name in PROMPT_LOGIC[1]})
+        self.assertEqual(now, PROMPT_LOGIC,
+                         'The logic of the tools that draw the button prompts changed. If the change can alter what '
+                         'they write, give make_game.PROMPT_TOOLS a new value, so that installs draw their prompts '
+                         'again; either way record the new pair in PROMPT_LOGIC (tests/launcher_test.py).')
+
+
 # ---------------------------------------------------------------- jobs
 
 FAKE_MAKE_GAME = r'''

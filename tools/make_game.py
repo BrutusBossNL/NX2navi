@@ -112,6 +112,12 @@ SCAN_CHECKED = re.compile(r'^checked (\d+) of (\d+)$')   # tools/romfs_check.py'
 # check, so the key of every install that passed it stays what it is. tests/launcher_test.py
 # test_the_file_checks_logic_is_the_recorded_one fails when the script's logic changes, to ask this question.
 SCAN_TOOL = '55ea0c150aaf9dac93a2e6fd3b4ca11e1c572b5eee8b6bd74960535964384634'
+# The same for the tools that draw the button prompts (tools/pad_prompts.py, prompt_art.py, button_icons.py) in the
+# prompts step's key, which held the digest of the three scripts' bytes: two of four releases changed a script, and
+# each time every install drew its prompts again, a minute. Changed by hand when a change to the scripts can change
+# what they write. Its value is their digest in 0.7.0 and 0.7.1, so the key of an install made by those stays what it
+# is. tests/launcher_test.py test_the_prompt_tools_logic_is_the_recorded_one asks the question when the logic changes.
+PROMPT_TOOLS = 'ad59f2c4533f6ea2630b916ef5f3695f72daffe9b2b7663eea4168a4f08e4249'
 
 # Bring-up fixes in the lifted SDK, each anchored on exact generated text that must occur once.
 LIFT_FIXES = [
@@ -2110,8 +2116,8 @@ def step_scan(out):
 def step_key(step, identity, out=None):
     """What a step's output depends on. exefs and romfs: the game files only; lift: the unpacked ExeFS and the
     lifter; compile: the lift, the runtime sources, this script and the processor (cpu_tag); prompts: the game files,
-    the kit's button art, the tools that draw it, the bind_ lines of nx2navi.ini, and whether every folder it writes
-    is still there; scan: the game files, the check's version (SCAN_TOOL) and whether its report is still there."""
+    the kit's button art, the version of the tools that draw it (PROMPT_TOOLS), the bind_ lines of nx2navi.ini, and
+    whether every folder it writes is still there; scan: the game files, the check's version (SCAN_TOOL) and whether its report is still there."""
     if step in ('exefs', 'romfs'):
         return f'{step}-1|{identity}'
     if step == 'scan':
@@ -2119,10 +2125,9 @@ def step_key(step, identity, out=None):
         tool = KIT / 'tools' / 'romfs_check.py'
         return f'scan-1|{identity}|{SCAN_TOOL if tool.is_file() else "no tool"}|{written}'
     if step == 'prompts':
-        tools = tree_digest(KIT / 'tools', ('pad_prompts.py', 'prompt_art.py', 'button_icons.py'))
         binds = sha256_bytes(json.dumps(bind_lines(out)).encode())
         written = all((out / f / 'manifest.tsv').is_file() for f in prompt_art.OVERLAYS)
-        return (f'prompts-1|{identity}|{tree_digest(prompt_art_dir(), ("**/*.png",))}|{tools}|{binds}'
+        return (f'prompts-1|{identity}|{tree_digest(prompt_art_dir(), ("**/*.png",))}|{PROMPT_TOOLS}|{binds}'
                 f'|{"written" if written else "missing"}')
     lift = f'lift|{exefs_digest(out)}|{lift_digest()}'
     if step == 'lift':
