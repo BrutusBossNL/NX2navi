@@ -1715,7 +1715,7 @@ static void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int sto
 // absent from that submit's page tables, a GPU page fault on the 128x128 probe pass of Kokiri Forest's first frame
 // (RADV's radv_wait_for_vm_map_updates hid it, as did NX2NAVI_SPLIT_DRAWS=0).
 volatile uint32_t vk_pool_kinds_used;
-#define POOL_SETS 4
+#define POOL_SETS VK_POOL_SETS
 #define POOL_LOG (1u << 20)   // entries of the change log: binding * VK_POOL_TEX + id, one per write
 static struct {
     VkDescriptorSetLayout layout, empty;
@@ -1998,6 +1998,7 @@ static void pool_entry_to(VkDescriptorSet set, uint32_t e) {
 // the log position the set holds writes up to (pool_catch_up brings it level once pool_sync has refreshed the entries:
 // a view written into a set must be alive, and the refresh is what replaces the views of destroyed textures).
 static int pool_current(void);
+static volatile uint64_t pool_takes;   // sets taken (vk_pool_takes): counted once the take's pool_sync is done
 
 static int pool_take_set(VkExec *ex, uint64_t *from) {
     // a sealed set stays bound while it is current: reading it is what the pending part does too
@@ -2019,6 +2020,8 @@ int vk_exec_pool_split(uint64_t fence) {
     PL.sealed = 1;
     return 1;
 }
+
+uint64_t vk_pool_takes(void) { return __atomic_load_n(&pool_takes, __ATOMIC_ACQUIRE); }
 
 // The current set gets the entries written into other sets in [from, to) of the log, as PL.view / PL.samp hold them now.
 static uint64_t pool_memo_hits;   // pool_fill: slots that shared another slot's lookup (defined with pool_memo below)
@@ -2146,6 +2149,7 @@ static void pool_sync_entries(VkExec *ex);
 static void pool_sync(VkExec *ex) {
     if (!PL.layout) vk_pool_set_layout();
     uint64_t from = 0, pre = PL.logn;
+    int took = PL.cur_fence != ex->fence;
     int switched = pool_take_set(ex, &from);   // every submission its own set, before the shortcut
     if (PL.sealed) return;   // current when checked: a change since waits for the next sync, which takes a new set
     uint64_t t0 = kern_now_ns(), f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
@@ -2161,6 +2165,8 @@ static void pool_sync(VkExec *ex) {
         PL.catch_ns += kern_now_ns() - t1;
     }
     PL.set_synced[PL.cur] = PL.logn;
+    // a set taken and up to date (with one set, the refresh above wrote into it directly)
+    if (took) __atomic_fetch_add(&pool_takes, 1, __ATOMIC_RELEASE);
 }
 
 typedef struct { VkExec *ex; uint32_t used; int n, retry, spent; } PoolDirty;

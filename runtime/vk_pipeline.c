@@ -1607,7 +1607,7 @@ static int marks_on = -1, marks_vs_ok, marks_fs_ok;
 
 int vk_pool_marks_enabled(void) {
     if (marks_on < 0) {
-        marks_on = rt_knob("TEX_DISUSE", "1") == 1;
+        marks_on = rt_knob("TEX_DISUSE", "1") >= 1;   // 2: marks and stand-ins, nothing freed (vk_texture.c "disuse")
         VkCtx *c = vk_ctx();
         if (c) {
             VkPhysicalDeviceFeatures f;
