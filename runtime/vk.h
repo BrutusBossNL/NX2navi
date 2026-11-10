@@ -570,6 +570,11 @@ void vk_sync_start(void);                  // vk_init (fatal without a device) a
 uint64_t vk_sync_submit(const uint64_t *handles, int n);   // records with vk_exec_record, submits; returns the value
 uint64_t vk_sync_reserve(void);            // asynchronous replay: the value the next queued submission signals
 int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns);   // 1 when done; 0 on timeout or a value never submitted
+// The executed timeline (vk_sync.c): a submission's own commands are through the GPU, its write-backs maybe not yet.
+int vk_sync_exec_wait(uint64_t value, uint64_t timeout_ns);
+int vk_sync_wb_split(void);                 // NX2NAVI_WB_SPLIT: the write-backs go into a part of their own
+VkCommandBuffer vk_sync_split_exec(void);   // vk_sync_split for the part before a submission's write-backs
+int vk_mem_mirror_wb_pending(void);         // vk_memory.c: vk_mem_mirror_end has write-backs to record
 uint64_t vk_sync_fence_done(void);         // highest done value
 uint64_t vk_sync_issued(void);             // newest submitted value (the one being recorded is this + 1)
 void vk_sync_finish(void);                 // every submitted value done

@@ -590,6 +590,10 @@
 # are made inaccessible until their first read or write, which is logged with its instruction ("mem: write-back
 # probe"). The bytes are there all along; the probe only watches, at the cost of the faults it takes.
 # wb_probe = 0
+# 1: what the GPU wrote goes back to the game's memory in a GPU submission of its own, and the wait after each frame's
+# first submission ends when that submission's passes are through, without waiting for the copy back (3 to 4 ms of
+# every frame). 0: the copy back is part of the submission, and the wait covers it.
+# wb_split = 1
 # 1: the game's flushes of mirrored memory are copied into the mirrors even where the write watch already sees every
 # page the game wrote; 0 (default) copies only the written pages there, which saved 47-57 MiB of copies a frame in
 # Kokiri Forest.

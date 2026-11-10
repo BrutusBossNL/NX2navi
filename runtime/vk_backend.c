@@ -183,6 +183,11 @@ int vk_replay_async(void) {
     return on;
 }
 
+// With the replay on its own thread a submission's value covers its replay too, and the wait stays the fence's.
+static int vk_be_exec_wait(uint64_t value, uint64_t timeout_ns) {
+    return vk_replay_async() ? vk_sync_fence_wait(value, timeout_ns) : vk_sync_exec_wait(value, timeout_ns);
+}
+
 // The front end's view (nvn_api_core.c, nvn_api_cmd.c): replay is asynchronous only on this back end.
 int gfx_replay_async(void) { return gfx_backend() == &gfx_vulkan_backend && vk_replay_async(); }
 
@@ -606,6 +611,7 @@ const GfxBackend gfx_vulkan_backend = {
     .program_release = vk_be_program_release,
     .submit = vk_be_submit,
     .fence_wait = vk_sync_fence_wait,
+    .exec_wait = vk_be_exec_wait,
     .fence_done = vk_sync_fence_done,
     .present = vk_be_present,
     .frame_start = vk_dlssg_frame_start,
