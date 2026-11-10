@@ -67,6 +67,8 @@ int vk_hdr_wanted(void);
 int vk_hdr_active(void);
 int vk_hdr_needs_restart(void);
 int vk_dlaa_needs_restart(void);
+int vk_ngxfg_wanted(void);              // vk_dlaa.c: DLSS's frame generation through NGX itself can run in this run
+int vk_ngxfg_max(void);                 // ... and how many frames it may generate per rendered one (0: it cannot)
 int vk_ffx_available(void);             // vk_ffx.cpp: FSR 3.1 upscaling can run (asked without loading the library)
 int vk_ffx_framegen_available(void);    // ... and FSR 3.1 frame generation
 double frame_step_limit_hz(void);
@@ -941,6 +943,36 @@ static void row_framegen_mult(bool restart) {
     if (nv >= 0 && nv < n) opt_apply("NX2NAVI_FRAMEGEN_MULTIPLIER", values[nv]);
 }
 
+// NVIDIA's frame generation runs through NGX itself, not through Streamline (vk_dlaa.c vk_ngxfg_*, gfx_present.c
+// ng_*): every build but the Windows one.
+static bool framegen_ngx(void) {
+#ifdef _WIN32
+    return false;
+#else
+    return true;
+#endif
+}
+
+// Its multiplier there (cfg.c FG_MULT, gfx_present.c ng_multiplier): 2x up to what the GPU allows, or Dynamic. Left out
+// while frame generation is set but cannot run: the frame generation row says why.
+static void row_framegen_mult_ngx(void) {
+    static const char *const mult[] = {"2", "3", "4", "5", "6"};
+    static const char *const mult_names[] = {"2x", "3x", "4x", "5x", "6x"};
+    const int max = vk_ngxfg_max();   // generated frames per rendered one
+    if (max < 1) return;
+    const char *values[6], *names[6];
+    int n = 0;
+    for (; n < max && n < 5; n++) values[n] = mult[n], names[n] = mult_names[n];
+    const int top = n - 1;
+    values[n] = "dynamic", names[n++] = menu_text(UI_MENU_FG_MULT_DYNAMIC);
+    const char *v = cfg_value("NX2NAVI_FG_MULT");
+    int cur = strcmp(v, "dynamic") ? top : n - 1;   // a multiplier above what the GPU allows shows as the highest
+    for (int i = 0; i < n; i++)
+        if (!strcmp(v, values[i])) cur = i;
+    int nv = opt_choice_index("NX2NAVI_FG_MULT", UI_MENU_FRAMEGEN_MULT, names, n, cur, 0, UI_MENU_FG_MULT_DESC, nullptr);
+    if (nv >= 0 && nv < n) opt_apply("NX2NAVI_FG_MULT", values[nv]);
+}
+
 // Frame generation (vk_fg.cpp, at once; NVIDIA's after a restart); it needs a temporal upscaler's motion vectors
 static void row_framegen(void) {
     // the generated frames are made from DLSS's or FSR 3.1's motion vectors: without one of them it would do nothing,
@@ -969,16 +1001,20 @@ static void row_framegen(void) {
         if (i == cur) at = n;
         values[n] = all_values[i], names[n++] = all_names[i];
     }
-    // AMD's follows the setting; NVIDIA's is set up with the device, so only a change to or from it waits for a restart
-    const bool restart = dlss && (cur == 2) != (vk_dlssg_wanted() != 0);
+    // AMD's follows the setting; NVIDIA's is set up with the device, so only a change to or from it waits for a restart.
+    // Through NGX it follows the setting too, once NGX is up, which needs DLSS upscaling on when the game starts.
+    const bool ngx = framegen_ngx();
+    const bool restart = ngx ? dlss && cur == 2 && !vk_ngxfg_wanted() : dlss && (cur == 2) != (vk_dlssg_wanted() != 0);
     if (restart) note = UI_MENU_AFTER_RESTART;
     else if (cur == 1 && !fsr) note = UI_MENU_FSR3_OFF;   // set where it cannot load: "in use: off" and why
-    // NVIDIA's set since the start but not running: "in use: off" and why (vk_dlssg_status; the log has the details)
-    const int st = cur == 2 && !restart ? vk_dlssg_status() : DLSSG_RUNS;
+    // NVIDIA's set since the start but not running: "in use: off" and why (vk_dlssg_status; the log has the details).
+    // Through NGX that is NVIDIA's frame generation library missing beside the game, or a GPU it does not run on.
+    const int st = cur != 2 || restart ? DLSSG_RUNS : ngx ? (vk_ngxfg_max() ? DLSSG_RUNS : DLSSG_NO_FILES) : vk_dlssg_status();
     if (st == DLSSG_NO_GPU) note = UI_MENU_FRAMEGEN_OFF_GPU;
     else if (st == DLSSG_NO_FILES) note = UI_MENU_FRAMEGEN_OFF_FILES;
     int nv = opt_choice_index("NX2NAVI_FRAMEGEN", UI_MENU_FRAMEGEN, names, n, at, 0, desc, menu_text(note));
     if (nv >= 0 && nv < n) opt_apply("NX2NAVI_FRAMEGEN", values[nv]);
+    else if (cur == 2 && upscaled && dlss && ngx) row_framegen_mult_ngx();
     else if (cur == 2 && upscaled && dlss) row_framegen_mult(restart);
 }
 

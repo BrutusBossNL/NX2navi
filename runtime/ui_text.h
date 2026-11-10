@@ -283,6 +283,8 @@ typedef enum {
     // DLSS frame generation (ui/menu.cpp row_framegen, row_framegen_mult): the multiplier row, its notes when this GPU
     // and driver allow less than 4x, and the frame generation row's notes when DLSS's does not run
     UI_MENU_FRAMEGEN_MULT, UI_MENU_FRAMEGEN_MULT_DESC,
+    // the multiplier row where DLSS's frame generation runs through NGX itself (ui/menu.cpp row_framegen_mult_ngx)
+    UI_MENU_FG_MULT_DESC, UI_MENU_FG_MULT_DYNAMIC,
     UI_MENU_FRAMEGEN_MULT_RTX50,     // this GPU and driver do 2x only
     UI_MENU_FRAMEGEN_MULT_UPTO,      // printf: "%d", the highest multiplier this GPU and driver allow
     UI_MENU_FRAMEGEN_MULT_OLD_DLL,   // nx2navi_dlssg.dll is older than multi frame generation

@@ -562,6 +562,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                    "here.",
     [UI_MENU_FRAMEGEN_NEEDS_NONE] = "needs DLSS or FSR 3.1, which do not run here",
     [UI_MENU_FRAMEGEN_MULT] = "DLSS multiplier",
+    [UI_MENU_FG_MULT_DESC] = "Frames on screen for each frame the game draws with DLSS Frame Generation: 2x adds one "
+                             "generated frame, up to 6x on an RTX 50 card. Dynamic adds only the frames needed to "
+                             "reach your display's refresh rate. Changes take effect at once.",
+    [UI_MENU_FG_MULT_DYNAMIC] = "Dynamic",
     [UI_MENU_FRAMEGEN_MULT_DESC] = "Frames on screen for each frame the game draws: 2x adds one generated frame, 3x "
                                    "two, 4x three. Higher is smoother but adds a little delay. The frame limit counts "
                                    "the frames on screen, so the game draws the limit divided by this: set the limit "

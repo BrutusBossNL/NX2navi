@@ -125,6 +125,13 @@ or to use another DLSS version, put the library there yourself: NVIDIA publishes
 `v<version>`, and `tools/dlss_pin.py` names the version the kit carries. Later builds keep a library they did not
 place. Without it DLSS does nothing on Linux.
 
+DLSS Frame Generation (RTX 40 and 50 cards) runs through NGX itself on Linux, without Streamline. It needs NVIDIA's
+`libnvidia-ngx-dlssg.so.<version>` beside `ocarina` (the same repository, `lib/Linux_x86_64/rel/`; no kit carries it)
+and DLSS upscaling on when the game starts. *Frame generation* in the Screen menu then offers NVIDIA DLSS, which
+switches at once, with a *DLSS multiplier* of 2x to 6x (above 2x on RTX 50 cards) or Dynamic, which generates only the
+frames needed to reach the display's refresh rate (`framegen = dlss` and `fg_mult` in `nx2navi.ini`). The log says
+`ngxfg: DLSS Frame Generation available` when NGX found the library.
+
 `tools/make_appimage.py` packs this kit into one `NX2navi-Linux-<version>-x86_64.AppImage` with its own Python, for
 players without a source checkout: it checks for the packages above, installs zbic with pip on its first run, picks
 `--jobs` from the memory, builds into `~/Games/Ocarina` (or the folder given after the dump) and writes `play.sh`
