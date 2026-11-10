@@ -2177,11 +2177,14 @@ static void pool_sync(VkExec *ex) {
 typedef struct { VkExec *ex; uint32_t used; int n, retry, spent; } PoolDirty;
 
 // A slot whose token changed: filled, or noted as left (pool_defer). With the frame's creation time spent (spent), a
-// slot left earlier in the frame is not looked up again.
+// slot left earlier in the frame is not looked up again. A left slot holds the stand-ins (its lookup resolved to
+// nothing), and a fill clears the note: kept, a slot left and then filled in the same frame was skipped later in that
+// frame with the filled texture's view still in the set, also after that texture was destroyed (a released one dropped,
+// one evicted), and a shader sampling the slot read freed memory.
 static int pool_refill(VkExec *ex, uint32_t id, uint32_t used, uint64_t t, int spent) {
     uint32_t mark = (uint32_t)PL.frame + 1;
     if (spent && pool_defer[id] == mark) return PL.n_defer_skips++, 0;
-    if (pool_fill(ex, id, used, t)) return 1;
+    if (pool_fill(ex, id, used, t)) return pool_defer[id] = 0, 1;
     pool_defer[id] = mark;
     return 0;
 }
