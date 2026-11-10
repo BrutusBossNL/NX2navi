@@ -522,8 +522,11 @@ static int image2d(uint32_t w, uint32_t h, VkFormat f, VkImageUsageFlags usage, 
 // Giving the kept feature its own sizes again at each evaluation changed nothing. A feature made while a smaller one
 // is alive leaves the smaller one as it was (the pause screen's after the gameplay one, at every first pause). So when
 // a feature is made, the alive ones with a larger input are released first, and after a release since the last
-// creation all of them (release_kept); their images stay and each is made again when its size is next evaluated. With
-// the second half alone, none of 5 runs in which the gameplay feature had been freed was striped.
+// creation all of them (release_kept); their images stay and each is made again when its size is next evaluated.
+// Scripted on one build, each way with the rule and with 2: the long pause and the mode change were striped without it
+// and clean with it. The input size may not be what matters: in every striped case the feature made was of another
+// model (performance's or ultra performance's) than the pause screen's, and the one run in which balanced's feature,
+// of the pause screen's model, was made again beside it without the rule was clean. The rule covers both readings.
 //   1 (default)  idle features are freed
 //   0            idle features are never freed (about 0.5 GB more video memory after the first pause)
 //   2            idle features are freed and nothing is released when a feature is made (as before; shows the fault)
