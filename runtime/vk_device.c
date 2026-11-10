@@ -304,6 +304,15 @@ typedef struct {
     VkPhysicalDeviceAddressBindingReportFeaturesEXT abr;
 } FeatureChain;
 
+// One line for a fatal error's report (dispatch.h rt_fatal_note_add): the card, its driver, and the settings in effect
+// that change how the game's memory behaves. A report often arrives as the end of a log alone, or as a picture of it,
+// and the lines that say these things are at its start. No lock is taken: the failing thread may hold any.
+static void fatal_note(void) {
+    char mem[512];
+    vk_mem_fatal_note(mem, sizeof mem);
+    rt_log("fatal: gpu %s; %s; texture detail %s", vk_caps_summary(), mem, vk_texture_detail_name());
+}
+
 static int create_device(void) {
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
@@ -510,6 +519,8 @@ static int create_device(void) {
     vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
     g_vk.min_imported_host_alignment = (uint32_t)emh.minImportedHostPointerAlignment;
     vk_caps_init(&g_vk);
+    vk_mem_lazy_decide();   // the driver is known: the lazy write-back's default depends on it
+    rt_fatal_note_add(fatal_note);
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.device, .instance = g_vk.instance,
                                  .vulkanApiVersion = VK_API_VERSION_1_3,

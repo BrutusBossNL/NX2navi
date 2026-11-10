@@ -311,6 +311,7 @@ static void crash_handler(const PlatCrash *x) {
     } else {
         rt_logf("  not on a guest thread\n");
     }
+    rt_fatal_notes();   // the card, its driver and the memory settings in effect (vk_device.c fatal_note)
     kern_free_cores_note();
     rtss_limit_restore();   // after the report: RivaTuner Statistics Server's profile as it was
     fflush(stderr);

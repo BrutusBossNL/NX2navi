@@ -2,6 +2,10 @@
 # Each line shows the default; on a Steam Deck the device profile ([display]) changes a few of them. A NX2NAVI_*
 # environment variable of the same name (NX2NAVI_FPS_LIMIT for fps_limit) overrides the file. Keys are case-insensitive;
 # '#' and ';' start a comment; [sections] only group lines.
+# Only the keys in this file are settings. A line with any other key does nothing: the game's log names it at the
+# start ("no setting of this version") and the settings menu (F1) shows it in its bottom row.
+# Updates and rebuilds of the game never rewrite nx2navi.ini; the settings menu changes only the lines of the settings
+# it changes and keeps every other line as it is.
 
 [frame rate]
 # Frame rate limit: 30, 40, 45, 60, 90, 120, 144, any whole rate from 30 to 240, display (the refresh rate of the
@@ -729,10 +733,13 @@
 # first submission ends when that submission's passes are through, without waiting for the copy back (3 to 4 ms of
 # every frame). 0: the copy back is part of the submission, and the wait covers it.
 # wb_split = 1
-# 1 (the default on Windows): what the game's shaders write into its memory is copied back from the video card once,
-# and after that only when the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field), for
-# about a third more frames a second in open areas. 0: copied back at the end of every GPU submission, as in 0.7.0.
-# With shadow storage (Linux, Wine) it stays off.
+# 1: what the game's shaders write into its memory is copied back from the video card once, and after that only when
+# the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field), for about a third more frames
+# a second in open areas. 0: copied back at the end of every GPU submission, as in 0.7.0.
+# Default: 1 on Windows, except 0 with AMD's driver for RX 5000 and RX 6000 cards, where it has not been tried by us
+# and one report lost its device with it on: set 1 there to try it, and back to 0 if the game ends in play (the log's
+# "mem: lazy write-back" line says which is in effect and why). 0 elsewhere. With shadow storage (Linux, Wine) it
+# stays off whatever is set.
 # wb_lazy = 1
 # Barriers between the game's draw passes and compute dispatches. 1: only where the game itself asks for one, or where
 # the work changes between drawing and compute; this takes about a tenth off the graphics card's time for a frame.

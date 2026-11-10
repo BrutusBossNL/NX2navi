@@ -24,6 +24,9 @@
 VkCaps vk_caps = {.float64 = 1, .sg_size = 32};
 static int f64_supported;
 static VkBool32 gpl_lib, gpl_fast;   // the driver's graphicsPipelineLibrary (feature), ...FastLinking (property)
+static char summary[832];           // vk_caps_summary: written once, in vk_caps_init, before any other thread reads it
+
+const char *vk_caps_summary(void) { return summary; }
 
 static uint32_t env_u32(const char *name, uint32_t def) {
     const char *e = cfg_get(name);
@@ -41,6 +44,8 @@ void vk_caps_driver(VkPhysicalDevice p) {
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
     vkGetPhysicalDeviceProperties2(p, &p2);
     vk_caps.amd = p2.properties.vendorID == 0x1002;
+    vk_caps.driver_id = (uint32_t)drv.driverID;
+    snprintf(vk_caps.driver_info, sizeof vk_caps.driver_info, "%s", drv.driverInfo);
     // AMD split RDNA 1 and 2 off into a driver branch of their own; its driverInfo reads
     // "26.10.1 (AMD proprietary shader compiler)" where the RDNA 3 and 4 driver names LLPC.
     vk_caps.amd_sc = drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY && strstr(drv.driverInfo, "shader compiler");
@@ -132,6 +137,8 @@ void vk_caps_init(VkCtx *c) {
 
     char dv[32];
     driver_version(dv, sizeof dv, c->props.vendorID, c->props.driverVersion);
+    snprintf(summary, sizeof summary, "%s, driver %s \"%s\" version %s", c->props.deviceName, drv.driverName,
+             drv.driverInfo, dv);
     uint32_t v = c->props.apiVersion;
     VkPhysicalDevice p = c->phys;
     rt_log("vk caps: %s, vendor %#06x device %#06x, driver %s \"%s\" (id %d, version %s, raw %#x), api %u.%u.%u",

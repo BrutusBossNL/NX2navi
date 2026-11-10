@@ -21,6 +21,7 @@
 #include "vk_dlaa.h"
 #include "vk_exec.h"
 #include "vk_gpa.h"
+#include "wb_lazy_choice.h"
 #include "wb_merge_spv.h"
 #include "platform/platform.h"
 
@@ -2536,7 +2537,7 @@ static void snap_free(void *arg) {   // completion thread: the submission is don
     free(f);
 }
 
-// ---- lazy write-back (NX2NAVI_WB_LAZY, default 1 on Windows; memory.c "Lazy write-back")
+// ---- lazy write-back (NX2NAVI_WB_LAZY; the default by platform and driver, wb_lazy_choice.h; memory.c "Lazy write-back")
 // A range a shader wrote goes back to guest memory once and is then armed (vk_gpu_written_back, mem_lazy_arm). While it
 // stays armed, gpu_wrote leaves the later writes of its pages in the mirror: no snapshot, no merge, no copy. When the
 // CPU touches a page, memory.c calls lazy_fetch with the mirror and the imported buffer of the range: a copy of its
@@ -2605,15 +2606,33 @@ static int lazy_clean(uint64_t lo, uint64_t hi, void *ctx) {
     return mem_written_peek(lo, hi - lo, p, 1) == 0;   // UINT64_MAX (not watched) counts as written
 }
 
+// Whether the lazy write-back is wanted on this device, decided and logged once, when the driver is known
+// (vk_device.c create_device, after vk_caps_init): the player's setting, else the default of the platform and driver
+// (wb_lazy_choice.h). Never in import mode, where no pool has a mirror; with shadow storage, where a fetch would copy
+// the mirror into the pool's buffer, which is guest memory only when the pool is imported (a shadow's bytes reach
+// guest memory in the submission's shadow_wb_cb); or with the write-back probe, which watches the same pages.
+_Static_assert(WBL_DRIVER_AMD == VK_DRIVER_ID_AMD_PROPRIETARY, "wb_lazy_choice.h names AMD's own driver");
+static int lz_wanted = -1;          // -1 not decided, 0 off, 1 on
+static const char *lz_why = "";     // the reason the log gave
+
+void vk_mem_lazy_decide(void) {
+    const char *set = cfg_is_set("NX2NAVI_WB_LAZY") ? cfg_get("NX2NAVI_WB_LAZY") : NULL;
+    WblChoice ch = wb_lazy_choice(set, WBL_ON_WINDOWS, vk_caps.driver_id, vk_caps.driver_info);
+    if (!vk_mirror_on) ch = (WblChoice){0, "no pool has a mirror in import mode"};
+    else if (shadow_on) ch = (WblChoice){0, "shadow storage keeps it off"};
+    else if (ch.on && cfg_bool("NX2NAVI_WB_PROBE")) ch = (WblChoice){0, "the write-back probe watches the same pages"};
+    lz_why = ch.why;
+    __atomic_store_n(&lz_wanted, ch.on, __ATOMIC_RELEASE);
+    rt_log("mem: lazy write-back %s: %s", ch.on ? "on" : "off", ch.why);
+}
+
 static int wb_lazy(void) {
     int s = __atomic_load_n(&lz_state, __ATOMIC_ACQUIRE);
     if (s) return s == 1;
     plat_mutex_lock(&lz_init_lock);
     if (!lz_state) {
         VkCtx *c = vk_ctx();
-        // Not with shadow storage: a fetch copies the mirror into the pool's buffer, which is guest memory only when
-        // the pool is imported; a shadow's bytes reach guest memory in the submission's shadow_wb_cb.
-        int on = vk_mirror_on && !shadow_on && c && cfg_bool("NX2NAVI_WB_LAZY");
+        int on = c && __atomic_load_n(&lz_wanted, __ATOMIC_ACQUIRE) == 1;
         if (on) {
             VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                           .queueFamilyIndex = c->gfx_family};
@@ -2625,10 +2644,10 @@ static int wb_lazy(void) {
                  vkCreateFence(c->device, &fi, NULL, &lz_fence) == VK_SUCCESS;
             on = on && mem_lazy_enable(lazy_fetch, lazy_clean);
         }
-        rt_log("mem: what shaders write into mirrored pools %s (NX2NAVI_WB_LAZY%s)",
+        rt_log("mem: what shaders write into mirrored pools %s (lazy write-back: %s)",
                on ? "goes back to guest memory once and then only when the CPU touches it"
                   : "goes back to guest memory at the end of every submission",
-               shadow_on ? "; shadow storage keeps it off" : "");
+               on || lz_wanted != 1 ? lz_why : "its command buffer and fence could not be made");
         __atomic_store_n(&lz_state, on ? 1 : 2, __ATOMIC_RELEASE);
     }
     plat_mutex_unlock(&lz_init_lock);
@@ -3294,6 +3313,17 @@ void vk_mem_lost_report(void) {
     rt_log("vk: video memory when the device was lost: %llu MiB in use of a budget of %llu MiB (%s)",
            (unsigned long long)(used >> 20), (unsigned long long)(budget >> 20),
            exact ? "the driver's figures, every program counted in the budget" : "this game's own allocations only");
+}
+
+// The settings that change how the game's memory reaches the GPU, as they are in effect, for a fatal error's summary
+// line (vk_device.c fatal_note): the memory mode and the lazy write-back with its reason and state. No lock, any thread.
+void vk_mem_fatal_note(char *out, size_t n) {
+    char lazy[160];
+    mem_lazy_note(lazy, sizeof lazy);
+    int st = __atomic_load_n(&lz_state, __ATOMIC_ACQUIRE), want = __atomic_load_n(&lz_wanted, __ATOMIC_ACQUIRE);
+    snprintf(out, n, "memory mode %s%s, lazy write-back %s (%s%s%s)", mirror_verify ? "verify" : vk_mirror_on ? "mirror" : "import",
+             shadow_on ? " with shadow storage" : "", want < 0 ? "not decided" : st == 2 && want ? "failed to start" : want ? "on" : "off",
+             lz_why, *lazy ? "; " : "", lazy);
 }
 
 float vk_mem_device_used_mb(void) {
