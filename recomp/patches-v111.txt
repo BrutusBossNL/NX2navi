@@ -93,9 +93,12 @@ site wide_movie main 3b5c758 a941a269 d100a3b0 bd400a10 bd401211 1e303a32 @page:
 # The game's zstd decoder (BSD zstd, statically linked into main) through the host's libzstd (runtime/ov_zstd.c): the
 # three calls of ZSTD_decompressMultiFrame (main+0xeb380: dctx, dst, capacity, src, size, dict, dict size, ddict) go to
 # the host function on the patch page (+0xff0). main+0xe910c is the file loader's call for a file that fits one read
-# chunk. Until a check run has compared the two decoders on this build, the host function passes every call on to the
-# game's decoder unless zstd_native = 1 is set (ov_zstd.c trusted). The loading threads' stream feed (main+0xf5c80,
-# called at main+0xf5c2c) decodes most of the data and is not replaced yet.
+# chunk. The loading threads decode most of the data through the game's stream feed (main+0xf5c80: state, src, size,
+# ddict), called once per chunk read at main+0xf5c2c: that call goes to the host's stream decoder on the patch page
+# (+0xf80), which takes a stream from its first chunk or leaves it to the game (ov_zstd.c host_stream). Until a check
+# run has compared the two decoders on this build, the host functions pass every call on to the game's decoder unless
+# zstd_native = 1 is set (ov_zstd.c trusted).
 site zstd main e910c  9400089d 9536dfb9   # bl ZSTD_decompressMultiFrame -> page+0xff0
 site zstd main bf72e0 97d3d028 950aa744   # bl ZSTD_decompressMultiFrame -> page+0xff0
 site zstd main f50164 97c66c87 94fd43a3   # bl ZSTD_decompressMultiFrame -> page+0xff0
+site zstd main f5c2c  94000015 9536acd5   # bl the stream feed -> page+0xf80
