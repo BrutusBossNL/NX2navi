@@ -387,12 +387,19 @@ def step_romfs(src, out, jobs):
     dst.mkdir(parents=True, exist_ok=True)
     files = sorted(((rel, ref, src.romfs_size(ref)) for rel, ref in src.romfs), key=lambda e: e[0].encode())
     total = sum(size for _, _, size in files)
+    # What a run that was cut short (Cancel, a full disk, a power cut) left of the image goes first: this run
+    # writes the image anew, and counted as used space its up to 26 GB made a retry on a nearly full disk fail the
+    # check below although the retry needs no more room than the first try.
+    part = dst / 'romfs.bin.part'
+    try:
+        part.unlink(missing_ok=True)
+    except OSError as e:
+        fail(f'cannot remove {part}, left by an earlier run ({e.strerror or e}): close whatever has it open')
     free = shutil.disk_usage(dst).free
     if free < total + (1 << 30):
         fail(f'{dst} needs {total / 1e9:.1f} GB free for the RomFS image, it has {free / 1e9:.1f} GB')
     say(f'  {len(files)} files, {total / 1e9:.1f} GB')
     entries, h, pos, done, t0 = [], hashlib.sha256(), 0, 0, time.time()
-    part = dst / 'romfs.bin.part'
     emit('progress', step='romfs', done=0, total=total, unit='bytes')
 
     def load(e):   # small files are read whole on a worker; big ones are streamed by the writer

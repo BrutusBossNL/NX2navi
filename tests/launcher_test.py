@@ -2313,6 +2313,44 @@ class MakeGameTest(Tmp):
         self.assertIn('windres failed on runtime/nx2navi.rc: windres: preprocessing failed.', err.getvalue())
         self.assertEqual(sorted(p.name for p in obj.iterdir()), ['nx2navi_rc.o'])
 
+    def test_a_cut_romfs_image_does_not_count_as_used_space(self):
+        """The RomFS step removes the romfs.bin.part of a run that was cut short before it measures the free space:
+        on a disk with just enough room for the image, the retry passes the check as the first run did."""
+        import collections
+        mb = 1 << 20
+
+        class Src:
+            romfs = [(f'f{i}.bin', i) for i in range(3)]
+
+            def romfs_size(self, ref):
+                return mb
+
+            def romfs_chunks(self, ref):
+                yield bytes([ref]) * mb
+        budget = 3 * mb + (1 << 30) + mb   # the image, the margin the step asks for, and 1 MB to spare
+        usage = collections.namedtuple('usage', 'total used free')
+
+        def disk_usage(path):   # a disk of that size that holds only the game folder
+            held = sum(f.stat().st_size for f in Path(path).rglob('*') if f.is_file())
+            return usage(budget, held, budget - held)
+        romfs = self.out / 'romfs'
+        romfs.mkdir(parents=True)
+        (romfs / 'romfs.bin.part').write_bytes(bytes(2 * mb))   # what the cut run left
+        with mock.patch.object(self.mg.shutil, 'disk_usage', disk_usage), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.mg.step_romfs(Src(), self.out, 2)
+        self.assertEqual((romfs / 'romfs.bin').stat().st_size, 3 * mb)
+        self.assertFalse((romfs / 'romfs.bin.part').exists())
+        # a disk that is too small even so still stops the step, and says by how much
+        (romfs / 'romfs.bin').unlink()
+        budget -= 2 * mb
+        err = io.StringIO()
+        with mock.patch.object(self.mg.shutil, 'disk_usage', disk_usage), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit):
+            self.mg.step_romfs(Src(), self.out, 2)
+        self.assertIn('GB free for the RomFS image', err.getvalue())
+
     def main_rebuild(self, lift, compile_, *more):
         """make_game.main() --rebuild in this process on self.out, with the given functions in place of the lift and
         the compile. Returns (the SystemExit code or 0, what it printed)."""
@@ -3195,6 +3233,76 @@ class WhilePlayingTest(Tmp):
         a.root.deiconify.assert_called_once()
 
 
+class MemorySettings(dict):
+    """The launcher's settings (launcher/settings.py) without their file."""
+
+    def save(self):
+        pass
+
+
+def mock_app(test, game):
+    """launcher.ui.app.App and a stand-in for its instance, for calling one of its methods without a window: the
+    settings name the game folder, the context and layout are real ones in the test's folder, nothing is staged,
+    no check has run and no message is set. Skips the test without the window toolkit."""
+    try:
+        from launcher.ui.app import App
+    except ImportError as e:
+        test.skipTest(f'no window toolkit: {e}')
+    a = mock.MagicMock()
+    a.settings = MemorySettings({'game_dir': str(game), 'auto_check': False})
+    a.args = mock.Mock(rolled_back='', uninstall=False, continue_update=None)
+    a.ctx = Context(test.layout)
+    test.addCleanup(a.ctx._file.close)
+    a.layout = test.layout
+    a.install_staged.return_value = False
+    a.bg.ready.return_value = None
+    a.bg.staging.return_value = False
+    a.release = a.check = None
+    a.check_error = a.message = ''
+    a.checked_at = 0
+    return App, a
+
+
+class BeginInstallTest(Tmp):
+    def test_a_cut_romfs_image_does_not_block_the_install(self):
+        """Begin Installation removes the romfs.bin.part an install that was cut short left before it measures the
+        free space, so the 31 GB it asks for are not short by the part's size."""
+        import collections
+        game = self.tmp / 'game'
+        part = game / 'romfs' / 'romfs.bin.part'
+        part.parent.mkdir(parents=True)
+        part.write_bytes(b'cut short')
+        usage = collections.namedtuple('usage', 'total used free')
+
+        def disk_usage(path):   # 40 GB free without the part, 20 GB with it
+            return usage(10 ** 12, 0, 20 * 10 ** 9 if part.exists() else 40 * 10 ** 9)
+        App, a = mock_app(self, game)
+        a.settings['dump'] = str(self.tmp / 'game.nup')
+        a.settings['desktop_shortcut'] = False
+        a.game_dir.return_value = str(game)
+        with mock.patch('launcher.ui.app.shutil.disk_usage', disk_usage):
+            App.begin_install(a)
+        self.assertFalse(part.exists())
+        job = a.run_job.call_args[0][0]
+        self.assertIsInstance(job, jobs.InstallJob)
+        self.assertEqual(job.game_dir, str(game))
+
+    def test_the_first_run_screen_counts_a_cut_romfs_image_as_free(self):
+        from launcher.ui import app
+        game = self.tmp / 'game'
+        (game / 'romfs').mkdir(parents=True)
+        self.assertEqual(app.partial_image_gb(game), 0.0)
+        (game / 'romfs' / 'romfs.bin.part').write_bytes(bytes(2500000))
+        self.assertEqual(app.partial_image_gb(game), 0.0025)
+        App, a = mock_app(self, game)
+        a.settings['dump'] = str(self.tmp / 'game.nup')
+        a.game_dir.return_value = str(game)
+        with mock.patch.object(app, 'free_gb', lambda p: 5.0), mock.patch.object(app, 'partial_image_gb', lambda p: 26.0):
+            rows = {r.label: r for r in App.rows_first_run(a) if r.label}
+        self.assertIn('31 GB free', rows['Install Folder'].desc[0])
+        self.assertIn('(31 GB free)', rows['Begin Installation'].desc[0])
+
+
 class StartScriptTest(Tmp):
     """launcher/start.pyw when the version cannot be imported: with a version to go back to it ends with code 86 at
     once and shows no message box, so the stub's six-second wait sees the code and rolls back."""
@@ -3268,23 +3376,7 @@ class UnfinishedUpdateTest(Tmp):
     before still there): the window opens on home and says how to finish, and an update goes on with the game."""
 
     def app(self, game):
-        try:
-            from launcher.ui.app import App
-        except ImportError as e:
-            self.skipTest(f'no window toolkit: {e}')
-        a = mock.MagicMock()
-        a.settings = {'game_dir': str(game), 'auto_check': False}
-        a.args = mock.Mock(rolled_back='', uninstall=False, continue_update=None)
-        a.ctx = Context(self.layout)
-        self.addCleanup(a.ctx._file.close)
-        a.layout = self.layout
-        a.install_staged.return_value = False
-        a.bg.ready.return_value = None
-        a.bg.staging.return_value = False
-        a.release = a.check = None
-        a.check_error = a.message = ''
-        a.checked_at = 0
-        return App, a
+        return mock_app(self, game)
 
     def test_the_window_opens_on_home(self):
         game = made_up_game(self.tmp / 'game', steps=('exefs', 'romfs', 'lift'))

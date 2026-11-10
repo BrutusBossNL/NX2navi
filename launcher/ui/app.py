@@ -140,6 +140,25 @@ def note_exit_in_log(game_dir, text):
         pass
 
 
+def partial_image_gb(game_dir):
+    """The size of what an install that was cut short left of the RomFS image (romfs/romfs.bin.part, up to 26 GB).
+    The next install writes the image anew (tools/make_game.py step_romfs), so that space is the install's to use:
+    the first-run screen counts it as free."""
+    try:
+        return (Path(game_dir) / 'romfs' / 'romfs.bin.part').stat().st_size / 1e9
+    except OSError:
+        return 0.0
+
+
+def drop_partial_image(game_dir):
+    """Removes that file (partial_image_gb), so that it does not count against the free space an install asks
+    for."""
+    try:
+        (Path(game_dir) / 'romfs' / 'romfs.bin.part').unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def drive_of(path):
     return Path(path).anchor.rstrip('\\/') or str(Path(path).parent)
 
@@ -731,7 +750,7 @@ class App:
                          'found in Downloads, Desktop or Documents.',)
         gd = self.game_dir()
         need = 30
-        free = free_gb(gd)
+        free = free_gb(gd) + partial_image_gb(gd)   # Begin Installation removes the partial image (begin_install)
         folder_desc = (f'The game is built into this folder. {free:.0f} GB free on {drive_of(gd)}; the game needs '
                        f'about {need} GB. Select this row to choose another folder.',)
         ready = bool(dump)
@@ -828,6 +847,7 @@ class App:
             self.choose_dump()
             return
         gd = self.game_dir()
+        drop_partial_image(gd)   # before the free space is measured
         if free_gb(gd) < 31 and not (Path(gd) / 'romfs' / 'romfs.bin').is_file():
             self.message = f'{drive_of(gd)} has {free_gb(gd):.0f} GB free; the game needs about 30 GB.'
             self.render()
