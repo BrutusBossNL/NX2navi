@@ -118,9 +118,10 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   are compiled outside the pipeline lock, and one compile serves every thread that needs it. The boot builds the
   pipeline of every compute shader play recorded or the shader preparation listed, but keeps only those of the shaders
   dispatched most recently (`compute-used.bin`, `compute_keep`): the others go into the pipeline cache and are
-  destroyed, and their first dispatch creates them from it. A kept pipeline holds driver memory whether it is used or
-  not, and the list has thousands of compute shaders a session never dispatches (`runtime/vk_pipeline.c`, "compute
-  pipelines the boot keeps").
+  destroyed, and their first dispatch creates them from it. A compute shader of more than half a million SPIR-V words
+  is built ahead only when a run has dispatched it: a pipeline of one holds about 100 MiB of device memory whether it
+  is used or not, also after it is destroyed, and the list has about twenty of them that the game never dispatches
+  (`runtime/vk_pipeline.c`, "compute pipelines the boot keeps").
 - The game's tensor-core upscaler is replaced by a decode-and-scale pass (`vk_tonemap.c`); `vk_fsr.c` runs AMD FSR 1
   (EASU, RCAS) on the present when the window is larger than the picture.
 - HDR (`vk_hdr.c`): the game tonemaps its scene into a float target, upscales it, draws the HUD into a second float
