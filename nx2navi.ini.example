@@ -646,10 +646,12 @@
 # first submission ends when that submission's passes are through, without waiting for the copy back (3 to 4 ms of
 # every frame). 0: the copy back is part of the submission, and the wait covers it.
 # wb_split = 1
-# 1: what the game's shaders write into its memory is copied back from the video card once, and after that only when
-# the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field). 0: copied back at the end of
-# every GPU submission, as before. On Linux it is off unless set here.
-# wb_lazy = 1
+# 0: what the game's shaders write into its memory is copied back from the video card at the end of every GPU
+# submission. 1 (experimental): copied back once, and after that only when the game's CPU code touches it (most of it
+# never is: 66 MiB a frame in Hyrule Field), for about a third more frames a second in open areas. With 1, single
+# frames of the scene can flicker; tell us what you see if you try it. In the settings menu: Experimental FPS boost
+# (Screen tab).
+# wb_lazy = 0
 # 1: the game's flushes of mirrored memory are copied into the mirrors even where the write watch already sees every
 # page the game wrote; 0 (default) copies only the written pages there, which saved 47-57 MiB of copies a frame in
 # Kokiri Forest.

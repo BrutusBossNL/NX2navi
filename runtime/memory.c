@@ -108,7 +108,10 @@ static void unprobe_locked(uint64_t r) {
     plat_dec32(&nprb);
 }
 
-// Lazy write-back (NX2NAVI_WB_LAZY, vk_memory.c "lazy write-back"). What a shader wrote into a mirrored pool used to be
+// Lazy write-back (NX2NAVI_WB_LAZY, default 0, vk_memory.c "lazy write-back"). Off by default: with it on, single
+// frames come out with the whole scene lit differently (brighter, shadows off). The flight recorder's thumbnails of
+// 1,800 presents standing in Hyrule Field show none with it off and 10 to 180 with it on, most when other programs keep
+// the CPU busy; the cause is not found (2026-11-10). What a shader wrote into a mirrored pool is
 // copied back into guest memory at the end of every submission, in case the CPU reads it. Ocarina's CPU does not read
 // most of it: standing in Hyrule Field, 66 MiB a frame went back over PCIe, 7 to 9 ms of each frame's 13 to 15 ms of
 // GPU time, and the write-back probe found no access to it in 40 s. So a range that went back once is armed here: its
@@ -634,11 +637,7 @@ void mem_init(void) {
     if (cfg_bool("NX2NAVI_WB_PROBE")) {   // a diagnosis: off, no access fault reaches probe_fault and nothing is probed
         plat_mem_access_hook(access_fault);
         __atomic_store_n(&prb_on, 1, __ATOMIC_RELEASE);
-#ifdef _WIN32
-    } else if (cfg_bool("NX2NAVI_WB_LAZY")) {   // armed only once the back end can fetch (mem_lazy_enable)
-#else   // the fetch runs inside the access-fault handler, which has not run on this platform yet: only when set
-    } else if (cfg_bool("NX2NAVI_WB_LAZY") && cfg_is_set("NX2NAVI_WB_LAZY")) {
-#endif
+    } else if (cfg_bool("NX2NAVI_WB_LAZY")) {   // off unless set; armed only once the back end can fetch (mem_lazy_enable)
         plat_mem_access_hook(access_fault);
         lz_want = 1;
     }

@@ -2112,7 +2112,7 @@ static void snap_free(void *arg) {   // completion thread: the submission is don
     free(f);
 }
 
-// ---- lazy write-back (NX2NAVI_WB_LAZY, default 1; memory.c "Lazy write-back")
+// ---- lazy write-back (NX2NAVI_WB_LAZY, default 0; memory.c "Lazy write-back")
 // A range a shader wrote goes back to guest memory once and is then armed (vk_gpu_written_back, mem_lazy_arm). While it
 // stays armed, gpu_wrote leaves the later writes of its pages in the mirror: no snapshot, no merge, no copy. When the
 // CPU touches a page, memory.c calls lazy_fetch with the mirror and the imported buffer of the range: a copy of its
