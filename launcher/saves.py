@@ -390,15 +390,49 @@ def _fresh_file(folder, stem, suffix):
     return p
 
 
+NO_SAVE = 'the game has no save yet: play until it saves, then export'
+
+
+def _export_log(game, dest, version, log):
+    """The bug report of a game without a save (it stopped before its first one): NX2navi-log-<date>_<time>-bug-report.zip
+    with the game's latest log, nx2navi.ini and a manifest that counts no save files; import_zip refuses it as a zip
+    without a save. SaveError when the game has written no log either: then there is nothing to report with."""
+    extras = [f for f in (game / 'logs' / 'nx2navi.log', game / 'nx2navi.ini') if f.is_file()]
+    if not extras or extras[0].name != 'nx2navi.log':
+        raise SaveError(NO_SAVE)
+    dest.mkdir(parents=True, exist_ok=True)
+    out = _fresh_file(dest, time.strftime('NX2navi-log-%Y-%m-%d_%H-%M-%S') + '-bug-report', '.zip')
+    tmp = out.with_name(out.name + '.part')
+    manifest = {'format': FORMAT, 'format_version': FORMAT_VERSION, 'game': GAME, 'title_id': _title_hex(),
+                'game_version': GAME_VERSION, 'nx2navi': version,
+                'exported': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'exported_by': 'launcher',
+                'files': 0, 'bug_report': True}
+    try:
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr(MANIFEST, json.dumps(manifest, indent=1) + '\n')
+            for f in extras:
+                z.write(f, REPORT_DIR + f.name)
+        os.replace(tmp, out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    log(f'saves: the game has no save yet; exported {", ".join(f.name for f in extras)} to {out}')
+    return {'path': out, 'files': 0, 'extras': [f.name for f in extras]}
+
+
 def export_save(game, dest=None, bug_report=False, version='', log=print):
     """Write the save the game would load now into one zip in dest (default_export_dir when None), for a bug report
-    or another player. bug_report adds the game's latest log and nx2navi.ini. Never a key file. Returns {'path',
-    'files', 'extras'} (extras: the names of the bug report files that were there)."""
+    or another player. bug_report adds the game's latest log and nx2navi.ini, and still writes those two when the game
+    has no save yet (_export_log): a game that stops before its first save is the one its player wants to report.
+    Never a key file. Returns {'path', 'files', 'extras'} (files 0: no save; extras: the names of the bug report files
+    that were there)."""
     game = Path(game)
-    if not (game / 'profile' / 'account.uid').is_file():
-        raise SaveError('the game has no save yet: play until it saves, then export')
-    account = account_dir(game)
     dest = Path(dest) if dest else default_export_dir()
+    if not (game / 'profile' / 'account.uid').is_file():   # account_dir would make the account: not for an export
+        if bug_report:
+            return _export_log(game, dest, version, log)
+        raise SaveError(NO_SAVE)
+    account = account_dir(game)
     dest.mkdir(parents=True, exist_ok=True)
     stem = time.strftime('NX2navi-save-%Y-%m-%d_%H-%M-%S') + ('-bug-report' if bug_report else '')
     extras = [f for f in (game / 'logs' / 'nx2navi.log', game / 'nx2navi.ini') if bug_report and f.is_file()]
@@ -406,7 +440,9 @@ def export_save(game, dest=None, bug_report=False, version='', log=print):
         # a running game may swap a commit in while its files are read (runtime/fs_host.c swap_in): read again
         current = _newest(game, account)
         if current is None or not _has_file(current):
-            raise SaveError('the game has no save yet: play until it saves, then export')
+            if bug_report:
+                return _export_log(game, dest, version, log)
+            raise SaveError(NO_SAVE)
         files = [rel for rel in _files(current, set()) if not _key_file(rel)]
         out = _fresh_file(dest, stem, '.zip')
         tmp = out.with_name(out.name + '.part')

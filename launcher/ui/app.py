@@ -1050,7 +1050,8 @@ class App:
             Row('value', 'Export Save', out.name or str(out), on=self.export_save, desc=export_desc),
             Row('toggle', 'Add Log and Settings', on=report, get=lambda: bool(self.settings.get('export_with_log')),
                 desc=('On: the zip also holds the game\'s latest log (logs\\nx2navi.log) and its settings '
-                      '(nx2navi.ini), which show what happened and with which settings. Keep it on for a bug report.',
+                      '(nx2navi.ini), which show what happened and with which settings. Keep it on for a bug report: '
+                      'while the game has no save yet, Export Save then writes these two alone.',
                       'Off: the save alone, to give to another player.')),
             Row('value', 'Export To', str(out), on=self.choose_export_dir,
                 desc=(f'Export Save writes into {out}.', 'Select this row to choose another folder.')),
@@ -1088,6 +1089,9 @@ class App:
             else:
                 extra = ' with the game\'s log and settings' if r['extras'] else ''
                 self.export_message = f'Exported {r["files"]} files{extra} to {r["path"]}.'
+                if not r['files']:   # a game that stopped before its first save: the report files alone
+                    self.export_message = (f'The game has no save yet: exported its log and settings alone to '
+                                           f'{r["path"]}.')
                 try:
                     winsys.reveal(r['path'])
                 except OSError:

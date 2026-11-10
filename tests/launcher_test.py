@@ -2554,6 +2554,32 @@ class SaveShareTest(unittest.TestCase):
             saves.export_save(self.game, self.out, log=lambda m: None)   # an account without files
         self.assertEqual(list(self.out.iterdir()), [])
 
+    def test_a_bug_report_without_a_save_holds_the_log_and_settings(self):
+        """A game that stops before its first save: the bug report export writes its log and settings alone."""
+        with self.assertRaises(saves.SaveError):
+            saves.export_save(self.game, self.out, bug_report=True, log=lambda m: None)   # no log either: nothing
+        self.assertFalse(self.out.exists() and list(self.out.iterdir()))
+        self.files(self.game, {'logs/nx2navi.log': b'FATAL: it stopped', 'nx2navi.ini': b'[x]', 'prod.keys': b'secret'})
+        with self.assertRaises(saves.SaveError):
+            saves.export_save(self.game, self.out, log=lambda m: None)   # not a bug report: a save or nothing
+        for account in (False, True):   # a game that never made its account, and an account without files
+            if account:
+                saves.account_dir(self.game).mkdir(parents=True)
+            with self.subTest(account=account):
+                r = saves.export_save(self.game, self.out, bug_report=True, version='0.7.1', log=lambda m: None)
+                self.assertRegex(r['path'].name, r'^NX2navi-log-.*-bug-report( \(\d+\))?\.zip$')   # (2): the same second
+                self.assertEqual((r['files'], r['extras']), (0, ['nx2navi.log', 'nx2navi.ini']))
+                with zipfile.ZipFile(r['path']) as z:
+                    self.assertEqual(sorted(z.namelist()), ['bug-report/nx2navi.ini', 'bug-report/nx2navi.log',
+                                                            'manifest.json'])
+                    self.assertEqual(z.read('bug-report/nx2navi.log'), b'FATAL: it stopped')
+                    m = json.loads(z.read('manifest.json'))
+                    self.assertEqual((m['format'], m['files'], m['bug_report'], m['nx2navi']),
+                                     (saves.FORMAT, 0, True, '0.7.1'))
+                with self.assertRaises(saves.SaveError):   # nobody's save: an import says so and changes nothing
+                    saves.import_zip(self.game_with_save(self.tmp / f'other{account}'), r['path'], log=lambda m: None)
+        self.assertFalse(list(self.out.glob('*.part')))
+
     def test_a_shared_save_replaces_the_save_and_keeps_a_backup(self):
         other = self.game_with_save(self.tmp / 'other')
         shared = saves.export_save(other, self.out, bug_report=True, version='0.6.1', log=lambda m: None)['path']
