@@ -1216,11 +1216,125 @@ static void evo_resume(VkExec *ex) {
     }
 }
 
+// ---- looking ahead for pipelines (NX2NAVI_PIPE_AHEAD, default 1; 0 off)
+// A draw whose pipeline is not there yet waits for its fast link or is skipped until a worker has built it, and the
+// next draw with a new pipeline is only found when the replay reaches it: an area's first frame, or a turn that brings
+// a dozen new materials into view, paid for them one after another (each wait a few milliseconds with the stage
+// libraries in the driver's cache, 100 ms and more without), or showed frames with those draws missing while the
+// workers that could have built them all at once sat idle.
+// The submission is recorded before it is replayed, so what comes after the draw is known. The first draw of a
+// submission that finds a shader or pipeline missing has the rest read here (vk_exec_ahead), from the op after it to
+// the end of the submission's last command buffer: the scan applies the binds that decide a draw's shaders and its
+// shader libraries (program, state objects, vertex attributes, textures and images, render targets, depth clamp) to a
+// copy of the replay state and, at each draw, looks its shaders up as the draw will and names the state to
+// vk_pipeline_hint, which queues the libraries not built yet. Nothing is recorded and no Vulkan object is touched;
+// a shader not in memory is queued for its disk read or translation by the lookup itself. The draws then find their
+// libraries built, or building on several workers at once.
+// What the scan does not follow: the op stream past a wait for another queue's signal (what follows may be held), a
+// change of the texture pool, mesh draws (their pipelines have no libraries), and whatever would take it past
+// AHEAD_NS. Render targets are read from their descriptors (format, view format, sample count), which is what the
+// replay resolves them to unless a target is left out; a guess that misses costs two libraries at most.
+#define AHEAD_NS 3000000ull
+#define AHEAD_OPS 400000u
+static struct {
+    int on, live;                      // on: -1 until read; live: vk_exec_record walks handles[i] now
+    const uint64_t *handles;
+    int n, i;
+    const op_hdr *at[CALL_DEPTH + 1];  // the op being replayed at each call depth
+    int depth;
+    uint64_t seq;                      // the submission scanned last
+    uint64_t scans, ops, cut, ns, max_ns, logged_scans;
+} AH = {.on = -1};
+
+static void ahead_set_rt(VkExec *sx, const p_set_rt *r) {
+    sx->rt = *r;
+    int n = r->n < 0 ? 0 : r->n > 8 ? 8 : r->n, samples = 0;
+    for (int i = 0; i < 8; i++) {
+        const tex_t *t = i < n ? r->color[i] : NULL;
+        sx->pipe.color_fmt[i] = !t ? 0 : r->has_cview[i] && r->cview[i].set_format ? (int32_t)r->cview[i].format : t->d.format;
+        if (t && !samples) samples = t->d.samples > 1 ? t->d.samples : 1;
+    }
+    sx->pipe.depth_fmt = r->depth ? r->depth->d.format : 0;
+    if (r->depth && !samples) samples = r->depth->d.samples > 1 ? r->depth->d.samples : 1;
+    sx->pipe.samples = (uint8_t)(samples ? samples : 1);
+}
+
+void vk_exec_ahead(VkExec *ex) {
+    if (AH.on < 0) {
+        AH.on = cfg_bool("NX2NAVI_PIPE_AHEAD");
+        rt_log("vk: a draw that finds its pipeline missing has the rest of its submission read ahead for the stage "
+               "libraries the later draws need: %s (NX2NAVI_PIPE_AHEAD)", AH.on ? "on" : "off");
+    }
+    if (!AH.on || !AH.live || evo_in || AH.seq == vk_exec_submit_seq) return;
+    AH.seq = vk_exec_submit_seq;
+    uint64_t t0 = kern_now_ns();
+    uint32_t ops = 0;
+    static VkExec sx;   // a copy of the replay state: too large for the stack
+    sx = *ex;
+    vk_exec_ahead_begin();
+    const op_hdr *ret[CALL_DEPTH + 1];
+    int depth = AH.depth, i = AH.i;
+    for (int d = 0; d < depth; d++) ret[d] = AH.at[d];
+    const op_hdr *h = nvn_op_next(AH.at[depth]);
+    for (;;) {
+        if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_) break;   // the replay reports it when it gets there
+        if (++ops >= AHEAD_OPS || (!(ops & 63) && kern_now_ns() - t0 > AHEAD_NS)) {
+            AH.cut++;
+            break;
+        }
+        const void *a = nvn_op_payload(h);
+        int stop = 0;
+        switch (h->op) {
+        case OP_END:
+            if (depth > 0) h = ret[--depth];   // back in the caller: on from the op after its call, below
+            else if (++i < AH.n) {
+                h = nvn_op_first(AH.handles[i]);
+                continue;
+            } else stop = 1;
+            break;
+        case OP_JUMP: h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target; continue;
+        case OP_CALL:
+            if (depth >= CALL_DEPTH) {
+                stop = 1;
+                break;
+            }
+            ret[depth++] = h;
+            h = nvn_op_first(((const p_jump *)a)->target);
+            continue;
+        case OP_WAIT_EVENT: stop = 1; break;
+        case OP_SET_TEX_POOL: stop = ((const p_set_pool *)a)->pool != sx.tex_pool; break;
+        case OP_SET_RT:
+            if (memcmp(&sx.rt, a, sizeof sx.rt)) ahead_set_rt(&sx, a);
+            break;
+        case OP_DEPTH_CLAMP: sx.pipe.depth_clamp = ((const p_flag *)a)->value != 0; break;
+        case OP_RASTER_DISCARD: sx.pipe.raster_discard = ((const p_flag *)a)->value != 0; break;
+        case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_TEX: case OP_BIND_IMG:
+        case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND:
+            vk_exec_ahead_op(&sx, h->op, a);
+            break;
+        default: break;
+        }
+        if (stop) break;
+        h = nvn_op_next(h);
+    }
+    uint64_t ns = kern_now_ns() - t0;
+    AH.scans++, AH.ops += ops, AH.ns += ns;
+    if (ns > AH.max_ns) AH.max_ns = ns;
+    if ((rt_trace & RT_TRACE_PERF) && AH.scans - AH.logged_scans >= 100) {
+        rt_log("perf: looking ahead: %llu scans so far, %.0f ops and %.2f ms each (longest %.2f ms, %llu ended at their "
+               "limit); %llu draws seen, %llu looked up", (unsigned long long)AH.scans, (double)AH.ops / (double)AH.scans,
+               (double)AH.ns / 1e6 / (double)AH.scans, (double)AH.max_ns / 1e6, (unsigned long long)AH.cut,
+               (unsigned long long)vk_exec_ahead_draws, (unsigned long long)vk_exec_ahead_lookups);
+        AH.logged_scans = AH.scans;
+    }
+}
+
 static const op_hdr *walk(VkExec *ex, const op_hdr *h, int depth) {
     for (;;) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
         const void *a = nvn_op_payload(h);
+        AH.at[depth] = h, AH.depth = depth;   // where vk_exec_ahead reads on from
         switch (h->op) {
         case OP_END: return NULL;
         case OP_BEGIN: break;
@@ -1405,7 +1519,9 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
         if (n) cont_push(slot, cont_new(handles, n, 0, NULL)), evo_held++, vk_exec_evt('p', NULL, 0);
     } else {
         evo_queue = evo ? gfx_submit_queue : 0;
+        AH.handles = handles, AH.n = n, AH.live = 1;
         for (int i = 0; i < n; i++) {
+            AH.i = i;
             const op_hdr *stop = walk(ex, nvn_op_first(handles[i]), 0);
             if (!stop) continue;
             cont_push(slot, cont_new(handles, n, i, stop));   // the rest of this submission waits for its signal
@@ -1413,6 +1529,7 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
             vk_exec_evt('h', NULL, 0);
             break;
         }
+        AH.live = 0;
         evo_queue = 0;
     }
     vk_exec_pass_end(ex);

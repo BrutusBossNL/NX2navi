@@ -162,6 +162,14 @@ void vk_exec_noatt_dims(const VkExec *ex, uint32_t *w, uint32_t *h);   // pass s
 // rendered for the first time) was rendered in the previous presented frame (per-frame targets); 0 otherwise, or when
 // the pass has none.
 int vk_exec_targets_recent(VkExec *ex, int any);
+// Looking ahead (vk_exec.c): called by a draw that found its shader or pipeline missing, before it waits or is skipped.
+// The rest of the submission being replayed is read once and the stage libraries of the pipelines its later draws need
+// are queued to the workers (vk_pipeline_hint). vk_exec_ahead_op (vk_exec_draw.c) applies one bind or draw op of that
+// scan to sx, a copy of the replay state; vk_exec_ahead_begin starts a scan there.
+void vk_exec_ahead(VkExec *ex);
+void vk_exec_ahead_begin(void);
+void vk_exec_ahead_op(VkExec *sx, uint32_t op, const void *payload);
+extern uint64_t vk_exec_ahead_draws, vk_exec_ahead_lookups;   // draws the scans saw, and those whose shaders they looked up
 // The current pass's targets with their formats, extents and the frames they were last rendered in (diagnostics).
 void vk_exec_targets_describe(VkExec *ex, char *buf, size_t cap);
 

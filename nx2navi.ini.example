@@ -96,6 +96,16 @@
 # How many milliseconds the draws of one frame may wait, in all, for a missing pipeline to be linked from the shader
 # libraries in the graphics driver's cache before they are dropped (0 to 100; 0: dropped at once, as before).
 # pipe_link_ms = 6
+# When a draw finds its pipeline missing, the rest of the commands the game submitted with it are read ahead and the
+# shader libraries of every other pipeline they will need are built at once on background threads, so the later draws
+# find theirs ready instead of waiting one after another or being left out of a frame. 0: off, as before.
+# pipe_ahead = 1
+# A pipeline whose fragment shader reads the picture it draws into (soft particles, water, some full-screen passes) is
+# linked from the shader libraries like any other. 0: as before, such a draw waits for the whole compile.
+# gpl_feedback = 1
+# The threads that build shader libraries also link the pipelines of draws that were left out of a frame, several at
+# once, instead of one thread linking them one after another while the others build optimised pipelines. 0: as before.
+# pipe_fast_workers = 1
 # The graphics driver's cache of shader libraries is checked at every start and, when it lost them (a driver update,
 # a cache the driver emptied), filled again in the background while the game runs. 0: no check; force: at every start.
 # After two cold starts in a row warming stops being tried on that driver; once its cache can hold the libraries (on
