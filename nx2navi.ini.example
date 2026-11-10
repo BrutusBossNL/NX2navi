@@ -642,7 +642,7 @@
 # wb_split = 1
 # 1: what the game's shaders write into its memory is copied back from the video card once, and after that only when
 # the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field). 0: copied back at the end of
-# every GPU submission, as before.
+# every GPU submission, as before. On Linux it is off unless set here.
 # wb_lazy = 1
 # 1: the game's flushes of mirrored memory are copied into the mirrors even where the write watch already sees every
 # page the game wrote; 0 (default) copies only the written pages there, which saved 47-57 MiB of copies a frame in

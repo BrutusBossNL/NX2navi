@@ -190,6 +190,7 @@ int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64
 uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t off);
 int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t out[][2], int max);
 int mem_lazy_armed(uint64_t a, uint64_t n);
+void mem_lazy_window(int open);
 void mem_lazy_release(uint64_t a, uint64_t n);
 void mem_lazy_report(uint64_t frame, uint64_t skipped);
 int mem_lazy_pick(uint64_t *addr, int max);                // test: addresses of armed pages

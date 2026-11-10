@@ -2115,17 +2115,20 @@ static void snap_free(void *arg) {   // completion thread: the submission is don
 // A range a shader wrote goes back to guest memory once and is then armed (vk_gpu_written_back, mem_lazy_arm). While it
 // stays armed, gpu_wrote leaves the later writes of its pages in the mirror: no snapshot, no merge, no copy. When the
 // CPU touches a page, memory.c calls lazy_fetch with the mirror and the imported buffer of the range: a copy of its
-// own, sent after every submission handed over so far (the held ones first), and waited for. A submission that is
-// still being recorded when that happens has already left its write out, so vk_mem_mirror_end copies the ranges it
-// skipped that are no longer armed (lz_skip).
+// own, sent after every part handed over so far (the held ones first), and waited for. The part that is still being
+// recorded when that happens has already left its writes out: at its end (lazy_part_check, from vk_mem_mirror_end or
+// from the prologue of a part split off earlier) it writes back, as ever, what it skipped and finds no longer armed;
+// the snapshot for that merge is taken in the part's own prologue, before its GPU work. From that check to the part's
+// hand-over (vk_mem_lazy_handed) memory.c's window keeps a fault from releasing a range unseen.
 static VkCommandPool lz_pool;
 static VkCommandBuffer lz_cb;
 static VkFence lz_fence;
 static volatile int32_t lz_state;   // 0 not asked, 1 on, 2 off
 static PlatMutex lz_init_lock = PLAT_MUTEX_INIT;
-typedef struct { PoolRec *r; uint64_t off, size; } LzSkip;
-static LzSkip *lz_skip;             // replay: what this submission left in the mirror
+typedef struct { VkMemSpan sp; uint64_t size; int shader; } LzSkip;
+static LzSkip *lz_skip;             // replay: what the part being recorded left in the mirror
 static int lz_nskip, lz_cskip;
+static int lz_win;                  // replay: the part's window is open (lazy_part_check)
 static uint64_t lz_skipped;         // replay: bytes left in the mirror since the last log line
 
 static void mbarrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds,
@@ -2206,11 +2209,36 @@ static void gpu_wrote(const VkMemSpan *sp, uint64_t size, int shader) {
         }
         if (i < k) {
             if (lz_nskip == lz_cskip) grow((void **)&lz_skip, &lz_cskip, sizeof *lz_skip);
-            lz_skip[lz_nskip++] = (LzSkip){r, sp->offset + (lo - g0), hi - lo};
+            LzSkip k = {*sp, hi - lo, shader};
+            k.sp.offset = sp->offset + (lo - g0);
+            lz_skip[lz_nskip++] = k;
             lz_skipped += hi - lo;
         }
         run = hi;
     }
+}
+
+// The end of the part being recorded: what it left in the mirror for a range that is no longer armed (the CPU touched
+// it meanwhile) is written back after all. Opens memory.c's window, which vk_mem_lazy_handed closes.
+static void lazy_part_check(void) {
+    if (lz_win || !lz_nskip) return;
+    mem_lazy_window(1);
+    lz_win = 1;
+    for (int i = 0; i < lz_nskip; i++) {
+        const PoolRec *r = lz_skip[i].sp.pool;
+        if (!mem_lazy_armed(r->import_lo + lz_skip[i].sp.offset, lz_skip[i].size))
+            gpu_wrote_range(&lz_skip[i].sp, lz_skip[i].size, lz_skip[i].shader);
+    }
+}
+
+// vk_sync.c, before a part's prologue is recorded: the check for a part that was split off (the last part's ran in
+// vk_mem_mirror_end already).
+void vk_mem_lazy_part_end(void) { lazy_part_check(); }
+
+// vk_sync.c, once the part is held or handed to the queue: a fetch from here on has its writes.
+void vk_mem_lazy_handed(void) {
+    lz_nskip = 0;
+    if (lz_win) mem_lazy_window(0), lz_win = 0;
 }
 
 static void gpu_wrote_range(const VkMemSpan *sp, uint64_t size, int shader) {
@@ -2482,12 +2510,7 @@ int vk_mem_mirror_wb_pending(void) { return vk_mirror_on && (nsnl || nwbl); }
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     if (!vk_mirror_on) return 0;
     int rec = 0;
-    // What this submission left in the mirror for a range that was armed then and is not now (the CPU touched it while
-    // the submission was recorded): its bytes go down after all, as a copy.
-    for (int i = 0; i < lz_nskip; i++)
-        if (!mem_lazy_armed(lz_skip[i].r->import_lo + lz_skip[i].off, lz_skip[i].size))
-            range_add(&wbl, &nwbl, &cwbl, lz_skip[i].r, lz_skip[i].off, lz_skip[i].size);
-    lz_nskip = 0;
+    lazy_part_check();   // before the merges are recorded: what the last part skipped and has to write back after all
     if (nsnl) {
         // the merge reads the mirror the submission's shaders wrote and writes the imported buffers
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,

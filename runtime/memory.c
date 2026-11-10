@@ -119,6 +119,13 @@ static void unprobe_locked(uint64_t r) {
 // being touched), written back every submission as before. Every thaw (before the kernel writes or reads guest
 // memory, and before mapping changes) releases the armed ranges of its regions the same way.
 // A region with armed pages is not frozen (freeze_locked wants every page read-write), and a frozen one is not armed.
+// A fetch brings what the GPU work handed over so far wrote. The part of a submission that is being recorded has left
+// its writes out as well, and makes up for it when it finds a range it skipped no longer armed (vk_memory.c
+// lazy_part_check). Between that check and the part's hand-over a release would be seen by neither side, so the
+// replay opens a window there (mem_lazy_window) and a fault on an armed page waits for it to close: the fetch then
+// has the part's writes. Only a fault of the replay thread itself, a wait of 20 ms, or a release by a thaw goes ahead
+// inside the window (lz_gaps counts the faults): that part's writes to the range then reach guest memory with the
+// range's next write-back.
 typedef struct { uint64_t lo, hi, h0, h1; int64_t delta; uint8_t stale; } LzSeg;   // pages [lo, hi); buffer offset = address + delta
 static LzSeg *lzs;                      // frz_lock
 static int lz_n, lz_cap;                // frz_lock
@@ -129,7 +136,8 @@ static volatile int32_t lz_on;
 static int lz_want;                     // the setting, read in mem_init
 static void (*lz_fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size);
 // frz_lock: since the last report: faults by a read, by a write, other releases, fetches, their bytes and time
-static uint64_t lz_faults[2], lz_other, lz_fetches, lz_fetch_bytes, lz_fetch_ns;
+static uint64_t lz_faults[2], lz_other, lz_fetches, lz_fetch_bytes, lz_fetch_ns, lz_gaps;
+static volatile uint32_t lz_win_tid;    // the replay thread's id while its part is between check and hand-over; 0 else
 
 static void lazy_flags_locked(uint64_t lo, uint64_t hi) {
     for (uint64_t r = lo >> FRZ_SHIFT; r <= (hi - 1) >> FRZ_SHIFT; r++) {
@@ -290,14 +298,40 @@ int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64
     return 1;
 }
 
+// Opens (under frz_lock, so no release is half done) or closes the window of the replay's part.
+void mem_lazy_window(int open) {
+    if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED)) return;
+    if (!open) {
+        __atomic_store_n(&lz_win_tid, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    plat_mutex_lock(&frz_lock);
+    __atomic_store_n(&lz_win_tid, plat_thread_id(), __ATOMIC_RELEASE);
+    plat_mutex_unlock(&frz_lock);
+}
+
 static int lazy_fault(uint64_t a, int write) {
     if (a >= RT_ADDRESS_LIMIT || !__atomic_load_n(&lzr[a >> FRZ_SHIFT], __ATOMIC_ACQUIRE)) return 0;
-    int hit = 0;
-    plat_mutex_lock(&frz_lock);
-    for (int i = 0; i < lz_n && !hit; i++)
-        if (a >= lzs[i].lo && a < lzs[i].hi) lazy_drop_locked(i, write != 0), hit = 1;
-    plat_mutex_unlock(&frz_lock);
-    return hit;
+    uint32_t me = plat_thread_id();
+    for (int tries = 0;; tries++) {
+        plat_mutex_lock(&frz_lock);
+        int i = 0;
+        while (i < lz_n && !(a >= lzs[i].lo && a < lzs[i].hi)) i++;
+        if (i == lz_n) {
+            plat_mutex_unlock(&frz_lock);
+            return 0;
+        }
+        uint32_t w = __atomic_load_n(&lz_win_tid, __ATOMIC_ACQUIRE);
+        if (w && w != me && tries < 400) {   // up to 20 ms: after the hand-over the fetch has that part's writes
+            plat_mutex_unlock(&frz_lock);
+            plat_wait_ns(50000);
+            continue;
+        }
+        if (w) lz_gaps++;
+        lazy_drop_locked(i, write != 0);
+        plat_mutex_unlock(&frz_lock);
+        return 1;
+    }
 }
 
 // Test (NX2NAVI_WB_LAZY_TOUCH): the first addresses of up to max armed segments, another set each call, for a caller
@@ -318,15 +352,16 @@ void mem_lazy_report(uint64_t frame, uint64_t skipped) {
     if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED)) return;
     plat_mutex_lock(&frz_lock);
     uint64_t bytes = 0, fr = lz_faults[0], fw = lz_faults[1], other = lz_other, nf = lz_fetches, fb = lz_fetch_bytes,
-             fns = lz_fetch_ns;
+             fns = lz_fetch_ns, gaps = lz_gaps;
     int n = lz_n;
     for (int i = 0; i < lz_n; i++) bytes += lzs[i].hi - lzs[i].lo;
-    lz_faults[0] = lz_faults[1] = lz_other = lz_fetches = lz_fetch_bytes = lz_fetch_ns = 0;
+    lz_faults[0] = lz_faults[1] = lz_other = lz_fetches = lz_fetch_bytes = lz_fetch_ns = lz_gaps = 0;
     plat_mutex_unlock(&frz_lock);
     rt_log("mem: lazy write-back at frame %llu: %d ranges armed, %.1f MiB; since the last line %.1f MiB left in the "
-           "mirror, %llu read and %llu write faults, %llu other releases, %llu fetches of %.1f MiB in %.2f ms",
-           (unsigned long long)frame, n, bytes / 1048576.0, skipped / 1048576.0, (unsigned long long)fr,
-           (unsigned long long)fw, (unsigned long long)other, (unsigned long long)nf, fb / 1048576.0, fns / 1e6);
+           "mirror, %llu read and %llu write faults (%llu inside a part's window), %llu other releases, %llu fetches of "
+           "%.1f MiB in %.2f ms", (unsigned long long)frame, n, bytes / 1048576.0, skipped / 1048576.0,
+           (unsigned long long)fr, (unsigned long long)fw, (unsigned long long)gaps, (unsigned long long)other,
+           (unsigned long long)nf, fb / 1048576.0, fns / 1e6);
 }
 
 // frz_lock held exclusively. why: 1 a write fault, 2 mem_thaw (holds the region thawed), 3 a mapping change here.
@@ -583,7 +618,11 @@ void mem_init(void) {
     if (cfg_bool("NX2NAVI_WB_PROBE")) {   // a diagnosis: off, no access fault reaches probe_fault and nothing is probed
         plat_mem_access_hook(access_fault);
         __atomic_store_n(&prb_on, 1, __ATOMIC_RELEASE);
+#ifdef _WIN32
     } else if (cfg_bool("NX2NAVI_WB_LAZY")) {   // armed only once the back end can fetch (mem_lazy_enable)
+#else   // the fetch runs inside the access-fault handler, which has not run on this platform yet: only when set
+    } else if (cfg_bool("NX2NAVI_WB_LAZY") && cfg_is_set("NX2NAVI_WB_LAZY")) {
+#endif
         plat_mem_access_hook(access_fault);
         lz_want = 1;
     }
