@@ -84,6 +84,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_ANISO] = "Texture filtering",
     [UI_MENU_ANISO_DESC] = "Anisotropic filtering of surface textures: ground, roads and walls seen at a shallow angle stay sharp into the distance instead of blurring. Game: the level the game asks for, as on the Switch.",
     [UI_MENU_ANISO_GAME] = "Game",
+    [UI_MENU_TEX_DETAIL] = "Texture detail",
+    [UI_MENU_TEX_DETAIL_DESC] = "Sharpness of large surface textures. Reduced and Low leave out their largest versions, so that an area fits the video memory of 6 and 8 GB cards; only surfaces seen up close look softer. Automatic picks by the card's video memory.",
+    [UI_MENU_TEX_DETAIL_AUTO] = "Automatic: %s",
+    [UI_MENU_TEX_DETAIL_FULL] = "Full", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduced", [UI_MENU_TEX_DETAIL_LOW] = "Low",
     [UI_MENU_FPS_BOOST] = "Experimental FPS boost",
     [UI_MENU_FPS_BOOST_DESC] = "What the game's shaders write into its memory is copied back from the video card only "
                                "when the game's own code needs it, instead of after every step of a frame. About a "
@@ -648,6 +652,10 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_ANISO] = "Фильтрация текстур",
     [UI_MENU_ANISO_DESC] = "Анизотропная фильтрация текстур поверхностей: земля, дороги и стены под острым углом остаются чёткими вдали, а не размываются. Игра: уровень, который запрашивает игра, как на Switch.",
     [UI_MENU_ANISO_GAME] = "Игра",
+    [UI_MENU_TEX_DETAIL] = "Детализация текстур",
+    [UI_MENU_TEX_DETAIL_DESC] = "Чёткость больших текстур поверхностей. «Сниженная» и «Низкая» не загружают их самые крупные версии, чтобы область помещалась в видеопамять карт на 6 и 8 ГБ; мягче выглядят только поверхности вблизи. «Авто» выбирает по объёму видеопамяти.",
+    [UI_MENU_TEX_DETAIL_AUTO] = "Авто: %s",
+    [UI_MENU_TEX_DETAIL_FULL] = "Полная", [UI_MENU_TEX_DETAIL_REDUCED] = "Сниженная", [UI_MENU_TEX_DETAIL_LOW] = "Низкая",
     [UI_MENU_FPS_BOOST] = "Экспериментальное ускорение FPS",
     [UI_MENU_FPS_BOOST_DESC] = "То, что шейдеры игры записывают в её память, копируется с видеокарты обратно только "
                                "тогда, когда это нужно коду самой игры, а не после каждого этапа кадра. Примерно на "
@@ -1458,6 +1466,13 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
                            "ângulo raso continuam nítidos ao longe em vez de borrar. Jogo: o nível que o jogo pede, "
                            "como no Switch.",
     [UI_MENU_ANISO_GAME] = "Jogo",
+    [UI_MENU_TEX_DETAIL] = "Detalhe das texturas",
+    [UI_MENU_TEX_DETAIL_DESC] = "Nitidez das texturas grandes de superfície. Reduzido e Baixo deixam de fora as versões "
+                                "maiores delas, para que uma área caiba na memória de vídeo de placas de 6 e 8 GB; só as "
+                                "superfícies vistas de perto ficam mais suaves. Automático escolhe pela memória de vídeo "
+                                "da placa.",
+    [UI_MENU_TEX_DETAIL_AUTO] = "Automático: %s",
+    [UI_MENU_TEX_DETAIL_FULL] = "Completo", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduzido", [UI_MENU_TEX_DETAIL_LOW] = "Baixo",
     [UI_MENU_FPS_BOOST] = "Aumento de FPS experimental",
     [UI_MENU_FPS_BOOST_DESC] = "O que os shaders do jogo escrevem na memória dele só é copiado de volta da placa de "
                                "vídeo quando o próprio código do jogo precisa, em vez de após cada etapa do quadro. "
@@ -2142,6 +2157,10 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_ANISO] = "纹理过滤",
     [UI_MENU_ANISO_DESC] = "表面纹理的各向异性过滤：以小角度看到的地面、道路和墙壁在远处依然清晰，而不会模糊。游戏：使用游戏请求的级别，与 Switch 上相同。",
     [UI_MENU_ANISO_GAME] = "游戏",
+    [UI_MENU_TEX_DETAIL] = "纹理细节",
+    [UI_MENU_TEX_DETAIL_DESC] = "大型表面纹理的清晰度。“降低”和“低”不加载它们最大的版本，使一个区域能放进 6 GB 和 8 GB 显卡的显存；只有近处的表面看起来略微柔和。“自动”根据显卡的显存选择。",
+    [UI_MENU_TEX_DETAIL_AUTO] = "自动：%s",
+    [UI_MENU_TEX_DETAIL_FULL] = "完整", [UI_MENU_TEX_DETAIL_REDUCED] = "降低", [UI_MENU_TEX_DETAIL_LOW] = "低",
     [UI_MENU_FPS_BOOST] = "实验性帧率提升",
     [UI_MENU_FPS_BOOST_DESC] = "游戏着色器写入其内存的数据，只有在游戏自身的代码需要时才从显卡复制回来，而不是在每帧的每个阶段之后都"
                                "复制。在大型开放区域中帧率提高约三分之一。实验性功能：开启后个别帧可能闪烁。默认关闭。",
