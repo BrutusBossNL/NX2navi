@@ -1215,6 +1215,29 @@ def _nest(flat):
     return tree
 
 
+def made_up_game(out, steps=('exefs', 'romfs', 'lift', 'compile', 'shaders'), exe=True, kit='0.6.1'):
+    """A game folder as tools/make_game.py leaves it, made up without game files: an ExeFS whose main is a header
+    with the game's build id, a RomFS image of zeros, the exe unless exe is False, and a state.json in which the
+    game-file steps are current and every other step named has the key of an earlier kit."""
+    import make_game
+    out = Path(out)
+    for d in ('exefs', 'romfs', 'build-cache'):
+        (out / d).mkdir(parents=True, exist_ok=True)
+    main = bytearray(0x100)
+    main[:4], main[0x40:0x50] = b'NSO0', bytes.fromhex(make_game.MAIN_BUILD_ID)
+    for n in make_game.EXEFS_FILES:
+        (out / 'exefs' / n).write_bytes(bytes(main) if n == 'main' else b'x' * 64)
+    (out / 'romfs' / 'romfs.bin').write_bytes(bytes(16))
+    (out / 'romfs' / 'index.json').write_text('{}')
+    if exe:
+        (out / 'ocarina.exe').write_bytes(b'MZ')
+    ident = 'nup X 1 1'
+    keys = {s: f'{s}-1|{ident}' if s in ('exefs', 'romfs') else f'old-{s}' for s in steps}
+    (out / 'build-cache' / 'state.json').write_text(json.dumps(
+        {'version': make_game.STATE_VERSION, 'input': ident, 'kit': kit, 'steps': keys}))
+    return out
+
+
 # Stands in for windres.exe: records its arguments, working directory and temporary folder, opens the .rc and the
 # files it names from the working directory as windres does, and leaves two temporary files behind as windres does.
 FAKE_WINDRES = r'''
@@ -2290,6 +2313,42 @@ class MakeGameTest(Tmp):
         self.assertIn('windres failed on runtime/nx2navi.rc: windres: preprocessing failed.', err.getvalue())
         self.assertEqual(sorted(p.name for p in obj.iterdir()), ['nx2navi_rc.o'])
 
+    def main_rebuild(self, lift, compile_, *more):
+        """make_game.main() --rebuild in this process on self.out, with the given functions in place of the lift and
+        the compile. Returns (the SystemExit code or 0, what it printed)."""
+        buf = io.StringIO()
+        argv = ['make_game.py', '--rebuild', '--out', str(self.out), '--msys', str(self.msys), *more]
+        with mock.patch.object(self.mg, 'step_lift', lift), mock.patch.object(self.mg, 'step_compile', compile_), \
+                mock.patch.object(self.mg, 'keep_awake', lambda: None), mock.patch.object(sys, 'argv', argv), \
+                contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            try:
+                self.mg.main()
+                return 0, buf.getvalue()
+            except SystemExit as e:
+                return e.code, buf.getvalue()
+
+    def test_an_update_that_stops_in_the_compile_keeps_the_game(self):
+        """An update whose lift ran again drops the compile step's record before the compile runs. When the compile
+        then stops, the folder still holds the exe of the build before and the unpacked game files: the launcher
+        counts it as installed (build.installed), not as a folder to install into with the dump."""
+        made_up_game(self.out)
+        self.assertEqual(build.built_version(self.out), '0.6.1')
+
+        def stop(*a, **k):
+            self.mg.fail('3 files did not compile')
+        code, _ = self.main_rebuild(lambda out, cache: None, stop)
+        self.assertEqual(code, 1)
+        st = json.loads((self.out / 'build-cache' / 'state.json').read_text())
+        self.assertEqual(sorted(st['steps']), ['exefs', 'lift', 'romfs'])
+        self.assertEqual(build.built_version(self.out), '')   # no finished build on record
+        self.assertTrue(build.can_rebuild(self.out))
+        self.assertTrue(build.installed(self.out))
+        (self.out / 'ocarina.exe').unlink()                  # a first install that stopped there has nothing to play
+        self.assertFalse(build.installed(self.out))
+        self.assertFalse(build.installed(''))
+        self.assertFalse(build.installed(None))
+        self.assertFalse(build.installed(self.tmp / 'no such folder'))
+
 
 # ---------------------------------------------------------------- jobs
 
@@ -2356,6 +2415,20 @@ class JobTest(Tmp):
         self.assertEqual(j.result, 'failed')
         self.assertIn('1.1.1', j.error)
         self.assertEqual(j.step('check').state, jobs.FAILED)
+
+    def test_an_install_goes_on_from_the_unpacked_game_files(self):
+        """Begin Installation into a folder whose game files an earlier run unpacked builds on from them (--rebuild
+        for this processor's level), so a moved or deleted dump is not asked for; without them it reads the dump."""
+        ctx = self.make_ctx('ok')
+        game = self.tmp / 'game'
+        first = jobs.InstallJob(ctx, self.tmp / 'g.nup', game).args()
+        self.assertEqual(first[:2], ['--nup', str(self.tmp / 'g.nup')])
+        made_up_game(game, steps=('exefs', 'romfs'), exe=False)
+        again = jobs.InstallJob(ctx, self.tmp / 'g.nup', game).args()
+        self.assertEqual(again[:2], ['--rebuild', '--retune'])
+        self.assertNotIn('--nup', again)
+        (game / 'romfs' / 'romfs.bin').unlink()   # the image is gone: only the dump brings it back
+        self.assertEqual(jobs.InstallJob(ctx, self.tmp / 'g.nup', game).args()[0], '--nup')
 
 
 # ---------------------------------------------------------------- the icon
@@ -3120,6 +3193,60 @@ class WhilePlayingTest(Tmp):
         with mock.patch('launcher.ui.app.saves.game_running', return_value=False):
             App.watch_game(a)
         a.root.deiconify.assert_called_once()
+
+
+class UnfinishedUpdateTest(Tmp):
+    """A game whose last update stopped in the compile (state.json without the compile step, the exe of the build
+    before still there): the window opens on home and says how to finish, and an update goes on with the game."""
+
+    def app(self, game):
+        try:
+            from launcher.ui.app import App
+        except ImportError as e:
+            self.skipTest(f'no window toolkit: {e}')
+        a = mock.MagicMock()
+        a.settings = {'game_dir': str(game), 'auto_check': False}
+        a.args = mock.Mock(rolled_back='', uninstall=False, continue_update=None)
+        a.ctx = Context(self.layout)
+        self.addCleanup(a.ctx._file.close)
+        a.layout = self.layout
+        a.install_staged.return_value = False
+        a.bg.ready.return_value = None
+        a.bg.staging.return_value = False
+        a.release = a.check = None
+        a.check_error = a.message = ''
+        a.checked_at = 0
+        return App, a
+
+    def test_the_window_opens_on_home(self):
+        game = made_up_game(self.tmp / 'game', steps=('exefs', 'romfs', 'lift'))
+        App, a = self.app(game)
+        App.start(a)
+        a.show.assert_called_once_with('home')
+        a.find_dumps.assert_not_called()
+        (game / 'ocarina.exe').unlink()   # nothing to play: an install that never finished asks for the dump
+        App, a = self.app(game)
+        App.start(a)
+        a.show.assert_called_once_with('first_run')
+
+    def test_an_update_goes_on_with_the_game(self):
+        game = made_up_game(self.tmp / 'game', steps=('exefs', 'romfs', 'lift'))
+        App, a = self.app(game)
+        a.args.continue_update = '0.6.1'
+        App.start(a)
+        job = a.run_job.call_args[0][0]
+        self.assertIsInstance(job, jobs.ContinueUpdateJob)
+        self.assertEqual(job.game_dir, str(game))   # not '', which skips the rebuild with "No game yet"
+
+    def test_home_says_how_to_finish(self):
+        game = made_up_game(self.tmp / 'game', steps=('exefs', 'romfs', 'lift'))
+        App, a = self.app(game)
+        rows = {r.label: r for r in App.rows_home(a) if r.label}
+        self.assertEqual(rows['Rebuild the Game'].value, 'Not Finished')
+        self.assertTrue(any('Rebuild the Game finishes it' in d and 'dump is not needed' in d for d in rows['Play'].desc))
+        made_up_game(game)   # a finished build of an earlier version
+        rows = {r.label: r for r in App.rows_home(a) if r.label}
+        self.assertEqual(rows['Rebuild the Game'].value, 'Built with 0.6.1')
 
 
 class WindowTest(Tmp):

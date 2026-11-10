@@ -301,9 +301,18 @@ class InstallJob(Job):
                                'scan', 'ready'])
         self.dump, self.game_dir = str(dump), str(game_dir)
 
+    def args(self):
+        """make_game.py's arguments. A game folder whose game files an earlier run already unpacked and checked
+        (build.can_rebuild, build.unpacked) is built on from those, for this processor's level as a first build is:
+        the dump is not read again, so an install that stopped after the RomFS image goes on although the dump
+        was moved or deleted since, and the 26 GB image is not packed a second time."""
+        if build.can_rebuild(self.game_dir) and build.unpacked(self.game_dir):
+            return build.rebuild_args(self.ctx.layout, self.game_dir, retune=True)
+        return build.install_args(self.ctx.layout, self.dump, self.game_dir)
+
     def run(self):
         self.ensure_tools('tools')
-        self.make_game(build.install_args(self.ctx.layout, self.dump, self.game_dir),
+        self.make_game(self.args(),
                        {s: s for s in ('check', 'exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts', 'scan')})
         for sid in ('shaders', 'prompts', 'scan'):
             if self.step(sid) and self.step(sid).state == PENDING:

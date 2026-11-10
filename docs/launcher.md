@@ -240,7 +240,11 @@ The stub swaps `python.next` in while no Python runs, then starts the new versio
      objects of 0.5.0 and earlier); Rebuild the Game compiles it for this processor's (`--retune`), and runs the
      compile step for that even when nothing else changed (`retune_due`).
 6. **Swap In the New Build**: lld links `ocarina.exe.new`, which replaces `ocarina.exe` only once it is complete. A
-   failed rebuild leaves the old build playable; Rebuild the Game tries again.
+   failed rebuild leaves the old build playable; Rebuild the Game tries again. A rebuild that lifted again and then
+   stopped has no finished compile on record (`build.built_version` is empty), but the old exe and the unpacked game
+   files are there: the launcher still counts the game as installed (`build.installed`), opens on home, where
+   Rebuild the Game reads "Not Finished", and never asks for the dump again. Begin Installation into a folder whose
+   game files are already unpacked builds on from them as well (`jobs.InstallJob.args`).
 7. **Prepare the Shaders** is skipped once shaders were prepared before (`shader-prepared.bin`): the game keeps using
    them and translates them again with the new translator in the background (`NX2NAVI_SHADER_CARRY`). With
    `shader_carry = 0`, or nothing prepared yet, the step prepares them all as at the install.

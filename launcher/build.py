@@ -151,3 +151,24 @@ def built_version(game_dir):
 def can_rebuild(game_dir):
     st = build_state(game_dir)
     return st.get('version') == 2 and all(s in st.get('steps', {}) for s in ('exefs', 'romfs'))
+
+
+def unpacked(game_dir):
+    """True when the game files a rebuild reads are in the game folder (make_game.py BuiltSource names the same
+    ones): the unpacked ExeFS, the RomFS image and its index."""
+    gd = str(game_dir)
+    return all(os.path.isfile(os.path.join(gd, *parts)) for parts in
+               (('exefs', 'main'), ('romfs', 'romfs.bin'), ('romfs', 'index.json')))
+
+
+def installed(game_dir):
+    """True when the game folder holds a game the player can start: a finished build, or the exe of the last
+    finished build beside a build that stopped later. make_game.py drops a step's record when a step before it
+    runs again, so an update that lifted again and then stopped in the compile (an error, Cancel, a power cut)
+    leaves state.json without `compile` and built_version says '': the old exe is still there and playable, and
+    a rebuild continues from the unpacked game files without the dump (can_rebuild)."""
+    if not game_dir:
+        return False
+    if built_version(game_dir):
+        return True
+    return os.path.isfile(os.path.join(str(game_dir), 'ocarina.exe')) and can_rebuild(game_dir)

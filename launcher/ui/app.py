@@ -653,9 +653,11 @@ class App:
         elif a.continue_update is not None and not a.rolled_back:
             # after a rollback the stub passes the failed version's --continue-update on to this one: the game was
             # never rebuilt for the new version, so there is nothing to finish, and home tells why the version is back
-            self.run_job(jobs.ContinueUpdateJob(self.ctx, gd if gd and build.built_version(gd) else '',
+            self.run_job(jobs.ContinueUpdateJob(self.ctx, gd if build.installed(gd) else '',
                                                 a.continue_update, self.settings.get('dump')), 'home')
-        elif gd and build.built_version(gd):
+        elif build.installed(gd):
+            # also a game whose last update stopped in the compile (build.installed): home, where Play starts the
+            # build from before the update and Rebuild the Game finishes it, not the first-run screen and its dump
             self.show('home')
             self.after_update_notice()
             if self.install_staged('a staged update waited for the launcher to start'):
@@ -870,11 +872,17 @@ class App:
             upd = Row('value', 'Updates', f'Version {mine}', 'normal', big=True, icon='refresh',
                       on=lambda: self.check_now(force=True),
                       desc=(f'You have NX2navi {mine}. Select this row to look for a new version.',))
-        rebuild_value = f'Built with {versions.display(built)}' if built else 'Not built'
+        # an update that stopped in the compile left no finished build on record, but the exe of the build before it
+        unfinished = not built and build.installed(gd)
+        rebuild_value = (f'Built with {versions.display(built)}' if built else
+                         'Not Finished' if unfinished else 'Not built')
         rebuild_style = 'normal' if versions.display(built) == mine else 'salmon'
         play_desc = ('Start Ocarina of Time. The launcher steps aside while you play and comes back when you quit.',)
         if built and versions.display(built) != mine:
             play_desc += (f'The game was built with {versions.display(built)}. Rebuild the Game brings it to {mine}.',)
+        elif unfinished:
+            play_desc += (f'The last rebuild of the game did not finish, so Play starts the build from before it. '
+                          f'Rebuild the Game finishes it and brings the game to {mine}; your dump is not needed.',)
         if staged and self.settings.get('auto_install'):
             play_desc += (f'NX2navi {staged["version"]} is downloaded and installs after you quit the game.',)
         if self.message:
