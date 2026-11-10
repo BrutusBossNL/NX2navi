@@ -1006,11 +1006,15 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 // SDL), then goes to the crash hook (main.c), which reports it and ends the process. Without a crash hook the fault
 // gets the default action. Runs on the thread's signal stack.
 static int (*fault_hook)(uint64_t addr);
+static int (*access_hook)(uint64_t addr, int write, uint64_t ip);   // every read or write fault, before fault_hook
 static void (*crash_fn)(const PlatCrash *c);
 
 static void fault_handler(int sig, siginfo_t *si, void *uc) {
     ucontext_t *u = uc;
     long err = u->uc_mcontext.gregs[REG_ERR];
+    if (sig == SIGSEGV && access_hook && !(err & 16) &&
+        access_hook((uint64_t)(uintptr_t)si->si_addr, (err & 2) != 0, (uint64_t)u->uc_mcontext.gregs[REG_RIP]))
+        return;
     if (sig == SIGSEGV && fault_hook && (err & 2) && fault_hook((uint64_t)(uintptr_t)si->si_addr)) return;
     uintptr_t rip = (uintptr_t)u->uc_mcontext.gregs[REG_RIP];
     Dl_info at, self;
@@ -1047,6 +1051,11 @@ static void fault_install(void) {
 
 void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
     fault_hook = fn;
+    fault_install();
+}
+
+void plat_mem_access_hook(int (*fn)(uint64_t addr, int write, uint64_t ip)) {
+    access_hook = fn;
     fault_install();
 }
 

@@ -807,14 +807,22 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 }
 
 static int (*fault_hook)(uint64_t addr);
+static int (*access_hook)(uint64_t addr, int write, uint64_t ip);
 
-// A write access violation (ExceptionInformation[0] == 1) goes to the hook; registered first, before the crash handler.
+// A read or write access violation (ExceptionInformation[0] 0 or 1) goes to the access hook when there is one, then a
+// write to the write-fault hook; registered first, before the crash handler.
 static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *ep) {
     const EXCEPTION_RECORD *er = ep->ExceptionRecord;
-    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2 || er->ExceptionInformation[0] != 1)
+    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2 || er->ExceptionInformation[0] > 1)
         return EXCEPTION_CONTINUE_SEARCH;
-    return fault_hook((uint64_t)er->ExceptionInformation[1]) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+    int write = er->ExceptionInformation[0] == 1;
+    uint64_t addr = (uint64_t)er->ExceptionInformation[1];
+    if (access_hook && access_hook(addr, write, (uint64_t)(uintptr_t)er->ExceptionAddress)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (!write) return EXCEPTION_CONTINUE_SEARCH;
+    return fault_hook(addr) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
+
+void plat_mem_access_hook(int (*fn)(uint64_t addr, int write, uint64_t ip)) { access_hook = fn; }
 
 void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
     fault_hook = fn;

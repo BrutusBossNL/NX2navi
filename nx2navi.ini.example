@@ -579,6 +579,10 @@
 # 1: pages a VRAM mirror wrote back to game memory are not copied up into it again, as it already holds them (a write by
 # the game still is). Outdoors this removed about 57 MiB of copies a frame. 0: they are copied up again.
 # wb_no_reup = 1
+# 1: finds out who reads what the GPU wrote back into guest memory. The 2 MiB regions inside a range just written back
+# are made inaccessible until their first read or write, which is logged with its instruction ("mem: write-back
+# probe"). The bytes are there all along; the probe only watches, at the cost of the faults it takes.
+# wb_probe = 0
 # 1: the game's flushes of mirrored memory are copied into the mirrors even where the write watch already sees every
 # page the game wrote; 0 (default) copies only the written pages there, which saved 47-57 MiB of copies a frame in
 # Kokiri Forest.

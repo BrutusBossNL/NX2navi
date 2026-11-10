@@ -243,6 +243,10 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 // A write that faulted on a read-only page at addr goes to fn first; fn returns 1 when it made the page writable and
 // the write should run again, 0 to let the fault go on (to the crash handler). One hook per process.
 void plat_mem_fault_hook(int (*fn)(uint64_t addr));
+// A read or write that faulted at addr (write: 1 for a write; ip: the faulting instruction) goes to fn before the
+// write-fault hook; fn returns 1 when it made the page accessible and the access should run again, 0 to let the fault
+// go on. fn sees every access violation of the process and tells its own pages apart. One hook per process.
+void plat_mem_access_hook(int (*fn)(uint64_t addr, int write, uint64_t ip));
 // Starts this program again with the same arguments and ends this process with the new one's exit code (Windows), or
 // replaces this process with it (Linux). Environment changes made before the call are passed on.
 _Noreturn void plat_reexec(void);

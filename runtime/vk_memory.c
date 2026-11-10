@@ -1146,7 +1146,10 @@ static void gpu_written(uint64_t addr, uint64_t size, int back) {
 }
 
 void vk_gpu_written(uint64_t addr, uint64_t size) { gpu_written(addr, size, 0); }
-void vk_gpu_written_back(uint64_t addr, uint64_t size) { gpu_written(addr, size, 1); }
+void vk_gpu_written_back(uint64_t addr, uint64_t size) {
+    gpu_written(addr, size, 1);
+    mem_probe(addr, size);   // NX2NAVI_WB_PROBE: the bytes are in guest memory now; note who reads them next
+}
 
 int vk_mem_mirrored(uint64_t addr, uint64_t size) {
     VkMemSpan sp;
@@ -2426,6 +2429,7 @@ static void mirror_log(uint64_t frame) {
     ww_last = frame;
     uint64_t fz, ff, ft, fo;
     mem_freeze_stats(&fz, &ff, &ft, &fo);
+    mem_probe_report(frame);
     if (rt_trace & RT_TRACE_PERF)
         rt_log("mem: write-watch frame %llu: per frame, every consumer: %.1f queries over %.1f MiB, %.3f ms (%.1f found "
                "%.0f written pages, %.3f ms); frozen %.0f MiB; since the last line: freezes %llu, thaws by a write %llu, by a file read "
