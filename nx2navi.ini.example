@@ -751,6 +751,10 @@
 # 0: a full barrier before every pass and every dispatch. Default: 1 on NVIDIA graphics cards, 0 on all others, where it
 # has not been tried: set 1 there to try it, and back to 0 if the picture shows faults.
 # barrier_game = 1
+# Mesh draws whose count the graphics card computes: 1 (default) prepares the counts of a run of such draws at its
+# first one, so their draw pass is not ended and begun again at each of them (about 40 passes fewer a frame in a
+# village). 0: each such draw ends its pass and prepares its own count, as before.
+# mesh_ahead = 1
 # Linux, shadow storage: 1 clears the write watch's protection of a range in one call before the GPU's bytes are copied
 # back into the game's memory, instead of taking a fault at the first store into each page.
 # shadow_bulk_write = 0

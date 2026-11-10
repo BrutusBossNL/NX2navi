@@ -561,6 +561,8 @@ void mem_lazy_report(uint64_t frame, uint64_t skipped) {
     memcpy(no, lz_no, sizeof no);
     memset(lz_no, 0, sizeof lz_no);
     lz_no_small = lz_arm_calls = 0;
+    uint64_t pieces = lz_pieces, piece_bytes = lz_piece_bytes, heavy = lz_heavy;
+    lz_pieces = lz_piece_bytes = lz_heavy = 0;
     plat_mutex_unlock(&frz_lock);
     rt_log("mem: lazy write-back at frame %llu: %d ranges armed, %.1f MiB; since the last line %.1f MiB left in the "
            "mirror, %llu read and %llu write faults (%llu inside a part's window), %llu other releases, %llu fetches of "
@@ -568,8 +570,6 @@ void mem_lazy_report(uint64_t frame, uint64_t skipped) {
            bytes / 1048576.0, skipped / 1048576.0, (unsigned long long)fr, (unsigned long long)fw,
            (unsigned long long)gaps, (unsigned long long)other, (unsigned long long)nf, fb / 1048576.0, fns / 1e6,
            (unsigned long long)unclean);
-    uint64_t pieces = lz_pieces, piece_bytes = lz_piece_bytes, heavy = lz_heavy;
-    lz_pieces = lz_piece_bytes = lz_heavy = 0;
     for (int i = 0; i < nnote && (rt_trace & RT_TRACE_PERF); i++)
         rt_log("mem: lazy write-back: thread %u %s %#llx, %llu KiB into an armed range of %.2f MiB at %#llx; %llu KiB of "
                "it given back%s and held for %u s", note[i].tid, note[i].write ? "wrote" : "read",
