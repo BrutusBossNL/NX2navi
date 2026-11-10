@@ -158,6 +158,22 @@ of them.
    version; they build at their first draw instead, another driver version builds them again, and so does deleting the
    file.
 
+   What this step leaves for play, and the shared pipeline list. The step translates every shader's default variant
+   and the shader list's variants and builds each one's stage library or compute pipeline. A whole graphics pipeline
+   is built ahead only at the start of a game folder that has drawn it before (`pipeline-keys.bin`); a pipeline met
+   for the first time is linked from its stage libraries in 2 to 6 ms, except a mesh pipeline, which has no libraries
+   and compiles whole (0.2 to 1.1 s, its draws left out of the picture meanwhile). `tools/pipeline_list.py merge`
+   folds the `pipeline-keys.bin` and `shader-answers.bin` of game folders that were played into a pipeline list;
+   `prepare_shaders.py` reads it from `tools\data\pipeline_list.bin` (`data\pipeline_list.bin` in a release folder, or
+   `--pipeline-list`), adds the shader variants it names to the seed and writes its records next to the game as
+   `seed-pipeline-keys.bin`, and `--prepare-shaders` builds the mesh pipelines among them into the pipeline cache and
+   the driver's (`runtime/vk_pipeline.c` `seed_pipelines`; `NX2NAVI_PREPARE_PIPELINES=all` builds the vertex pipelines
+   too). `--warm-shaders` builds them again, and `nx2navi.exe --prepare-pipelines` does that step alone. The list is
+   derived from game data: it is not in the repository (`tools/check_content.py` refuses it), and a kit, a launcher
+   release or an installer release takes one with `--pipeline-list` (`tools/make_kit.py`, `make_launcher.py`,
+   `make_release.py`). A list belongs to the record layout of the runtime that wrote it; another runtime says so and
+   builds nothing from it. `python tests\pipeline_list_test.py` checks the tool on made-up folders.
+
 7. Run. The game keeps running when its window loses the focus (`assume_focus = 1` in `nx2navi.ini`, the default; the
    Game tab switches it). With 0 it pauses, as it does on the Switch when Home is pressed.
 

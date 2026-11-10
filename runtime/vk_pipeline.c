@@ -5823,6 +5823,163 @@ static void lb_warm_prepared(const char *dir) {
     free(LB.e), LB.e = NULL, LB.n = 0, LB.next = 0, LB.done = 0, LB.skipped = 0;
 }
 
+// ---- the shared pipeline list (tools/pipeline_list.py; seed-pipeline-keys.bin next to the game)
+// tools/prepare_shaders.py writes the list's key records there, in the layout of pipeline-keys.bin, after putting the
+// shader variants they name into the seed. The preparation builds them once, after the seed is translated: each
+// pipeline goes through the pipeline cache and so into pipeline-cache.bin and the driver's own disk cache, and is
+// dropped with the process. Nothing is added to this folder's pipeline-keys.bin: the boot keeps building only what
+// this install drew, and a listed pipeline costs no start-up time or video memory until a draw meets it. That draw
+// then finds its pipeline in the caches: a few milliseconds for a mesh pipeline, which has no stage libraries and
+// otherwise leaves its draws out of the picture for its whole compile (0.2 to 1.1 s each on a first visit of a forest,
+// 18 of them).
+// NX2NAVI_PREPARE_PIPELINES: mesh (default) builds the list's mesh pipelines only; all, every record; 0, none. A
+// vertex pipeline is linked from its prepared stage libraries in 2 to 6 ms when a draw misses it, and its module
+// depends on the vertex output union of the pairs this install has recorded (vs_outs), so one built here is not
+// certain to be the one a draw asks for.
+// A driver whose compiler crashes on one of these would crash at every preparation: seed-pipelines-running.txt marks
+// the step, and a run that finds the marker of a run that died skips the step for good on this folder (the pipelines
+// are then built at their first draw, as without a list) until the marker is deleted.
+static int cache_save(uint32_t wait_ms);
+
+static int seed_pipelines(const char *dir) {
+    const char *mode = cfg_value("NX2NAVI_PREPARE_PIPELINES");
+    int all = !strcmp(mode, "all");
+    char path[PLAT_PATH_MAX * 2 + 48], mark[PLAT_PATH_MAX * 2 + 48];
+    snprintf(path, sizeof path, "%s/seed-pipeline-keys.bin", dir);
+    snprintf(mark, sizeof mark, "%s/seed-pipelines-running.txt", dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;   // no list: nothing to say
+    if (!strcmp(mode, "0")) {
+        fclose(f);
+        printf("prepare-pipelines: off (NX2NAVI_PREPARE_PIPELINES=0)\n");
+        return 0;
+    }
+    if (plat_file_exists(mark)) {
+        fclose(f);
+        printf("prepare-pipelines: skipped: an earlier preparation ended while it built the listed pipelines (%s); they "
+               "are built at their first draw\n", mark);
+        return 0;
+    }
+    KeysHeader h;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    size_t n = 0;
+    KeyRec *r = NULL;
+    if (len >= (long)sizeof h && fread(&h, sizeof h, 1, f) == 1 && !memcmp(h.magic, "NX2NPKEY", 8) &&
+        h.version == KEYS_VERSION && h.rec_size == sizeof(KeyRec)) {
+        n = ((size_t)len - sizeof h) / sizeof(KeyRec);
+        r = malloc(n * sizeof *r + 1);
+        if (r && fread(r, sizeof *r, n, f) != n) n = 0;
+    } else {
+        printf("prepare-pipelines: %s is a list for another version of the game's runtime (its record layout differs); "
+               "no pipeline is built from it\n", path);
+    }
+    fclose(f);
+    uint8_t (*ids)[32] = n ? malloc(3 * n * 32) : NULL;
+    const GfxShader **sh = n ? calloc(3 * n, sizeof *sh) : NULL;
+    if (!r || !ids || !sh) {
+        free(r), free(ids), free(sh);
+        return 0;
+    }
+    double t0 = now_ms();
+    size_t m = 0, u = 0;
+    for (size_t i = 0; i < n; i++) {
+        memcpy(ids[m++], r[i].vs, 32);
+        if (r[i].has_fs) memcpy(ids[m++], r[i].fs, 32);
+        if (r[i].has_ts) memcpy(ids[m++], r[i].ts, 32);
+    }
+    qsort(ids, m, 32, id_cmp);
+    for (size_t i = 0; i < m; i++)
+        if (!u || memcmp(ids[u - 1], ids[i], 32)) memcpy(ids[u++], ids[i], 32);
+    int cpus = (int)plat_cpu_usable();
+    const char *pe = cfg_get("NX2NAVI_PREWARM_XLATE");
+    int procs = pe && *pe ? atoi(pe) : cpus / 2 > 16 ? 16 : cpus / 2;
+    gfx_shader_prewarm((const uint8_t(*)[32])ids, u, sh, cpus, procs < 1 ? 1 : procs);
+    static const char note[] = "the listed pipelines are being built; a run that finds this file skips them\n";
+    plat_file_write_atomic(mark, note, sizeof note - 1);
+    uint32_t queued = 0, dropped = 0, known = 0, other = 0, mesh = 0;
+    plat_mutex_lock(&P.lock);
+    uint32_t built0 = K.built, failed0 = K.failed;
+    K.loading = 1;
+    for (size_t i = 0; i < n; i++) {
+        const uint8_t (*v)[32] = bsearch(r[i].vs, ids, u, 32, id_cmp);
+        const uint8_t (*fi)[32] = r[i].has_fs ? bsearch(r[i].fs, ids, u, 32, id_cmp) : NULL;
+        const uint8_t (*t)[32] = r[i].has_ts ? bsearch(r[i].ts, ids, u, 32, id_cmp) : NULL;
+        const GfxShader *vs = v ? sh[v - ids] : NULL, *fs = fi ? sh[fi - ids] : NULL, *ts = t ? sh[t - ids] : NULL;
+        if (!vs || (r[i].has_fs && !fs) || (r[i].has_ts && !ts)) {
+            dropped++;
+            continue;
+        }
+        VkPipeState s = r[i].s;
+        s.vs = vs, s.fs = fs, s.ts = ts;
+        if (!is_mesh(&s) && !all) {
+            other++;
+            continue;
+        }
+        if (!is_mesh(&s) && P.indep && fs && gfx_shader_stage(vs) == GFX_STAGE_VS) {   // its vertex output union, as the boot
+            GfxShaderIo io[32];
+            vs_outs(vs, fs, io);
+        }
+        GKey k;
+        gkey_fill(&s, &k);
+        uint64_t hk = key_hash(&k, sizeof k);
+        int q = 0;
+        if (pipe_find(&k, sizeof k, hk)) known++;
+        else pipe_miss(&s, &k, hk, 2, &q), queued += (uint32_t)q, mesh += q && is_mesh(&s);
+    }
+    K.loading = 0;
+    K.until = 0;   // every one of them: no boot waits for this
+    plat_mutex_unlock(&P.lock);
+    free(ids), free(sh), free(r);
+    PlatThread *th[64];
+    int nt = 0;
+    for (int i = 0; i < cpus && i < 64 && queued; i++)
+        if ((th[nt] = plat_thread_new(warm_builder, NULL, "pipe list"))) nt++;
+    if (!nt && queued) warm_builder(NULL);
+    for (int i = 0; i < nt; i++)
+        while (!plat_thread_join_ns(th[i], 2000000000u)) {
+            printf("prepare-pipelines: progress %u %u\n",
+                   __atomic_load_n(&K.built, __ATOMIC_RELAXED) + __atomic_load_n(&K.failed, __ATOMIC_RELAXED) - built0 - failed0,
+                   queued);
+            fflush(stdout);
+        }
+    plat_mutex_lock(&P.lock);
+    while (K.left) plat_cond_wait(&done_cv, &P.lock);   // those a pool worker took
+    uint32_t built = K.built - built0, failed = K.failed - failed0;
+    plat_mutex_unlock(&P.lock);
+    int saved = cache_save(5000);   // as a save at exit: it waits that long for a moment with no build running
+    plat_file_delete(mark);
+    char msg[640];
+    snprintf(msg, sizeof msg, "prepare-pipelines: %zu listed pipelines: %u built (%u mesh), %u failed, %u the same as one "
+             "built before, %u without a shader this game version or its shader cache has, %u vertex pipelines left to "
+             "their first draw (NX2NAVI_PREPARE_PIPELINES=%s); on %d threads in %.0f ms; pipeline cache %s", n, built,
+             mesh, failed, known, dropped, other, all ? "all" : "mesh", nt ? nt : 1, now_ms() - t0,
+             saved ? "saved" : "not saved (builds kept running)");
+    printf("%s\n", msg);
+    fflush(stdout);
+    rt_log("vk_pipeline: %s", msg);
+    fb_log("after the listed pipelines");
+    return 0;
+}
+
+// nx2navi.exe --prepare-pipelines: the list's pipelines alone, for a folder whose shaders are prepared already.
+int vk_pipeline_prepare_pipelines(void) {
+    if (!ensure_init()) {
+        fprintf(stderr, "prepare-pipelines: no Vulkan device\n");
+        return 1;
+    }
+    char dir[PLAT_PATH_MAX * 2];
+    if (!cache_dir(dir, sizeof dir)) return 1;
+    char path[PLAT_PATH_MAX * 2 + 48];
+    snprintf(path, sizeof path, "%s/seed-pipeline-keys.bin", dir);
+    if (!plat_file_exists(path)) {
+        fprintf(stderr, "prepare-pipelines: no %s (tools/prepare_shaders.py writes it from the pipeline list)\n", path);
+        return 1;
+    }
+    return seed_pipelines(dir);
+}
+
 // nx2navi.exe --prepare-shaders (tools/prepare_shaders.py): the device sets the translator's host answers (they are in every
 // cache key), the seed next to nx2navi.exe is translated on every core, then every prepared variant's stage library or
 // compute pipeline is built once into the driver's disk cache (lb_warm_prepared). No game runs.
@@ -5837,6 +5994,9 @@ int vk_pipeline_prepare_shaders(void) {
     const char *pe = cfg_get("NX2NAVI_PREWARM_XLATE");   // no fixed default: half the CPUs, at most 16, when unset
     int procs = pe && *pe ? atoi(pe) : cpus / 2 > 16 ? 16 : cpus / 2;
     int rc = gfx_shader_prepare_seed(dir, cpus, procs < 1 ? 1 : procs);
+    // The listed pipelines before the stage libraries: the pipeline cache is saved with them in it and without the
+    // tens of thousands of libraries the next step builds, which would take the file past its size limit.
+    if (!rc) seed_pipelines(dir);
     if (!rc) lb_warm_prepared(dir);
     return rc;
 }
@@ -5858,6 +6018,7 @@ int vk_pipeline_warm_shaders(void) {
         fprintf(stderr, "warm-shaders: no %s (tools/prepare_shaders.py writes it)\n", prp);
         return 1;
     }
+    seed_pipelines(dir);   // before the libraries, as in vk_pipeline_prepare_shaders
     lb_warm_prepared(dir);
     return 0;
 }

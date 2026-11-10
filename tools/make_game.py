@@ -1672,7 +1672,8 @@ def step_shaders(out, update=False):
     if rc:
         fail('preparing the shaders failed (the lines above say why); the game still runs, compiling shaders as it '
              'meets them. Run the build again to retry this step')
-    for seed in ('seed-programs.bin', 'seed-answers.bin'):   # translated now: the shader cache holds them
+    # translated now: the shader cache holds them. seed-pipeline-keys.bin stays: --warm-shaders builds from it again
+    for seed in ('seed-programs.bin', 'seed-answers.bin'):
         (out / seed).unlink(missing_ok=True)
     pack_shader_cache(out)
 
