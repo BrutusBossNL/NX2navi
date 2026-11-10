@@ -36,8 +36,8 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
   GPUs (one, two or three generated frames for every frame the game draws), or AMD FSR 3.1 (any GPU), a generated
   frame between every two the game draws, with the HUD kept out of it, for about twice the frame rate on a fast
   display; in a window of another shape than the picture, frames are generated inside the picture only, so the black
-  bars stay clean. With frame generation on, the frame limit counts the frames on screen, and with no limit chosen
-  it is the display's refresh rate. The frame limit can also be
+  bars stay clean. The frame limit counts the frames the game draws, and frame generation adds its
+  frames on top of it. The frame limit can also be
   handed to RivaTuner Statistics Server
 - HDR on HDR displays: the game's own native HDR, or its SDR picture tone mapped to the display's peak, with exposure, highlights, shadows, contrast, saturation and gamma in the menu
 - The game's known shaders prepared when the game is built, and the pipelines met in play built again in the

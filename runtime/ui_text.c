@@ -179,7 +179,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FXAA_DESC] = "The game's own FXAA edge smoothing. It blurs fine detail a little; with DLAA on it is not needed.",
 
     [UI_MENU_FPS_LIMIT] = "Frame rate limit",
-    [UI_MENU_FPS_LIMIT_DESC] = "The highest frame rate the game runs at.",
+    [UI_MENU_FPS_LIMIT_DESC] = "The highest frame rate the game draws at. Frame generation adds its frames on top.",
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
     [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
     // the monitor's refresh rate; printf format with the rate in Hz when it is known
@@ -575,9 +575,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FG_MULT_DYNAMIC] = "Dynamic",
     [UI_MENU_FRAMEGEN_MULT_DESC] = "Frames on screen for each frame the game draws: 2x adds one generated frame, 3x "
                                    "two, 4x three. Higher is smoother but adds a little delay. The frame limit counts "
-                                   "the frames on screen, so the game draws the limit divided by this: set the limit "
-                                   "to your display's rate. 2x needs a GeForce RTX 40 GPU or newer, 3x and 4x an RTX "
-                                   "50.",
+                                   "the frames the game draws, so the screen shows the limit times this. 2x needs a "
+                                   "GeForce RTX 40 GPU or newer, 3x and 4x an RTX 50.",
     [UI_MENU_FRAMEGEN_MULT_RTX50] = "3x and 4x need an RTX 50 GPU",
     [UI_MENU_FRAMEGEN_MULT_UPTO] = "up to %dx on this GPU and driver",
     [UI_MENU_FRAMEGEN_MULT_OLD_DLL] = "2x only: update the DLSS frame generation files",
@@ -744,7 +743,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_FXAA_DESC] = "Собственное сглаживание FXAA. Слегка размывает мелкие детали; с DLAA оно не нужно.",
 
     [UI_MENU_FPS_LIMIT] = "Ограничение частоты кадров",
-    [UI_MENU_FPS_LIMIT_DESC] = "Максимальная частота кадров игры.",
+    [UI_MENU_FPS_LIMIT_DESC] = "Максимальная частота кадров, которые рисует игра. Генерация кадров добавляет свои сверх неё.",
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
     [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
     [UI_MENU_FPS_DISPLAY] = "Как у монитора", [UI_MENU_FPS_DISPLAY_HZ] = "Как у монитора (%.0f Гц)",
@@ -1202,7 +1201,7 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS_NEEDS_FSR] = "só com AMD FSR 1",
 
     [UI_MENU_FPS_LIMIT] = "Limite de quadros",
-    [UI_MENU_FPS_LIMIT_DESC] = "A taxa de quadros máxima do jogo.",
+    [UI_MENU_FPS_LIMIT_DESC] = "A taxa máxima de quadros que o jogo desenha. A geração de quadros soma os dela por cima.",
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
     [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
     [UI_MENU_ASSUME_FOCUS] = "Continuar rodando fora de foco",
@@ -1781,7 +1780,7 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_COLOR_GAMMA] = "伽马",
     [UI_MENU_COLOR_GAMMA_DESC] = "小于 1 提亮暗部与中间调，大于 1 压暗；1 表示不调整。",
     [UI_MENU_FPS_LIMIT] = "帧率上限",
-    [UI_MENU_FPS_LIMIT_DESC] = "游戏的最高帧率。",
+    [UI_MENU_FPS_LIMIT_DESC] = "游戏绘制的最高帧率。帧生成的帧在此之上另算。",
     [UI_MENU_FPS_30] = "30 FPS",
     [UI_MENU_FPS_40] = "40 FPS",
     [UI_MENU_FPS_45] = "45 FPS",

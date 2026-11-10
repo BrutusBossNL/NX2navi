@@ -336,8 +336,7 @@ int ov_movie_live(void);                                   // ov_movie2.c: a mov
 int frame_limit_adjustable(void);                         // the frame limit setting changes the rate (always)
 int frame_free_running(void);                             // no fps60/realtime patch set: the game steps by the clock
 double frame_step_limit_hz(void);                         // the frame rate the limit gives (overlay); 0 unknown
-double frame_step_game_hz(void);                          // ... over frame generation's factor: the game's rate
-int frame_limit_follows_display(void);                    // no limit set and frame generation in use: the display's rate
+double frame_step_game_hz(void);                          // the rate the game draws at under the limit; 0 unknown
 // rtss_limit.c: RivaTuner Statistics Server takes the frame limit where it runs
 void rtss_limit_want(int64_t mhz);                        // the pacer's limit in millihertz: >0, 0 none, -1 keep RTSS out
 int rtss_limit_active(void);                              // RTSS limits to the wanted rate: the pacer holds no frames
