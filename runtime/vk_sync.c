@@ -401,7 +401,15 @@ static void completion_main(void *arg) {
                 vk_device_fault_report(r);
                 rt_fatal("vk: vkWaitSemaphores failed (%d; device lost?)", (int)r);
             }
-            vkGetSemaphoreCounterValue(c->device, c->timeline, &reached);
+            // A lost device is reported here, where it is first seen. Unchecked, the value was taken as it came: the
+            // callbacks of submissions that never ran were called as if their work were done (one report's first sign
+            // was an occlusion query "not available after its fence"), and the game went on recording until the next
+            // checked queue call failed, an upload's, which then read as the cause.
+            r = vkGetSemaphoreCounterValue(c->device, c->timeline, &reached);
+            if (r != VK_SUCCESS) {
+                vk_device_fault_report(r);
+                rt_fatal("vk: the submissions' timeline could not be read (%d; device lost?)", (int)r);
+            }
             plat_mutex_lock(&st_lock);
             if (reached > issued) reached = issued;
         }
