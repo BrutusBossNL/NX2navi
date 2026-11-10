@@ -298,12 +298,45 @@ static void migrate(void) {
            prompts ? prompts->value : "xbox");
 }
 
+// A file saved as UTF-16 (Notepad's "Unicode": the byte order mark FF FE or FE FF, then two bytes per character) as
+// UTF-8 in a new buffer; NULL for any other file. Read as bytes such a file ends at the zero after its first character:
+// no line was taken, and every setting kept its default without a word in the log.
+static uint8_t *utf16_text(const uint8_t *d, uint64_t size) {
+    if (size < 2 || !((d[0] == 0xFF && d[1] == 0xFE) || (d[0] == 0xFE && d[1] == 0xFF))) return NULL;
+    int be = d[0] == 0xFE;
+    uint8_t *out = malloc((size_t)(size / 2) * 3 + 1), *o = out;
+    if (!out) return NULL;
+    for (uint64_t i = 2; i + 1 < size; i += 2) {
+        uint32_t c = be ? (uint32_t)d[i] << 8 | d[i + 1] : (uint32_t)d[i + 1] << 8 | d[i];
+        if (!c) break;
+        if (c >= 0xD800 && c < 0xDC00 && i + 3 < size) {   // a pair: one character above U+FFFF
+            uint32_t lo = be ? (uint32_t)d[i + 2] << 8 | d[i + 3] : (uint32_t)d[i + 3] << 8 | d[i + 2];
+            if (lo >= 0xDC00 && lo < 0xE000) c = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00), i += 2;
+        }
+        if (c < 0x80) *o++ = (uint8_t)c;
+        else if (c < 0x800) *o++ = (uint8_t)(0xC0 | c >> 6), *o++ = (uint8_t)(0x80 | (c & 0x3F));
+        else if (c < 0x10000)
+            *o++ = (uint8_t)(0xE0 | c >> 12), *o++ = (uint8_t)(0x80 | (c >> 6 & 0x3F)), *o++ = (uint8_t)(0x80 | (c & 0x3F));
+        else
+            *o++ = (uint8_t)(0xF0 | c >> 18), *o++ = (uint8_t)(0x80 | (c >> 12 & 0x3F)),
+            *o++ = (uint8_t)(0x80 | (c >> 6 & 0x3F)), *o++ = (uint8_t)(0x80 | (c & 0x3F));
+    }
+    *o = 0;
+    return out;
+}
+
 int cfg_load(const char *path) {
     clear();
     __atomic_add_fetch(&version, 1, __ATOMIC_RELEASE);   // the lookup memo (cfg_memo) forgets the freed strings
     uint64_t size = 0;
     uint8_t *data = plat_file_read(path, &size);
     if (!data) return 0;
+    uint8_t *wide = utf16_text(data, size);
+    if (wide) {
+        free(data);
+        data = wide, size = strlen((const char *)wide);
+        rt_log("cfg: %s is saved as UTF-16; read as that (the menu saves it as UTF-8)", path);
+    }
     char *p = (char *)data;
     if (size >= 3 && !memcmp(p, "\xEF\xBB\xBF", 3)) p += 3;   // editors add a BOM
     for (int line = 1; *p; line++) {

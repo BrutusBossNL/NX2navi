@@ -4267,7 +4267,7 @@ static struct {
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
     if (info) *info = NULL;
     if (!cs || !ensure_init()) return VK_NULL_HANDLE;
-    struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
+    struct { const GfxShader *cs; uint64_t compute; } k = {cs, 1};   // no padding: the key is hashed and compared as bytes
     uint64_t h = key_hash(&k, sizeof k);
     plat_mutex_lock(&P.lock);
     Pipe *p = pipe_find(&k, sizeof k, h);
@@ -4487,7 +4487,7 @@ static void bg_main(void *arg) {
         plat_mutex_unlock(&LB.stat);
         if (!have) break;
         const uint8_t *iid = idbuf;
-        struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
+        struct { const GfxShader *cs; uint64_t compute; } k = {cs, 1};   // no padding: the key is hashed and compared as bytes
         uint64_t h = key_hash(&k, sizeof k);
         Bindings B = {0};
         const char *why = NULL;
@@ -4567,7 +4567,7 @@ static void bg_start(void) {
 }
 
 static void lb_compute(const GfxShader *cs, const uint8_t iid[32]) {
-    struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
+    struct { const GfxShader *cs; uint64_t compute; } k = {cs, 1};   // no padding: the key is hashed and compared as bytes
     uint64_t h = key_hash(&k, sizeof k);
     Bindings B = {0};
     const char *why = NULL;

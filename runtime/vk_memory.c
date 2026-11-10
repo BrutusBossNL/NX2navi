@@ -3023,7 +3023,13 @@ uint64_t vk_upload_flush(int wait) {
     }
     if (c && wait) {
         while (ninflight && done_seq < seq) {
-            vkWaitForFences(c->device, 1, &inflight[0].fence, VK_TRUE, UINT64_MAX);
+            // a lost device ends the wait at once and leaves the fence unsignalled: retire would take nothing and this
+            // loop would spin for good, holding the upload lock, instead of the run ending with the device's report
+            VkResult w = vkWaitForFences(c->device, 1, &inflight[0].fence, VK_TRUE, UINT64_MAX);
+            if (w != VK_SUCCESS) {
+                vk_device_fault_report(w);
+                rt_fatal("vk: the wait for an upload failed (%d)", (int)w);
+            }
             retire(c, 0);
         }
     }

@@ -1042,8 +1042,8 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
     return 1;
 }
 
-static void c0_table(uint8_t *at, const p_bind_buf b[16]) {
-    for (int r = 0; r < 16; r++) {
+static void c0_table(uint8_t *at, const p_bind_buf b[16], int rows) {
+    for (int r = 0; r < rows; r++) {
         uint64_t a = b[r].addr;
         uint32_t n = (uint32_t)b[r].size;
         memcpy(at + 16 * r, &a, 8);
@@ -1056,8 +1056,9 @@ static void c0_table(uint8_t *at, const p_bind_buf b[16]) {
 // candidate base from here and compares the global pointer against it. Compute: dispatch size at 0x200, the uniform
 // buffer table at 0x210 + 16 r. Graphics: the largest point size (Maxwell's limit, GLSLC clamps gl_PointSize to it) at
 // 0x610, the base instance at 0x644. NVN2 task and mesh stages: storage tables at 0x670 and 0x770 (the game binds
-// slots 0-2 there, and their programs read 0x670.. and 0x770..). Other stages: zeros. Unbound slots read zero, since the
-// replay keeps them zero.
+// slots 0-2 there, and their programs read 0x670.. and 0x770..). The mesh table starts 0x90 bytes before the bank's
+// end: it holds the 9 slots that fit, and sixteen would write 0x6C bytes past the bank. Other stages: zeros. Unbound
+// slots read zero, since the replay keeps them zero.
 // Byte offset of a stage's storage buffer table in c0, -1 for none.
 static int c0_ssbo_base(int stage) {
     return stage == NVN_STAGE_VS ? 0x110 : stage == NVN_STAGE_FS ? 0x510 : stage == NVN_STAGE_CS ? 0x310
@@ -1069,11 +1070,12 @@ void vk_c0_fill(uint8_t bank[VK_C0_BYTES], int stage, const p_bind_buf ssbo[16],
     memset(bank, 0, VK_C0_BYTES);
     int base = c0_ssbo_base(stage);
     if (base < 0) return;
-    c0_table(bank + base, ssbo);
+    int rows = (int)(VK_C0_BYTES - (uint32_t)base) / 16;
+    c0_table(bank + base, ssbo, rows < 16 ? rows : 16);
     if (stage == NVN_STAGE_TASK || stage == NVN_STAGE_MESH) return;
     if (stage == NVN_STAGE_CS) {
         memcpy(bank + 0x200, dispatch, 12);
-        c0_table(bank + 0x210, ubo);
+        c0_table(bank + 0x210, ubo, 16);
         return;
     }
     const float max_point = 2047.0f;

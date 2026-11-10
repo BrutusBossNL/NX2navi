@@ -197,7 +197,10 @@ static void frame_limit_live(void) {
 // NX2NAVI_MOVIE_FPS (default 60; 0 = off): the game's frame rate while a movie plays (ov_movie2.c ov_movie_live). A
 // movie's event counts the game's updates as 60 Hz frames whatever the step: at 144 fps the intro's narration lines
 // started 2.4 times too early, each over the one before, and its closing fade to black came at 65 s of the movie's
-// 154, hiding the whole dream. The movies are 60 fps, so the cap shows the same pictures.
+// 154, hiding the whole dream. The movies are 60 fps, so the cap shows the same pictures. It is the rate in both
+// directions: under a lower limit (40 fps, or 60 shown with frame generation, which is 30 of the game's) the movie ran
+// at that fraction of its speed and ended many seconds behind its sound, so the game is paced at the movie's rate
+// while one plays, above the limit too.
 static int movie_cap_hz(void) {
     static int hz = -1;
     if (hz < 0) {
@@ -244,7 +247,7 @@ uint64_t frame_step_cap_ns(void) {
     if (!!movie_hz != movie_was) {
         movie_was = !!movie_hz;
         if (movie_logs++ < 40) {   // the first 20 movies
-            if (movie_hz) rt_log("frame rate: a movie plays: at most %d fps until it ends (NX2NAVI_MOVIE_FPS)", movie_hz);
+            if (movie_hz) rt_log("frame rate: a movie plays: %d fps until it ends (NX2NAVI_MOVIE_FPS)", movie_hz);
             else rt_log("frame rate: the movie ended: the frame limit again");
         }
     }
@@ -272,7 +275,7 @@ uint64_t frame_step_cap_ns(void) {
     // limit over that factor (half, a third, a quarter), so the screen shows the limit. With VSync and the limit at the
     // display's rate, the generated frames then fill the display's refreshes and none is dropped.
     if (gen > 1) hz /= gen;
-    if (movie_hz && hz > movie_hz) hz = movie_hz;
+    if (movie_hz) hz = movie_hz;
     rtss_limit_want(rtss ? (int64_t)(hz * 1000 + 0.5) : -1);
     if (rtss_limit_active()) return 0;
     return (uint64_t)(1e9 / hz + 0.5);
