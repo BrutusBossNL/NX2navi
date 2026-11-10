@@ -3974,6 +3974,9 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             if (linking) t0 = kern_now_ns();
             else w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;
             vk_exec_ahead(ex);
+            // A mesh pipeline that is known to be compiling gets no fast link, so the few milliseconds a draw waits
+            // for one are lost in every frame that meets it until the compile ends, 0.2 to 1.1 s later (MESH_WAIT_MS).
+            if (wait_ms && linking && mesh && vk_pipeline_building_ms(&s) > MESH_WAIT_MS) wait_ms = 0;
             if (wait_ms) p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
         }
         if (t0 && budget) {

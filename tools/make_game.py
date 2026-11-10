@@ -1622,6 +1622,20 @@ def shader_run(cmd, cwd=None):
     return rc
 
 
+def refresh_pipeline_seed(out):
+    """The kit's pipeline list (tools/pipeline_list.py) as the game folder's seed-pipeline-keys.bin, so that an update
+    which carries the shaders over builds a newer list's pipelines too: `--warm-shaders` builds from that file. The
+    list's shader variants are not translated on this path, so a record whose variant this folder has neither prepared
+    nor met is left out by the game, which counts those in its line."""
+    lst = KIT / 'tools' / 'data' / 'pipeline_list.bin'
+    if not lst.is_file():
+        return
+    import pipeline_list
+    got = pipeline_list.unpack(lst.read_bytes())
+    if got:
+        (out / 'seed-pipeline-keys.bin').write_bytes(got[1])
+
+
 def warm_driver_cache(out):
     """After an update that carries the shaders over: every prepared stage library is built into the graphics driver's
     cache again (`nx2navi.exe --warm-shaders`). It takes seconds while the driver still has them. It takes minutes when
@@ -1633,6 +1647,7 @@ def warm_driver_cache(out):
     exe = out / EXE_NAME
     if not exe.is_file() or not (out / 'shader-prepared.bin').is_file():
         return
+    refresh_pipeline_seed(out)
     say("  the prepared shaders are built into the graphics driver's cache again")
     t0 = time.monotonic()
     try:
@@ -1672,7 +1687,8 @@ def step_shaders(out, update=False):
     if rc:
         fail('preparing the shaders failed (the lines above say why); the game still runs, compiling shaders as it '
              'meets them. Run the build again to retry this step')
-    for seed in ('seed-programs.bin', 'seed-answers.bin'):   # translated now: the shader cache holds them
+    # translated now: the shader cache holds them. seed-pipeline-keys.bin stays: --warm-shaders builds from it again
+    for seed in ('seed-programs.bin', 'seed-answers.bin'):
         (out / seed).unlink(missing_ok=True)
     pack_shader_cache(out)
 
