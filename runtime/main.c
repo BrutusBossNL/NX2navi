@@ -35,6 +35,7 @@
 // Also here: the runtime services the generated code calls besides rt_dispatch and rt_svc (rt_brk, rt_udf,
 // rt_ticks, the function profiler hook), logging, SHA-256, and the crash reporter (a vectored exception handler that
 // names the lifted function, the guest registers and the guest frame-pointer chain).
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -256,6 +257,17 @@ static uint64_t lifted_function(uintptr_t rip) {
 
 static int readable(uint64_t a, uint64_t n) { return plat_mem_readable(a, n); }
 
+// A module another program put into the game's process: the Vulkan layer or the hook of a recorder, an overlay or a
+// capture tool, by the words such files carry in their names. A crash inside one is that program's: one report was an
+// access violation in a recorder's layer the moment the present mode changed and the swapchain was made again.
+static int foreign_hook(const char *module) {
+    char low[160];
+    size_t n = 0;
+    for (; module && module[n] && n < sizeof low - 1; n++) low[n] = (char)tolower((unsigned char)module[n]);
+    low[n] = 0;
+    return strstr(low, "vk_layer") || strstr(low, "hook") || strstr(low, "overlay");
+}
+
 static void crash_handler(const PlatCrash *x) {
     static volatile int32_t busy;
     if (plat_xchg32(&busy, 1)) plat_exit(71);
@@ -269,6 +281,9 @@ static void crash_handler(const PlatCrash *x) {
         rt_logf(", %s address %#llx", x->access == 1 ? "writing" : x->access == 8 ? "executing" : "reading",
                 (unsigned long long)x->addr);
     rt_log_raw("\n", 1);
+    if (foreign_hook(x->module))
+        rt_logf("  %s is not part of the game: a recording, overlay or capture program put it into the game. Close that "
+                "program or turn off its Vulkan capture, then start the game again\n", x->module);
     uint64_t f = x->module ? 0 : lifted_function(rip);
     if (f) rt_logf("  in lifted function f_%llx = %s\n", (unsigned long long)f, ldr_describe(f, d, sizeof d));
     // abort and invalid parameter: where the host code called it; a fault in another module: the host calls that led

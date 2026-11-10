@@ -588,6 +588,7 @@ void vk_device_fault_report(VkResult r) {
     done = 1;
     vk_crumbs_report();
     vk_pass_marks_report();
+    vk_mem_lost_report();
     VkCtx *c = vk_ctx();
     PFN_vkGetDeviceFaultInfoEXT get =
         c && c->has_device_fault ? (PFN_vkGetDeviceFaultInfoEXT)vk_dpa(c->device, "vkGetDeviceFaultInfoEXT")

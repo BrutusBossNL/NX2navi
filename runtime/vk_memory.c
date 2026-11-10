@@ -3247,6 +3247,18 @@ static void outside_watch(uint64_t frame) {
 
 // The overlay's "game" figure beside the card's memory in use (perfmon.c, its sampling thread): what the driver
 // counts for this process on the device-local heaps, the same figure vram_use_log splits by use.
+// With the device lost report (vk_device.c): the video memory in use and the budget the driver gives the game. A lost
+// device with the memory at or over its budget points at the memory; one far below it does not, and the report of a
+// card with 8 GB that ended this way held neither number.
+void vk_mem_lost_report(void) {
+    uint64_t used, budget;
+    int exact;
+    if (!vram_query(&used, &budget, &exact)) return;
+    rt_log("vk: video memory when the device was lost: %llu MiB in use of a budget of %llu MiB (%s)",
+           (unsigned long long)(used >> 20), (unsigned long long)(budget >> 20),
+           exact ? "the driver's figures, every program counted in the budget" : "this game's own allocations only");
+}
+
 float vk_mem_device_used_mb(void) {
     VkCtx *c = vk_ctx();
     if (!c || !c->has_memory_budget) return -1;

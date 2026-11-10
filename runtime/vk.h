@@ -353,6 +353,7 @@ void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDevic
 int vk_mem_class_of(uint64_t addr);               // VK_MCLS_* of the pool at addr (NONE when unbacked)
 void vk_mem_census(uint64_t frame);               // at each present: pool census and traffic, logged at frame 1800 and,
                                                   // with NX2NAVI_TRACE=perf, every 1800 frames
+void vk_mem_lost_report(void);                    // a line with the video memory in use and its budget (device lost)
 float vk_mem_device_used_mb(void);                // device-local memory this process holds (the driver's budget
                                                   // figure), MB; -1 without VK_EXT_memory_budget. Any thread.
 void vk_mem_stage_log(const char *stage);         // one line after a boot stage: device memory, process commit
