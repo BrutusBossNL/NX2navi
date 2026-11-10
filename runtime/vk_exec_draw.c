@@ -1928,13 +1928,30 @@ static uint16_t pool_kind_type(int k) {
 // default 16). The sync holds the texture lock throughout, and with 64 streaming in new textures made frames of 20-40 ms
 // with the replay and other threads waiting on that lock (24 ms of holds per slow frame in a dense area); 16 brought
 // that to 5 ms with no pop-in a player could see. The slots it leaves keep their stand-in until the next sync.
+// An area load is not streaming. It leaves thousands of slots at once (4,925 in the load measured below), and at the
+// streaming budget they came in over a hundred frames and more: the first seconds out of a load screen showed the
+// ground, the walls and the buildings as their black stand-ins. So while a sync leaves NX2NAVI_POOL_LOAD_BACKLOG slots
+// or more (default 512; 0: never) the pool is loading: the count budget is off, a frame's refreshes may take
+// NX2NAVI_POOL_LOAD_MS (default 50), and the presents of those frames are left out so the picture before the load
+// stays up (vk_backend.c frame_hold, vk_exec_pool_loading) until fewer than POOL_LOAD_END slots are left. The load
+// screen lasts those few frames longer and the area appears whole.
+#define POOL_LOAD_END 64
+static volatile int32_t pool_loading;   // replay: a sync left an area load's worth of slots, and they are not made yet
+static uint64_t pool_load_made, pool_load_frame0;
+int vk_exec_pool_loading(void) { return __atomic_load_n(&pool_loading, __ATOMIC_RELAXED); }
+static int pool_load_backlog(void) {
+    static int n = -1;
+    if (n < 0) n = cfg_int("NX2NAVI_POOL_LOAD_BACKLOG");
+    return n;
+}
+
 static int pool_create_budget(void) {
     static int n = -1;
     if (n < 0) {
         n = cfg_int("NX2NAVI_POOL_CREATE_BUDGET");
         if (n < 1) n = 1;
     }
-    return n;
+    return pool_loading ? 1 << 20 : n;
 }
 
 // The refresh runs before every draw that binds the pools, not once per submission, so the count above held for each
@@ -1944,12 +1961,13 @@ static int pool_create_budget(void) {
 // and skip the slots left earlier in the frame (pool_defer) instead of looking them up again; the first refresh of
 // each frame keeps its count budget. The slots left keep their stand-in, a few frames longer in a large load.
 static uint64_t pool_create_ns(void) {
-    static int64_t ns = -1;
+    static int64_t ns = -1, load_ns;
     if (ns < 0) {
-        int ms = cfg_int("NX2NAVI_POOL_CREATE_MS");
+        int ms = cfg_int("NX2NAVI_POOL_CREATE_MS"), lms = cfg_int("NX2NAVI_POOL_LOAD_MS");
+        load_ns = (int64_t)(lms < 1 ? 1 : lms) * 1000000;
         ns = (int64_t)(ms < 0 ? 0 : ms) * 1000000;
     }
-    return (uint64_t)ns;
+    return (uint64_t)(pool_loading && ns ? load_ns : ns);
 }
 static uint32_t pool_defer[VK_POOL_TEX];   // per slot: 1 + the low bits of the frame a refresh left it in
 static VkWriteDescriptorSet pool_w[POOL_WBATCH];
@@ -2200,7 +2218,7 @@ static void pool_dirty_slot(int id, void *arg) {   // vk_texture_dirty_slots_loc
     if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
     else PL.n_by_addr++;
     if (pool_refill(d->ex, (uint32_t)id, d->used, t, d->spent)) PL.tok[id] = t;
-    else d->retry = 1;
+    else d->retry++;
 }
 
 // Every entry as the slots, kinds and samplers are now (pool_sync_entries has nothing to write).
@@ -2246,7 +2264,7 @@ static void pool_sync_entries(VkExec *ex) {
                 if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
                 else PL.n_by_addr++;
                 if (pool_refill(ex, (uint32_t)id, used, t, spent)) PL.tok[id] = t;
-                else retry = 1;
+                else retry++;
             } else if (t && fresh) {
                 pool_fill(ex, (uint32_t)id, fresh, t);
             } else if (t && ep != PL.epoch) {
@@ -2257,7 +2275,17 @@ static void pool_sync_entries(VkExec *ex) {
         if (!walked) PL.n_slots += (uint64_t)n;
         vk_texture_create_budget_locked(-1);
     }
-    PL.retry = retry;
+    PL.retry = retry != 0;
+    // retry counts the slots this sync left; a sync with slots left walks the whole table, so that is all of them
+    int backlog = pool_load_backlog();
+    if (!pool_loading && backlog > 0 && retry >= backlog) {
+        pool_load_made = (uint64_t)retry, pool_load_frame0 = PL.frame;
+        __atomic_store_n(&pool_loading, 1, __ATOMIC_RELEASE);
+    } else if (pool_loading && retry < POOL_LOAD_END) {
+        __atomic_store_n(&pool_loading, 0, __ATOMIC_RELEASE);
+        rt_log("vk: texture pool: an area load of about %llu textures was made in %llu frames (NX2NAVI_POOL_LOAD_BACKLOG)",
+               (unsigned long long)pool_load_made, (unsigned long long)(PL.frame - pool_load_frame0 + 1));
+    }
     if (sg != PL.sgen) {
         int ns = vk_sampler_slot_count_locked();
         for (int id = 0; id < VK_POOL_SAMP; id++) {

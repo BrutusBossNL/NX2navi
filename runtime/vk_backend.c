@@ -112,8 +112,16 @@ void vk_present_drain(void) {
 // setting and does not use the allowance. It holds with DLSS Frame Generation too: a present left out is a longer gap
 // between two rendered frames to it (its constants and tags are set at the host present, gfx_present.c), and a dark
 // frame it is given comes out as several generated ones.
+// And it covers an area load (vk_exec_draw.c vk_exec_pool_loading): while the texture pool still makes the area's
+// textures, the frames show the ground and the walls as black stand-ins, so the picture before the load stays for up
+// to LOAD_HOLD_NS, also beside the allowance.
 #define RESIZE_HOLD 6
-static struct { int64_t limit_ns, left_ns; uint64_t last_ns, held, runs, shown; int holding, resize_left; } FH = {.limit_ns = -1};
+#define LOAD_HOLD_NS 2000000000ull
+static struct {
+    int64_t limit_ns, left_ns;
+    uint64_t last_ns, held, runs, shown, load_t0, load_held;
+    int holding, resize_left;
+} FH = {.limit_ns = -1};
 
 static void frame_hold_refill(uint64_t now) {
     if (FH.limit_ns < 0) {
@@ -147,6 +155,18 @@ static int frame_hold(uint32_t skipped, int resized, uint64_t frame) {
     if (FH.resize_left) {   // beside the allowance: nothing below counts these frames
         FH.resize_left--;
         return 1;
+    }
+    if (FH.limit_ns > 0 && vk_exec_pool_loading()) {
+        uint64_t now = kern_now_ns();
+        if (!FH.load_t0) FH.load_t0 = now, FH.load_held = 0;
+        if (now - FH.load_t0 < LOAD_HOLD_NS) {
+            FH.load_held++;
+            return 1;
+        }
+    } else if (FH.load_t0) {
+        rt_log("vk: frame %llu: the previous picture stayed for %llu frames, %.0f ms, while an area's textures were made",
+               (unsigned long long)frame, (unsigned long long)FH.load_held, (double)(kern_now_ns() - FH.load_t0) / 1e6);
+        FH.load_t0 = 0;
     }
     int hold = skipped && FH.left_ns > 0 && !vk_dlssg_active();
     if (hold && !FH.holding) FH.runs++;

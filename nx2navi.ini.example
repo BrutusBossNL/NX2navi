@@ -625,6 +625,11 @@
 # keeps its budget): an area load then spreads over several frames with stand-ins instead of holding one frame for
 # 200-400 ms. 0: no limit.
 # pool_create_ms = 6
+# An area load is told from streaming by the number of textures still to make: at this many or more, the two limits
+# above give way (a frame may take pool_load_ms for them) and the picture before the load stays on screen until the
+# area's textures are there, instead of showing the ground and the walls black for the first seconds. 0: never.
+# pool_load_backlog = 512
+# pool_load_ms = 50
 # Written storage-buffer ranges up to this size in MiB (1 to 256) go back to game memory as a merge, in 4 MiB pieces:
 # copied within video memory and only the words that changed written over PCIe. Larger ones are copied back whole at
 # the end of every submission. Raising it from 4 to 16 took a 5.5 MiB range off the plain copies (about 46 MiB a frame
