@@ -2836,6 +2836,20 @@ static void outside_watch(uint64_t frame) {
     last = out, seen = 1;
 }
 
+// The overlay's "game" figure beside the card's memory in use (perfmon.c, its sampling thread): what the driver
+// counts for this process on the device-local heaps, the same figure vram_use_log splits by use.
+float vk_mem_device_used_mb(void) {
+    VkCtx *c = vk_ctx();
+    if (!c || !c->has_memory_budget) return -1;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT bp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, .pNext = &bp};
+    vkGetPhysicalDeviceMemoryProperties2(c->phys, &p2);
+    uint64_t usage = 0;
+    for (uint32_t h = 0; h < c->mem_props.memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++)
+        if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) usage += bp.heapUsage[h];
+    return (float)(usage / 1048576.0);
+}
+
 // One line per boot stage (vk_pipeline.c calls it after the pipeline cache load, the shader prewarm, the recorded
 // pipelines and the compute pipeline prebuild): the device-local memory in use, the part of it VMA did not allocate
 // (outside_watch's "outside VMA": pipelines and the driver's own, before the swapchain and the upscaler exist), and the
