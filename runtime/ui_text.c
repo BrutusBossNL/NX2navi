@@ -88,11 +88,6 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_DESC] = "Sharpness of large surface textures. Reduced and Low leave out their largest versions, so that an area fits the video memory of 6 and 8 GB cards; only surfaces seen up close look softer. Automatic picks by the card's video memory.",
     [UI_MENU_TEX_DETAIL_AUTO] = "Automatic: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Full", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduced", [UI_MENU_TEX_DETAIL_LOW] = "Low",
-    [UI_MENU_FPS_BOOST] = "Experimental FPS boost",
-    [UI_MENU_FPS_BOOST_DESC] = "What the game's shaders write into its memory is copied back from the video card only "
-                               "when the game's own code needs it, instead of after every step of a frame. About a "
-                               "third more frames per second in large open areas. Experimental: single frames can "
-                               "flicker with it on. Off by default.",
     [UI_MENU_SHARPNESS] = "FSR sharpness",
     [UI_MENU_SHARPNESS_DESC] = "How sharp FSR makes the picture. 0 turns it off.",
     [UI_MENU_SHARPNESS_NEEDS_FSR] = "only with AMD FSR 1 or FSR 3.1",
@@ -657,11 +652,6 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_DESC] = "Чёткость больших текстур поверхностей. «Сниженная» и «Низкая» не загружают их самые крупные версии, чтобы область помещалась в видеопамять карт на 6 и 8 ГБ; мягче выглядят только поверхности вблизи. «Авто» выбирает по объёму видеопамяти.",
     [UI_MENU_TEX_DETAIL_AUTO] = "Авто: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Полная", [UI_MENU_TEX_DETAIL_REDUCED] = "Сниженная", [UI_MENU_TEX_DETAIL_LOW] = "Низкая",
-    [UI_MENU_FPS_BOOST] = "Экспериментальное ускорение FPS",
-    [UI_MENU_FPS_BOOST_DESC] = "То, что шейдеры игры записывают в её память, копируется с видеокарты обратно только "
-                               "тогда, когда это нужно коду самой игры, а не после каждого этапа кадра. Примерно на "
-                               "треть больше кадров в секунду на больших открытых пространствах. Экспериментально: "
-                               "отдельные кадры могут мерцать. По умолчанию выключено.",
     [UI_MENU_SHARPNESS] = "Резкость FSR",
     [UI_MENU_SHARPNESS_DESC] = "Насколько FSR повышает резкость. 0 отключает.",
     [UI_MENU_SHARPNESS_NEEDS_FSR] = "только с AMD FSR 1",
@@ -1475,11 +1465,6 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
                                 "da placa.",
     [UI_MENU_TEX_DETAIL_AUTO] = "Automático: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Completo", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduzido", [UI_MENU_TEX_DETAIL_LOW] = "Baixo",
-    [UI_MENU_FPS_BOOST] = "Aumento de FPS experimental",
-    [UI_MENU_FPS_BOOST_DESC] = "O que os shaders do jogo escrevem na memória dele só é copiado de volta da placa de "
-                               "vídeo quando o próprio código do jogo precisa, em vez de após cada etapa do quadro. "
-                               "Cerca de um terço a mais de quadros por segundo em grandes áreas abertas. "
-                               "Experimental: quadros isolados podem piscar com isto ligado. Desligado por padrão.",
     [UI_MENU_COLOR] = "Cor",
     [UI_MENU_COLOR_PRESET] = "Perfil de cor",
     [UI_MENU_COLOR_PRESET_DESC] = "Define os quatro valores abaixo. Vívido: mais contraste e saturação, sombras um "
@@ -2164,9 +2149,6 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_DESC] = "大型表面纹理的清晰度。“降低”和“低”不加载它们最大的版本，使一个区域能放进 6 GB 和 8 GB 显卡的显存；只有近处的表面看起来略微柔和。“自动”根据显卡的显存选择。",
     [UI_MENU_TEX_DETAIL_AUTO] = "自动：%s",
     [UI_MENU_TEX_DETAIL_FULL] = "完整", [UI_MENU_TEX_DETAIL_REDUCED] = "降低", [UI_MENU_TEX_DETAIL_LOW] = "低",
-    [UI_MENU_FPS_BOOST] = "实验性帧率提升",
-    [UI_MENU_FPS_BOOST_DESC] = "游戏着色器写入其内存的数据，只有在游戏自身的代码需要时才从显卡复制回来，而不是在每帧的每个阶段之后都"
-                               "复制。在大型开放区域中帧率提高约三分之一。实验性功能：开启后个别帧可能闪烁。默认关闭。",
     [UI_MENU_HDR_GROUP] = "HDR",
     [UI_MENU_HDR] = "HDR 输出",
     [UI_MENU_HDR_DESC] = "在 HDR 显示器上呈现更亮的高光。请先在 Windows 中开启 HDR。",

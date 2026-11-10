@@ -684,12 +684,11 @@
 # first submission ends when that submission's passes are through, without waiting for the copy back (3 to 4 ms of
 # every frame). 0: the copy back is part of the submission, and the wait covers it.
 # wb_split = 1
-# 0: what the game's shaders write into its memory is copied back from the video card at the end of every GPU
-# submission. 1 (experimental): copied back once, and after that only when the game's CPU code touches it (most of it
-# never is: 66 MiB a frame in Hyrule Field), for about a third more frames a second in open areas. With 1, single
-# frames of the scene can flicker; tell us what you see if you try it. In the settings menu: Experimental FPS boost
-# (Screen tab). With shadow storage (Linux, Wine) it stays off.
-# wb_lazy = 0
+# 1 (the default on Windows): what the game's shaders write into its memory is copied back from the video card once,
+# and after that only when the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field), for
+# about a third more frames a second in open areas. 0: copied back at the end of every GPU submission, as in 0.7.0.
+# With shadow storage (Linux, Wine) it stays off.
+# wb_lazy = 1
 # Linux, shadow storage: 1 clears the write watch's protection of a range in one call before the GPU's bytes are copied
 # back into the game's memory, instead of taking a fault at the first store into each page.
 # shadow_bulk_write = 0

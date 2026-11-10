@@ -1062,11 +1062,6 @@ static void tab_screen(float scale) {
     row_gpu();
     static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
     opt_choice("NX2NAVI_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
-#ifdef _WIN32
-    // The lazy write-back (memory.c "Lazy write-back"), off by default and read at the start: the row notes the restart.
-    // Not offered where its fetch inside the access-fault handler has never run.
-    opt_toggle("NX2NAVI_WB_LAZY", UI_MENU_FPS_BOOST, UI_MENU_FPS_BOOST_DESC);
-#endif
     opt_group(UI_MENU_GRAPHICS);
     // The game resolution needs the output and scene patch sets (resolution.c res_adjustable): Ocarina's build has
     // none and always draws its own size, so the row would change nothing
