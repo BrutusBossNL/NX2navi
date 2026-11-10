@@ -85,7 +85,8 @@ class Server:
                     self.send_response(status)
                     for k, v in headers.items():
                         self.send_header(k, v)
-                    self.send_header('Content-Length', str(len(body)))
+                    if 'Content-Length' not in headers:
+                        self.send_header('Content-Length', str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
                     return
@@ -520,6 +521,22 @@ class NetTest(Tmp):
         with mock.patch.object(net, 'request', down), mock.patch.object(net.time, 'sleep'):
             with self.assertRaises(ConnectionResetError):   # every try failed: the last error goes up
                 net.get_bytes('https://example.invalid/down')
+
+    def test_early_eof_retries_metadata_and_resumes_file(self):
+        data = b'{"build":123}'
+        (self.tmp / 'asset').write_bytes(data)
+        cut = (200, {'Content-Length': str(len(data))}, data[:7])
+        routes = {'/asset': cut}
+        srv = Server(self.tmp, routes)
+        self.addCleanup(srv.close)
+        url = srv.url + 'asset'
+        with mock.patch.object(net.time, 'sleep', side_effect=lambda _: routes.clear()):
+            self.assertEqual(net.get_json(url), {'build': 123})
+            routes['/asset'] = cut
+            dest = self.tmp / 'download'
+            net.download(url, dest, sha256=sha(data), size=len(data))
+        self.assertEqual(dest.read_bytes(), data)
+        self.assertEqual([h.get('Range') for _, h in srv.hits], [None, None, None, 'bytes=7-'])
 
     def test_download_resume_and_checks(self):
         data = os.urandom(3 * net.CHUNK + 123)
