@@ -57,7 +57,7 @@ typedef struct Tex {
     uint64_t retire_due;          // vk_sync_issued once every pool set was taken since (0: not yet); destroyed after it
     int uploaded, released;
     uint32_t rel_serial;          // reg_serial when it was released: slots registered before then are stale (slot_resolve)
-    uint32_t rel_agen, rel_pre;   // its address generation after and before the release's bump (tex_gen_unrelease)
+    uint64_t uid;                 // names the entry in its bucket's released set (tex_gen_flip); 0 until its first release
     uint64_t rel_frame;           // gfx_counters.frames when it was released (drop_stale)
     uint32_t back_gap;            // most presents between a release and its taking back so far (stale_after)
     uint32_t n_up;                // uploads of this entry (vk_texture_debug)
@@ -203,13 +203,35 @@ static uint16_t *slot_bucket;
 
 static void dirty_push(uint32_t x) { dirty[ndirty++ % DIRTY_N] = x; }
 
-// tex_gen_bump calls, by site: destroy, create, take-back, release; and the take-backs that undid their release's bump
-// instead (tex_gen_unrelease), for vk_texture_bucket_stats
+// tex_gen_bump calls, by site: destroy, create, take-back, release; and the releases and take-backs that went back to a
+// generation their bucket's state had before (tex_gen_flip), for vk_texture_bucket_stats
 static uint64_t n_bumps, n_site[4], n_undone;
 static uint32_t bump_count[AGEN_N];
-// The highest generation each bucket ever had. A bump takes the next one after it, not the one after the current
-// value, so a value a bucket went back from (tex_gen_unrelease) is never given to another state.
+// The highest generation each bucket ever had. A new state takes the next one after it, not the one after the current
+// value, so a value a bucket went back from (tex_gen_flip) is never given to another state.
 static uint32_t agen_top[AGEN_N];
+// What a slot at an address resolves to depends on the entries there and on which of them are released
+// (slot_resolve). Per bucket: epoch counts every change other than a release or a take-back (an entry made, destroyed,
+// retired, held or taken back with more than its flag changing), sig is the released entries' uids XORed, which a
+// release and a take-back each flip. (bucket, epoch, sig) names the state; gs remembers the generation each state
+// got, so a bucket that comes back to a state gets that state's generation back.
+static uint32_t bepoch[AGEN_N];
+static uint64_t bsig[AGEN_N];
+#define GS_N 8192
+static struct { uint64_t sig; uint32_t b, epoch, gen, valid; } gs[GS_N];
+// A slot lookup is resolving (vk_texture_by_id_locked around slot_resolve). The lookup's callers stamp what they keep
+// with the generation they read before it: the slot's own cache, the pool's tokens, the descriptor, type and feedback
+// memos (vk_exec_draw.c). A lookup that itself changes the state (it takes a released entry back for a slot registered
+// since the release) leaves such a stamp naming the state it left, with a result that state would not give: the next
+// release of that entry is later than the slot's registration, the slot is stale then (slot_resolve), and the kept
+// result would hand out the released entry, whose storage the game may be unmapping. So the state such a lookup
+// leaves loses its remembered generation (tex_gen_flip): it gets a new one when the bucket is next in it, and the
+// stamp never matches again.
+static int in_lookup;
+
+static uint32_t gs_at(uint32_t b) {
+    return (uint32_t)(((bsig[b] ^ ((uint64_t)b << 32 | bepoch[b])) * 0x9E3779B97F4A7C15ull) >> 51);
+}
 
 static void tex_gen_bump(uint64_t addr) {
     n_bumps++;
@@ -217,35 +239,59 @@ static void tex_gen_bump(uint64_t addr) {
     if (!++tex_gen) tex_gen = 1;
     slots_gen++;
     uint32_t b = agen_idx(addr);
+    bepoch[b]++;
     __atomic_store_n(&agen[b], ++agen_top[b], __ATOMIC_RELEASE);
+    gs[gs_at(b)] = (typeof(gs[0])){bsig[b], b, bepoch[b], agen[b], 1};
     dirty_push(DIRTY_BUCKET | b);
 }
 
-// NX2NAVI_TEX_GEN_UNDO (default 1; 0: a take-back bumps like any change). Ocarina finalizes and initializes transient
-// textures all through a frame: in a large town about 40,000 releases and as many take-backs per 3,600 submissions,
-// each a bump of its address bucket, and the buckets with the most slots (1,300 registered over one address) were the
-// ones bumped most. The texture pool refresh refilled about 6,000 slots per submission for it and spent its 6 ms of a
-// frame in half the frames there, which is also when new textures arrive late.
-// A release followed by the take-back of the same entry, with no other change at its address between them, leaves every
-// slot there resolving as before the release: slot_resolve reads the entries at the address and their released flags,
-// and those are as they were. So the take-back puts the bucket's generation back to its value from before the
-// release, and whatever was resolved then counts as current again: the pool's tokens, the descriptor memo and the
-// slots' own cached entries. What was resolved while the entry was released carries the generation in between, which
-// no state gets again (agen_top). The global generations still move, so their readers look, and find nothing changed.
-// Not for an entry that was superseded or overwritten while released: its take-back changes more than the flag.
-static void tex_gen_unrelease(Tex *e) {
+// NX2NAVI_TEX_GEN_UNDO (default 1; 0: every release and take-back is a new generation). Ocarina finalizes and
+// initializes transient textures all through a frame: in a large town about 40,000 releases and as many take-backs
+// per 3,600 submissions, each a bump of its address bucket, and the buckets with the most slots (1,300 registered over
+// one address) were the ones bumped most. The texture pool refresh refilled about 6,000 slots per submission for it.
+// A release or a take-back changes one entry's released flag and nothing else, so it moves the bucket between states
+// it has usually been in before: the textures the game keeps released and takes back for a moment, and those it
+// releases and takes straight back. The bucket then gets the generation that state had, and whatever was resolved in
+// that state counts as current again: the pool's tokens, the descriptor memo and the slots' own cached entries. A
+// state seen for the first time gets a new generation (agen_top), and any other change starts a new epoch, so a
+// generation never stands for two states. The global generations still move, so their readers look, and find the
+// tokens equal. plain: the take-back of an entry that was superseded or overwritten while released changes more than
+// the flag, and is a change like any other.
+// One input of slot_resolve is not in the state: the stale rule compares a slot's registration with the entry's
+// release (rel_serial), which is later at every release. A slot is stale at every later release once it is at one, so
+// what it resolves to in a released state stays right; the one that is not stale takes the entry back, which is the
+// lookup-made change in_lookup deals with.
+static void tex_gen_flip(Tex *e, int plain) {
     static int on = -1;
+    static uint64_t uids;
     if (on < 0) on = rt_knob("TEX_GEN_UNDO", "1") == 1;
-    uint32_t b = agen_idx(e->key.addr), at = e->rel_agen;
-    e->rel_agen = 0;
-    if (!on || !at || agen[b] != at || e->superseded || e->overwritten) {
+    if (!e->uid) {
+        uint64_t z = ++uids * 0x9E3779B97F4A7C15ull;
+        z = (z ^ z >> 30) * 0xBF58476D1CE4E5B9ull, z = (z ^ z >> 27) * 0x94D049BB133111EBull;
+        e->uid = (z ^ z >> 31) | 1;
+    }
+    uint32_t b = agen_idx(e->key.addr);
+    if (in_lookup) {   // see in_lookup: the state this lookup leaves is not to get its generation again
+        typeof(gs[0]) *m0 = &gs[gs_at(b)];
+        if (m0->valid && m0->b == b && m0->epoch == bepoch[b] && m0->sig == bsig[b]) m0->valid = 0;
+    }
+    bsig[b] ^= e->uid;
+    if (!on || plain) {
         tex_gen_bump(e->key.addr);
         return;
     }
-    n_undone++;
     if (!++tex_gen) tex_gen = 1;
     slots_gen++;
-    __atomic_store_n(&agen[b], e->rel_pre, __ATOMIC_RELEASE);
+    typeof(gs[0]) *m = &gs[gs_at(b)];
+    if (m->valid && m->b == b && m->epoch == bepoch[b] && m->sig == bsig[b]) {
+        n_undone++;
+        __atomic_store_n(&agen[b], m->gen, __ATOMIC_RELEASE);
+    } else {
+        n_bumps++;
+        bump_count[b]++;
+        __atomic_store_n(&agen[b], ++agen_top[b], __ATOMIC_RELEASE);
+        *m = (typeof(*m)){bsig[b], b, bepoch[b], agen[b], 1};
+    }
     dirty_push(DIRTY_BUCKET | b);
 }
 
@@ -2134,7 +2180,7 @@ static Tex *entry_of(const tex_t *t) {
         e->samp_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);   // in use again, as a new one
         uint64_t gap = e->samp_frame - e->rel_frame;
         if (gap > e->back_gap) e->back_gap = gap > UINT32_MAX ? UINT32_MAX : (uint32_t)gap;
-        e->released = 0, nreleased--, rel_unlink(e), n_site[2]++, tex_gen_unrelease(e);
+        e->released = 0, nreleased--, rel_unlink(e), n_site[2]++, tex_gen_flip(e, e->superseded || e->overwritten);
         e->overwritten = 0;
         if (e->superseded) {   // its image may still be in use: the first barrier waits for all earlier work
             e->superseded = 0, e->reused = 1;
@@ -2201,9 +2247,7 @@ static void mark_released(Tex *e) {   // tex_lock held; e is not released
     nreleased++;
     rel_append(e);
     n_site[3]++;
-    e->rel_pre = agen[agen_idx(e->key.addr)];
-    tex_gen_bump(e->key.addr);
-    e->rel_agen = agen[agen_idx(e->key.addr)];
+    tex_gen_flip(e, 0);
 }
 
 // e, in the GPU-only address window, is written by the GPU in frame fr: the entries its storage runs over are
@@ -2473,8 +2517,8 @@ void vk_texture_bucket_stats(char *out, size_t n) {
             }
     uint64_t hot = 0;   // bumps weighted by the slots they invalidate
     for (int b = 0; b < AGEN_N; b++) hot += (uint64_t)bump_count[b] * occ[b];
-    snprintf(out, n, "%llu bumps (destroy %llu, create %llu, take-back %llu, release %llu; %llu take-backs put their "
-             "release's generation back instead), %llu slot invalidations; fullest buckets %u/%u/%u/%u slots, bumped %u/%u/%u/%u",
+    snprintf(out, n, "%llu new generations (destroy %llu, create %llu, take-back %llu, release %llu; %llu releases and "
+             "take-backs went back to a generation their state had), %llu slot invalidations; fullest buckets %u/%u/%u/%u slots, bumped %u/%u/%u/%u",
              (unsigned long long)n_bumps, (unsigned long long)n_site[0], (unsigned long long)n_site[1],
              (unsigned long long)n_site[2], (unsigned long long)n_site[3], (unsigned long long)n_undone,
              (unsigned long long)hot, occ[top[0]], occ[top[1]], occ[top[2]], occ[top[3]],
@@ -2513,7 +2557,9 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
         view_t v;
         int hv;
         resolve_held = 0;
+        in_lookup = 1;
         s->ce = slot_resolve(s, &v, &hv);   // entry_of may create an entry and bump g: g read before it
+        in_lookup = 0;
         s->cview = v, s->chas_view = (uint8_t)hv;
         s->cgen = g;
         s->cepoch = 0;

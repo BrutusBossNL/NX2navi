@@ -162,9 +162,9 @@
 # made again within a few frames. The first start after changing it builds the pipelines again. 0: such textures stay.
 # 2 (diagnosis): the same marks, and such textures give way to stand-ins in the texture pool, but none is freed.
 # tex_disuse = 1
-# 1: a texture the game releases and takes straight back, with nothing else changed at its address, leaves the texture
-# table's slots there as they were, instead of having them all looked up again (large towns release and take back
-# thousands a second). 0: every release and take-back counts as a change, as before.
+# 1: a texture the game releases or takes back, with nothing else changed at its address, puts the texture table's
+# slots there back in a state they were in before, and they are not all looked up again (large towns release and take
+# back thousands a second). 0: every release and take-back counts as a new state.
 # tex_gen_undo = 1
 # Host zstd decoder in place of the game's (0 = the game's), and a check that decodes every call both ways and logs
 # the differences (1 = on; slow). Ocarina of Time 1.1.1 keeps the game's decoder while zstd_native is unset: its host
@@ -598,6 +598,10 @@
 # are made inaccessible until their first read or write, which is logged with its instruction ("mem: write-back
 # probe"). The bytes are there all along; the probe only watches, at the cost of the faults it takes.
 # wb_probe = 0
+# 1: what the GPU wrote goes back to the game's memory in a GPU submission of its own, and the wait after each frame's
+# first submission ends when that submission's passes are through, without waiting for the copy back (3 to 4 ms of
+# every frame). 0: the copy back is part of the submission, and the wait covers it.
+# wb_split = 1
 # 1: the game's flushes of mirrored memory are copied into the mirrors even where the write watch already sees every
 # page the game wrote; 0 (default) copies only the written pages there, which saved 47-57 MiB of copies a frame in
 # Kokiri Forest.

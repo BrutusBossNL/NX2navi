@@ -2331,6 +2331,8 @@ static int verify_record(VkCommandBuffer cb, uint64_t fence) {
     return j->n + 2;
 }
 
+int vk_mem_mirror_wb_pending(void) { return vk_mirror_on && (nsnl || nwbl); }
+
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     if (!vk_mirror_on) return 0;
     int rec = 0;
