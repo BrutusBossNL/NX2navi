@@ -315,6 +315,11 @@ class App:
             got = heard = {}
             try:
                 if fonts:
+                    # The cached files are registered (load_fonts) and were not usable, or this would not run:
+                    # registered, Windows keeps them open, and decoding them again failed with "Permission denied"
+                    # at every start, so a cache file that had gone bad was never replaced.
+                    for path, _family in gamefiles.cached_fonts(self.layout).values():
+                        winsys.unregister_font(path)
                     got = gamefiles.extract_fonts(self.layout, game_dir, dump)
             except Exception as e:
                 self.ctx.log(f'fonts: {e}')

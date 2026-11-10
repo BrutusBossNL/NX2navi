@@ -1019,6 +1019,14 @@ class FontTest(Tmp):
         self.assertEqual(got['title'][1], 'DejaVu Sans')
         self.assertEqual(Path(got['title'][0]).read_bytes(), otf)
         self.assertEqual(gamefiles.cached_fonts(self.layout)['title'][1], 'DejaVu Sans')
+        # Registered as a font, Windows keeps the file open: decoding it again must not fail on the unchanged file,
+        # and once the registration is given up a file that went bad is replaced.
+        path = Path(got['title'][0])
+        winsys.register_font(path)
+        self.assertEqual(gamefiles.extract_fonts(self.layout, self.tmp / 'game')['title'][1], 'DejaVu Sans')
+        winsys.unregister_font(path)
+        path.write_bytes(b'not a font')
+        self.assertEqual(Path(gamefiles.extract_fonts(self.layout, self.tmp / 'game')['title'][0]).read_bytes(), otf)
 
 
 # ---------------------------------------------------------------- the button art of a release
