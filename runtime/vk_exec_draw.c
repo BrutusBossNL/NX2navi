@@ -3475,6 +3475,33 @@ static int skip_prog_wanted(uint64_t serial) {
     return 0;
 }
 
+// NX2NAVI_PROG_LEAD=1 (diagnostics): how long before its first draw the game made each program
+// (nvnProgramSetShaders, nvn_api_obj.c nvn_prog_made_ns): the head start a build begun at that moment would have over
+// one begun at the draw, which is where shaders are looked up and pipelines built today. One line with the draw
+// statistics (draw_stats_tick's period), mesh programs apart.
+#define PROG_LEAD_N 16384
+static struct { int on; uint64_t seen[PROG_LEAD_N]; uint64_t n[2][6], logged; } PLD = {-1};
+
+static void prog_lead(const prog_t *p, int mesh) {
+    uint32_t i = (uint32_t)p->serial & (PROG_LEAD_N - 1);
+    if (PLD.seen[i] == p->serial) return;
+    PLD.seen[i] = p->serial;
+    uint64_t made = nvn_prog_made_ns(p->serial);
+    if (!made) return;
+    double ms = (double)(plat_now_ns() - made) / 1e6;
+    PLD.n[mesh][ms < 17 ? 0 : ms < 100 ? 1 : ms < 1000 ? 2 : ms < 5000 ? 3 : ms < 30000 ? 4 : 5]++;
+    uint64_t tot = 0;
+    for (int m = 0; m < 2; m++)
+        for (int k = 0; k < 6; k++) tot += PLD.n[m][k];
+    if (tot - PLD.logged < 200) return;
+    PLD.logged = tot;
+    for (int m = 0; m < 2; m++)
+        rt_log("vk: %s programs were made before their first draw by: under 17 ms %llu, 17-100 ms %llu, 0.1-1 s %llu, 1-5 s "
+               "%llu, 5-30 s %llu, longer %llu (NX2NAVI_PROG_LEAD)", m ? "mesh" : "vertex", (unsigned long long)PLD.n[m][0],
+               (unsigned long long)PLD.n[m][1], (unsigned long long)PLD.n[m][2], (unsigned long long)PLD.n[m][3],
+               (unsigned long long)PLD.n[m][4], (unsigned long long)PLD.n[m][5]);
+}
+
 // mesh: a mesh draw (op_draw_mesh): the program's mesh and task stages stand in for the vertex stage, and nothing
 // vertex-related (vertex buffers, motion vector bookkeeping of vertex shaders) is bound or noted.
 static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) {
@@ -3492,6 +3519,8 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     VkRect2D sc = vk_exec_scissor(ex);
     if (!sc.extent.width || !sc.extent.height) return draw_skipped(ex, mesh, SK_SCISSOR);
     if (!ex->prog) return draw_skipped(ex, mesh, SK_NO_PROGRAM);
+    if (PLD.on < 0) PLD.on = cfg_get("NX2NAVI_PROG_LEAD") != NULL && strcmp(cfg_get("NX2NAVI_PROG_LEAD"), "0") != 0;
+    if (PLD.on) prog_lead(ex->prog, mesh);
     if (n_skip_prog && skip_prog_wanted(ex->prog->serial)) return draw_skipped(ex, mesh, SK_DISABLED);   // -1 until read
     int has_vs, has_fs, vs_wait = 0, fs_wait = 0, memo = mesh ? 0 : shader_memo_on();
     int has_ts = 0, ts_wait = 0, vst = mesh ? NVN_STAGE_MESH : NVN_STAGE_VS;
