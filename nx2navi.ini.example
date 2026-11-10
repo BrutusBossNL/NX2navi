@@ -94,9 +94,17 @@
 # Draws whose pipeline is still building: default waits on a reserved worker; draw is the previous scheduling.
 # pipe_wait = default
 # Which draws are dropped instead of waiting for their pipeline: strict (only draws into per-frame passes), any (also
-# draws into passes whose target a recent frame rendered; full-screen draws wait, up to 50 ms a frame) or fullscreen
+# draws into passes whose target a recent frame rendered; full-screen draws wait, from pipe_frame_wait_ms) or fullscreen
 # (those and full-screen draws: no wait, but a lighting or fog pass that is dropped shows as a black or unlit frame).
 # pipe_skip = any
+# How many milliseconds one frame may wait, in all, for the shaders and pipelines of its full-screen draws and of
+# draws into pictures drawn for the first time (0 to 500). What is not ready by then is left out of that frame and
+# built in the background.
+# pipe_frame_wait_ms = 50
+# A picture the game has drawn in many frames counts as drawn every frame after a pause too (a loading screen, a
+# menu), so the first frame of an area leaves a draw out while its pipeline is built instead of stopping for it.
+# 0: as up to 0.7.1, such a frame waits for each new pipeline in turn.
+# pipe_skip_steady = 1
 # How many milliseconds the draws of one frame may wait, in all, for a missing pipeline to be linked from the shader
 # libraries in the graphics driver's cache before they are dropped (0 to 100; 0: dropped at once, as before).
 # pipe_link_ms = 6
@@ -116,13 +124,12 @@
 # NVIDIA under Windows, Shader Cache Size Unlimited in the NVIDIA app), start once with force, or delete
 # shader-warm.txt, to warm again.
 # lib_warm = 1
-# How long (ms) a draw into a target no recent frame rendered waits for a pipeline built for the first time,
-# then is skipped. The default waits, as such a target (a lookup table, a new area's target) can stay empty if
-# skipped; a lower value caps the stall.
+# Draws into a picture drawn for the first time (a lookup table, a new area's target) wait for a pipeline built for
+# the first time from pipe_frame_wait_ms; one left over is drawn the next frame its picture is drawn. 0: as up to
+# 0.7.1, each such draw waits up to oneshot_wait_ms milliseconds, which stops the game for as long as the pipelines
+# of a new area take to build.
+# oneshot_budget = 1
 # oneshot_wait_ms = 30000
-# 1: those draws share a wait budget per presented frame instead (100 ms for large passes, 300 ms for small ones); a
-# draw left over is drawn the next frame its target is drawn. Shortens the long first frame of a new area.
-# oneshot_budget = 0
 # Build shader stage libraries in the background ahead of time, and the threads for it (1 to 16; default 2). More
 # threads mostly wait on the graphics driver's lock: 16 on NVIDIA spent about 8 cores spinning in the driver.
 # lib_prebuild = 1

@@ -168,9 +168,10 @@ VkRect2D vk_exec_scissor(const VkExec *ex);
 void vk_exec_feedback_war(VkExec *ex, uint32_t written);
 void vk_exec_noatt_dims(const VkExec *ex, uint32_t *w, uint32_t *h);   // pass size when no attachment is set
 // 1: every target of the current pass (any 1: at least one, and not only the depth target while a colour target is
-// rendered for the first time) was rendered in the previous presented frame (per-frame targets); 0 otherwise, or when
-// the pass has none.
+// rendered for the first time) is one the game renders frame after frame: rendered in the last few presented frames,
+// or steady (vk_target_frames.h tfr_pass_recent); 0 otherwise, or when the pass has none.
 int vk_exec_targets_recent(VkExec *ex, int any);
+extern uint64_t vk_exec_steady_passes;   // its answers of 1 that only a steady target gave (vk_target_frames.h)
 // Looking ahead (vk_exec.c): called by a draw that found its shader or pipeline missing, before it waits or is skipped.
 // The rest of the submission being replayed is read once and the stage libraries of the pipelines its later draws need
 // are queued to the workers (vk_pipeline_hint). vk_exec_ahead_op (vk_exec_draw.c) applies one bind or draw op of that
