@@ -76,7 +76,7 @@ static struct {
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
-    struct { uint64_t links, fb_links, wlinks, flinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, hints, hint_libs, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
+    struct { uint64_t links, fb_links, wlinks, flinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, ready_mesh, ready_recorded, ready_fresh, ready_logged, lib_logged, hints, hint_libs, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
     int vs_outs_all;                   // NX2NAVI_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src, f_full_subgroups;
@@ -1905,6 +1905,12 @@ static VkShaderStageFlags stage_bit(int stage) {
 
 static int is_mesh(const VkPipeState *s) { return s->vs && gfx_shader_stage(s->vs) == GFX_STAGE_MS; }
 
+// Where a shader's translation came from (gfx_shader_origin), for the log.
+static const char *origin_name(const GfxShader *s) {
+    static const char *const name[3] = {"from the shader cache", "a previous translator's", "translated in this session"};
+    return s ? name[gfx_shader_origin(s)] : "none";
+}
+
 // The shaders of the pipeline this thread builds, for the crash notes (platform.h plat_crash_context): the first 8
 // bytes of each cache key, as gfx_shader.c names its cache files.
 static void crash_note(const char *what, const GfxShader *a, const GfxShader *b, const GfxShader *c) {
@@ -2820,8 +2826,21 @@ static VkPipeline lib_build(Lib *b, int kind, const VkPipeState *s, const GKey *
         plat_mutex_lock(&P.lock);
         P.g.lib_n[kind]++, P.g.lib_ms[kind] += ms;
         if (ms > P.g.lib_max[kind]) P.g.lib_max[kind] = ms;
-        if (kind == LIB_PR && ((const PrKey *)(const void *)b->key)->missing) P.g.pr_added++, P.g.pr_added_ms += ms;
+        int added = kind == LIB_PR && ((const PrKey *)(const void *)b->key)->missing;
+        if (added) P.g.pr_added++, P.g.pr_added_ms += ms;
         if (ms >= 25) P.g.lib_slow[kind]++, P.g.lib_slow_ms[kind] += ms;
+        // A shader library that took this long was not in the driver's cache; why not, for the first 32 of a run
+        if (ms >= 25 && (kind == LIB_PR || kind == LIB_FS) && P.g.lib_logged < 32) {
+            const GfxShader *sh = kind == LIB_PR ? s->vs : s->fs;
+            const uint8_t *id = sh ? gfx_shader_input_id(sh) : NULL;
+            P.g.lib_logged++;
+            rt_log("vk_pipeline: gpl: a %s library took %.0f ms: shader %02x%02x%02x%02x, %s%s",
+                   kind == LIB_PR ? "pre-rasterization" : "fragment shader", ms, id ? id[0] : 0, id ? id[1] : 0,
+                   id ? id[2] : 0, id ? id[3] : 0, origin_name(sh),
+                   added ? "; outputs were added for its fragment shader, a module the preparation did not build"
+                   : sh && gfx_shader_origin(sh) == 2 ? "; nothing was prepared from a shader first translated now"
+                   : "; the driver's cache did not have it, or the build waited behind others in the driver");
+        }
     }
     if (!pipe && ++P.g.lib_fail <= 8) rt_log("vk_pipeline: gpl: stage library %d not built", kind);
     b->pipe = pipe, b->building = 0;
@@ -2907,18 +2926,6 @@ static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, F
     ok->kind = LIB_FO, ok->n_color = k->n_color, ok->samples = k->samples, ok->a2c = k->a2c, ok->logic_op = k->logic_op;
     ok->blend_en = k->blend_en, ok->fbl = k->fbl, ok->depth = k->depth, ok->stencil = k->stencil, ok->wmask = k->wmask;
     memcpy(ok->color, k->color, sizeof ok->color), memcpy(ok->blend, k->blend, sizeof ok->blend);
-}
-
-// p, which a draw missed, has its first usable pipeline: how long that took is how long its draws were skipped or
-// waited. fast 0: it had no fast link and this is the optimised build. Caller holds P.lock.
-static void ready_note(Pipe *p, int fast) {
-    if (!p->t_miss) return;
-    double ms = (double)(plat_now_ns() - p->t_miss) / 1e6;
-    p->t_miss = 0;
-    P.g.ready_n[ms < 4 ? 0 : ms < 8 ? 1 : ms < 17 ? 2 : ms < 50 ? 3 : ms < 150 ? 4 : 5]++;
-    P.g.ready_ms += ms;
-    if (ms > P.g.ready_max) P.g.ready_max = ms;
-    P.g.ready_nofast += !fast;
 }
 
 // NX2NAVI_GPL_FEEDBACK (default 1; 0 = as before): a pipeline whose fragment shader samples an attachment of its own pass
@@ -3205,6 +3212,44 @@ static void keys_open(void) {
 static double now_ms(void) { return (double)plat_now_ns() / 1e6; }
 
 // Caller holds P.lock.
+// p, which a draw missed, has its first usable pipeline: how long that took is how long its draws were skipped or
+// waited. fast 0: it had no fast link and this is the optimised build. Caller holds P.lock.
+// The summary (save_with) counts what a slow one can be: a mesh pipeline (no stage libraries, so its whole build), one
+// the key file names whose prebuild had not come to it, one with a shader translated in this session (nothing of it
+// was prepared, so its libraries compile cold). The first READY_LOGS that took READY_SLOW_MS or longer get a line
+// each with those facts, so a log says which pipelines left their draws out of the picture and for which reason.
+#define READY_SLOW_MS 50.0
+#define READY_LOGS 48
+static void ready_note(Pipe *p, int fast) {
+    if (!p->t_miss) return;
+    double ms = (double)(plat_now_ns() - p->t_miss) / 1e6;
+    p->t_miss = 0;
+    P.g.ready_n[ms < 4 ? 0 : ms < 8 ? 1 : ms < 17 ? 2 : ms < 50 ? 3 : ms < 150 ? 4 : 5]++;
+    P.g.ready_ms += ms;
+    if (ms > P.g.ready_max) P.g.ready_max = ms;
+    P.g.ready_nofast += !fast;
+    const Job *j = p->job;
+    if (!j) return;
+    int mesh = is_mesh(&j->s);
+    int fresh = gfx_shader_origin(j->s.vs) == 2 || (j->s.fs && gfx_shader_origin(j->s.fs) == 2) ||
+                (j->s.ts && gfx_shader_origin(j->s.ts) == 2);
+    P.g.ready_mesh += (uint64_t)mesh, P.g.ready_recorded += j->prebuild, P.g.ready_fresh += (uint64_t)fresh;
+    if (ms < READY_SLOW_MS || P.g.ready_logged >= READY_LOGS) return;
+    P.g.ready_logged++;
+    const uint8_t *vi = gfx_shader_input_id(j->s.vs), *fi = j->s.fs ? gfx_shader_input_id(j->s.fs) : NULL;
+    char fid[16] = "none";
+    if (fi) snprintf(fid, sizeof fid, "%02x%02x%02x%02x", fi[0], fi[1], fi[2], fi[3]);
+    rt_log("vk_pipeline: a pipeline a draw missed was usable after %.0f ms: a %s pipeline, %s; %s; %s shader "
+           "%02x%02x%02x%02x (%s), fragment shader %s (%s)%s%s",
+           ms, mesh ? "mesh" : "vertex",
+           fast ? "fast-linked, so the time went to its stage libraries (the lines \"a ... library took\" name the slow ones)"
+                : mesh ? "which has no stage libraries: this is its whole build"
+                       : "which got no fast link: this is its whole build",
+           j->prebuild ? "pipeline-keys.bin names it and its prebuild had not come to it" : "not in pipeline-keys.bin before",
+           mesh ? "mesh" : "vertex", vi[0], vi[1], vi[2], vi[3], origin_name(j->s.vs), fid, origin_name(j->s.fs),
+           j->k.fbl ? "; feedback loop" : "", P.g.ready_logged == READY_LOGS ? " (the last such line of this run)" : "");
+}
+
 static void prebuild_report(void) {
     rt_log("vk_pipeline: prebuild done: %u built, %u failed, %u asked for by a draw first; %.0f ms after the device was "
            "ready", K.built, K.failed, K.promoted, now_ms() - K.t0);
@@ -3884,6 +3929,9 @@ static void prewarm_run(void) {
     __atomic_store_n(&pw_phase, 1, __ATOMIC_RELEASE);
     gfx_shader_prewarm((const uint8_t(*)[32])ids, u, sh, cpus, procs < 1 ? 1 : procs);
     double t1 = now_ms();
+    size_t carried = 0, fresh = 0;   // the recorded pipelines' shaders by where their translation came from
+    for (size_t i = 0; i < u; i++)
+        if (sh[i]) carried += gfx_shader_origin(sh[i]) == 1, fresh += gfx_shader_origin(sh[i]) == 2;
     vk_mem_stage_log("the shader prewarm");
 
     if (P.indep) {   // vertex output unions first: workers may take a job before the queue is complete
@@ -3974,6 +4022,13 @@ static void prewarm_run(void) {
     free(K.file);
     K.file = NULL;
     plat_mutex_unlock(&P.lock);
+    // After an update with another translator: a record names its shaders by input id, which no translator changes,
+    // so every record still finds its shaders, and the pipeline cache gives the pipeline back wherever the translation
+    // in use is the one it was built from. The line below this one says how many it gave back.
+    if (carried || fresh)
+        rt_log("vk_pipeline: prewarm: of the %zu shaders the recorded pipelines name, %zu are a previous translator's "
+               "translations and %zu were translated now; a recorded pipeline is compiled again only where its shaders' "
+               "translation changed, which the pipeline-cache.bin hits below show", u, carried, fresh);
     fb_log("after the boot prewarm");
     vk_mem_stage_log("the recorded pipelines' prebuild");
     vk_pipeline_prewarm_marker_clear();   // the boot's share is done; what the pool builds later runs during play
@@ -5895,8 +5950,9 @@ static void save_with(uint32_t wait_ms) {
     if (P.ready && P.gpl) {
         rt_log("vk_pipeline: gpl: %llu fast links (%llu by workers, %llu of those by the library workers for skipped draws; "
                "%llu of pipelines with a feedback loop; avg %.2f ms, "
-               "max %.2f ms, %llu failed), %llu draws "
-               "lookups found shader libraries missing (left to a worker), %llu optimised pipelines swapped in (%llu queued "
+               "max %.2f ms, %llu failed), %llu lookups by a draw found a stage library not made in this process yet and "
+               "left it to a worker (whether the driver's cache has it shows in the library times below), %llu optimised "
+               "pipelines swapped in (%llu queued "
                "low after their fast link), %llu drawing-thread links over 5 ms; %llu waiting draws built their libraries "
                "(avg %.2f ms, max %.2f ms)",
                (unsigned long long)P.g.links, (unsigned long long)P.g.wlinks, (unsigned long long)P.g.flinks,
@@ -5907,10 +5963,14 @@ static void save_with(uint32_t wait_ms) {
                (unsigned long long)P.g.dlinks, P.g.dlinks ? P.g.dlink_ms / P.g.dlinks : 0.0, P.g.dlink_max);
         uint64_t rn = P.g.ready_n[0] + P.g.ready_n[1] + P.g.ready_n[2] + P.g.ready_n[3] + P.g.ready_n[4] + P.g.ready_n[5];
         rt_log("vk_pipeline: gpl: pipelines a draw missed were usable after under 4 ms %llu, 4-8 ms %llu, 8-17 ms %llu, "
-               "17-50 ms %llu, 50-150 ms %llu, longer %llu (avg %.1f ms, longest %.0f ms); %llu of them had no fast link",
+               "17-50 ms %llu, 50-150 ms %llu, longer %llu (avg %.1f ms, longest %.0f ms); %llu of them had no fast link; "
+               "%llu were mesh pipelines (no stage libraries), %llu were named in pipeline-keys.bin and not prebuilt yet "
+               "(the others were new to this install), %llu had a shader translated in this session",
                (unsigned long long)P.g.ready_n[0], (unsigned long long)P.g.ready_n[1], (unsigned long long)P.g.ready_n[2],
                (unsigned long long)P.g.ready_n[3], (unsigned long long)P.g.ready_n[4], (unsigned long long)P.g.ready_n[5],
-               rn ? P.g.ready_ms / (double)rn : 0.0, P.g.ready_max, (unsigned long long)P.g.ready_nofast);
+               rn ? P.g.ready_ms / (double)rn : 0.0, P.g.ready_max, (unsigned long long)P.g.ready_nofast,
+               (unsigned long long)P.g.ready_mesh, (unsigned long long)P.g.ready_recorded,
+               (unsigned long long)P.g.ready_fresh);
         if (P.g.hints)
             rt_log("vk_pipeline: gpl: looking ahead named %llu pipeline states not known yet and queued %llu stage libraries "
                    "for them", (unsigned long long)P.g.hints, (unsigned long long)P.g.hint_libs);

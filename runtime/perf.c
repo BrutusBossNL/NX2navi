@@ -133,6 +133,9 @@ typedef struct {
 // What a frame over 25 ms spent its time on, so a count of slow frames says where to look instead of only that they
 // happened. A frame is charged to the largest part when that part is at least a quarter of it, and to "unattributed"
 // otherwise - the part of a slow frame none of the recorded waits explains (the GPU, or a stall outside them).
+// The replay's part is its time without the pipeline, translation and texture waits, which all happen inside it: with
+// them in, every frame that waited 900 ms for a pipeline was charged to "replay", the larger number, and a log
+// could not tell a pipeline stall from a slow replay.
 enum { FT_C_PIPE, FT_C_XLATE, FT_C_TEX, FT_C_FENCE, FT_C_PACE, FT_C_REPLAY, FT_C_OTHER, FT_C_N };
 static const char *const ft_cause_name[FT_C_N] = { "pipeline", "translation", "texture", "fence", "pacing", "replay",
                                                    "unattributed" };
@@ -380,7 +383,9 @@ static uint64_t ft_frame(uint64_t frame, uint64_t now, uint64_t d) {
         part[FT_C_TEX] = frame_ns[PERF_TEX];
         part[FT_C_FENCE] = frame_ns[PERF_FENCE] + frame_ns[PERF_DRAIN];
         part[FT_C_PACE] = frame_ns[PERF_PACE];
-        part[FT_C_REPLAY] = (uint64_t)rep > 0 ? (uint64_t)rep : 0;
+        part[FT_C_REPLAY] = rep > 0 ? (uint64_t)rep : 0;
+        uint64_t inside = part[FT_C_PIPE] + part[FT_C_XLATE] + part[FT_C_TEX];   // waits on the replay thread
+        part[FT_C_REPLAY] = part[FT_C_REPLAY] > inside ? part[FT_C_REPLAY] - inside : 0;
         uint64_t known = 0;
         for (int c = 0; c < FT_C_OTHER; c++) known += part[c];
         part[FT_C_OTHER] = d > known ? d - known : 0;

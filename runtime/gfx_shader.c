@@ -129,6 +129,7 @@ struct GfxShader {
                                                            // (4 bits per target, the SPH omap); 0 unknown (older translations)
     uint8_t carried;                                       // 1 + the previous identity (C.prev) that translated it; 0 the
                                                            // current translator
+    uint8_t fresh;                                         // translated in this process (translate_one)
 };
 
 static PlatMutex cache_lock = PLAT_MUTEX_INIT;                  // memory cache
@@ -1973,6 +1974,7 @@ static const GfxShader *translate_one(const Req *r, int stage, const uint8_t *co
     }
     in_store(s->iid, stage, control, code, r, a);
     plat_inc64(&n_xlated);
+    s->fresh = 1;
     return mem_insert(s);
 }
 
@@ -2243,6 +2245,8 @@ uint64_t gfx_shader_async_done(void) { return (uint64_t)n_async; }
 void gfx_shader_counts(uint64_t *keys, uint64_t *translated) { *keys = (uint64_t)n_keys, *translated = (uint64_t)n_xlated; }
 
 const uint8_t *gfx_shader_key(const GfxShader *s) { return s->key; }
+
+int gfx_shader_origin(const GfxShader *s) { return s->fresh ? 2 : s->carried ? 1 : 0; }
 
 const uint8_t *gfx_shader_input_id(const GfxShader *s) { return s->iid; }
 

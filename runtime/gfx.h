@@ -62,6 +62,9 @@ void gfx_shader_set_host(int float64, uint32_t sbuf_align, const uint32_t subgro
                          int bda);
 const uint8_t *gfx_shader_key(const GfxShader *s);          // the 32-byte cache key (stable while the translator is)
 const uint8_t *gfx_shader_input_id(const GfxShader *s);     // the 32-byte input id (stable across translators)
+// Where the translation in use came from: 0 the shader cache, under the current translator; 1 the shader cache, a
+// previous translator's (gfx_shader.c "Carry"); 2 translated in this process, so nothing was prepared from it.
+int gfx_shader_origin(const GfxShader *s);
 // By input id from memory or disk; xlate 1 also translates it from its stored inputs. NULL if absent.
 const GfxShader *gfx_shader_load_input(const uint8_t iid[32], int xlate);
 // Boot prewarm: out[i] = gfx_shader_load_input(iids[i], 1) on `threads` threads with up to `procs` translators, then
