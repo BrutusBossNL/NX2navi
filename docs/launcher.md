@@ -125,11 +125,17 @@ A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the too
    complete. No MSYS2 shell or pacman runs. Then zbic: the wheel for the bundled Python from PyPI, checked against
    PyPI's sha256, into `pydeps/`.
 2. **Inspect Your Game** to **Compile**: `tools/make_game.py --nup <dump> --out <game> --msys <toolchain> --events`,
-   whose `@@` progress lines drive the rows (check, exefs, romfs, lift, compile). How it keeps the build short:
+   whose `@@` progress lines drive the rows (check, exefs, romfs, lift, compile). Before the first long step it
+   looks at what can be known to fail later: the disk space of every step that will run (the RomFS image and 1 GiB,
+   2 GiB for the build cache, 4 GiB for the prepared shaders; `check_space` names each part and how much is
+   missing), and that the build tools compile and link an empty program (`probe_toolchain`). How it keeps the build
+   short:
    - The RomFS image (26 GB, mostly disk work) is packed beside the lift and the compile (processor work), so a first
      build takes about as long as the longer of the two. Only `romfs.c`, which includes the RomFS index's
      `romfs_config.h`, waits for the image.
-   - Every logical processor compiles, the largest files first, so no big file starts last and runs on alone.
+   - Every logical processor compiles, the largest files first, so no big file starts last and runs on alone; fewer
+     compiles run when memory is short, as many as 80 % of the free memory holds at 768 MiB each (`make_game.py`
+     `default_jobs`).
    - The lifted code compiles with MSYS2 CLANG64's clang when the toolchain has it: the same LLVM release as
      UCRT64's, built with profile-guided optimisation, about a fifth faster on this code and writing the same objects
      (it reads UCRT64's headers; `make_game.py` `fast_clang` checks that both report the same version and target).
@@ -148,14 +154,20 @@ A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the too
    and writes the Xbox, PlayStation, Steam Deck and keyboard and mouse prompts into `romfs-patches-*` beside the game (about
    30 s), which the game's Controls > Button prompts loads. The keyboard and mouse prompts show the keys of
    `nx2navi.ini`'s `bind_` lines, so Rebuild the Game after rebinding keys draws them again; the step's key names
-   all it reads (the RomFS, the art, the tools, those lines), so it runs again only when one changed or a folder is
-   gone, and runs no other step again. Without art the row is not shown and the game keeps its own prompts.
+   all it reads (the RomFS, the art, those lines) and the version of the tools (`make_game.py` `PROMPT_TOOLS`, changed
+   by hand when a change to them changes what they write: an edit of a script alone does not draw the prompts
+   again), so it runs again only when one changed or a folder is gone, and runs no other step again. Without art
+   the row is not shown and the game keeps its own prompts.
 5. **Check the Game Files**: make_game.py's last step runs `tools/romfs_check.py`, once for each copy of the game data
-   (about 4 minutes, in worker threads, never while the game runs). It decompresses every file, writes
+   (about 4 minutes on players' PCs up to 0.7.1, in worker threads, never while the game runs; its key holds the
+   check's version, `SCAN_TOOL`, in the same way). It decompresses every file, writes
    `romfs-check.json` beside the game, and for each damaged texture puts a stand-in, another texture of the same kind
    under the damaged one's name, in `mods/Damaged file stand-ins`, so the game can load what needs it. A damaged file
    of any other kind is only reported: only a clean dump restores it. In play the game logs a file it keeps opening
-   and cannot load (runtime/romfs.c `open_note`).
+   and cannot load (runtime/romfs.c `open_note`). The launcher shows what the check found (`jobs.Job.note_scan`):
+   the count in the step's row ("4 Flagged, 3 Stand-Ins"), and after a job in which the check ran a sentence on the
+   home screen and in `launcher.log`. The four files the check flags on every copy of the game (`jobs.SCAN_EXPECTED`)
+   are told as that, with nothing for the player to do; other files are counted and `romfs-check.json` named.
 6. The game's Cetra Display is decoded for the window.
 
 ## Updating
@@ -168,6 +180,10 @@ repository for testing; `{"type": "url", "url": ".../NX2navi-update.json"}` in f
 directly. Every address is https (plain http only to this PC), a redirect to http is refused, and the token is not
 sent on when a redirect leaves the host it was meant for (`launcher/net.py`). A manifest that does not give a file's
 size and sha256 is refused.
+
+GitHub allows an address 60 such requests an hour. The Updates row and F5 therefore start no check within a minute
+of the last one (`FORCED_CHECK_PAUSE`), and a check GitHub refuses says when the allowance is whole again, from the
+answer's `X-RateLimit-Reset` (`feed.retry_text`). A failed check is one line in `launcher.log`.
 
 ### In the background
 
@@ -240,17 +256,28 @@ The stub swaps `python.next` in while no Python runs, then starts the new versio
      objects of 0.5.0 and earlier); Rebuild the Game compiles it for this processor's (`--retune`), and runs the
      compile step for that even when nothing else changed (`retune_due`).
 6. **Swap In the New Build**: lld links `ocarina.exe.new`, which replaces `ocarina.exe` only once it is complete. A
-   failed rebuild leaves the old build playable; Rebuild the Game tries again.
+   failed rebuild leaves the old build playable; Rebuild the Game tries again. A rebuild that lifted again and then
+   stopped has no finished compile on record (`build.built_version` is empty), but the old exe and the unpacked game
+   files are there: the launcher still counts the game as installed (`build.installed`), opens on home, where
+   Rebuild the Game reads "Not Finished", and never asks for the dump again. Begin Installation into a folder whose
+   game files are already unpacked builds on from them as well (`jobs.InstallJob.args`).
 7. **Prepare the Shaders** is skipped once shaders were prepared before (`shader-prepared.bin`): the game keeps using
    them and translates them again with the new translator in the background (`NX2NAVI_SHADER_CARRY`). With
-   `shader_carry = 0`, or nothing prepared yet, the step prepares them all as at the install.
+   `shader_carry = 0`, or nothing prepared yet, the step prepares them all as at the install. The step still builds
+   the prepared shaders into the graphics driver's cache again (`make_game.py` `warm_driver_cache`): seconds while
+   the driver has them, 20 minutes on a player's PC when the update changed what they are built with. Its bar
+   follows that count from 0 to 100 %, and the Updates row says an update takes from a few minutes to half an hour
+   or more (`launcher/ui/app.py` `UPDATE_TAKES`).
 8. **Draw the Button Prompts**, with button art in the new version: only when the art, the prompt tools or the key
    bindings changed, or a prompt folder is missing (a first version with art draws them all).
 9. Every version but the current and the previous one is deleted, except a staged release newer than the current
    one.
 
 When the new version fails to start (exit code 86 from `start.pyw`, or any error within six seconds), the stub sets
-`current.txt` back to `previous.txt`'s version and starts it with `--rolled-back`. The game is never rebuilt while it
+`current.txt` back to `previous.txt`'s version and starts it with `--rolled-back`. `start.pyw` writes the failure to
+`data/logs/crash.log` and shows it in a message box only when there is no version to go back to, when Steam started
+it, or when the six seconds are over (`quiet_exit`): a box holds the exit code back until it is closed, and the
+broken version then stayed the current one. The game is never rebuilt while it
 runs. Keep Build Cache off deletes the lifted C and the objects (about 5 GB) after each build but keeps
 `build-cache/state.json`, so updates still rebuild without the dump (compiling everything).
 
@@ -406,6 +433,20 @@ files, the import of a zip with its backup, a zip in the saves folder, the menu'
 refuses: no manifest, another format or game, a newer format, paths outside the save, links, damage), the install
 job with a fake
 `make_game.py` (with and without the prompts row), and the window's selftest when a display is there.
+
+What goes wrong around a build is tested the same way, on made-up folders and stand-in processes: an update that
+stops in its compile (the game stays installed, home says how to finish, the install goes on from the unpacked
+files), `start.pyw` on a version that cannot be imported (exit code 86 at once, no message box, with a version to go
+back to), a cut RomFS image and the free space, the object cache written while the compile runs and kept when it is
+cut, a RomFS step that does not repeat the lift, the update's duration text and the warm-up's bar, a damaged dump
+named by its file and an unexpected error by its message, the file check's result in its row and on home, the
+game's FATAL line after exit codes 70 and 71, the job count by free memory and the build's priority class, a line
+handler that raises and a log that cannot be written, one forced update check a minute and GitHub's reset time, a
+game folder with characters outside the Basic Multilingual Plane (its `modules.c` compiled when a C compiler is
+there), the file check at both piece sizes against the check as it was, the disk space of every step and the build
+tools' test compile, and the prompt tool's unpacking. Two tests record the logic of `tools/romfs_check.py` and of
+the three prompt scripts (their code without comments and docstrings) beside `SCAN_TOOL` and `PROMPT_TOOLS`: they
+fail when that logic changes, to ask whether the step must run again on every install.
 
 ## Requirements and limits
 

@@ -127,6 +127,31 @@ def exit_code_text(code):
     return f'{shown} ({meaning})' if meaning else shown
 
 
+FATAL_TAIL = 256 << 10   # bytes of the game's log last_fatal reads from its end
+FATAL_SHOWN = 240        # characters of a FATAL line the home screen shows; the launcher's log has all of it
+
+
+def last_fatal(game_dir):
+    """The last FATAL line of the game's latest run, without its "FATAL: ", or ''. The game writes one before it
+    exits with 70 (runtime/dispatch.c rt_fatal) or 71 (runtime/main.c crash_handler) into logs/nx2navi.log, which
+    each run starts anew (runtime/main.c log_open). A line this launcher added for an earlier run's end
+    (note_exit_in_log) ends the search: what stands before it is not this run's."""
+    if not game_dir:
+        return ''
+    try:
+        with open(Path(game_dir) / 'logs' / 'nx2navi.log', 'rb') as f:
+            f.seek(max(0, f.seek(0, 2) - FATAL_TAIL))
+            lines = f.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return ''
+    for line in reversed(lines):
+        if line.startswith('[launcher] the game ended'):
+            return ''
+        if line.startswith('FATAL: '):
+            return line[len('FATAL: '):].strip()
+    return ''
+
+
 def note_exit_in_log(game_dir, text):
     """Adds the exit code to the end of the game's log, so a log a player sends shows how the run ended even when the
     process died before it could write a line itself."""
@@ -138,6 +163,39 @@ def note_exit_in_log(game_dir, text):
             f.write(f'[launcher] the game ended with code {text} at {time.strftime("%Y-%m-%d %H:%M:%S")}\n')
     except OSError:
         pass
+
+
+def partial_image_gb(game_dir):
+    """The size of what an install that was cut short left of the RomFS image (romfs/romfs.bin.part, up to 26 GB).
+    The next install writes the image anew (tools/make_game.py step_romfs), so that space is the install's to use:
+    the first-run screen counts it as free."""
+    try:
+        return (Path(game_dir) / 'romfs' / 'romfs.bin.part').stat().st_size / 1e9
+    except OSError:
+        return 0.0
+
+
+def drop_partial_image(game_dir):
+    """Removes that file (partial_image_gb), so that it does not count against the free space an install asks
+    for."""
+    try:
+        (Path(game_dir) / 'romfs' / 'romfs.bin.part').unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# Seconds after an update check before the Updates row or F5 starts another. Each check is a request to GitHub,
+# which allows 60 an hour for an address: a player who selected the row 25 times in 90 seconds used the allowance
+# up, and every check of the next hour was refused.
+FORCED_CHECK_PAUSE = 60
+
+# How long an update's rebuild takes, for the Updates row. No single figure holds: a version that changed little
+# compiles a few files and links, minutes; one that changed the lifter translates and compiles the game's code again,
+# and one that changed what the shaders are built with builds all of them into the graphics driver's cache again
+# (tools/make_game.py warm_driver_cache). Players' updates took 24, 34 and 45 minutes where the text said "a few
+# minutes".
+UPDATE_TAKES = ('That takes a few minutes when little changed, and half an hour or more when the game\'s code or '
+                'its shaders are built again.')
 
 
 def drive_of(path):
@@ -653,9 +711,11 @@ class App:
         elif a.continue_update is not None and not a.rolled_back:
             # after a rollback the stub passes the failed version's --continue-update on to this one: the game was
             # never rebuilt for the new version, so there is nothing to finish, and home tells why the version is back
-            self.run_job(jobs.ContinueUpdateJob(self.ctx, gd if gd and build.built_version(gd) else '',
+            self.run_job(jobs.ContinueUpdateJob(self.ctx, gd if build.installed(gd) else '',
                                                 a.continue_update, self.settings.get('dump')), 'home')
-        elif gd and build.built_version(gd):
+        elif build.installed(gd):
+            # also a game whose last update stopped in the compile (build.installed): home, where Play starts the
+            # build from before the update and Rebuild the Game finishes it, not the first-run screen and its dump
             self.show('home')
             self.after_update_notice()
             if self.install_staged('a staged update waited for the launcher to start'):
@@ -729,7 +789,7 @@ class App:
                          'found in Downloads, Desktop or Documents.',)
         gd = self.game_dir()
         need = 30
-        free = free_gb(gd)
+        free = free_gb(gd) + partial_image_gb(gd)   # Begin Installation removes the partial image (begin_install)
         folder_desc = (f'The game is built into this folder. {free:.0f} GB free on {drive_of(gd)}; the game needs '
                        f'about {need} GB. Select this row to choose another folder.',)
         ready = bool(dump)
@@ -826,6 +886,7 @@ class App:
             self.choose_dump()
             return
         gd = self.game_dir()
+        drop_partial_image(gd)   # before the free space is measured
         if free_gb(gd) < 31 and not (Path(gd) / 'romfs' / 'romfs.bin').is_file():
             self.message = f'{drive_of(gd)} has {free_gb(gd):.0f} GB free; the game needs about 30 GB.'
             self.render()
@@ -870,11 +931,17 @@ class App:
             upd = Row('value', 'Updates', f'Version {mine}', 'normal', big=True, icon='refresh',
                       on=lambda: self.check_now(force=True),
                       desc=(f'You have NX2navi {mine}. Select this row to look for a new version.',))
-        rebuild_value = f'Built with {versions.display(built)}' if built else 'Not built'
+        # an update that stopped in the compile left no finished build on record, but the exe of the build before it
+        unfinished = not built and build.installed(gd)
+        rebuild_value = (f'Built with {versions.display(built)}' if built else
+                         'Not Finished' if unfinished else 'Not built')
         rebuild_style = 'normal' if versions.display(built) == mine else 'salmon'
         play_desc = ('Start Ocarina of Time. The launcher steps aside while you play and comes back when you quit.',)
         if built and versions.display(built) != mine:
             play_desc += (f'The game was built with {versions.display(built)}. Rebuild the Game brings it to {mine}.',)
+        elif unfinished:
+            play_desc += (f'The last rebuild of the game did not finish, so Play starts the build from before it. '
+                          f'Rebuild the Game finishes it and brings the game to {mine}; your dump is not needed.',)
         if staged and self.settings.get('auto_install'):
             play_desc += (f'NX2navi {staged["version"]} is downloaded and installs after you quit the game.',)
         if self.message:
@@ -1211,8 +1278,8 @@ class App:
         nv, mine = versions.display(r.version), versions.display(self.layout.version)
         notes = feed.plain_notes(r.notes, 6)
         return {'title': f'Version {nv} Is Ready',
-                'text': [f'You have {mine}. Updating downloads the new version and rebuilds the game in a few '
-                         f'minutes. Your saves and settings stay as they are.'],
+                'text': [f'You have {mine}. Updating downloads the new version and rebuilds the game. {UPDATE_TAKES} '
+                         f'Your saves and settings stay as they are.'],
                 'divider': bool(notes), 'subtitle': "What's New" if notes else '', 'bullets': notes}
 
     def staged_desc(self, m):
@@ -1226,7 +1293,7 @@ class App:
             text = f'You have {mine}. Version {nv} is downloaded. Select this row to install it.'
         return {'title': f'Version {nv} Is Ready', 'text': [text],
                 'divider': bool(notes), 'subtitle': "What's New" if notes else '', 'bullets': notes,
-                'note': 'Installing restarts the launcher and rebuilds the game in a few minutes. Your saves and '
+                'note': f'Installing restarts the launcher and rebuilds the game. {UPDATE_TAKES} Your saves and '
                         'settings stay as they are.'}
 
     def staging_desc(self):
@@ -1253,6 +1320,11 @@ class App:
         if self.check and self.check.result is None:
             return
         if not force and time.time() - self.settings.get('last_check', 0) < 600 and self.release:
+            return
+        if force and time.time() - self.check_started < FORCED_CHECK_PAUSE:
+            self.message = 'NX2navi looked for updates less than a minute ago.'
+            if self.screen == 'home':
+                self.show('home', self.focus)
             return
         self.check_error = ''
         self.check_started = time.time()
@@ -1314,8 +1386,17 @@ class App:
         self.root.lift()
         if code not in (0, None):
             text = exit_code_text(code)
-            self.ctx.log(f'the game ended with code {text}')
-            self.message = f'The game ended with code {text}. Its log is logs\\nx2navi.log in the game folder.'
+            # 70 and 71 follow a FATAL line of the game's own, which names the error: the player gets that line
+            # and the launcher's log too, where the exit code alone said only that there was one
+            fatal = last_fatal(self.game_dir()) if code & 0xFFFFFFFF in (70, 71) else ''
+            if fatal:
+                shown = fatal if len(fatal) <= FATAL_SHOWN else fatal[:FATAL_SHOWN].rstrip() + '…'
+                self.ctx.log(f'the game ended with code {code & 0xFFFFFFFF}; its log says: FATAL: {fatal}')
+                self.message = (f'The game ended with a fatal error (code {code & 0xFFFFFFFF}): {shown}. Its log is '
+                                'logs\\nx2navi.log in the game folder.')
+            else:
+                self.ctx.log(f'the game ended with code {text}')
+                self.message = f'The game ended with code {text}. Its log is logs\\nx2navi.log in the game folder.'
             note_exit_in_log(self.game_dir(), text)
         if self.install_staged('the game exited'):
             return
@@ -1592,6 +1673,9 @@ class App:
                 self.message = 'The game is rebuilt and up to date.' if j.kind == 'rebuild' else \
                     f'NX2navi is now {versions.display(self.layout.version)}.'
                 self.release = None
+            note = getattr(j, 'note', '')   # what the file check found (jobs.Job.note_scan)
+            if note and j.after is None:
+                self.message = f'{self.message} {note}'.strip()
             self.reload_fonts_if_new()
             self.show(self.job_return)
             if j.kind == 'install' and self.settings.get('auto_check'):

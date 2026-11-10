@@ -26,7 +26,8 @@ Steps, each skipped when a run before finished it for the same inputs (state in 
               tools, those lines), so it runs again only when one of them changed or a folder is gone, and running
               it makes no other step run again. A failure here leaves the game and its shaders complete.
   8. scan     tools/romfs_check.py decompresses every file of the game data once, writes <out>/romfs-check.json and
-              makes stand-ins for damaged textures in <out>/mods. Its key names the game files and the tool, and it
+              makes stand-ins for damaged textures in <out>/mods. Its key names the game files and the check's
+              version (SCAN_TOOL, changed by hand: an edit of the tool alone does not run it again), and it
               is last: nothing of it runs while the game does.
               Without art the step is skipped and the game shows its own prompts, as before
 
@@ -35,10 +36,12 @@ therefore lifts and compiles again but keeps the unpacked game files, and --rebu
 compile step keeps every object with the dependency list clang wrote for it (build-cache/obj/objects.json) and
 compiles a file again only when it, a header it includes, the flags or the compiler changed; the kit's own folder
 is not part of that key, so a kit in another folder (the launcher keeps each version in its own) reuses the objects.
+The list goes to disk every 25 objects while the compile runs, so a compile that is cut short keeps what it finished.
 A kit with lib/libnx2navirt.a built by --make-runtime-lib for the same runtime/ and the same compiler links the
 runtime from it and compiles only the runtime files that include headers written per install. The new ocarina.exe
 replaces the old one only once it links (with lld when the toolchain has it), so a failed build leaves the last good
-one in place. Compiles run on every logical processor, the largest files first. The lifted code is built for this
+one in place. Compiles run on every logical processor, or on as many as the free memory allows (default_jobs; --jobs
+sets the number), the largest files first. The lifted code is built for this
 PC's x86-64 level (cpu_level), with MSYS2 CLANG64's clang when it sits beside the UCRT64 folder and reports the same
 version (fast_clang: the same objects, about a fifth faster).
 
@@ -63,6 +66,7 @@ by a JSON object (launcher/build.py reads them): {"ev": "step", "step": ..., "st
 """
 import argparse
 import concurrent.futures
+import errno
 import hashlib
 import json
 import os
@@ -74,6 +78,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parents[1]
@@ -91,11 +96,28 @@ STEPS = ('exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts', 'scan')
 # Steps whose key names every input they read rather than the step before them: a step before them that runs does
 # not make them run again, and they make no step after them run again.
 OWN_KEY_STEPS = ('prompts', 'scan')
+# (a step that runs, a later step that reads nothing it writes): the later step is not made to run again. The lift
+# reads only the unpacked ExeFS (step_key), so the RomFS step leaves it alone: an install that was cut short while the
+# image was still being packed, the lift beside it already done, packs the image again but does not lift again.
+UNAFFECTED = {('romfs', 'lift')}
 # The Python packages tools/pad_prompts.py imports (pip name: import name), checked before a build with button art.
 PROMPT_PACKAGES = {'zstandard': 'zstandard', 'fonttools': 'fontTools', 'pillow': 'PIL'}
 # The line tools/pad_prompts.py prints for each overlay folder it wrote.
 PROMPTS_WRITTEN = re.compile(r'^.+: \d+ files, the font grew by -?\d+ bytes$')
 SCAN_CHECKED = re.compile(r'^checked (\d+) of (\d+)$')   # tools/romfs_check.py's progress lines
+# What stands for tools/romfs_check.py in the scan step's key (step_key). The key held the sha256 of the script's
+# bytes, so any edit of the script, a comment's too, made every install check its 26 GB of game files again, four
+# minutes. It is this constant now, changed by hand when a change to the script can change what the check finds
+# or writes, and only then. Its value is the sha256 the script had in 0.7.0 and 0.7.1, the releases that brought the
+# check, so the key of every install that passed it stays what it is. tests/launcher_test.py
+# test_the_file_checks_logic_is_the_recorded_one fails when the script's logic changes, to ask this question.
+SCAN_TOOL = '55ea0c150aaf9dac93a2e6fd3b4ca11e1c572b5eee8b6bd74960535964384634'
+# The same for the tools that draw the button prompts (tools/pad_prompts.py, prompt_art.py, button_icons.py) in the
+# prompts step's key, which held the digest of the three scripts' bytes: two of four releases changed a script, and
+# each time every install drew its prompts again, a minute. Changed by hand when a change to the scripts can change
+# what they write. Its value is their digest in 0.7.0 and 0.7.1, so the key of an install made by those stays what it
+# is. tests/launcher_test.py test_the_prompt_tools_logic_is_the_recorded_one asks the question when the logic changes.
+PROMPT_TOOLS = 'ad59f2c4533f6ea2630b916ef5f3695f72daffe9b2b7663eea4168a4f08e4249'
 
 # Bring-up fixes in the lifted SDK, each anchored on exact generated text that must occur once.
 LIFT_FIXES = [
@@ -158,6 +180,16 @@ def fail(msg):
     with OUT_LOCK:
         print(f'\nerror: {msg}', file=sys.stderr, flush=True)
     sys.exit(1)
+
+
+def error_text(e):
+    """An exception in a line a player can read: what the system said and about which file for a file error, the
+    full disk named as such, else the exception's kind and message."""
+    if isinstance(e, OSError) and e.strerror:
+        if e.errno == errno.ENOSPC:
+            return f'the disk is full ({e.filename})' if e.filename else 'the disk is full'
+        return e.strerror + (f': {e.filename}' if e.filename else '')
+    return f'{type(e).__name__}: {e}' if str(e) else type(e).__name__
 
 
 class Background:
@@ -368,6 +400,19 @@ def exefs_digest(out):
 ROMFS_READ_AHEAD = 64 << 20   # total file bytes requested from workers in one group
 
 
+def unreadable(rel, err):
+    """Ends the build on a game file that could not be read while the RomFS image was packed, naming the file. A
+    file that does not match the dump's own checksum (nup.NupError) means the dump is damaged: a copy that went
+    wrong or a dump that was cut short, which only a new copy or a new dump mends."""
+    if isinstance(err, nup.NupError):
+        why = str(err).split(': ', 1)[-1]   # without nup.py's "file <number>: ", which says nothing to a player
+        if why.startswith('damaged (') and why.endswith(')'):
+            why = why[len('damaged ('):-1]
+        fail(f'the dump is damaged: {rel}: {why}. Copy the dump to this PC again, or dump the game again, and then '
+             'try again')
+    fail(f'cannot read {rel} from the game files: {error_text(err)}')
+
+
 def romfs_read_groups(files):
     group, buffered = [], 0
     for entry in files:
@@ -387,38 +432,71 @@ def step_romfs(src, out, jobs):
     dst.mkdir(parents=True, exist_ok=True)
     files = sorted(((rel, ref, src.romfs_size(ref)) for rel, ref in src.romfs), key=lambda e: e[0].encode())
     total = sum(size for _, _, size in files)
+    # What a run that was cut short (Cancel, a full disk, a power cut) left of the image goes first: this run
+    # writes the image anew, and counted as used space its up to 26 GB made a retry on a nearly full disk fail the
+    # check below although the retry needs no more room than the first try.
+    part = dst / 'romfs.bin.part'
+    try:
+        part.unlink(missing_ok=True)
+    except OSError as e:
+        fail(f'cannot remove {part}, left by an earlier run ({e.strerror or e}): close whatever has it open')
     free = shutil.disk_usage(dst).free
     if free < total + (1 << 30):
         fail(f'{dst} needs {total / 1e9:.1f} GB free for the RomFS image, it has {free / 1e9:.1f} GB')
     say(f'  {len(files)} files, {total / 1e9:.1f} GB')
     entries, h, pos, done, t0 = [], hashlib.sha256(), 0, 0, time.time()
-    part = dst / 'romfs.bin.part'
     emit('progress', step='romfs', done=0, total=total, unit='bytes')
 
     def load(e):   # small files are read whole on a worker; big ones are streamed by the writer
         _, ref, size = e
-        return None if size > ROMFS_READ_AHEAD else b''.join(src.romfs_chunks(ref))
+        if size > ROMFS_READ_AHEAD:
+            return None
+        try:
+            return b''.join(src.romfs_chunks(ref))
+        except (nup.NupError, OSError) as err:   # handed to the writer, which knows the file's name
+            return err
 
-    with open(part, 'wb', buffering=16 << 20) as img, concurrent.futures.ThreadPoolExecutor(jobs) as ex:
-        for batch, group in enumerate(romfs_read_groups(files)):
-            for (rel, ref, size), data in zip(group, ex.map(load, group)):
-                pad = -pos % ALIGN
-                if pad:
-                    img.write(b'\0' * pad)
-                    h.update(b'\0' * pad)
-                    pos += pad
-                offset = pos
-                for chunk in ((data,) if data is not None else src.romfs_chunks(ref)):
-                    img.write(chunk)
-                    h.update(chunk)
-                    pos += len(chunk)
-                if pos - offset != size:
-                    fail(f'{rel} changed size while packing the RomFS: expected {size} bytes, read {pos - offset}')
-                entries.append({'path': rel, 'offset': offset, 'size': size})
-                done += size
-            emit('progress', step='romfs', done=done, total=total, unit='bytes')
-            if batch % 40 == 0:
-                say(f'  RomFS {done / 1e9:5.1f} of {total / 1e9:.1f} GB, {time.time() - t0:.0f} s')
+    def pieces(rel, ref, data):
+        """The file's bytes; a file of the game files that cannot be read, or does not match its checksum in the
+        dump, ends the step with its name (unreadable)."""
+        if isinstance(data, Exception):
+            unreadable(rel, data)
+        if data is not None:
+            yield data
+            return
+        try:
+            yield from src.romfs_chunks(ref)
+        except (nup.NupError, OSError) as err:
+            unreadable(rel, err)
+
+    try:
+        with open(part, 'wb', buffering=16 << 20) as img, concurrent.futures.ThreadPoolExecutor(jobs) as ex:
+            for batch, group in enumerate(romfs_read_groups(files)):
+                for (rel, ref, size), data in zip(group, ex.map(load, group)):
+                    pad = -pos % ALIGN
+                    if pad:
+                        img.write(b'\0' * pad)
+                        h.update(b'\0' * pad)
+                        pos += pad
+                    offset = pos
+                    for chunk in pieces(rel, ref, data):
+                        img.write(chunk)
+                        h.update(chunk)
+                        pos += len(chunk)
+                    if pos - offset != size:
+                        fail(f'{rel} changed size while packing the RomFS: expected {size} bytes, read {pos - offset}')
+                    entries.append({'path': rel, 'offset': offset, 'size': size})
+                    done += size
+                emit('progress', step='romfs', done=done, total=total, unit='bytes')
+                if batch % 40 == 0:
+                    say(f'  RomFS {done / 1e9:5.1f} of {total / 1e9:.1f} GB, {time.time() - t0:.0f} s')
+    except BaseException:
+        # a failed image is of no use, the next run writes it anew: up to 26 GB of it would only fill the disk
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     part.replace(dst / 'romfs.bin')
     index = {'status': 'pass', 'romfs_size': pos, 'romfs_sha256': h.hexdigest(), 'files': entries}
     (dst / 'index.json').write_text(json.dumps(index), encoding='utf-8')
@@ -463,6 +541,15 @@ def step_lift(out, cache):
 
 # ---------------------------------------------------------------- compile
 
+def c_string(text):
+    """text as a C string literal for a source file in UTF-8, which modules.c is: JSON's escapes for the quote, the
+    backslash and the control characters are C's too, and every other character stands as itself. With JSON's
+    default, which writes each character outside ASCII as \\uXXXX, a character outside the Basic Multilingual Plane
+    came out as two surrogate halves (\\ud83e\\uddda), which C refuses ("invalid universal character"): a game
+    folder with an emoji or a rare Han character in its path failed at the end of the compile."""
+    return json.dumps(text, ensure_ascii=False)
+
+
 def modules_c(lift, out, gen):
     layout = json.loads((lift / 'layout.json').read_text(encoding='utf-8'))
     L = ['#include "dispatch.h"', '#include "host.h"', '#include "layout.h"', '']
@@ -481,13 +568,13 @@ def modules_c(lift, out, gen):
     L += ['    return n;', '}', '', 'const RtFileHash rt_exefs_sha256[] = {']
     L += [f'    {{"{name}", "{sha256_file(out / "exefs" / name)}"}},' for name in EXEFS_FILES]
     L += ['};', f'const int rt_exefs_sha256_count = {len(EXEFS_FILES)};', '',
-          f'const char rt_default_exefs[] = {json.dumps(str(out / "exefs"))};',
-          f'const char rt_default_romfs[] = {json.dumps(str(out / "romfs"))};',
-          f'const char rt_default_profile[] = {json.dumps(str(out / "profile"))};',
+          f'const char rt_default_exefs[] = {c_string(str(out / "exefs"))};',
+          f'const char rt_default_romfs[] = {c_string(str(out / "romfs"))};',
+          f'const char rt_default_profile[] = {c_string(str(out / "profile"))};',
           'const int rt_game_version = 111;',
           'const unsigned long long rt_app_pool_bytes = 9809ull << 20;   /* the Switch 2 application pool */',
           'const int rt_nvn_api_version[2] = {231, 40};   /* NVN2: main asks for major 231, minor 40 or later */',
-          f'const char rt_port_version[] = {json.dumps(kit_version())};']
+          f'const char rt_port_version[] = {c_string(kit_version())};']
     p = gen / 'modules.c'
     write_if_changed(p, '\n'.join(L) + '\n')
     if WIN:   # on Linux ui/menu_sdl.cpp defines it
@@ -781,6 +868,8 @@ class ObjectCache:
         return 1
 
     def save(self):
+        """Whole or not at all: written beside the file and moved over it, so a process that ends in the middle
+        (Cancel) leaves the last complete objects.json."""
         tmp = self.path.with_suffix('.tmp')
         tmp.write_text(json.dumps(self.entries), encoding='utf-8')
         tmp.replace(self.path)
@@ -842,6 +931,32 @@ def earlier_kits():
     return sorted(kits)
 
 
+# Peak memory of one compile (tools/build_game.py JOB_MEM: 120 to 180 MiB for a chunk of lifted code, 568 MiB for the
+# largest file), and the share of the free memory the compiles may take in all; the rest stays with the system, the
+# RomFS step beside them and whatever else the player runs.
+JOB_MEM = 768 << 20
+JOB_MEM_SHARE = 0.8
+
+
+def default_jobs(cpus=None, free=None):
+    """(compiles at a time, why) without --jobs: one per logical processor, but no more than JOB_MEM_SHARE of the
+    free memory holds at JOB_MEM each, and at least one. One per processor alone took no account of memory: on a
+    PC with many threads and little free memory the compiles filled it, the largest files first as they start
+    together. cpus, free: the processor count and the free bytes instead of this machine's (tests); without a
+    reading of the free memory (tools/hostmem.py) the processor count alone decides, as before."""
+    cpus = cpus or os.cpu_count() or 4
+    if free is None:
+        try:
+            import hostmem
+            free = hostmem.available_ram()
+        except (ImportError, OSError, AttributeError):
+            free = None
+    if free is None:
+        return cpus, f'{cpus} processors, free memory unknown'
+    by_mem = max(1, int(free * JOB_MEM_SHARE) // JOB_MEM)
+    return min(cpus, by_mem), f'{cpus} processors, {free / 2 ** 30:.1f} GiB of free memory allow {by_mem}'
+
+
 SOURCE_WAIT, SOURCE_PAUSE = 60, 2   # seconds source_size waits for a drive in all, and between two tries
 
 
@@ -870,6 +985,11 @@ def source_size(src):
             time.sleep(SOURCE_PAUSE)
 
 
+# compile_all writes the object cache to disk after this many more objects, and at most this often (seconds): the
+# cache of a whole game is some megabytes, and writing it after every object would take longer than the compiles.
+CACHE_SAVE_EVERY, CACHE_SAVE_PAUSE = 25, 2.0
+
+
 def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=None, alts=None):
     """Compile each (source, object) whose object is not current in cache. cmd_for(src, dst) -> argv without the
     dependency-file options; salt identifies the compiler. Returns (compiled, reused, failures) with failures as
@@ -877,7 +997,10 @@ def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=No
     compile time grows with size, and a big file that started last would run on alone after the others finished.
     stop() true makes the compiles not yet started end at once, unrecorded (a step beside this one failed).
     alts(src, dst) -> (keys, kits): the keys earlier versions gave the same compile, and the folders of their kits; an
-    object recorded under one of them is taken over (ObjectCache.adopt) instead of compiled again."""
+    object recorded under one of them is taken over (ObjectCache.adopt) instead of compiled again.
+    Each object is recorded when its compile ends, whichever started first, and the cache goes to disk every
+    CACHE_SAVE_EVERY objects: a compile that is cut short (Cancel ends the process, a crash, a power cut) keeps the
+    objects finished until then, where it used to keep none and the next run compiled the whole game again."""
     todo, keys = [], {}
     adopted = 0
     for src, dst in srcs:
@@ -904,10 +1027,14 @@ def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=No
         return src, dst, dep, p.returncode, p.stderr[-1500:]
 
     done, bad = reused, []
+    unsaved, saved_at = 0, time.monotonic()
     if progress:
         progress(done, len(srcs))
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as ex:
-        for src, dst, dep, rc, err in ex.map(cc, todo):
+        # submitted largest first, taken as they end: in submission order every result would wait for the largest
+        # file's, and nothing would be recorded during the minutes that one compiles
+        for result in concurrent.futures.as_completed([ex.submit(cc, job) for job in todo]):
+            src, dst, dep, rc, err = result.result()
             done += 1
             if rc is None:   # not started (stop)
                 continue
@@ -916,6 +1043,13 @@ def compile_all(srcs, cmd_for, cache, jobs, env, progress=None, salt='', stop=No
                 cache.forget(dst)
             else:
                 cache.record(dst, keys[dst], dep, src)
+                unsaved += 1
+            if unsaved >= CACHE_SAVE_EVERY and time.monotonic() - saved_at >= CACHE_SAVE_PAUSE:
+                try:
+                    cache.save()
+                except OSError:   # the save at the end still reports a disk that cannot be written
+                    pass
+                unsaved, saved_at = 0, time.monotonic()
             if progress:
                 progress(done, len(srcs))
     cache.save()
@@ -995,6 +1129,107 @@ def preflight(msys, jobs, sources=None):
              'install the development packages README-BuildKit.md lists under "Linux". '
              'On Fedora the static C++ library is its own package, libstdc++-static.')
     say(f'check: {len(sources)} runtime files and the libraries pass, {time.time() - t0:.0f} s')
+
+
+def steps_to_run(state, identity, out, until=None):
+    """The steps from exefs to shaders this build will run, as main's loop decides it: a step whose key is not the
+    recorded one, and every step after one that runs but those that read nothing of it (UNAFFECTED). until: the
+    step the build stops after (--until). For the checks made before the long steps (space_needs, probe_toolchain)."""
+    runs = []
+    for name in STEPS[:STEPS.index('shaders') + 1]:
+        if (any((earlier, name) not in UNAFFECTED for earlier in runs)
+                or state['steps'].get(name) != step_key(name, identity, out)):
+            runs.append(name)
+        if name == until:
+            break
+    return runs
+
+
+GiB = 1 << 30
+# Disk space the steps after the RomFS image take in the game folder, the least each is known to need: a build that
+# has less is sure to stop, half an hour in when it is the shaders. Measured on a 0.7.1 game folder: the lifted C
+# 1.16 GiB, its objects 0.34 GiB and the new exe beside the old one 0.3 GiB; with the lifted C already there only
+# the changed files and the exe. A full shader preparation writes every translation as a loose file (a player's
+# pack of two translators' translations held 8,290 MiB, 327,560 files) and the game's shader programs and pipeline
+# cache, 0.84 GiB. Folding the translations into their pack takes as much again, but a pack that cannot be written
+# does not stop the build (pack_shader_cache), so it is not asked for here.
+SPACE_BUILD_CACHE, SPACE_REBUILD, SPACE_SHADERS = 2 * GiB, 1 * GiB, 4 * GiB
+SPACE_IMAGE_MARGIN = 1 * GiB   # beside the RomFS image, as step_romfs asks
+
+
+def space_needs(runs, out, image_bytes=0, carried=False):
+    """[(what, bytes)] this build will write into the game folder, for the steps it runs (steps_to_run).
+    image_bytes: the size of the RomFS image when that step runs; carried: the shaders step keeps the shaders
+    prepared before (step_shaders update) and writes none."""
+    needs = []
+    if 'romfs' in runs:
+        needs.append(('the RomFS image', image_bytes + SPACE_IMAGE_MARGIN))
+    if 'compile' in runs:
+        lifted = (out / 'build-cache' / 'lift' / 'layout.json').is_file()
+        needs.append(('the build cache (the translated code and its compiled files)',
+                      SPACE_REBUILD if lifted else SPACE_BUILD_CACHE))
+    if 'shaders' in runs and not carried:
+        needs.append(('the prepared shaders', SPACE_SHADERS))
+    return needs
+
+
+def check_space(out, needs):
+    """Stops the build before its first long step when the game folder's disk cannot hold what the build will
+    write (space_needs), naming each part and how much is missing. Only the RomFS image's space was looked at,
+    and only when that step began: a disk that held the image but not the build cache or the shaders stopped the
+    build in the compile or, after half an hour, in the shader preparation. What an earlier run left of the image
+    counts as free: the RomFS step removes it (step_romfs)."""
+    need = sum(n for _, n in needs)
+    if not need:
+        return
+    free = shutil.disk_usage(out).free
+    try:
+        free += (out / 'romfs' / 'romfs.bin.part').stat().st_size
+    except OSError:
+        pass
+    if free >= need:
+        return
+    parts = ', '.join(f'{n / 1e9:.1f} GB for {what}' for what, n in needs)
+    fail(f'{out} has {free / 1e9:.1f} GB free and this build needs {need / 1e9:.1f} GB there: {parts}. Free '
+         f'{(need - free) / 1e9:.1f} GB more on that disk, or build into a folder on another one')
+
+
+def probe_toolchain(msys, work):
+    """Windows, before the long steps of a build whose compile step will run: an empty program is compiled and
+    linked with the installed toolchain, against the libraries the game links and with the linker the compile step
+    uses, in the folder work. Build tools that are incomplete, or that security software keeps from starting or
+    from writing an exe, stopped the build in its compile step, after the RomFS image and the lift, ten minutes and
+    more in; this takes a second. (Linux tries its compiler on the runtime's own sources: preflight.)"""
+    clang, clangxx, env, _ = toolchain(msys)
+    repair = (f'If the launcher installed these tools, delete the folder {msys.parent} and try again: it unpacks '
+              f'them anew. If you installed MSYS2 yourself, install the packages README-BuildKit.md lists')
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        src, obj, exe = work / 'probe.c', work / 'probe.o', work / ('probe.exe' if WIN else 'probe')
+        src.write_text('int main(void) { return 0; }\n', encoding='ascii')
+        ld = ['-fuse-ld=lld'] if (msys / 'bin' / 'ld.lld.exe').is_file() else []
+        steps = (('compile', clang, [str(clang), '-c', '-std=gnu11', '-O1', '-o', str(obj), str(src)]),
+                 ('link', clangxx, [str(clangxx), *ld, '-o', str(exe), str(obj), '-L', str(msys / 'lib'), *LINK_LIBS]))
+        for what, tool, cmd in steps:
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, env=env, errors='replace')
+            except OSError as e:
+                fail(f'{tool} does not start ({error_text(e)}): the build tools are damaged, or security software '
+                     f'blocks them. {repair}')
+            if not p.returncode:
+                continue
+            said = (p.stderr.strip().splitlines() or [f'exit code {p.returncode}'])[-1][-300:]
+            if what == 'compile':
+                fail(f'{tool} cannot compile a test program ({said}): the build tools are incomplete, or security '
+                     f'software blocks them. {repair}')
+            lacking = sorted(set(re.findall(r'unable to find library (-l\S+)', p.stderr)))
+            fail('the build tools cannot link the game: '
+                 + (f'{msys / "lib"} lacks {", ".join(lacking)}' if lacking else f'the linker says: {said}')
+                 + f'. {repair}')
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    say('check: the build tools compile and link a test program')
 
 
 def runtime_sources():
@@ -1502,19 +1737,24 @@ SHADER_STALL_S = 180   # no count moved for this long: the launcher says so (the
 SHADER_BEAT_S = 10     # a progress event at least this often while the step runs
 
 
-def shader_progress(phase, done, total, quiet_s, elapsed_s):
+def shader_progress(phase, done, total, quiet_s, elapsed_s, build_only=False):
     """The shaders step's progress event fields: the translation fills the first half of the bar, the build into the
     driver's cache the second (nx2navi.exe prints both counts, runtime/gfx_shader.c prepare_files and
     runtime/vk_pipeline.c lb_warm_prepared); before either count, reading the game's shaders. quiet_s: seconds since a
     count last moved, said once it passes SHADER_STALL_S, so a slow step never looks frozen without a word. The
-    detail ends without a full stop: the launcher adds one (launcher/ui/app.py)."""
+    detail ends without a full stop: the launcher adds one (launcher/ui/app.py).
+    build_only: a run that only builds (warm_driver_cache), whose count fills the whole bar: starting at one half,
+    the bar of a 20 minute build read 50% in its first second, and the launcher's time left, which follows the bar's
+    pace (launcher/jobs.py Job.eta), had half the bar to go by."""
     clock = f'{int(elapsed_s) // 60}:{int(elapsed_s) % 60:02d}'
     if phase is None:
         fraction, detail = 0.0, f'Reading the game\'s shaders ({clock} so far)'
     elif phase == 'translate':
         fraction, detail = 0.5 * done / max(total, 1), f'Translated {done:,} of {total:,} shaders'
     else:
-        fraction, detail = 0.5 + 0.5 * done / max(total, 1), f'Built {done:,} of {total:,} shaders for your graphics card'
+        part = done / max(total, 1)
+        fraction = part if build_only else 0.5 + 0.5 * part
+        detail = f'Built {done:,} of {total:,} shaders for your graphics card'
     if quiet_s >= SHADER_STALL_S:
         detail += (f'. No change for {int(quiet_s) // 60} min, but it is still running: one large shader can take '
                    'a while')
@@ -1574,10 +1814,10 @@ def shader_carry(out):
     return (out / 'shader-prepared.bin').is_file() and bool(cache_identities(out))
 
 
-def shader_run(cmd, cwd=None):
+def shader_run(cmd, cwd=None, build_only=False):
     """Runs a shader preparation command and returns its exit code. Its output is read as it comes: the counts
     nx2navi.exe prints become progress events, the other lines go on to the log, and while nothing moves an event
-    every few seconds keeps saying the step is running and for how long."""
+    every few seconds keeps saying the step is running and for how long. build_only: shader_progress."""
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             encoding='utf-8', errors='replace', bufsize=1)
     t0 = time.monotonic()
@@ -1588,7 +1828,7 @@ def shader_run(cmd, cwd=None):
     def send():
         now = time.monotonic()
         emit('progress', **shader_progress(state['phase'], state['done'], state['total'], now - state['moved'],
-                                           now - t0))
+                                           now - t0, build_only))
 
     def heartbeat():
         while not stop.wait(SHADER_BEAT_S):
@@ -1651,7 +1891,7 @@ def warm_driver_cache(out):
     say("  the prepared shaders are built into the graphics driver's cache again")
     t0 = time.monotonic()
     try:
-        rc = shader_run([str(exe), '--warm-shaders'], cwd=str(out))
+        rc = shader_run([str(exe), '--warm-shaders'], cwd=str(out), build_only=True)
     except OSError as e:
         rc = str(e)
     if rc:
@@ -1678,6 +1918,8 @@ def step_shaders(out, update=False):
     if update and shader_carry(out):
         say('  the shaders prepared before this update stay in use; the game translates them again in the background')
         if loose_shaders(out) >= PACK_LOOSE_MIN:
+            # minutes without a count (4 on a player's 328,000 files): the row says what runs meanwhile
+            emit('progress', step='shaders', fraction=0.0, detail='Folding the shader cache into one file')
             pack_shader_cache(out)
         warm_driver_cache(out)
         return
@@ -1890,19 +2132,18 @@ def step_scan(out):
 def step_key(step, identity, out=None):
     """What a step's output depends on. exefs and romfs: the game files only; lift: the unpacked ExeFS and the
     lifter; compile: the lift, the runtime sources, this script and the processor (cpu_tag); prompts: the game files,
-    the kit's button art, the tools that draw it, the bind_ lines of nx2navi.ini, and whether every folder it writes
-    is still there."""
+    the kit's button art, the version of the tools that draw it (PROMPT_TOOLS), the bind_ lines of nx2navi.ini, and
+    whether every folder it writes is still there; scan: the game files, the check's version (SCAN_TOOL) and whether its report is still there."""
     if step in ('exefs', 'romfs'):
         return f'{step}-1|{identity}'
     if step == 'scan':
         written = 'written' if (out / 'romfs-check.json').is_file() else 'missing'
         tool = KIT / 'tools' / 'romfs_check.py'
-        return f'scan-1|{identity}|{sha256_file(tool) if tool.is_file() else "no tool"}|{written}'
+        return f'scan-1|{identity}|{SCAN_TOOL if tool.is_file() else "no tool"}|{written}'
     if step == 'prompts':
-        tools = tree_digest(KIT / 'tools', ('pad_prompts.py', 'prompt_art.py', 'button_icons.py'))
         binds = sha256_bytes(json.dumps(bind_lines(out)).encode())
         written = all((out / f / 'manifest.tsv').is_file() for f in prompt_art.OVERLAYS)
-        return (f'prompts-1|{identity}|{tree_digest(prompt_art_dir(), ("**/*.png",))}|{tools}|{binds}'
+        return (f'prompts-1|{identity}|{tree_digest(prompt_art_dir(), ("**/*.png",))}|{PROMPT_TOOLS}|{binds}'
                 f'|{"written" if written else "missing"}')
     lift = f'lift|{exefs_digest(out)}|{lift_digest()}'
     if step == 'lift':
@@ -1925,6 +2166,20 @@ def out_path(arg):
 
 
 def main():
+    """The build (build_main), with every error it does not report itself reported as fail reports one: the launcher
+    shows the message of the error event (launcher/build.py Run), and an exception that only printed its traceback
+    reached the player as "the build stopped (exit code 1)". The traceback still goes to the log."""
+    try:
+        build_main()
+    except nup.NupError as e:
+        fail(f'the dump is damaged: {e}. Copy the dump to this PC again, or dump the game again, and then try again')
+    except Exception as e:   # noqa: BLE001 - whatever it is, the player gets its message
+        with OUT_LOCK:
+            traceback.print_exc()
+        fail(f'the build stopped: {error_text(e)}')
+
+
+def build_main():
     global EVENTS
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--nup', help='the game as one .nup file')
@@ -1939,13 +2194,17 @@ def main():
     ap.add_argument('--check', action='store_true', help='only check the game\'s version; builds nothing')
     ap.add_argument('--msys', default=r'C:\msys64\ucrt64',
                     help='MSYS2 UCRT64 folder (default C:\\msys64\\ucrt64; Windows only: Linux takes clang and lld from PATH)')
-    ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4, help='parallel compiles')
+    ap.add_argument('--jobs', type=int,
+                    help='parallel compiles (default: one per processor, fewer when the free memory is short)')
     ap.add_argument('--events', action='store_true', help='machine-readable progress lines on stdout ("@@" + JSON)')
     ap.add_argument('--make-runtime-lib', metavar='DIR', help='build the prebuilt runtime library of a release into DIR')
     ap.add_argument('--obj', help='with --make-runtime-lib: the folder for its objects')
     ap.add_argument('--until', choices=STEPS, help=argparse.SUPPRESS)   # tests: stop after this step
     a = ap.parse_args()
     EVENTS = a.events
+    jobs_why = '--jobs'
+    if not a.jobs or a.jobs < 1:
+        a.jobs, jobs_why = default_jobs()
     if a.make_runtime_lib:
         make_runtime_lib(a.make_runtime_lib, Path(a.msys), a.jobs, a.obj)
         return
@@ -1996,10 +2255,18 @@ def main():
         # the compile step's key does not name the level: without this a finished compile reads as done before
         state['steps'].pop('compile', None)
     keep_awake()
+    # What can be known to fail later is looked at now: the disk space of every step that will run, and on Windows
+    # that the build tools compile and link (not for a build the tests stop before its compile step, --until)
+    ahead = steps_to_run(state, src.identity, out, a.until)
+    check_space(out, space_needs(ahead, out, sum(src.romfs_size(ref) for _, ref in src.romfs) if 'romfs' in ahead else 0,
+                                 a.rebuild and shader_carry(out)))
+    if WIN and 'compile' in ahead:
+        probe_toolchain(msys, cache / 'toolchain-check')
     # Linux: the compiler, headers and libraries are the system's, so they are tried on the runtime before the long
     # steps of a build that will reach the compile step (the first step whose key is not current makes the rest run)
     if not WIN and any(state['steps'].get(n) != step_key(n, src.identity, out) for n in STEPS[:STEPS.index('compile') + 1]):
         preflight(msys, a.jobs)
+    say(f'compiles at a time: {a.jobs} ({jobs_why})')
     t0 = time.time()
     romfs_job = None
     runs = {'exefs': lambda: step_exefs(src, out), 'romfs': lambda: step_romfs(src, out, min(a.jobs, 8)),
@@ -2047,10 +2314,10 @@ def main():
                 emit('step', step=name, state='skip')
             else:
                 # a step that runs makes every step after it run too: their keys hash its output, not its key (but
-                # for OWN_KEY_STEPS, whose keys name their inputs)
+                # for OWN_KEY_STEPS, whose keys name their inputs, and a step that reads nothing of it, UNAFFECTED)
                 with state_lock:
                     for later in STEPS[STEPS.index(name):]:
-                        if later == name or not {name, later} & set(OWN_KEY_STEPS):
+                        if later == name or not ({name, later} & set(OWN_KEY_STEPS) or (name, later) in UNAFFECTED):
                             state['steps'].pop(later, None)
                 say(f'{name}:')
                 emit('step', step=name, state='start')
