@@ -606,6 +606,11 @@
 # Log kernel services that block longer than this many ms, with the service number (0: off). A stalled frame shows up as
 # time in the replay; this says whether the guest was waiting in a service, and which one.
 # svc_slow_ms = 0
+# 1: every signalled event and every thread that ends wakes all the game threads that wait for any event, as before;
+# each takes one of the game's virtual cores to find that its own event is not the one, often from a thread that was
+# working. 0 (default): only the threads that wait for that event or thread are woken. With trace = sched the
+# "sched:" line counts both ("signals woke ..., left ... asleep").
+# sync_wake_all = 0
 # 1: the frame-time summary also splits the replay by op kind (draw, bind, transfer), which says where a stalled frame
 # went. The clock reads cost a fraction of a millisecond a frame, so it is off by default.
 # replay_time = 0
