@@ -1098,9 +1098,16 @@ void plat_exit(int code) {
 #ifdef NX2NAVI_PGO_GEN
     __llvm_profile_dump();
 #endif
-    fflush(stdout);
-    fflush(stderr);
-    ExitProcess((UINT)code);
+    fflush(NULL);   // every open stream: nothing below runs the C runtime's own exit
+    // The process ends here, without the libraries' detach calls that ExitProcess makes. The callers have saved what
+    // is to be kept (gfx_present.c gfx_window_closed: settings, pipeline cache, profile, saves), and the game's other
+    // threads are still running when this is called. ExitProcess stops them wherever they are and then runs every
+    // library's detach on this thread: NVIDIA's NGX core, which still held the device and the DLSS features, read a
+    // dead pointer in its detach on the window thread after the window was closed (an access violation in
+    // _nvngx.dll after the last save, once in 5 scripted runs that had freed and made a DLSS feature again), and the
+    // crash handler wrote a FATAL for a run that had ended cleanly.
+    TerminateProcess(GetCurrentProcess(), (UINT)code);
+    ExitProcess((UINT)code);   // not reached
 }
 
 // _putenv_s, not SetEnvironmentVariableA: getenv reads the C runtime's copy of the environment, which only the CRT's
