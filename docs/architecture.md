@@ -83,6 +83,12 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
 - Uniform snapshot. The game rewrites per-object uniform blocks soon after it submits the frame that reads them; at
   the start of a submission's replay every uniform range it binds from CPU-written pools is copied, and the draws bind
   the copy (`vk_usnap.c`).
+- Event order. Ocarina's queues hand work to each other with events, and its main queue waits each frame for a
+  signal the game gives from the CPU once it has written the frame's data. The replay stops a submission at a wait
+  whose signal has not been replayed and lets it go on after the signal (`vk_exec.c`, "event order across the game's
+  queues"); a CPU signal counts for a submission only when it came before the copies above were taken, and a
+  submission it comes too late for goes on at once in one of its own (`vk_exec_xfer.c`, "events the CPU signals").
+  `NX2NAVI_EVO_TRACE=1` logs the order every frame was replayed in.
 - Driver data. The NVN driver keeps a per-stage constant bank (c0). The back end fills it as the driver does: storage
   and uniform tables, push constants and, for NVN 2 compute, the dispatch's group counts in bytes 0-0xb.
 - Storage buffers the shaders reach through pointer tables in memory are bound at the address the table holds
