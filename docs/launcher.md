@@ -33,6 +33,26 @@ Display: the launcher decodes it from the player's dump or built game into `data
 `runtime/menu_assets.c` does for the in-game menu) and uses the system's interface font until then. Every picture is
 drawn in code (`launcher/ui/art.py`); no texture, font or sound of the game is in the repository or the release.
 
+Customize Launcher (on the home screen) makes the look the player's own:
+
+- Color Scheme: Kokiri Forest (the colours above), Death Mountain, Zora's Domain, Gerudo Valley, Temple of Time and
+  Shadow Temple. A scheme is the first one with its woods, accents, backdrop and glow turned to other hues
+  (`art.THEMES`, `art.recolor`), so each keeps the same light and dark steps and the same readable text. The window is
+  drawn again in the new colours at once.
+- Background: a picture of the player's own behind the panels instead of the scheme's backdrop (`launcher/ui/picture.py`:
+  PNG, JPEG, WebP, BMP, GIF or TIFF, read with Pillow). It is cut to the window's shape around its middle and kept as
+  `data/background.npy`, so the launcher needs the file no more; Background Dimming darkens it (0 to 80 %) for the
+  text over it, the list panel and the description box turn a little see-through, and Remove Background brings the
+  scheme's backdrop back.
+- Animations (on by default): the cursor glides from row to row, a new screen slides into place, sparks drift up
+  over the backdrop and Navi bobs in the title band with a pulsing halo (`App.animate`). They move by the time that
+  passed, stand still while the window is hidden or minimised, and Off stops them all.
+- Sounds (off by default; Low, Medium or High): a short chime when the cursor moves, a choice changes, a row is
+  chosen, the game starts and a build ends or fails. The chimes are made from sine tones in `launcher/ui/sound.py`
+  and played from memory (PlaySound on Windows; `pw-play`, `paplay` or `aplay` elsewhere).
+
+The choices are `theme`, `background`, `background_dim`, `animations` and `sounds` in `data/launcher.json`.
+
 Navi (`art.NAVI`, 22 x 21 pixels, drawn in whole pixels at every size) is also the icon of `NX2navi.exe`,
 `NX2navi-Setup.exe`, the window and its taskbar button (`art.navi_ico`, written into the release by
 `tools/make_launcher.py`). The window sets that icon on itself, and the setup's shortcuts carry the window's taskbar
@@ -41,7 +61,8 @@ identity (`NX2navi.Launcher`), so the taskbar groups and pins it under NX2navi r
 Screens (`launcher/ui/app.py`): first run (dump, install folder, Desktop Shortcut, Check for Updates at Start,
 Update Channel, Begin Installation); the steps of an install, update or rebuild with their progress, the build log's
 last lines and Cancel, and after a failure Try Again and Copy Report; home (Play, Updates, Game Folder, Saves,
-Rebuild the Game, Settings); saves (Export Save, Add Log and Settings, Export To, Import a Save, Import a Save Folder,
+Rebuild the Game, Customize Launcher, Settings); customize (Color Scheme, Background, with a picture set Background
+Dimming and Remove Background, Animations, Sounds, Back); saves (Export Save, Add Log and Settings, Export To, Import a Save, Import a Save Folder,
 Open Saves Folder, Back); settings (update check, Install Updates Automatically, Hide Launcher While Playing, Keep
 Build Cache, Update Channel, the folders, Open Logs Folder, Uninstall, Back); uninstall (keep or remove the built game).
 A screen with more rows than the window holds draws them closer together (`fit_rows`).
@@ -66,7 +87,8 @@ app/<version>/           launcher/, runtime/, recomp/, tools/, bin/nx2navi_xlate
 pydeps/                  zbic, downloaded from PyPI on this PC
 toolchain/msys64/ucrt64  MSYS2's clang and libraries, downloaded from the MSYS2 repository on this PC
 toolchain/pkgs/          the downloaded package files
-data/launcher.json       settings; data/logs/launcher.log (and crash.log); data/cache/fonts
+data/launcher.json       settings; data/logs/launcher.log (and crash.log); data/cache/fonts;
+                         data/background.npy (the player's background picture, fitted to the window)
 game/                    the built game, unless another folder was chosen (its layout: README-BuildKit.md), with
                          saves/ for saves to import and the backups imports make (below)
 ```
@@ -349,7 +371,9 @@ certificates made with the `openssl` command), the GitHub and URL feeds, staging
 pruning, unsafe archives, the background update (a release staged beside the running version without switching, the
 `staged.json` marker, a staged release installed after a restart, no install while the game runs, the install once
 it exited, nothing by itself with Install Updates Automatically off, a failed staging tried again after the next
-check), the font decoding on a system font wrapped like the game's, `make_game.py` on a synthetic
+check), the font decoding on a system font wrapped like the game's, the look (every colour scheme complete, the
+background picture cut to the window's shape and kept, the sound effects as WAVs and off by default), `make_game.py`
+on a synthetic
 `.nup` (events, skipped steps, `--rebuild` without the dump, step keys, the shaders key following the translator the
 build uses), the RomFS step beside the lift and compile
 and its failure stopping the build, the prompts step with a stand-in prompt tool (when it runs again, and that it

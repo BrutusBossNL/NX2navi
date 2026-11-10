@@ -18,6 +18,7 @@ Run: python tests/launcher_test.py   (Python 3.14 for the zstd tests; the window
   a source checkout's build/xlate/), the prompts step with a stand-in prompt tool, the object cache of the compile
   step with the system's C compiler, and its windres call under folders with spaces (a script in windres's place)
 - jobs: an install driven by a fake make_game.py, with and without the prompts row
+- the look: the colour schemes, the background picture's fitting and kept copy, the sound effects (off by default)
 - the window: --selftest draws every screen (skipped without a display)
 """
 import contextlib
@@ -2402,6 +2403,166 @@ class IconTest(unittest.TestCase):
         self.assertEqual(data[big:big + 4], b'\x89PNG')
 
 
+class LookTest(Tmp):
+    """Customize Launcher: the colour schemes, the background picture and the sounds."""
+
+    def setUp(self):
+        super().setUp()
+        try:
+            from launcher.ui import art, picture, sound
+        except ImportError:
+            self.skipTest('needs numpy')
+        self.art, self.picture, self.sound = art, picture, sound
+
+    def test_every_colour_scheme_has_every_colour(self):
+        art = self.art
+        self.assertEqual(art.theme_palette('kokiri'), art.BASE)   # the first scheme is the colours as written
+        for name, t in art.THEMES.items():
+            pal = art.theme_palette(name)
+            self.assertEqual(set(pal), set(art.BASE), name)
+            for key, value in pal.items():
+                self.assertRegex(value, r'^#[0-9a-f]{6}$', f'{name} {key}')
+            self.assertTrue(t['label'])
+        grouped = [k for keys in art.GROUPS.values() for k in keys]
+        self.assertEqual(len(grouped), len(set(grouped)), 'a colour in two groups')
+        self.assertLessEqual(set(grouped), set(art.BASE))
+
+    def test_set_theme_changes_the_palette_in_place(self):
+        art = self.art
+        held = art.PALETTE
+        try:
+            self.assertEqual(art.set_theme('zora'), 'zora')
+            self.assertIs(art.PALETTE, held)
+            self.assertNotEqual(held['panel'], art.BASE['panel'])
+            self.assertEqual(held['salmon'], art.BASE['salmon'])        # a warning stays a warning in every scheme
+            self.assertEqual(art.set_theme('no such scheme'), 'kokiri')
+            self.assertEqual(dict(held), art.BASE)
+            self.assertEqual(art.set_theme(None), 'kokiri')             # launcher.json without the key
+        finally:
+            art.set_theme('kokiri')
+
+    def test_recolor_keeps_light_and_dark(self):
+        import colorsys
+        art = self.art
+
+        def hls(c):
+            return colorsys.rgb_to_hls(*(int(c[i:i + 2], 16) / 255 for i in (1, 3, 5)))
+        for c in ('#7a5c32', '#2a2019', '#d69127'):
+            h, l, _s = hls(art.recolor(c, 200))
+            self.assertAlmostEqual(h * 360, 200, delta=4)
+            self.assertAlmostEqual(l, hls(c)[1], delta=0.01)
+        self.assertEqual(art.recolor('#7a5c32', None), '#7a5c32')
+
+    def test_a_picture_is_cut_to_the_windows_shape(self):
+        import numpy as np
+        pic = self.picture
+        wide = np.zeros((100, 400, 3), dtype=np.uint8)
+        wide[:, 150:250] = 255                                # the middle of a wide picture
+        out = pic.cover(wide, 160, 100)
+        self.assertEqual(out.shape, (100, 160, 3))
+        self.assertGreater(out[:, 40:120].mean(), 200)        # its middle fills most of the result
+        tall = np.zeros((400, 100, 3), dtype=np.uint8)
+        tall[150:250] = 255
+        self.assertEqual(pic.cover(tall, 160, 100).shape, (100, 160, 3))
+        self.assertGreater(pic.cover(tall, 160, 100).mean(), 120)
+        big = np.full((2048, 3200, 3), 77, dtype=np.uint8)   # shrunk to half: averaged, the grey stays
+        self.assertTrue((pic.cover(big, 1600, 1024) == 77).all())
+
+    def test_the_kept_background(self):
+        import numpy as np
+        art, pic = self.art, self.picture
+        src = self.tmp / 'mine.png'
+        img = np.zeros((90, 300, 4), dtype=np.float32)
+        img[..., 0], img[..., 3] = 1.0, 1.0                  # red
+        src.write_bytes(art.png_bytes(img))
+        store = self.tmp / 'background.npy'
+        if pic.Image is None and os.name != 'nt':
+            self.skipTest('needs Pillow, or Tk with a display')
+        fitted = pic.keep(src, store)
+        self.assertEqual(fitted.shape, (pic.KEEP_H, pic.KEEP_W, 3))
+        back = pic.kept(store, 1000, 640)
+        self.assertEqual(back.shape, (640, 1000, 3))
+        self.assertEqual(str(back.dtype), 'float32')
+        self.assertAlmostEqual(float(back[..., 0].min()), 1.0, places=3)
+        self.assertAlmostEqual(float(back[..., 1:].max()), 0.0, places=3)
+        # the backdrop with it: the picture darkened by the dimming, solid everywhere
+        plain = art.backdrop(200, 128, 1.0, pic.kept(store, 200, 128), 0.0)
+        dimmed = art.backdrop(200, 128, 1.0, pic.kept(store, 200, 128), 0.8)
+        self.assertEqual(plain.shape, (128, 200, 4))
+        self.assertGreater(plain[64, 100, 0], 0.8)                   # the corners' shade reaches in a little
+        self.assertLess(dimmed[64, 100, 0], 0.35)
+        self.assertEqual(float(dimmed[..., 3].min()), 1.0)
+        # what is not a kept background, and what is no picture
+        self.assertIsNone(pic.kept(self.tmp / 'none.npy', 100, 64))
+        store.write_bytes(b'not numpy')
+        self.assertIsNone(pic.kept(store, 100, 64))
+        text = self.tmp / 'notes.txt'
+        text.write_text('no picture')
+        with self.assertRaises(pic.PictureError):
+            pic.keep(text, store)
+        with self.assertRaises(pic.PictureError):
+            pic.load(self.tmp / 'gone.png')
+
+    def test_ppm(self):
+        import numpy as np
+        px = bytes(range(18))
+        a = self.picture.read_ppm(b'P6\n# a comment\n3 2\n255\n' + px)
+        self.assertEqual(a.shape, (2, 3, 3))
+        self.assertEqual(a.tobytes(), px)
+        self.assertEqual(a.dtype, np.uint8)
+        with self.assertRaises(self.picture.PictureError):
+            self.picture.read_ppm(b'P5\n1 1\n255\n\0')
+
+    def test_the_effects_are_short_wavs(self):
+        sound = self.sound
+        for name in sound.EFFECTS:
+            samples = sound.synth(name)
+            self.assertAlmostEqual(float(abs(samples).max()), 1.0, places=5, msg=name)
+            self.assertLess(len(samples) / sound.RATE, 1.0, name)
+            self.assertLess(abs(float(samples[-1])), 0.01, name)   # it ends at nothing: no click
+            wav = sound.wav_bytes(samples, 0.4)
+            self.assertEqual(wav[:4] + wav[8:16], b'RIFFWAVEfmt ')
+            self.assertEqual(struct.unpack_from('<I', wav, 4)[0], len(wav) - 8)
+            self.assertEqual(struct.unpack_from('<HHIIHH', wav, 20), (1, 1, sound.RATE, sound.RATE * 2, 2, 16))
+            peak = max(abs(v) for v in struct.unpack_from(f'<{len(samples)}h', wav, 44))
+            self.assertAlmostEqual(peak / 32767, 0.4, delta=0.01)
+
+    def test_sounds_are_off_until_the_player_turns_them_on(self):
+        sound = self.sound
+        self.assertEqual(settings.DEFAULTS['sounds'], 'off')
+        with mock.patch.object(sound.os, 'name', 'posix'), mock.patch.object(sound.shutil, 'which',
+                                                                             return_value='/usr/bin/aplay'), \
+                mock.patch.object(sound.subprocess, 'Popen') as popen:
+            s = sound.Sounds(self.tmp)                     # no level given, as a new launcher.json has it
+            s.play('move')
+            popen.assert_not_called()
+            s.set_level('nonsense')                        # a level launcher.json cannot hold: off
+            s.play('move')
+            popen.assert_not_called()
+            s.set_level('low')
+            s.play('move')
+            s.play('no such effect')
+            popen.assert_called_once()
+            path = Path(popen.call_args[0][0][1])
+            self.assertEqual(path.read_bytes()[:4], b'RIFF')
+            s.set_level('off')
+            s.play('move')
+            popen.assert_called_once()
+
+    def test_the_look_settings_survive_and_fall_back(self):
+        path = self.tmp / 'launcher.json'
+        s = settings.Settings(path)
+        self.assertEqual((s['theme'], s['background'], s['background_dim'], s['animations'], s['sounds']),
+                         ('kokiri', '', 40, True, 'off'))
+        s['theme'], s['sounds'], s['background_dim'] = 'shadow', 'high', 60
+        s.save()
+        t = settings.Settings(path)
+        self.assertEqual((t['theme'], t['sounds'], t['background_dim']), ('shadow', 'high', 60))
+        path.write_text(json.dumps({'theme': 5, 'animations': 'yes', 'background_dim': '40'}))
+        u = settings.Settings(path)                        # values of the wrong kind: the defaults
+        self.assertEqual((u['theme'], u['animations'], u['background_dim']), ('kokiri', True, 40))
+
+
 # ---------------------------------------------------------------- the window
 
 def have_display():
@@ -2442,7 +2603,7 @@ class WindowTest(Tmp):
         r = subprocess.run([sys.executable, '-m', 'launcher', '--root', str(self.tmp / 'w'), '--selftest'],
                            cwd=ROOT, capture_output=True, text=True, timeout=180)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn('12 screens drawn', r.stdout)
+        self.assertIn('15 screens drawn', r.stdout)
 
 
 if __name__ == '__main__':
