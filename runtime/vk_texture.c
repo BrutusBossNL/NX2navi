@@ -2178,9 +2178,30 @@ static int img_block(const Tex *e, int *bw, int *bh) {
 // on screen, so a descriptor made over a live target's memory is often a few texels larger or smaller than it. The game
 // reads the bytes there as its content (the same memory on the console); started empty instead, the scene went black
 // for a frame about once a second while the camera turned, from 0.6.1 on (issue #253).
+// NX2NAVI_DEPTH_ALIAS=1 (test, default 0): a depth-only image of the same format as the live one at its address takes
+// its depth too (the region both cover), where it started cleared to 0 (init_image). NX2NAVI_DEPTH_ALIAS_LOG=1 logs
+// every depth entry made over a live texture, with the frame, so a one-frame dark shadowing can be lined up with it.
+static int depth_alias(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = rt_knob("DEPTH_ALIAS", "0");
+        rt_log("vk: depth aliases: %s (NX2NAVI_DEPTH_ALIAS)", on == 2 ? "a new depth image takes the live one's depth in the B blocks"
+                                                              : on ? "a new depth image takes the live one's depth"
+                                                                   : "a new depth image starts cleared");
+    }
+    return RT_KNOB_ON(on);
+}
+
+static int depth_alias_log(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("DEPTH_ALIAS_LOG", "0");
+    return on;
+}
+
 static int alias_compatible(const Tex *e, const Tex *src, const char **why) {
     const VkTexImage *p = &e->pub, *q = &src->pub;
-    if (e->f.depth || e->f.stencil || src->f.depth || src->f.stencil || p->samples > 1 || q->samples > 1)
+    int dd = depth_alias() && e->f.depth && src->f.depth && !e->f.stencil && !src->f.stencil && e->f.vk == src->f.vk;
+    if (((e->f.depth || e->f.stencil || src->f.depth || src->f.stencil) && !dd) || p->samples > 1 || q->samples > 1)
         return *why = "depth, stencil or multisample", 0;
     if (p->type != q->type) return *why = "another image type", 0;
     if (p->skip || q->skip) return *why = "made without its top levels (texture detail)", 0;   // level i is not level i
@@ -2211,6 +2232,7 @@ static int alias_copy(Tex *e, const Tex *src) {
     VkCommandBuffer cb = vk_exec_inline_begin(&reopen);
     if (!cb) return 0;
     int bw, bh, bpb = img_block(e, &bw, &bh);
+    VkImageAspectFlags asp = e->f.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;   // depth_alias
     uint32_t levels = e->pub.levels < src->pub.levels ? e->pub.levels : src->pub.levels;
     uint32_t layers = e->pub.layers < src->pub.layers ? e->pub.layers : src->pub.layers, n = levels * layers, k = 0;
     // the region both images cover (alias_compatible: the same shape for block-compressed ones); the rest of a larger
@@ -2225,7 +2247,7 @@ static int alias_copy(Tex *e, const Tex *src) {
             uint32_t w = umin(mip(e->pub.width, lv), mip(src->pub.width, lv));
             uint32_t h = umin(mip(e->pub.height, lv), mip(src->pub.height, lv));
             uint32_t z = umin(mip(e->pub.depth, lv), mip(src->pub.depth, lv));
-            rg[k] = (VkBufferImageCopy){.bufferOffset = total, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, ly, 1},
+            rg[k] = (VkBufferImageCopy){.bufferOffset = total, .imageSubresource = {asp, lv, ly, 1},
                                         .imageExtent = {w, h, z}};
             total += ((VkDeviceSize)(w + bw - 1) / bw * ((h + bh - 1) / bh) * z * bpb + 15) & ~15ull;
         }
@@ -2245,11 +2267,17 @@ static int alias_copy(Tex *e, const Tex *src) {
                                 .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                                 .image = e->pub.image,
-                                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
+                                .subresourceRange = {asp, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb,
                            .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ib};
     vkCmdPipelineBarrier2(cb, &di);
-    if (partial && vk_fix_zero() && !e->bound_to && !e->pub.mirrored && !format_compressed(e->f.vk)) {
+    if (partial && e->f.depth) {   // the rest of a larger depth image starts as init_image leaves a new one
+        VkClearDepthStencilValue dz = {0.0f, 0};
+        VkImageSubresourceRange all = {asp, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+        vkCmdClearDepthStencilImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &dz, 1, &all);
+        barrier(cb, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    } else if (partial && vk_fix_zero() && !e->bound_to && !e->pub.mirrored && !format_compressed(e->f.vk)) {
         VkClearColorValue zero = {0};
         VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         vkCmdClearColorImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
@@ -2331,6 +2359,16 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
     int from_released = !src && rsrc && !live_content;
     if (from_released) src = rsrc;
     if (alias) perf_count(PERF_CNT_TEX_ALIAS);
+    if (alias && (e->f.depth || e->f.stencil) && depth_alias_log()) {   // depth_alias
+        static int n_dlog;
+        if (n_dlog++ < 20000)
+            rt_log("vk: depth alias: frame %llu %#llx %ux%ux%u fmt %#x%s over %ux%ux%u fmt %#x%s: %s",
+                   (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), (unsigned long long)k->addr,
+                   e->pub.width, e->pub.height, e->pub.layers, e->t.d.format, taken_back ? " (taken back)" : "",
+                   other->pub.width, other->pub.height, other->pub.layers, other->t.d.format,
+                   other->f.depth ? " depth" : "", taken_back && !newer && !e->pub.mirrored ? "kept its own"
+                   : !tex_alias ? "cleared (aliases off)" : src ? (from_released ? "copied from a released one" : "copied") : why);
+    }
     if (taken_back && !newer && !e->pub.mirrored) {   // its image still holds its content
         n_alias_kept++;
         return;

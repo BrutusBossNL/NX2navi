@@ -188,6 +188,11 @@
 # memory = auto
 # A new texture created over a live texture's memory starts with that content instead of empty.
 # tex_alias = 1
+# Test, off by default: a new depth image made over a live one of the same format at the same address takes its depth
+# for the region both cover, instead of starting cleared. The game remakes its depth targets at other sizes many times a
+# minute in some places, and a cleared one shows everything near the camera as in shadow for one frame. ab switches it
+# in blocks of game time for comparisons; depth_alias_log = 1 logs each such image with its frame.
+# depth_alias = 0
 # Small texture uploads stage in ranges of a few kept buffers instead of a new buffer each (0 = a buffer each).
 # stg_arena = 1
 # With astc = gpu: the compute shader reads the blocks in the game's tiled layout, so the CPU only copies the
