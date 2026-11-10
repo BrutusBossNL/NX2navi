@@ -11,6 +11,12 @@
 // - Inputs of at least AWAY_BYTES give the virtual core up while they decode (other guest threads run on it).
 // NX2NAVI_ZSTD_NATIVE=0 keeps the guest decoder (the patch set switch); NX2NAVI_ZSTD_CHECK=1 decodes each call both ways,
 // keeps the guest's result and logs every call where the two differ.
+//
+// Ocarina of Time 1.1.1 has the same decoder at other addresses (recomp/patches-v111.txt: three calls of
+// ZSTD_decompressMultiFrame, main+0xeb380). Its sites have not been through a check run yet, and 1.4.3 has a caller
+// whose result the game relies on being the game decoder's own, so on that build the host decodes only when
+// zstd_native = 1 is set outright or the check runs (trusted); an unset key sends every call on to the game's decoder.
+// Its loading threads decode most data through the game's stream feed (main+0xf5c80), which is not replaced yet.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,8 +34,8 @@
 
 #ifdef RT_PATCH_PAGE
 
-#define GUEST_MULTIFRAME 0x700003a1f0ull   // 1.4.3 main: ZSTD_decompressMultiFrame (only 1.4.3 has the patch sites)
-#define GUEST_USING_DDICT 0x700003a1e0ull  // ZSTD_decompress_usingDDict
+#define GUEST_MULTIFRAME (rt_game_version == 111 ? 0x70000eb380ull : 0x700003a1f0ull)   // ZSTD_decompressMultiFrame: 1.1.1, 1.4.3
+#define GUEST_USING_DDICT 0x700003a1e0ull  // 1.4.3 main: ZSTD_decompress_usingDDict (1.1.1 has no site for it)
 #define HOST_MULTIFRAME (RT_PATCH_PAGE + 0xff0)
 #define HOST_USING_DDICT (RT_PATCH_PAGE + 0xfe0)
 #define AWAY_BYTES (64u << 10)
@@ -165,12 +171,29 @@ static void count(uint64_t in, uint64_t out, uint64_t ns) {
                (unsigned long long)S.inplace, (unsigned long long)S.away);
 }
 
+// Whether this build's sites may decode on the host: always but on 1.1.1, where it takes zstd_native = 1 in the
+// settings or the check (see the top of the file).
+static int trusted(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = cfg_get("NX2NAVI_ZSTD_NATIVE");
+        v = rt_game_version != 111 || (e && *e && strcmp(e, "0") != 0) || check_mode();
+        if (!v) rt_log("zstd: the game's own decoder (the host decoder is not checked on this build yet: zstd_native = 1 "
+                       "turns it on, zstd_check = 1 compares the two)");
+    }
+    return v;
+}
+
 // x0 dctx, x1 dst, x2 capacity, x3 src, x4 size, then (dict, dict size, ddict) as the entry has them. guest: the
 // guest function with the same arguments, n of them.
 static void decode(Cpu *c, uint64_t dict, uint64_t dict_size, uint64_t ddict, uint64_t guest, int n) {
     uint64_t a[8];
     memcpy(a, c->x, sizeof a);
     uint64_t dst = a[1], cap = a[2], src = a[3], size = a[4];
+    if (!trusted()) {
+        rt_call(c, guest, n, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+        return;
+    }
     // In place (the input inside the output buffer): the result depends on how the decoder's writes overtake its
     // reads, which libzstd does not promise to do as the game's version does, and a host decode that failed half way
     // would leave the guest decoder a damaged input. Such calls stay in the guest.

@@ -154,7 +154,8 @@
 # made again within a few frames. The first start after changing it builds the pipelines again. 0: such textures stay.
 # tex_disuse = 1
 # Host zstd decoder in place of the game's (0 = the game's), and a check that decodes every call both ways and logs
-# the differences (1 = on; slow).
+# the differences (1 = on; slow). Ocarina of Time 1.1.1 keeps the game's decoder while zstd_native is unset: its host
+# decoding has not been through a check run yet, so there it takes zstd_native = 1 (or the check) to turn it on.
 # zstd_native = 1
 # zstd_check = 0
 
