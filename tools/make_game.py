@@ -365,11 +365,28 @@ def exefs_digest(out):
 
 # ---------------------------------------------------------------- romfs
 
+ROMFS_READ_AHEAD = 64 << 20   # total file bytes requested from workers in one group
+
+
+def romfs_read_groups(files):
+    group, buffered = [], 0
+    for entry in files:
+        size = entry[2]
+        ahead = size if size <= ROMFS_READ_AHEAD else 0   # the writer streams larger files
+        if buffered + ahead > ROMFS_READ_AHEAD or len(group) == 256:
+            yield group
+            group, buffered = [], 0
+        group.append(entry)
+        buffered += ahead
+    if group:
+        yield group
+
+
 def step_romfs(src, out, jobs):
     dst = out / 'romfs'
     dst.mkdir(parents=True, exist_ok=True)
-    files = sorted(src.romfs, key=lambda e: e[0].encode())
-    total = sum(src.romfs_size(ref) for _, ref in files)
+    files = sorted(((rel, ref, src.romfs_size(ref)) for rel, ref in src.romfs), key=lambda e: e[0].encode())
+    total = sum(size for _, _, size in files)
     free = shutil.disk_usage(dst).free
     if free < total + (1 << 30):
         fail(f'{dst} needs {total / 1e9:.1f} GB free for the RomFS image, it has {free / 1e9:.1f} GB')
@@ -379,28 +396,28 @@ def step_romfs(src, out, jobs):
     emit('progress', step='romfs', done=0, total=total, unit='bytes')
 
     def load(e):   # small files are read whole on a worker; big ones are streamed by the writer
-        rel, ref = e
-        return None if src.romfs_size(ref) > (64 << 20) else b''.join(src.romfs_chunks(ref))
+        _, ref, size = e
+        return None if size > ROMFS_READ_AHEAD else b''.join(src.romfs_chunks(ref))
 
     with open(part, 'wb', buffering=16 << 20) as img, concurrent.futures.ThreadPoolExecutor(jobs) as ex:
-        batch = 256
-        for start in range(0, len(files), batch):
-            group = files[start:start + batch]
-            for (rel, ref), data in zip(group, ex.map(load, group)):
+        for batch, group in enumerate(romfs_read_groups(files)):
+            for (rel, ref, size), data in zip(group, ex.map(load, group)):
                 pad = -pos % ALIGN
                 if pad:
                     img.write(b'\0' * pad)
                     h.update(b'\0' * pad)
                     pos += pad
-                size = src.romfs_size(ref)
-                entries.append({'path': rel, 'offset': pos, 'size': size})
+                offset = pos
                 for chunk in ((data,) if data is not None else src.romfs_chunks(ref)):
                     img.write(chunk)
                     h.update(chunk)
-                pos += size
+                    pos += len(chunk)
+                if pos - offset != size:
+                    fail(f'{rel} changed size while packing the RomFS: expected {size} bytes, read {pos - offset}')
+                entries.append({'path': rel, 'offset': offset, 'size': size})
                 done += size
             emit('progress', step='romfs', done=done, total=total, unit='bytes')
-            if start // batch % 40 == 0:
+            if batch % 40 == 0:
                 say(f'  RomFS {done / 1e9:5.1f} of {total / 1e9:.1f} GB, {time.time() - t0:.0f} s')
     part.replace(dst / 'romfs.bin')
     index = {'status': 'pass', 'romfs_size': pos, 'romfs_sha256': h.hexdigest(), 'files': entries}

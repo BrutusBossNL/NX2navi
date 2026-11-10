@@ -547,6 +547,13 @@ int main(int argc, char **argv) {
     // Timed guest waits (kernel.c block_inner) sleep in whole milliseconds; at the default 15.6 ms tick a 1 ms wait
     // costs a full tick. NX2NAVI_TIMER_1MS=0 keeps the default for comparison.
     if (cfg_bool("NX2NAVI_TIMER_1MS")) plat_timer_1ms();
+    // Before any thread pool counts the usable processors. Not in the shader preparation modes: they translate and
+    // build on every processor the process was given, and the placement (perf.c cpu_placement) is for the game's own
+    // threads, so narrowing them to one die would only make the preparation take longer.
+    int prepare = 0;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--prepare-shaders") || !strcmp(argv[i], "--warm-shaders")) prepare = 1;
+    if (!prepare) perf_cpu_start();
     {   // NX2NAVI_POWER_FULL=0 leaves Windows' power throttling of an unfocused window in place (A/B runs)
         const char *pf = cfg_get("NX2NAVI_POWER_FULL");
         if (!(pf && !strcmp(pf, "0"))) {

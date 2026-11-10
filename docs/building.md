@@ -219,6 +219,14 @@ The probes open a window, so from an SSH session they need the desktop session's
 skipped: no graphics+compute+present queue family`: on Wayland `XDG_RUNTIME_DIR=/run/user/$(id -u)
 WAYLAND_DISPLAY=wayland-1 SDL_VIDEODRIVER=wayland` (the socket name is in `$XDG_RUNTIME_DIR`), on X11 `DISPLAY=:0`.
 
+NVIDIA's Linux driver compiles into a disk cache of its own. A process adds at most `__GL_SHADER_DISK_CACHE_SIZE` to it
+(1 GiB by default; at a start the files after the first are deleted while the folder is over that size), and the default
+folder, `~/.cache/nvidia`, is shared with every program. `--prepare-shaders` of game 1.1.1 builds 42,142 variants, about
+1.5 GB: on the default limit about 30,700 of them were stored and the rest compiled again at their first draw in play.
+`runtime/vk_device.c` therefore points `__GL_SHADER_DISK_CACHE_PATH` at `nvidia-cache` beside `ocarina` and the size at
+8 GiB before the first Vulkan call, each unless the environment sets it, as it does `MESA_SHADER_CACHE_DIR` for RADV. The
+folder can be deleted; `ocarina --warm-shaders` fills it again.
+
 Memory: on Windows the GPU imports guest memory and `GetWriteWatch` tracks the CPU's writes to it. On Linux,
 re-protecting imported memory invalidates the driver's userptr buffer on every submit (about 1.3 ms per 16 MiB on
 amdgpu), and importing pins the pages, which drops their write protection. Each CPU-visible pool therefore gets a
