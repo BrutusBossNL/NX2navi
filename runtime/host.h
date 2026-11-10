@@ -186,8 +186,9 @@ void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen r
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
 // NX2NAVI_WB_PROBE=1 (memory.c, "Probed regions"): who reads what the GPU wrote back into guest memory.
 // NX2NAVI_WB_LAZY (memory.c, "Lazy write-back"): pages the GPU wrote that come down only when the CPU touches them.
-int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size));
-uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t off);
+int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size),
+                    int (*clean)(uint64_t lo, uint64_t hi, void *ctx));
+uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t off, void *ctx);
 int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t out[][2], int max);
 int mem_lazy_armed(uint64_t a, uint64_t n);
 void mem_lazy_window(int open);

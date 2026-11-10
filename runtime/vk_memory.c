@@ -1150,15 +1150,16 @@ static void gpu_written(uint64_t addr, uint64_t size, int back) {
 
 void vk_gpu_written(uint64_t addr, uint64_t size) { gpu_written(addr, size, 0); }
 static int wb_lazy(void);
+static int lazy_clean(uint64_t lo, uint64_t hi, void *ctx);
 
 void vk_gpu_written_back(uint64_t addr, uint64_t size) {
     gpu_written(addr, size, 1);
     mem_probe(addr, size);   // NX2NAVI_WB_PROBE: the bytes are in guest memory now; note who reads them next
     VkMemSpan sp;
     if (size && wb_lazy() && vk_mem_resolve(addr, size, &sp) && sp.pool) {   // or newer ones stay in the mirror from here on
-        const PoolRec *r = sp.pool;
+        PoolRec *r = sp.pool;
         if (r->mstate == MS_ON && r->mbuf && r->buf && addr >= r->import_lo && addr + size <= r->import_hi)
-            mem_lazy_arm(addr, size, (uint64_t)(uintptr_t)r->mbuf, (uint64_t)(uintptr_t)r->buf, addr - r->import_lo);
+            mem_lazy_arm(addr, size, (uint64_t)(uintptr_t)r->mbuf, (uint64_t)(uintptr_t)r->buf, addr - r->import_lo, r);
     }
 }
 
@@ -2163,6 +2164,23 @@ static void lazy_fetch(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size) {
     vkResetFences(c->device, 1, &lz_fence);
 }
 
+// memory.c's test before it arms [lo, hi) of the pool ctx (frz_lock held there, the pages already inaccessible): the
+// mirror holds every CPU write to them. A fetch copies the mirror over the whole range, not the merge of the bytes the
+// GPU changed that a write-back does, so a CPU write that came after the range's write-back reached guest memory and
+// before this arm, and that no sync of the mirror has carried up yet, would be overwritten by the mirror's older bytes:
+// a page stamped after the mirror's last sync (the CPU-write table, mgen), or a write-watch bit nobody has read yet.
+// No lock: the pages are inaccessible, so nothing stamps them meanwhile; the mirror's mgen only grows.
+static int lazy_clean(uint64_t lo, uint64_t hi, void *ctx) {
+    const PoolRec *r = ctx;
+    uint32_t mgen = __atomic_load_n(&r->mgen, __ATOMIC_ACQUIRE);
+    for (uint64_t a = lo; a < hi; a += 1ull << GEN_PAGE_SHIFT) {
+        const uint32_t *ch = __atomic_load_n(&cgen_chunk[a >> GEN_CHUNK_SHIFT], __ATOMIC_ACQUIRE);
+        if (ch && __atomic_load_n(&ch[(a >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)], __ATOMIC_RELAXED) > mgen) return 0;
+    }
+    uint64_t p[1];
+    return mem_written_peek(lo, hi - lo, p, 1) == 0;   // UINT64_MAX (not watched) counts as written
+}
+
 static int wb_lazy(void) {
     int s = __atomic_load_n(&lz_state, __ATOMIC_ACQUIRE);
     if (s) return s == 1;
@@ -2179,7 +2197,7 @@ static int wb_lazy(void) {
                                               .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
             on = on && vkAllocateCommandBuffers(c->device, &ai, &lz_cb) == VK_SUCCESS &&
                  vkCreateFence(c->device, &fi, NULL, &lz_fence) == VK_SUCCESS;
-            on = on && mem_lazy_enable(lazy_fetch);
+            on = on && mem_lazy_enable(lazy_fetch, lazy_clean);
         }
         rt_log("mem: what shaders write into mirrored pools %s (NX2NAVI_WB_LAZY)",
                on ? "goes back to guest memory once and then only when the CPU touches it"

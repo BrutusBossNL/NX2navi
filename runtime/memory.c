@@ -135,6 +135,10 @@ static uint8_t lz_back[RT_ADDRESS_LIMIT >> FRZ_SHIFT];        // frz_lock: secon
 static volatile int32_t lz_on;
 static int lz_want;                     // the setting, read in mem_init
 static void (*lz_fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size);
+// The back end's test that the mirror holds every CPU write to [lo, hi) (vk_memory.c lazy_clean): a fetch copies the
+// mirror's bytes over the whole range, so a CPU write the mirror does not have yet would be lost to it.
+static int (*lz_clean)(uint64_t lo, uint64_t hi, void *ctx);
+static uint64_t lz_unclean;             // frz_lock: arms refused since the last report because the mirror lacked a CPU write
 // frz_lock: since the last report: faults by a read, by a write, other releases, fetches, their bytes and time
 static uint64_t lz_faults[2], lz_other, lz_fetches, lz_fetch_bytes, lz_fetch_ns, lz_gaps;
 static volatile uint32_t lz_win_tid;    // the replay thread's id while its part is between check and hand-over; 0 else
@@ -189,8 +193,13 @@ static int lazy_covered_locked(uint64_t lo, uint64_t hi) {
 
 // frz_lock held exclusively: [x, e), inside one region, becomes inaccessible when every committed page of it is
 // read-write, or inaccessible as part of a segment already; anything else (a read-only page, a hole, a page the game
-// made inaccessible itself) leaves it as it is.
-static int lazy_protect_locked(uint64_t x, uint64_t e) {
+// made inaccessible itself) leaves it as it is. Then the back end checks that the mirror ctx belongs to holds every CPU
+// write to [x, e) (lz_clean): after the protection no write can come in, so a write that came before it is in the
+// write-watch or the page generations. When the mirror lacks one, the pages are given back and nothing is armed: the
+// CPU wrote into the range after its write-back reached guest memory and before this arm, and the next sync of the
+// mirror carries that write up; a fetch before it would have copied the mirror's older bytes over it (single frames
+// with another frame's lighting constants, or a black scene).
+static int lazy_protect_locked(uint64_t x, uint64_t e, void *ctx) {
     uint64_t run[16][2];
     int k = 0;
     for (uint64_t a = x, b; a < e; a = b) {
@@ -205,12 +214,17 @@ static int lazy_protect_locked(uint64_t x, uint64_t e) {
             while (i--) plat_mem_protect(run[i][0], run[i][1] - run[i][0], PLAT_PROT_RW);
             return 0;
         }
+    if (lz_clean && !lz_clean(x, e, ctx)) {
+        for (int i = 0; i < k; i++) plat_mem_protect(run[i][0], run[i][1] - run[i][0], PLAT_PROT_RW);
+        lz_unclean++;
+        return 0;
+    }
     return 1;
 }
 
 // Arms the whole pages of [a, a + n), which the back end has just written back from the buffer h0 into h1 at offset
 // off: they fault on their next access. Returns the bytes armed now. Not in a frozen, probed, held or thaw-held region.
-uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t off) {
+uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t off, void *ctx) {
     if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED) || a >= RT_ADDRESS_LIMIT || !watched(a, n)) return 0;
     uint64_t lo = (a + PAGE - 1) & ~(PAGE - 1), hi = (a + n) & ~(PAGE - 1), armed = 0;
     if (hi <= lo) return 0;
@@ -226,7 +240,7 @@ uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t
         e = (r + 1) << FRZ_SHIFT;
         if (e > hi) e = hi;
         if (frz[r] || prb[r] || (lz_hot[r] && (int32_t)(lz_hot[r] - now) > 0) ||
-            (thaw_ms[r] && (int32_t)(now - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) || !lazy_protect_locked(x, e))
+            (thaw_ms[r] && (int32_t)(now - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) || !lazy_protect_locked(x, e, ctx))
             continue;
         uint64_t slo = x, shi = e;
         uint8_t stale = 0;
@@ -291,9 +305,10 @@ void mem_lazy_release(uint64_t a, uint64_t n) {
 
 // The back end is ready to fetch: arming starts. 0 when the setting is off (or the probe is on, which watches the
 // same pages).
-int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size)) {
+int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size),
+                    int (*clean)(uint64_t lo, uint64_t hi, void *ctx)) {
     if (!lz_want) return 0;
-    lz_fetch = fetch;
+    lz_fetch = fetch, lz_clean = clean;
     __atomic_store_n(&lz_on, 1, __ATOMIC_RELEASE);
     return 1;
 }
@@ -352,16 +367,17 @@ void mem_lazy_report(uint64_t frame, uint64_t skipped) {
     if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED)) return;
     plat_mutex_lock(&frz_lock);
     uint64_t bytes = 0, fr = lz_faults[0], fw = lz_faults[1], other = lz_other, nf = lz_fetches, fb = lz_fetch_bytes,
-             fns = lz_fetch_ns, gaps = lz_gaps;
+             fns = lz_fetch_ns, gaps = lz_gaps, unclean = lz_unclean;
     int n = lz_n;
     for (int i = 0; i < lz_n; i++) bytes += lzs[i].hi - lzs[i].lo;
-    lz_faults[0] = lz_faults[1] = lz_other = lz_fetches = lz_fetch_bytes = lz_fetch_ns = lz_gaps = 0;
+    lz_faults[0] = lz_faults[1] = lz_other = lz_fetches = lz_fetch_bytes = lz_fetch_ns = lz_gaps = lz_unclean = 0;
     plat_mutex_unlock(&frz_lock);
     rt_log("mem: lazy write-back at frame %llu: %d ranges armed, %.1f MiB; since the last line %.1f MiB left in the "
            "mirror, %llu read and %llu write faults (%llu inside a part's window), %llu other releases, %llu fetches of "
-           "%.1f MiB in %.2f ms", (unsigned long long)frame, n, bytes / 1048576.0, skipped / 1048576.0,
-           (unsigned long long)fr, (unsigned long long)fw, (unsigned long long)gaps, (unsigned long long)other,
-           (unsigned long long)nf, fb / 1048576.0, fns / 1e6);
+           "%.1f MiB in %.2f ms, %llu arms refused (a CPU write not in the mirror yet)", (unsigned long long)frame, n,
+           bytes / 1048576.0, skipped / 1048576.0, (unsigned long long)fr, (unsigned long long)fw,
+           (unsigned long long)gaps, (unsigned long long)other, (unsigned long long)nf, fb / 1048576.0, fns / 1e6,
+           (unsigned long long)unclean);
 }
 
 // frz_lock held exclusively. why: 1 a write fault, 2 mem_thaw (holds the region thawed), 3 a mapping change here.
