@@ -57,6 +57,9 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   and, if its host rip is in lifted code at host depth 0, moves it to `kern_ap_stub`, which saves the volatile
   registers and gives the core up there. A holder of a guest mutex counts at the priority of its best waiter, and one
   inside an SDK spin lock is not preempted.
+- Wakes. A signalled event or a thread that ends wakes only the `WaitSynchronization` waits that hold a handle of it
+  (`wake_sync_waiters`): a woken thread takes a core before it looks, so waking the others cost running threads
+  their cores for nothing (`NX2NAVI_SYNC_WAKE_ALL=1` wakes them all).
 - Host work gives the core back. Queue submits, presents, GPU waits, shader translation, `nn::fs` calls and NVN memory
   pool setup run without a core (`NVN_BLOCKING`, `kern_core_away`).
 - Spin waits. Loops that only another thread can end send their back-edges through `rt_spin_gate`, which pauses the

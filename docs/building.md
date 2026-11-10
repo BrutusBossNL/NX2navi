@@ -278,6 +278,13 @@ A change to the step Ocarina is given each frame (`runtime/frame_rate.c` `ocarin
 display times: a held 60 fps limit gives exactly one frame every frame, a 240 fps limit never less than a quarter
 frame, uneven frame times one steady step, and game time follows the clock. No game files.
 
+A change to which waits a signalled event or an ended thread wakes (`runtime/kernel.c` `wake_sync_waiters`, the
+`WaitSynchronization` service) passes `python tests\sync_wake_check.py`, which builds `kernel.c` with the platform
+layer and the rest of the runtime stubbed and runs guest threads whose entries are host functions: a signal wakes the
+waits on its event and leaves the others asleep, a wait on several handles reports the right one, a thread's end ends
+the wait on it, timed waits keep their time, a cancel ends any wait, and 4,000 signals to eight looping waiters are
+each seen. It runs a second time with `NX2NAVI_SYNC_WAKE_ALL=1`. No game files.
+
 A change to the button prompts (`tools/make_romfs_patches.py --prompts`, `tools/button_icons.py`) passes
 `.venv-py314\Scripts\python tests\romfs_prompts_test.py`, which runs the tool on a RomFS it makes itself (no game
 files); a change to the settings passes `nx2navi.exe --probe-cfg`.
