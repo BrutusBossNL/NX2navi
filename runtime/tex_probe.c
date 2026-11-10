@@ -348,6 +348,7 @@ static int test_import(pool_t *pool) {
     vk_mem_resolve(a + 0x1000, 0x20000, &sp);
     mem_written_pages(a, pool->size, pages, 64);
     vk_mem_gpu_pending(a + 0x1000, 0x20000);
+    vk_mem_shadow_sync();   // as a submit does: the part's CPU inputs go in before its GPU work
     copy_wait(sb, 0, sp.buffer, sp.offset, 0x20000);
     vk_gpu_written(a + 0x1000, 0x20000);
     GCHECK(!memcmp(m + 0x1000, s, 0x20000), "GPU copy into the imported heap range differs from the source");
@@ -362,10 +363,14 @@ static int test_import(pool_t *pool) {
     GCHECK(n == 4 && pages[0] == a + 0x30000 && pages[3] == a + 0x33000, "CPU writes to 4 pages: %llu reported",
            (unsigned long long)n);
     vk_mem_resolve(a + 0x30000, 0x4000, &sp);
+    // A GPU write noted for the part being submitted must not keep the part's CPU inputs out: a buffer the shaders
+    // add to and the CPU resets (the game's lighting accumulators) depends on the reset reaching the GPU first.
+    vk_mem_gpu_pending(a + 0x30000, 0x4000);
     vk_mem_shadow_sync();
     copy_wait(sp.buffer, sp.offset, sb, 0, 0x4000);
     vmaInvalidateAllocation(c->vma, sa, 0, VK_WHOLE_SIZE);
     GCHECK(!memcmp(s, m + 0x30000, 0x4000), "GPU read of CPU-written heap differs");
+    vk_gpu_written(a + 0x30000, 0x4000);
     vmaDestroyBuffer(c->vma, sb, sa);
 
     // generations: written after `since` -> 1, then 0, explicit host write -> 1
