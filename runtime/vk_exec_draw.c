@@ -2165,8 +2165,13 @@ static void pool_sync(VkExec *ex) {
         PL.catch_ns += kern_now_ns() - t1;
     }
     PL.set_synced[PL.cur] = PL.logn;
-    // a set taken and up to date (with one set, the refresh above wrote into it directly)
-    if (took) __atomic_fetch_add(&pool_takes, 1, __ATOMIC_RELEASE);
+    // A set taken and up to date (with one set, the refresh above wrote into it directly), counted only when this sync
+    // left no slot behind: once the frame's creation time is spent, pool_refill skips a slot it left earlier in the frame
+    // and pool_sync_entries may return before the walk, and such a slot keeps its old view in this set with nothing in
+    // the log, so the takes after it would not carry the change into the other sets. After a counted take, every slot
+    // change made before it is in this set and in the log; vk_texture.c retire_sweep frees a retired image only after
+    // more than VK_POOL_SETS of them, so no set of the ring still holds its view.
+    if (took && !PL.retry) __atomic_fetch_add(&pool_takes, 1, __ATOMIC_RELEASE);
 }
 
 typedef struct { VkExec *ex; uint32_t used; int n, retry, spent; } PoolDirty;

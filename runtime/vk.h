@@ -498,8 +498,9 @@ int vk_pool_marks_enabled(void);                     // NX2NAVI_TEX_DISUSE: modu
 extern volatile int32_t vk_pool_marks_missed;        // modules indexing the pool that could not be marked
 void vk_pool_marks_read(const uint32_t *marks, uint32_t n);   // vk_texture.c: slots marked since the last read
 // The texture pool's ring of descriptor sets (vk_exec_draw.c pool_take_set): a submission's first pool use takes the next
-// set and brings it up to date. vk_pool_takes counts those takes; once it has moved on by more than VK_POOL_SETS since a
-// pool entry changed, every set holds the change (vk_texture.c retire_sweep).
+// set and brings it up to date. vk_pool_takes counts the takes whose sync left no slot behind (vk_exec_draw.c pool_sync);
+// once it has moved on by more than VK_POOL_SETS since a pool entry changed, every set holds the change (vk_texture.c
+// retire_sweep). It may count fewer takes than there were, which only delays that.
 #define VK_POOL_SETS 4
 uint64_t vk_pool_takes(void);
 // Texture lock held: 1 while the texture pool refresh looks its slots up (vk_exec_draw.c pool_sync_entries), 0 after.

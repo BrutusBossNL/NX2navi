@@ -1161,7 +1161,8 @@ static uint64_t evict_idle(uint64_t want, uint64_t used, uint64_t budget) {   //
 //    every slot that names it gets the kind's stand-in. Any use in the meantime takes it back as it is (retire_cancel):
 //    a lookup other than the pool refresh, or a mark on one of its slots (the stand-in was sampled).
 //  - destroyed (retire_sweep) once the texture pool has taken every set of its ring since, each brought up to date
-//    when taken (vk_exec_draw.c pool_take_set, pool_catch_up), and the GPU has finished the submissions recorded until
+//    when taken (vk_exec_draw.c pool_take_set, pool_catch_up), after a sync that left no slot behind wrote its stand-in
+//    (vk_pool_takes counts only such takes), and the GPU has finished the submissions recorded until
 //    then: no set can be bound with its view any more, and no submission that bound one is still running. Its key is
 //    held then: a held key makes no entry in the pool refresh (held_out), so the slot keeps its stand-in; a mark on the
 //    slot drops the hold and the next refresh makes the texture again, as does any other lookup.
