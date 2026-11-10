@@ -14,6 +14,11 @@ RUN = ('import os, runpy, sys; p = sys.argv[1]; s = sys.argv[2]; sys.argv = sys.
        'runpy.run_path(s, run_name="__main__")')
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+# The build runs below normal priority: a compile on every processor for ten minutes and more otherwise takes the
+# PC from whatever the player does meanwhile, which the job screen invites ("Keep using your PC if you like"). On an
+# idle PC it costs nothing. Windows hands a below-normal process's class on to the processes it starts, so the
+# compilers, the lifter's workers and the shader preparation that make_game.py starts run that way too.
+BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 
 
 def command(layout, args):
@@ -61,7 +66,7 @@ class Run:
         self.error = None
         kw = {}
         if os.name == 'nt':
-            kw['creationflags'] = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+            kw['creationflags'] = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | BELOW_NORMAL_PRIORITY_CLASS
         else:
             kw['start_new_session'] = True
         env = dict(os.environ, PYTHONUNBUFFERED='1', PYTHONIOENCODING='utf-8')

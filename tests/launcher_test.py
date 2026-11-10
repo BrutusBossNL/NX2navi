@@ -2743,6 +2743,24 @@ class JobTest(Tmp):
             App.job_finished(a)
         self.assertEqual(a.message, 'The game is built. Select Play.')
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows priority classes')
+    def test_the_build_and_what_it_starts_run_below_normal_priority(self):
+        """build.Run starts the build below normal priority, and the processes the build starts (the compilers)
+        get that class from it, so a build on every processor leaves the PC usable."""
+        script = self.tmp / 'priority.py'
+        script.write_text(
+            'import ctypes, subprocess, sys\n'
+            'k = ctypes.windll.kernel32\n'
+            'k.GetCurrentProcess.restype = ctypes.c_void_p\n'
+            'k.GetPriorityClass.argtypes = [ctypes.c_void_p]\n'
+            'print(sys.argv[1], hex(k.GetPriorityClass(k.GetCurrentProcess())), flush=True)\n'
+            'if sys.argv[1] == "build":\n'
+            '    subprocess.run([sys.executable, __file__, "compiler"])\n')
+        lines = []
+        run = build.Run([sys.executable, str(script), 'build'], lambda ev: None, lines.append)
+        self.assertEqual(run.wait(), 0, lines)
+        self.assertEqual(lines, ['build 0x4000', 'compiler 0x4000'])   # BELOW_NORMAL_PRIORITY_CLASS
+
     def test_an_install_goes_on_from_the_unpacked_game_files(self):
         """Begin Installation into a folder whose game files an earlier run unpacked builds on from them (--rebuild
         for this processor's level), so a moved or deleted dump is not asked for; without them it reads the dump."""
