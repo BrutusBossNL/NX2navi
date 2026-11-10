@@ -254,7 +254,10 @@ The stub swaps `python.next` in while no Python runs, then starts the new versio
    one.
 
 When the new version fails to start (exit code 86 from `start.pyw`, or any error within six seconds), the stub sets
-`current.txt` back to `previous.txt`'s version and starts it with `--rolled-back`. The game is never rebuilt while it
+`current.txt` back to `previous.txt`'s version and starts it with `--rolled-back`. `start.pyw` writes the failure to
+`data/logs/crash.log` and shows it in a message box only when there is no version to go back to, when Steam started
+it, or when the six seconds are over (`quiet_exit`): a box holds the exit code back until it is closed, and the
+broken version then stayed the current one. The game is never rebuilt while it
 runs. Keep Build Cache off deletes the lifted C and the objects (about 5 GB) after each build but keeps
 `build-cache/state.json`, so updates still rebuild without the dump (compiling everything).
 

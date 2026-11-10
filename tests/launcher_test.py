@@ -3195,6 +3195,74 @@ class WhilePlayingTest(Tmp):
         a.root.deiconify.assert_called_once()
 
 
+class StartScriptTest(Tmp):
+    """launcher/start.pyw when the version cannot be imported: with a version to go back to it ends with code 86 at
+    once and shows no message box, so the stub's six-second wait sees the code and rolls back."""
+
+    def release(self, ver, broken=False):
+        app = self.tmp / 'root' / 'app' / ver / 'launcher'
+        (app / 'ui').mkdir(parents=True)
+        shutil.copy(ROOT / 'launcher' / 'start.pyw', app / 'start.pyw')
+        (app / '__init__.py').write_text('')
+        (app / 'ui' / '__init__.py').write_text('')
+        (app / 'ui' / 'app.py').write_text("raise RuntimeError('this version is broken')\n" if broken else
+                                           'def main():\n    return 0\n')
+        return app / 'start.pyw'
+
+    def load(self, script):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader('nx2navi_start_script', str(script))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)   # not as __main__: nothing starts
+        return mod
+
+    def test_which_version_the_stub_goes_back_to(self):
+        root = self.tmp / 'root'
+        s = self.load(self.release('0.7.2', broken=True))
+        self.assertEqual(s.rollback_target(str(root)), '')            # no previous.txt
+        (root / 'app' / 'previous.txt').write_text('0.7.1\n')
+        self.assertEqual(s.rollback_target(str(root)), '')            # it names a folder that is not there
+        self.release('0.7.1')
+        self.assertEqual(s.rollback_target(str(root)), '0.7.1')
+        (root / 'app' / 'previous.txt').write_bytes(b'\xef\xbb\xbf 0.7.1 \r\n')   # as the stub reads the file
+        self.assertEqual(s.rollback_target(str(root)), '0.7.1')
+        self.assertTrue(s.quiet_exit(str(root), [], 1.0))
+        self.assertTrue(s.quiet_exit(str(root), ['--continue-update', '0.7.1'], 1.0))
+        self.assertFalse(s.quiet_exit(str(root), [], 5.5))            # the stub no longer waits: the box
+        self.assertFalse(s.quiet_exit(str(root), [], float('inf')))
+        self.assertFalse(s.quiet_exit(str(root), ['--play'], 1.0))    # Steam started it: no stub to roll back
+        (root / 'app' / 'previous.txt').write_text('0.7.2\n')        # this version itself: nothing to go back to
+        self.assertEqual(s.rollback_target(str(root)), '')
+        self.assertFalse(s.quiet_exit(str(root), [], 1.0))
+        if os.name == 'nt':
+            self.assertLess(s.process_age(), 3600)
+        else:
+            self.assertEqual(s.process_age(), float('inf'))
+
+    def test_a_broken_version_ends_with_86_and_no_box(self):
+        root = self.tmp / 'root'
+        script = self.release('0.7.2', broken=True)
+        self.release('0.7.1')
+        (root / 'app' / 'previous.txt').write_text('0.7.1\n')
+        env = dict(os.environ, NX2NAVI_LAUNCHER_ROOT=str(root))
+        try:   # a message box would wait for a click: the timeout is the test that there is none
+            r = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail('start.pyw did not end: it waits in a message box')
+        self.assertEqual(r.returncode, 86, r.stderr)
+        log = (root / 'data' / 'logs' / 'crash.log').read_text(encoding='utf-8')
+        self.assertIn('this version is broken', log)
+
+    def test_a_version_that_starts_returns_its_code(self):
+        root = self.tmp / 'root'
+        script = self.release('0.7.2')
+        r = subprocess.run([sys.executable, str(script)], env=dict(os.environ, NX2NAVI_LAUNCHER_ROOT=str(root)),
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((root / 'data' / 'logs' / 'crash.log').exists())
+
+
 class UnfinishedUpdateTest(Tmp):
     """A game whose last update stopped in the compile (state.json without the compile step, the exe of the build
     before still there): the window opens on home and says how to finish, and an update goes on with the game."""
