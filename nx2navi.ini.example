@@ -501,9 +501,10 @@
 # pad with Nintendo labels, xbox for the others). The bind_ lines below apply
 # on top. Changes while the game runs take effect at once. 0.1.9's xbox_prompts is read as nintendo with prompts = xbox.
 # pad_layout = nintendo
-# The buttons the game's prompts show: nintendo (the game's own), xbox (LB RB LT RT, Menu, View) or playstation (L1 R1
-# L2 R2, Options, Create), with A B X Y as the button pad_layout presses is labelled: with nintendo, A shows as B or
-# circle and X as Y or triangle. pc: the key each button has (the bind_ lines below when the files are made), WASD
+# The buttons the game's prompts show: nintendo (the game's own), xbox (LB RB LT RT, Menu, View), playstation (L1 R1
+# L2 R2, Options, Create) or steamdeck (the Deck's A B X Y, L1 R1 L2 R2, Menu, View), with A B X Y as the button
+# pad_layout presses is labelled: with nintendo, A shows as B or circle and X as Y or triangle. pc: the key each
+# button has (the bind_ lines below when the files are made), WASD
 # and the mouse. Read at start; their files come from tools/pad_prompts.py (docs/controls.md, "Button prompts").
 # prompts = nintendo
 # Gamepad stick dead zone in percent of full deflection (0 to 50). Raise it for a stick that drifts: inside the circle

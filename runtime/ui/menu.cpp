@@ -1311,12 +1311,12 @@ static void tab_controls(float scale) {
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX,
                                       UI_MENU_PAD_LAYOUT_PLAYSTATION};
     opt_choice("NX2NAVI_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
-    // The setting's values in their cfg.c order (nintendo, xbox, playstation, pc). The game reads its prompts at start:
-    // the row's note says when a restart would bring others, and the bar's Restart button does it.
+    // The setting's values in their cfg.c order (nintendo, xbox, playstation, steamdeck, pc). The game reads its prompts
+    // at start: the row's note says when a restart would bring others, and the bar's Restart button does it.
     static const UiTextId prompts[] = {UI_MENU_PROMPTS_NINTENDO, UI_MENU_PROMPTS_XBOX, UI_MENU_PROMPTS_PLAYSTATION,
-                                       UI_MENU_PROMPTS_PC};
+                                       UI_MENU_PROMPTS_STEAMDECK, UI_MENU_PROMPTS_PC};
     bool restart;
-    opt_choice("NX2NAVI_PROMPTS", UI_MENU_PROMPTS, prompts, 4, UI_MENU_PROMPTS_DESC, prompts_note(&restart));
+    opt_choice("NX2NAVI_PROMPTS", UI_MENU_PROMPTS, prompts, 5, UI_MENU_PROMPTS_DESC, prompts_note(&restart));
     opt_toggle("NX2NAVI_MOTION", UI_MENU_MOTION, UI_MENU_MOTION_DESC);
     opt_slider("NX2NAVI_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
     opt_slider("NX2NAVI_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");

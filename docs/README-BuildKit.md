@@ -25,7 +25,7 @@ downloads included, and keeps the game up to date. This page is the same build b
    ```
 
    `zbic` unpacks the game's compressed program files. It is a separate GPL-2.0 package you install yourself; the kit
-   only calls it. `fonttools` and `pillow` draw the Xbox, PlayStation and keyboard and mouse button prompts, when the
+   only calls it. `fonttools` and `pillow` draw the Xbox, PlayStation, Steam Deck and keyboard and mouse button prompts, when the
    kit has a `prompt-art` folder.
 
 2. **MSYS2** from [msys2.org](https://www.msys2.org/), installed to the default `C:\msys64`. Open **MSYS2 UCRT64** from
@@ -53,7 +53,7 @@ The build checks the version, unpacks the program files, packs the 26 GB RomFS i
 the dump's own checksums) while it turns the game's code into C and compiles it (about 6 minutes on a 16-thread
 Ryzen 7; longer on fewer cores), then prepares every one of the game's shaders for your graphics card (about 5 more
 minutes), so the game does not stop to compile shaders while you play. When the kit has a `prompt-art` folder, it
-last draws the Xbox, PlayStation and keyboard and mouse button prompts from that art (about a minute) into the
+last draws the Xbox, PlayStation, Steam Deck and keyboard and mouse button prompts from that art (about a minute) into the
 `romfs-patches-*` folders beside the game. The game it builds is for this PC's processor. You can use your PC
 meanwhile. If it stops, run the same command again: finished steps are skipped.
 
@@ -150,7 +150,7 @@ beside the game.
   upscaling on, and the frame limit then counts the frames on screen; with no limit chosen it is the display's refresh
   rate), HDR (the game's picture tone mapped to your display, with its own grading rows, or Native, the game's own HDR; turn HDR on in Windows first) and the
   resolution. Those marked "after restart" take effect when the game starts again.
-- **Controls** in the menu has Button prompts: the game's own, or Xbox, PlayStation or keyboard and mouse ones when
+- **Controls** in the menu has Button prompts: the game's own, or Xbox, PlayStation, Steam Deck or keyboard and mouse ones when
   the build drew them (a kit with `prompt-art`). It takes effect after a restart. The keyboard and mouse prompts show
   the keys `nx2navi.ini` binds when the build runs: after rebinding keys, run
   `py -I tools\make_game.py --rebuild --out "C:\Games\Ocarina"` to draw them again (it skips everything else).

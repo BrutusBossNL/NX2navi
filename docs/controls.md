@@ -23,7 +23,7 @@ letters unless *Button prompts* says otherwise (below).
 
 ## Button prompts
 
-`NX2NAVI_PROMPTS` (`prompts`, the *Button prompts* row on the Controls tab) picks the buttons the game's prompts show: `nintendo` (default, the game's own), `xbox`, `playstation` or `pc` (*Keyboard and mouse*). It changes three things the game draws:
+`NX2NAVI_PROMPTS` (`prompts`, the *Button prompts* row on the Controls tab) picks the buttons the game's prompts show: `nintendo` (default, the game's own), `xbox`, `playstation`, `steamdeck` or `pc` (*Keyboard and mouse*). It changes three things the game draws:
 
 - the button font every prompt in text uses (dialogue, the button guides, the controls screen): A B X Y, L R ZL ZR, Plus and Minus, the d-pad and the sticks with their directions become that pad's buttons (LB RB LT RT, Menu and View; L1 R1 L2 R2, Options and Create; its d-pad and sticks), or the keys. Power, Home and the console stay;
 - the letter in the action prompt (top right);
@@ -35,13 +35,13 @@ A, B, X and Y show the button the *Button layout* presses: with `nintendo` (by p
 
 The game reads the font and the interface textures once at start, so a change shows after a restart (the row says so; the menu's Restart button restarts). A button or key remapped on this tab keeps its old prompt until the folders are made again.
 
-The prompts live in overlay folders next to the exe, `romfs-patches-xbox`, `romfs-patches-xbox-label`, `romfs-patches-playstation` and `romfs-patches-playstation-label` (by position and by label) and `romfs-patches-pc`, which `runtime/romfs.c` loads in place of the game's files. `tools/pad_prompts.py` draws them on the player's machine from the player's own RomFS and a folder of button art, which the repository does not hold. A launcher release or build kit made with `--prompt-art` carries that art (`prompt-art`, `tools/prompt_art.py`), and `tools/make_game.py` draws every folder in its last step, again whenever the art, the tools or the `bind_` lines change (so a rebuild after rebinding keys brings the keyboard prompts up to date). By hand:
+The prompts live in overlay folders next to the exe, `romfs-patches-xbox`, `romfs-patches-xbox-label`, `romfs-patches-playstation`, `romfs-patches-playstation-label`, `romfs-patches-steamdeck` and `romfs-patches-steamdeck-label` (by position and by label) and `romfs-patches-pc`, which `runtime/romfs.c` loads in place of the game's files. `tools/pad_prompts.py` draws them on the player's machine from the player's own RomFS and a folder of button art, which the repository does not hold. A launcher release or build kit made with `--prompt-art` carries that art (`prompt-art`, `tools/prompt_art.py`), and `tools/make_game.py` draws every folder in its last step, again whenever the art, the tools or the `bind_` lines change (so a rebuild after rebinding keys brings the keyboard prompts up to date). By hand:
 
 ```
 python tools\pad_prompts.py --art <art pack>\Source --game <install folder>
 ```
 
-`--style xbox|playstation|pc` makes one style; the keys come from `<install folder>\nx2navi.ini` (`--binds` names another). The art folder holds `XGamepad/Default`, `XGamepad/Light`, `P5Gamepad/Default`, `P5Gamepad/Light`, `Keyboard_Mouse/Dark` and `Keyboard_Mouse/White` with the file names of `STYLES` and `KEY_ART` in the tool; a key it has no picture of is written on `Keyboard_Mouse/Blanks`. Without the folders the row says *prompt files missing* and the Switch prompts stay; so they do when a RomFS mod replaces one of the same files (*off: a RomFS mod replaces their files*). The log has a `RomFS overlay: ... button prompts` line for the folder in use. The tool needs fontTools, Pillow and zstandard (`tools/requirements-py314.txt`).
+`--style xbox|playstation|steamdeck|pc` makes one style; `steamdeck` shows the Deck's own labels (A B X Y where an Xbox pad has them, L1 R1 L2 R2 and L3 R3, Menu and View) and is drawn from the Xbox and PlayStation pictures, as the art has no Deck style; the keys come from `<install folder>\nx2navi.ini` (`--binds` names another). The art folder holds `XGamepad/Default`, `XGamepad/Light`, `P5Gamepad/Default`, `P5Gamepad/Light`, `Keyboard_Mouse/Dark` and `Keyboard_Mouse/White` with the file names of `STYLES` and `KEY_ART` in the tool; a key it has no picture of is written on `Keyboard_Mouse/Blanks`. Without the folders the row says *prompt files missing* and the Switch prompts stay; so they do when a RomFS mod replaces one of the same files (*off: a RomFS mod replaces their files*). The log has a `RomFS overlay: ... button prompts` line for the folder in use. The tool needs fontTools, Pillow and zstandard (`tools/requirements-py314.txt`).
 
 The actions are the game's own, as its *Basic Controls* screen (Plus menu, System) names them:
 

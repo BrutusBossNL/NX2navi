@@ -20,7 +20,7 @@ Steps, each skipped when a run before finished it for the same inputs (state in 
               (`ocarina.exe --prepare-shaders`); variants met in play with another bind state are still translated
               then, and the driver cache is per executable and is lost when the driver clears it
   7. prompts  only with button art in the kit (<kit>/prompt-art, tools/make_launcher.py and make_kit.py
-              --prompt-art): tools/pad_prompts.py draws the Xbox, PlayStation and keyboard and mouse button prompts
+              --prompt-art): tools/pad_prompts.py draws the Xbox, PlayStation, Steam Deck and keyboard and mouse button prompts
               from it into <out>/romfs-patches-* (the Controls menu's Button prompts loads them), the keys as the
               bind_ lines of <out>/nx2navi.ini give them. Its key names everything it reads (the RomFS, the art, the
               tools, those lines), so it runs again only when one of them changed or a folder is gone, and running
@@ -1602,7 +1602,7 @@ def bind_lines(out):
 def step_prompts(out):
     """The button prompts drawn from the kit's art into the game folder: tools/pad_prompts.py writes one overlay
     folder per style and layout (prompt_art.OVERLAYS), which runtime/romfs.c loads in place of the game's button font
-    and prompt textures when the Controls menu's Button prompts is Xbox, PlayStation or Keyboard and mouse. Its lines
+    and prompt textures when the Controls menu's Button prompts is Xbox, PlayStation, Steam Deck or Keyboard and mouse. Its lines
     go on to the log, each folder written is a progress event."""
     total = len(prompt_art.OVERLAYS)
     proc = subprocess.Popen(py_cmd(KIT / 'tools' / 'pad_prompts.py', '--art', prompt_art_dir(), '--game', out),

@@ -1573,9 +1573,11 @@ class MakeGameTest(Tmp):
             self.assertEqual((others, runs), (['compile', 'lift', 'romfs', 'scan', 'shaders'], 1))
             self.assertEqual(states(ev), ['start', 'done'])
             fractions = [e['fraction'] for e in ev if e['ev'] == 'progress']
-            self.assertEqual(fractions, [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+            sets = len(self.mg.prompt_art.OVERLAYS)   # two folders per pad style and the keyboard and mouse one
+            self.assertEqual(sets, 7)
+            self.assertEqual(fractions, [round(i / sets, 4) for i in range(sets + 1)])
             details = [e['detail'] for e in ev if e['ev'] == 'progress']
-            self.assertEqual(details[-1], 'Drew 5 of 5 sets of button prompts')
+            self.assertEqual(details[-1], f'Drew {sets} of {sets} sets of button prompts')
             self.assertIn('prompts', json.loads((self.out / 'build-cache' / 'state.json').read_text())['steps'])
             self.assertEqual(build(), ([], [{'ev': 'step', 'step': 'prompts', 'state': 'skip'}], 1))
             # a setting that is no key binding changes nothing; a binding draws the prompts again, and only them

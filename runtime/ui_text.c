@@ -252,8 +252,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PAD_LAYOUT_IN_USE] = "in use: %s",
     [UI_MENU_PROMPTS] = "Button prompts",
     [UI_MENU_PROMPTS_DESC] = "Which buttons the game's prompts show, in text, in the action prompt and on the "
-                             "ocarina's notes. Nintendo: the game's own. Xbox and PlayStation: that pad's buttons (LB, "
-                             "RB, LT, RT, Menu, View; L1, R1, L2, R2, Options, Create), and A, B, X and Y as the "
+                             "ocarina's notes. Nintendo: the game's own. Xbox, PlayStation and Steam Deck: that pad's "
+                             "buttons (LB, RB, LT, RT, Menu, View; L1, R1, L2, R2, Options, Create; the Deck's A, B, X, "
+                             "Y with L1, R1, L2, R2, Menu, View), and A, B, X and Y as the "
                              "button the layout above presses (with Nintendo (A right) the right button does A, so the "
                              "prompts for A show B, or circle). Keyboard and mouse: the key each button has (E, Ctrl, "
                              "Space, left click...), WASD for moving and the mouse for the camera. The prompt files "
@@ -262,7 +263,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                              "are part of the game's files, so a button you remap in Controls keeps its old prompt on "
                              "screen until the files are made again.",
     [UI_MENU_PROMPTS_NINTENDO] = "Nintendo", [UI_MENU_PROMPTS_XBOX] = "Xbox",
-    [UI_MENU_PROMPTS_PLAYSTATION] = "PlayStation", [UI_MENU_PROMPTS_PC] = "Keyboard and mouse",
+    [UI_MENU_PROMPTS_PLAYSTATION] = "PlayStation", [UI_MENU_PROMPTS_STEAMDECK] = "Steam Deck",
+    [UI_MENU_PROMPTS_PC] = "Keyboard and mouse",
     [UI_MENU_PROMPTS_MISSING] = "prompt files missing: tools/pad_prompts.py makes them",
     [UI_MENU_PROMPTS_FAILED] = "prompt files damaged: make them again with tools/pad_prompts.py",
     [UI_MENU_PROMPTS_RESTART] = "prompts change after restart",
@@ -816,7 +818,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                              "перезапуска. Подсказки записаны в файлах игры, поэтому у кнопки, переназначенной на "
                              "вкладке управления, на экране остаётся прежняя подсказка, пока файлы не созданы заново.",
     [UI_MENU_PROMPTS_NINTENDO] = "Nintendo", [UI_MENU_PROMPTS_XBOX] = "Xbox",
-    [UI_MENU_PROMPTS_PLAYSTATION] = "PlayStation", [UI_MENU_PROMPTS_PC] = "Клавиатура и мышь",
+    [UI_MENU_PROMPTS_PLAYSTATION] = "PlayStation", [UI_MENU_PROMPTS_STEAMDECK] = "Steam Deck",
+    [UI_MENU_PROMPTS_PC] = "Клавиатура и мышь",
     [UI_MENU_PROMPTS_MISSING] = "нет файлов подсказок: их создаёт tools/pad_prompts.py",
     [UI_MENU_PROMPTS_FAILED] = "файлы подсказок повреждены: создайте их снова tools/pad_prompts.py",
     [UI_MENU_PROMPTS_RESTART] = "подсказки сменятся после перезапуска",
