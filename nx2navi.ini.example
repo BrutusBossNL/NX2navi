@@ -409,7 +409,8 @@
 # Volume in percent (0 to 100), on top of the game's own. Changes while the game runs take effect at once.
 # volume = 100
 # Speakers: stereo, 5.1 or auto (5.1 when the Windows speaker setup has six or more channels, stereo otherwise). The
-# game is told the same channel count and mixes for it. Takes effect at the next start.
+# game is told the same channel count and mixes for it. A change while the game runs takes effect at once: the game is
+# told its output device changed, as on a console, and mixes for the new count.
 # audio_channels = stereo
 # Which output device the sound plays on. default (the default): the system default device, which the game follows when
 # the Windows default changes. Or a number, counting from 1 in the order `nx2navi.exe --list-audio-devices` prints; or part
@@ -450,7 +451,7 @@
 # stick_deadzone = 8
 # Right-stick camera speed (0.1 to 3): multiplies the game's own camera turn rates, top speed included, at each of the
 # five camera sensitivities in the game's Options. Keys bound to the right stick follow it; the mouse keeps mouse_sens.
-# Read at start.
+# A change while the game runs takes effect at once (the first one of a run within a few seconds).
 # stick_sens = 1
 # The dead zone of one stick, in place of stick_deadzone for that stick (0 to 50; unset = stick_deadzone). The Controls
 # tab shows each stick's deflection now, so a drifting stick's resting value can be read off.

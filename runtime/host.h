@@ -280,6 +280,8 @@ float cam_speed_applied(void);                             // the factor in effe
 int cam_pack_build(const void *in, size_t n, const void *zsdic, size_t zsdic_n, void **out, size_t *out_n);
                                                            // Pack/Actor/PlayerCamera.pack.zs with the camera speeds
                                                            // multiplied, malloc'd; 0 = factor 1 or cannot (logged)
+void cam_pack_opened(void);                                // romfs.c: the game opened the camera's pack
+void cam_speed_tick(void);                                 // every present: a changed setting goes into the game's memory
 void cam_pack_served(void);                                // romfs.c serves the multiplied pack
 // ---- game resolution (resolution.c): NX2NAVI_OUTPUT_RES, NX2NAVI_RENDER_SCALE
 uint64_t res_heap_extra_bytes(void);                       // added to the application pool (mem_init), 2 MiB steps

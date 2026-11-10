@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "audren.h"
 #include "cfg.h"
 #include "flight.h"
 #include "fs.h"
@@ -258,6 +259,7 @@ static void window_settings_live(void) {
     // with what it got: on a display without HDR10 the setting stays on and the swapchain SDR, and that is settled.
     if (started && vk_hdr_wanted() != g_sc_hdr_wanted) plat_xchg32(&g_dirty, 1);
     ov_operation_mode_live();
+    audio_channels_live();
     if (started) gfx_window_apply_settings();
     started = 1;
 }
@@ -971,6 +973,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     if (cw <= 0 || ch <= 0) cx = cy = 0, cw = w, ch = h;   // a crop outside the image (the game's nvnWindowSetCrop):
                                                              // the whole image, not an inverted blit rectangle
     window_settings_live();
+    cam_speed_tick();
     // The menu overlay: laid out before recording (its first frame starts the ImGui back end and uploads the font)
     const char *menu_shot = NULL;
     MenuTarget mt = {c->instance, c->phys, c->device, c->gfx_family, c->gfx_queue,
