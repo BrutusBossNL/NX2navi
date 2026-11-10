@@ -1716,10 +1716,28 @@ class MakeGameTest(Tmp):
         self.assertEqual(self.mg.lifted_level(obj, 3, update=True), 3)    # nothing recorded, no old cache
         (obj / 'objects.json').write_text(json.dumps({'main_main_0000.o': {'key': 'k', 'deps': {'a.c': 'ab'}}}))
         self.assertEqual(self.mg.lifted_level(obj, 3, update=True), 0)    # 0.5.0's cache: compiled for no level
+        # 0.5.0's runtime objects left in a cache whose lifted code a later version compiled: not an old cache
+        (obj / 'objects.json').write_text(json.dumps({
+            'main_main_0000.o': {'key': 'k', 'deps': {'a.c': ['ab', 1, 2]}}, 'rt_amiibo.o': {'key': 'k', 'deps': {'b.c': 'cd'}}}))
+        self.assertEqual(self.mg.lifted_level(obj, 3, update=True), 3)
+        cache = self.mg.ObjectCache(obj / 'objects.json')
+        self.assertEqual(cache.keep_only({'main_main_0000.o'}), 1)        # what this build no longer makes
+        self.assertEqual(list(cache.entries), ['main_main_0000.o'])
+        (obj / 'objects.json').write_text(json.dumps({'main_main_0000.o': {'key': 'k', 'deps': {'a.c': 'ab'}}}))
         (obj / self.mg.LIFTED_BUILD).write_text(json.dumps({'level': 2}))
         self.assertEqual(self.mg.lifted_level(obj, 3, update=True), 2)    # as recorded
         self.assertEqual(self.mg.lifted_level(obj, 1, update=True), 1)    # never above this processor's
         self.assertEqual(self.mg.lifted_level(obj, 3, update=False), 3)
+
+    def test_retune_due_when_the_level_differs(self):
+        obj = self.tmp / 'obj'
+        obj.mkdir()
+        with mock.patch.object(self.mg, 'cpu_level', lambda clang, env: 3),                 mock.patch.object(self.mg, 'toolchain', lambda msys: (None, None, {}, None)):
+            self.assertTrue(self.mg.retune_due(obj, None))                     # nothing recorded
+            (obj / self.mg.LIFTED_BUILD).write_text(json.dumps({'level': 0}))
+            self.assertTrue(self.mg.retune_due(obj, None))                     # generic objects on a v3 processor
+            (obj / self.mg.LIFTED_BUILD).write_text(json.dumps({'level': 3}))
+            self.assertFalse(self.mg.retune_due(obj, None))
 
     def test_updates_skip_shader_preparation(self):
         """An update leaves the shaders to the game (shader_carry) only when they were prepared and the cache names the

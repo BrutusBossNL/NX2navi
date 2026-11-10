@@ -197,8 +197,9 @@ The stub swaps `python.next` in while no Python runs, then starts the new versio
      The lifted code includes only `cpu.h` and `simd.h`: a change there compiles it all again, which is rare.
    - An object an earlier version recorded under its own key form is taken over when its compile and its files are
      the same (`ObjectCache.adopt`): 0.6.0's keys, and 0.5.0's, which named the kit's folder. An update keeps the
-     x86-64 level the game's code was compiled for (`build-cache/obj/lifted-build.json`; generic for the objects of
-     0.5.0 and earlier); Rebuild the Game compiles it for this processor's (`--retune`).
+     x86-64 level the game's code was compiled for (`build-cache/obj/lifted-build.json`; generic for the lifted
+     objects of 0.5.0 and earlier); Rebuild the Game compiles it for this processor's (`--retune`), and runs the
+     compile step for that even when nothing else changed (`retune_due`).
 6. **Swap In the New Build**: lld links `ocarina.exe.new`, which replaces `ocarina.exe` only once it is complete. A
    failed rebuild leaves the old build playable; Rebuild the Game tries again.
 7. **Prepare the Shaders** is skipped once shaders were prepared before (`shader-prepared.bin`): the game keeps using

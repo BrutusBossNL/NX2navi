@@ -703,6 +703,14 @@ class ObjectCache:
     def forget(self, obj):
         self.entries.pop(obj.name, None)
 
+    def keep_only(self, names):
+        """Drops the entries of objects this build does not make (the runtime objects an earlier version compiled
+        here and a later one links prebuilt): they would stay as that version wrote them for good. The number dropped."""
+        gone = [n for n in self.entries if n not in names]
+        for n in gone:
+            del self.entries[n]
+        return len(gone)
+
     def adopt(self, obj, key, old_keys, old_kits=()):
         """Records obj under key when its entry has one of old_keys, the keys an earlier version gave the same compile,
         its object is there and every file it was compiled from reads as it did. A file in an earlier kit's folder
@@ -740,7 +748,7 @@ def compiler_ids(clang, env):
     size. The keys up to 0.6.0 held the file's modification time too, so a tool update that put the same compiler back
     made every object stale, a full compile of the game for nothing; that form is still made, to take those objects
     over (object_alts)."""
-    p = subprocess.run([str(clang), '--version'], capture_output=True, text=True, env=env)
+    p = subprocess.run([str(clang), '--version'], capture_output=True, text=True, env=env, errors='replace')
     st = os.stat(clang)
     return (sha256_bytes(f'{p.stdout}\n{st.st_size}'.encode()),
             sha256_bytes(f'{p.stdout}\n{st.st_size}\n{int(st.st_mtime)}'.encode()))
@@ -879,7 +887,7 @@ def per_install(src, tainted):
 
 
 def clang_version(clang, env):
-    p = subprocess.run([str(clang), '--version'], capture_output=True, text=True, env=env)
+    p = subprocess.run([str(clang), '--version'], capture_output=True, text=True, env=env, errors='replace')
     return (p.stdout.splitlines() or [''])[0].strip()
 
 
@@ -1130,14 +1138,16 @@ def xlate_source():
 
 # The x86-64 level the lifted code was compiled for, beside the objects (lifted_level).
 LIFTED_BUILD = 'lifted-build.json'
+LIFTED_OBJECTS = ('main_', 'sdk_', 'subsdk0_')   # the objects of the lifted code, by the module their names start with
 
 
 def lifted_level(obj, now, update):
     """The x86-64 level to compile the lifted code for. A build from the game files takes this processor's (now). An
     update keeps the level the objects were compiled for, so that it compiles only what changed: the one recorded
-    (LIFTED_BUILD), else 0 (generic x86-64) when the cache is one of 0.5.0 or earlier, which compiled for no level and
-    whose entries name their files by sha256 alone. Never above this processor's: a game folder moved to an older PC is
-    compiled again for it."""
+    (LIFTED_BUILD), else 0 (generic x86-64) when the lifted objects are those of 0.5.0 or earlier, which compiled for no
+    level and whose entries name their files by sha256 alone. Only the lifted objects' entries say that: 0.5.0 also
+    compiled the runtime here, and those entries outlive it in a cache whose lifted code a later version compiled for
+    this processor. Never above this processor's: a game folder moved to an older PC is compiled again for it."""
     if not update:
         return now
     try:
@@ -1147,10 +1157,21 @@ def lifted_level(obj, now, update):
         pass
     try:
         entries = json.loads((obj / 'objects.json').read_text(encoding='utf-8'))
-        old = any(isinstance(rec, str) for e in entries.values() for rec in e.get('deps', {}).values())
+        old = any(isinstance(rec, str) for name, e in entries.items() if name.startswith(LIFTED_OBJECTS)
+                  for rec in e.get('deps', {}).values())
     except (OSError, ValueError, AttributeError):
         old = False
     return 0 if old else now
+
+
+def retune_due(obj, msys):
+    """Rebuild the Game (--rebuild --retune): whether the lifted code is recorded as compiled for another level than
+    this processor's, or for none (LIFTED_BUILD). The compile step then runs although its inputs are unchanged."""
+    clang, _, env, _ = toolchain(msys)
+    try:
+        return int(json.loads((obj / LIFTED_BUILD).read_text(encoding='utf-8'))['level']) != cpu_level(clang, env)
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
 
 
 def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
@@ -1236,6 +1257,8 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
         for src, err in bad[:3]:
             print(f'--- {src}\n{err}', file=sys.stderr)
         fail(f'{len(bad)} files did not compile')
+    if cache.keep_only({o.name for _, o in srcs}):
+        cache.save()
     (obj / LIFTED_BUILD).write_text(json.dumps({'level': level}), encoding='utf-8')   # lifted_level reads it next update
 
     objs = [o for _, o in srcs] + ([compile_resources(msys, rt, obj, env, lld=(msys / 'bin' / 'ld.lld.exe').is_file())]
@@ -1722,6 +1745,9 @@ def main():
     if reset:
         state = {'version': STATE_VERSION, 'input': src.identity, 'steps': {}}
     state['kit'] = kit_version()
+    if a.rebuild and a.retune and retune_due(cache / 'obj', msys):
+        # the compile step's key does not name the level: without this a finished compile reads as done before
+        state['steps'].pop('compile', None)
     keep_awake()
     t0 = time.time()
     romfs_job = None
@@ -1754,12 +1780,18 @@ def main():
         say(f'{name}: {time.time() - t:.0f} s')
         emit('step', step=name, state='done', seconds=round(time.time() - t, 1))
 
+    def lift_gone(name):
+        # Keep Build Cache off (the launcher) deletes the lift and the objects after a build and keeps this state:
+        # the lift's key still matches then, and a compile step that runs would find no lifted code to compile
+        return (name == 'lift' and not (cache / 'lift' / 'layout.json').is_file()
+                and state['steps'].get('compile') != step_key('compile', src.identity, out))
+
     try:
         for name in STEPS:
             if name == 'prompts' and not prompt_art_dir():
                 say('prompts: none to draw, the kit has no button art')
                 emit('step', step=name, state='skip')
-            elif state['steps'].get(name) == step_key(name, src.identity, out):
+            elif state['steps'].get(name) == step_key(name, src.identity, out) and not lift_gone(name):
                 say(f'{name}: done before')
                 emit('step', step=name, state='skip')
             else:
