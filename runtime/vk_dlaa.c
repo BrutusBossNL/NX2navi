@@ -1480,14 +1480,19 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
                             (int)t->format, (int)z->format);
         goto evaluated;
     }
+    // The sizes and the mode of this size's feature, at every evaluation and not only when the feature is made: the
+    // parameter object is one for all sizes, and DLSS reads these from it when it evaluates too. Left as the last made
+    // feature's, the pause screen's feature (the picture's size in and out) ran with the gameplay feature's smaller input
+    // size once that one had been freed unused (stale_sizes) and made again after it: every other band of the picture's
+    // rows came out black or noise, from the second pause on, for as long as the game stayed paused.
+    p_setu(p, "Width", w);
+    p_setu(p, "Height", h);
+    p_setu(p, "OutWidth", ow);
+    p_setu(p, "OutHeight", oh);
+    p_seti(p, "PerfQualityValue", perf_quality(w, ow));
     if (!e->feat) {
         p_setu(p, "CreationNodeMask", 1);
         p_setu(p, "VisibilityNodeMask", 1);
-        p_setu(p, "Width", w);
-        p_setu(p, "Height", h);
-        p_setu(p, "OutWidth", ow);
-        p_setu(p, "OutHeight", oh);
-        p_seti(p, "PerfQualityValue", perf_quality(w, ow));
         // IsHDR | MVLowRes | AutoExposure: linear scene light, motion vectors at the render size, no exposure texture
         p_seti(p, "DLSS.Feature.Create.Flags", (1 << 0) | (1 << 1) | (1 << 6));
         p_seti(p, "DLSS.Enable.Output.Subrects", 0);
