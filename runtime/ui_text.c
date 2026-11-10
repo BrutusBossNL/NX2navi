@@ -257,8 +257,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PAD_LAYOUT_IN_USE] = "in use: %s",
     [UI_MENU_PROMPTS] = "Button prompts",
     [UI_MENU_PROMPTS_DESC] = "Which buttons the game's prompts show, in text, in the action prompt and on the "
-                             "ocarina's notes. Nintendo: the game's own. Xbox and PlayStation: that pad's buttons (LB, "
-                             "RB, LT, RT, Menu, View; L1, R1, L2, R2, Options, Create), and A, B, X and Y as the "
+                             "ocarina's notes. Nintendo: the game's own. Xbox, PlayStation and Steam Deck: that pad's "
+                             "buttons (LB, RB, LT, RT, Menu, View; L1, R1, L2, R2, Options, Create; the Deck's A, B, X, "
+                             "Y with L1, R1, L2, R2, Menu, View), and A, B, X and Y as the "
                              "button the layout above presses (with Nintendo (A right) the right button does A, so the "
                              "prompts for A show B, or circle). Keyboard and mouse: the key each button has (E, Ctrl, "
                              "Space, left click...), WASD for moving and the mouse for the camera. The prompt files "
@@ -267,7 +268,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                              "are part of the game's files, so a button you remap in Controls keeps its old prompt on "
                              "screen until the files are made again.",
     [UI_MENU_PROMPTS_NINTENDO] = "Nintendo", [UI_MENU_PROMPTS_XBOX] = "Xbox",
-    [UI_MENU_PROMPTS_PLAYSTATION] = "PlayStation", [UI_MENU_PROMPTS_PC] = "Keyboard and mouse",
+    [UI_MENU_PROMPTS_PLAYSTATION] = "PlayStation", [UI_MENU_PROMPTS_STEAMDECK] = "Steam Deck",
+    [UI_MENU_PROMPTS_PC] = "Keyboard and mouse",
     [UI_MENU_PROMPTS_MISSING] = "prompt files missing: tools/pad_prompts.py makes them",
     [UI_MENU_PROMPTS_FAILED] = "prompt files damaged: make them again with tools/pad_prompts.py",
     [UI_MENU_PROMPTS_RESTART] = "prompts change after restart",
@@ -557,7 +559,20 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FRAMEGEN_NEEDS_FSR] = "choose an FSR 3.1 mode under Upscaling first",
     [UI_MENU_FRAMEGEN_NOTE_FSR] = "needs FSR 3.1",
     [UI_MENU_FRAMEGEN_DESC_FSR] = "Adds generated frames for smoother motion. Needs FSR 3.1.",
+    [UI_MENU_UPSCALING_DESC_NO_FSR] = "How the picture is smoothed and scaled to your window. AMD FSR 3.1 is not offered "
+                                      "here: it needs amd_fidelityfx_vk.dll, which cannot be loaded.",
+    [UI_MENU_FSR3_OFF] = "in use: off, FSR 3.1 is not available",
+    [UI_MENU_FRAMEGEN_DESC_DLSS] = "Adds generated frames for smoother motion. Needs DLSS.",
+    [UI_MENU_FRAMEGEN_NOTE_DLSS] = "needs DLSS",
+    [UI_MENU_FRAMEGEN_NEEDS_DLSS] = "choose a DLSS mode under Upscaling first",
+    [UI_MENU_FRAMEGEN_DESC_NONE] = "Adds generated frames for smoother motion. Needs DLSS or FSR 3.1, and neither runs "
+                                   "here.",
+    [UI_MENU_FRAMEGEN_NEEDS_NONE] = "needs DLSS or FSR 3.1, which do not run here",
     [UI_MENU_FRAMEGEN_MULT] = "DLSS multiplier",
+    [UI_MENU_FG_MULT_DESC] = "Frames on screen for each frame the game draws with DLSS Frame Generation: 2x adds one "
+                             "generated frame, up to 6x on an RTX 50 card. Dynamic adds only the frames needed to "
+                             "reach your display's refresh rate. Changes take effect at once.",
+    [UI_MENU_FG_MULT_DYNAMIC] = "Dynamic",
     [UI_MENU_FRAMEGEN_MULT_DESC] = "Frames on screen for each frame the game draws: 2x adds one generated frame, 3x "
                                    "two, 4x three. Higher is smoother but adds a little delay. The frame limit counts "
                                    "the frames on screen, so the game draws the limit divided by this: set the limit "
@@ -813,7 +828,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                              "перезапуска. Подсказки записаны в файлах игры, поэтому у кнопки, переназначенной на "
                              "вкладке управления, на экране остаётся прежняя подсказка, пока файлы не созданы заново.",
     [UI_MENU_PROMPTS_NINTENDO] = "Nintendo", [UI_MENU_PROMPTS_XBOX] = "Xbox",
-    [UI_MENU_PROMPTS_PLAYSTATION] = "PlayStation", [UI_MENU_PROMPTS_PC] = "Клавиатура и мышь",
+    [UI_MENU_PROMPTS_PLAYSTATION] = "PlayStation", [UI_MENU_PROMPTS_STEAMDECK] = "Steam Deck",
+    [UI_MENU_PROMPTS_PC] = "Клавиатура и мышь",
     [UI_MENU_PROMPTS_MISSING] = "нет файлов подсказок: их создаёт tools/pad_prompts.py",
     [UI_MENU_PROMPTS_FAILED] = "файлы подсказок повреждены: создайте их снова tools/pad_prompts.py",
     [UI_MENU_PROMPTS_RESTART] = "подсказки сменятся после перезапуска",
