@@ -7,7 +7,8 @@ player's PC from their own dump with tools/make_game.py, as NX2navi-Setup.exe do
 The AppImage holds no game files: the kit's tools/, recomp/, runtime/ and docs, the shader translator built by
 tools/build_xlate.py (bin/nx2navi_xlate), NVIDIA's DLSS library with its notice (bin/, tools/dlss_pin.py: downloaded
 from NVIDIA's DLSS SDK repository and checked, or --dlss; not with --no-dlss), the pinned Vulkan Memory Allocator
-header, and a relocatable CPython 3.14 (python-build-standalone, as `uv python install 3.14` puts in
+header (an AppImage made without the library downloads it after a build on machines with NVIDIA's driver: AppRun's
+get_dlss), and a relocatable CPython 3.14 (python-build-standalone, as `uv python install 3.14` puts in
 ~/.local/share/uv/python) with numpy, lz4, zstandard, fonttools and pillow, and with --prompt-art the button art
 make_game.py's prompts step draws from (as make_kit.py --prompt-art: the pictures tools/prompt_art.py art_files names,
 into the kit's prompt-art folder; without it that step is skipped and the game keeps the Switch prompts). zbic, the GPL
@@ -98,8 +99,34 @@ esac
 NUP="$1"
 OUT="${2:-$HOME/Games/Ocarina}"
 [ -f "$NUP" ] || { echo "error: $NUP is not a file" >&2; usage; exit 1; }
+# NVIDIA's DLSS for Linux, which the game's DLSS modes need beside it (runtime/resolution.c finds
+# libnvidia-ngx-dlss.so.<version> there). The build places the kit's when this file carries it; when it does not
+# (made with --no-dlss) and the game folder holds none, the version tools/dlss_pin.py pins is downloaded from
+# NVIDIA's DLSS SDK repository, on machines with NVIDIA's driver only, checked against its SHA-256 and kept
+# unmodified with the notice that names its licence. NX2NAVI_NO_DLSS=1 skips it.
+DLSS_VERSION=@DLSS_VERSION@
+DLSS_SO=@DLSS_SO@
+DLSS_SHA256=@DLSS_SHA256@
+DLSS_URL=@DLSS_URL@
+get_dlss() {
+    [ -e /proc/driver/nvidia/version ] && [ -z "${NX2NAVI_NO_DLSS:-}" ] || return 0
+    compgen -G "$OUT/libnvidia-ngx-dlss.so.*" >/dev/null && return 0   # the kit's, or one the player put there
+    echo "Downloading NVIDIA DLSS $DLSS_VERSION for Linux (NVIDIA RTX SDKs License) ..."
+    # not under the library's name: the game takes any file whose name starts like it
+    local tmp="$OUT/.dlss-download.part"
+    rm -f "$tmp"
+    if curl -fsSL -o "$tmp" "$DLSS_URL" && echo "$DLSS_SHA256  $tmp" | sha256sum -c --status; then
+        mv -f "$tmp" "$OUT/$DLSS_SO"
+        cp -f "$KIT/docs/libnvidia-ngx-dlss-NOTICE.txt" "$OUT/libnvidia-ngx-dlss-NOTICE.txt"
+    else
+        rm -f "$tmp"
+        echo "warning: DLSS could not be downloaded or did not match its checksum; the game runs without it" >&2
+    fi
+}
+
 echo "Building into $OUT with $jobs compiles at a time (${mem_gb} GB of RAM); this takes 10 to 25 minutes."
 run_make_game --nup "$NUP" --out "$OUT" --jobs "$jobs" || exit $?
+get_dlss
 
 # play.sh: the environment the game wants on this machine, then the game
 {
@@ -168,6 +195,9 @@ def main():
         shutil.copy2(ROOT / f, kit / f)
     (kit / 'docs').mkdir()
     shutil.copy2(ROOT / 'docs' / 'README-BuildKit.md', kit / 'docs' / 'README-BuildKit.md')
+    # the notice AppRun's get_dlss writes beside a library it downloads; its sha256 line is the one make_game.py reads
+    pin = dlss_pin.pin(linux=True)
+    (kit / 'docs' / pin.notice).write_text(dlss_pin.notice_text(linux=True), encoding='utf-8')
     (kit / 'bin').mkdir()
     for f in ('nx2navi_xlate', 'nx2navi_xlate.id'):
         shutil.copy2(xlate / f, kit / 'bin' / f)
@@ -189,7 +219,10 @@ def main():
     for cache in py.rglob('__pycache__'):
         shutil.rmtree(cache, ignore_errors=True)
 
-    (app / 'AppRun').write_text(APPRUN, encoding='utf-8')
+    apprun = APPRUN
+    for key, value in (('VERSION', dlss_pin.VERSION), ('SO', pin.name), ('SHA256', pin.sha256), ('URL', pin.url)):
+        apprun = apprun.replace(f'@DLSS_{key}@', value)
+    (app / 'AppRun').write_text(apprun, encoding='utf-8')
     (app / 'AppRun').chmod(0o755)
     (app / 'nx2navi.desktop').write_text(DESKTOP, encoding='utf-8')
     from PIL import Image   # the window icon of runtime/nx2navi.ico, as PNG

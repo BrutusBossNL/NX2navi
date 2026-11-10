@@ -117,7 +117,9 @@ game's own scaling and swapchain as they are (the log says so).
 NVIDIA DLSS (RTX cards) needs the driver's own `libnvidia-ngx.so.1` on the library path (the proprietary driver's
 utilities package, `nvidia-utils` on Arch) and NVIDIA's DLSS library `libnvidia-ngx-dlss.so.<version>` beside
 `ocarina`. The AppImage's kit has the library in `bin/` with `libnvidia-ngx-dlss-NOTICE.txt`, which names its licence,
-and the build copies both beside `ocarina` (`tools/make_appimage.py --no-dlss` leaves it out). From a source checkout,
+and the build copies both beside `ocarina` (`tools/make_appimage.py --no-dlss` leaves it out; such an AppImage
+downloads the same pinned library from NVIDIA's repository after a build on a machine with NVIDIA's driver, checks its
+SHA-256 and writes the notice, unless `NX2NAVI_NO_DLSS=1` is set or a library is already there). From a source checkout,
 or to use another DLSS version, put the library there yourself: NVIDIA publishes it as
 `lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.<version>` in [its DLSS repository](https://github.com/NVIDIA/DLSS), tagged
 `v<version>`, and `tools/dlss_pin.py` names the version the kit carries. Later builds keep a library they did not
