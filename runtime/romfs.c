@@ -31,6 +31,7 @@
 #include <strings.h>
 
 #include "cfg.h"
+#include "dispatch.h"
 #include "fs.h"
 #include "host.h"
 #include "input_map.h"
@@ -1156,14 +1157,43 @@ static void open_note(uint64_t i, const char *path) {
 
 // NX2NAVI_TRACE=perf: an area's static placement, Banc/<area>/<area>_<age>_Static.bcett.byml.zs, is read once when the
 // area loads (the game streams a neighbouring area the same way): perf_scene names it.
-static void scene_note(const char *p) {
+static int area_name(const char *p, char *name, size_t cap) {
     static const char tail[] = "_Static.bcett.byml";
-    if (strncmp(p, "Banc/", 5)) return;
+    if (strncmp(p, "Banc/", 5)) return 0;
     const char *leaf = strrchr(p, '/'), *t = leaf ? strstr(leaf, tail) : NULL;
-    if (!t || (t[sizeof tail - 1] && strcmp(t + sizeof tail - 1, ".zs"))) return;
+    if (!t || (t[sizeof tail - 1] && strcmp(t + sizeof tail - 1, ".zs"))) return 0;
+    snprintf(name, cap, "%.*s", (int)(t - leaf - 1), leaf + 1);
+    return 1;
+}
+
+static void scene_note(const char *p) {
     char name[96];
-    snprintf(name, sizeof name, "%.*s", (int)(t - leaf - 1), leaf + 1);
-    perf_scene(name);
+    if (area_name(p, name, sizeof name)) perf_scene(name);
+}
+
+// The game asked for an area's static placement and the RomFS has none: the save being loaded (or the game's own
+// state) names an area this game version does not have. The game does not check for that and reads through a null
+// area object a moment later (a child save naming HyruleCastle_Child on 1.1.1, whose castle has one placement for both
+// ages). The log names the area once, and the crash report that follows repeats it, so the report explains itself.
+static char area_missing_name[96];   // the first such area, written once under lock; the fatal note reads it
+
+static void area_missing_fatal_note(void) {
+    if (area_missing_name[0])
+        rt_log("fatal: the game asked for the area %s, which this game version does not have; a save that names it "
+               "cannot be loaded", area_missing_name);
+}
+
+static void area_missing(const char *p) {
+    char name[96];
+    if (!area_name(p, name, sizeof name)) return;
+    plat_mutex_lock(&lock);
+    int first = !area_missing_name[0];
+    if (first) snprintf(area_missing_name, sizeof area_missing_name, "%s", name);
+    plat_mutex_unlock(&lock);
+    if (!first) return;
+    rt_log("RomFS: the game asked for the area %s (%s), which this game version does not have; the save being loaded "
+           "names it and cannot be loaded here", name, p);
+    rt_fatal_note_add(area_missing_fatal_note);
 }
 
 uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
@@ -1178,7 +1208,10 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
         return FS_R_PATH_NOT_FOUND;
     }
     uint64_t i = file_index(p);
-    if (i == UINT64_MAX) return FS_R_PATH_NOT_FOUND;
+    if (i == UINT64_MAX) {
+        area_missing(p);
+        return FS_R_PATH_NOT_FOUND;
+    }
     open_note(i, p);
     if (rt_trace & RT_TRACE_PERF) scene_note(p);
     if (!strcasecmp(p, CAMPACK)) cam_pack_opened();   // its values come into memory at the start's factor (camera_speed.c)
