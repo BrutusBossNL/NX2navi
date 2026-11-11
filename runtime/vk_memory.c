@@ -3960,4 +3960,6 @@ void vk_mem_sizes(PerfSizes *s) {
     perf_size(s, "free staging arena chunks", arena_n, ARENA_KEEP, arena_n * ARENA_CHUNK);
     perf_size(s, "write-back snapshot pool", snap_n, SNAP_POOL_N, snap_b);
     perf_size(s, "shadow base copies", sb, 0, sb * SB_PAGE);
+    // the page generations handed out so far (gen_now, 32 bits, no wrap handling): how fast a session uses them up
+    perf_size(s, "page generations handed out", (uint64_t)__atomic_load_n(&gen_now, __ATOMIC_RELAXED), 0, PERF_SIZE_NONE);
 }
