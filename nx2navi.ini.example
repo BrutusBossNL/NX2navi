@@ -403,11 +403,11 @@
 # window is no longer stretched as it used to be; stretch fills the window. Changes while the game runs take effect at
 # once.
 # aspect = fit
-# Anisotropic filtering of surface textures: game (the level the game asks for, as on the Switch) or 2, 4, 8, 16. Keeps
-# ground, roads and walls seen at a shallow angle sharp into the distance. Only filtered, mipmapped textures that tile
-# are raised; shadow maps, data maps and screen-sized buffers keep the game's setting. Changes while the game runs take
-# effect at once.
-# aniso = game
+# Anisotropic filtering of surface textures: game (the level the game asks for, as on the Switch, 1x or 2x) or 2, 4,
+# 8, 16. Default: 16. Keeps ground, roads and walls seen at a shallow angle sharp into the distance. Only filtered,
+# mipmapped textures that tile are raised; shadow maps, data maps and screen-sized buffers keep the game's setting.
+# Changes while the game runs take effect at once.
+# aniso = 16
 # Texture detail: auto, full, reduced or low. The textures of a loaded area are what fills a card with little video
 # memory, and three quarters of a texture is its largest mip level. reduced makes the large surface textures (256x256 and
 # more, with smaller levels) without that level, low without the two largest when they are 1024x1024 or more. Surfaces
