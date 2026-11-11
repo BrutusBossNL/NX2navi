@@ -51,7 +51,6 @@
 #include "tex.h"
 #include "vk_build_gate.h"
 #include "vk_cache_file.h"
-#include "vk_gpa.h"
 #include "vk_save_retry.h"
 #include "vk_warm_hint.h"
 
@@ -2596,8 +2595,6 @@ static Pipe *pipe_add(const void *key, size_t size, uint64_t h, VkPipeline pipel
     p->info.push1 = l ? l->push1 : 0;
     p->info.n_sets = l && l->set1 ? 2 : 1;
     p->info.pool = B ? B->pool : 0;
-    for (uint32_t i = 0; i < p->info.n_bindings; i++)
-        if (p->bindings[i].kind == GFX_RES_SSBO && p->bindings[i].res->cbuf_slot == VK_GPA_CB_SLOT) p->info.gpa = 1;
     if (l) p->info.tpl[0] = l->tpl[0], p->info.tpl[1] = l->tpl[1];
     p->lay = l;
     Pipe **head = &pipes[h % PIPE_BUCKETS];

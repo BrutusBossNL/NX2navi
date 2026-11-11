@@ -145,7 +145,7 @@ VkCommandBuffer vk_exec_inline_begin(int *reopen);
 void vk_exec_inline_end(int reopen);
 // A test's hook (tex_probe.c): between a call with cb and one with VK_NULL_HANDLE, the calling thread counts as
 // recording a replay into cb for submission `fence`, so vk_exec_inline_begin hands cb out. Called from the record
-// callback of vk_sync_probe_submit, where a replay would be recorded.
+// callback of vk_sync_submit_own, where a replay would be recorded.
 void vk_exec_probe_inline(VkCommandBuffer cb, uint64_t fence);
 // vk_exec_draw.c: forget what the command buffer being recorded has bound (pipeline, sets, dynamic state, vertex
 // buffers): the replay continues in a new one (vk_sync_split).

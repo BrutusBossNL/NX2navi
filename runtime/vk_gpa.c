@@ -36,8 +36,8 @@
 // NX2NAVI_GPA=0 turns the table off: the translator is told the host has no device addresses (those accesses read 0).
 // NX2NAVI_GPA_EMPTY=1 keeps it empty, so every access through it reads the zero buffer (diagnosis).
 // Mirrored pools are not synced for the table's readers (vk_exec_draw.c ssbo_info says why). With shadow storage the
-// pools are copies of guest memory: a part whose shaders use the table is marked (vk_exec_draw.c bind_resources) and
-// its prologue copies the pages the CPU wrote into the copies the table names (vk_memory.c vk_mem_gpa_sync). There
+// pools are copies of guest memory, which a guest submission that binds the table (vk_exec_draw.c ssbo_info) brings up
+// to date with the pages the CPU wrote, once, before the part is submitted (vk_memory.c vk_mem_shadow_sync). There
 // the twin of a mirrored pool is its shadow copy, not guest memory, and what a shader stores through the table is not
 // noted as a GPU write: it does not come back to guest memory, and the next whole copy-in of its page overwrites it.
 // vk_memory.c "Pages a shader stores into through the device address table" has the sequence, what was measured, and

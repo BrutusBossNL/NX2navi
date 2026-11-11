@@ -647,8 +647,7 @@ static CmdSlot *take_slot(VkCtx *c, uint64_t fence) {
 // part was recorded, sub_lock held; may move slots[].
 // First brings the shadow storage up to date with the CPU's writes, which needs no command buffer.
 static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
-    vk_mem_shadow_sync();   // shadow storage: the CPU's writes go in before the part is submitted
-    vk_mem_gpa_sync(fence);   // a part whose shaders read through the device address table never resolved the pools they reach
+    vk_mem_shadow_sync(fence);   // shadow storage: the CPU's writes go in before the part is submitted
     vk_mem_lazy_part_end();   // what the part left in the mirror and has to write back after all joins the snapshots
     if (!vk_mem_mirror_pending()) return VK_NULL_HANDLE;
     int i = claim_slot(c, fence);   // before reading slots: the claim may move it
@@ -710,7 +709,13 @@ uint64_t vk_sync_reserve(void) {
     return v;
 }
 
-static uint64_t submit(const uint64_t *handles, int n, void (*probe_record)(VkCommandBuffer, void *), void *arg) {
+// own: NULL for the replay of handles; else the caller's commands in the replay's place (vk_sync_submit_own).
+typedef struct {
+    void (*record)(VkCommandBuffer, void *);
+    void *arg;
+} OwnCommands;
+
+static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     vk_sync_start();
     // The run is ending (vk_device.c vk_device_lost_check): nothing is recorded or submitted and no value is issued.
     // The value returned is the last one issued; a wait for it sleeps until the process ends.
@@ -733,8 +738,8 @@ static uint64_t submit(const uint64_t *handles, int n, void (*probe_record)(VkCo
     ts_begin(s->cb);
     rec_begin(s->cb, fence);
     vk_gpu_passes_part(s->cb, 0);
-    int recorded;
-    if (probe_record) { probe_record(s->cb, arg); recorded = 1; }
+    int recorded = 1;
+    if (own) own->record(s->cb, own->arg);
     else recorded = vk_exec_record(s->cb, handles, n, fence);
     s = &slots[cur_slot];   // the last part (vk_sync_split)
     vk_gpu_passes_part(s->cb, 1);
@@ -781,11 +786,12 @@ static uint64_t submit(const uint64_t *handles, int n, void (*probe_record)(VkCo
     return fence;
 }
 
-uint64_t vk_sync_submit(const uint64_t *handles, int n) { return submit(handles, n, NULL, NULL); }
+uint64_t vk_sync_submit(const uint64_t *handles, int n) { return submit(handles, n, NULL); }
 
-// Memory probes record their shader here, not in the upload batch (which is submitted before the memory prologue).
-uint64_t vk_sync_probe_submit(void (*record)(VkCommandBuffer, void *), void *arg) {
-    return submit(NULL, 0, record, arg);
+// The upload batch is no place for a probe's commands: it is submitted before the memory prologue.
+uint64_t vk_sync_submit_own(void (*record)(VkCommandBuffer, void *), void *arg) {
+    OwnCommands own = {record, arg};
+    return submit(NULL, 0, &own);
 }
 
 void vk_completion_add(uint64_t fence, void (*fn)(void *), void *arg) {
@@ -980,7 +986,7 @@ int vk_sync_probe_devlost(void) {
     int ran = plat_cas32(&probe_ran[1], 1, 1), reached = vk_sync_fence_done() >= v2;
     volatile int32_t recorded = 0;
     uint64_t before = vk_sync_issued(), t0 = plat_now_ms();
-    uint64_t got = vk_sync_probe_submit(probe_lost_record, (void *)&recorded);
+    uint64_t got = vk_sync_submit_own(probe_lost_record, (void *)&recorded);
     vk_upload_flush(1);
     int waited = vk_sync_exec_wait(v2, 5000000000ull);
     uint64_t ms = plat_now_ms() - t0;

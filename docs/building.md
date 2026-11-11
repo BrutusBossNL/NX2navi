@@ -286,10 +286,11 @@ well: the shadow copies are chosen for the measured cost above, not for a missin
 
 The device address table (`runtime/vk_gpa.c`) names a pool's shadow copy as it names an import, so shaders follow guest
 pointers into either. A shader that reads through the table resolves nothing, so the pool it reaches is not queued for
-the copy-in: a part whose pipelines declare the table is marked at its draws and dispatches, and its prologue brings
-the shadow of every pool in the table up to date with the pages the CPU wrote and queues the same pages for those
-pools' VRAM mirrors (`vk_memory.c` `vk_mem_gpa_sync`). That copies the written pages of every CPU-visible pool in
-each such part, which the cost above does not include. What a shader stores through the table lands in the shadow copy
+the copy-in: a guest submission whose record binds the table (`vk_exec_draw.c` `ssbo_info`) brings the shadow of
+every pool in the table up to date with the pages the CPU wrote, once, before the first part recorded after the
+binding is submitted, and queues the same pages for those pools' VRAM mirrors (`vk_memory.c` `vk_mem_shadow_sync`).
+That copies the written pages of every CPU-visible pool once in each such guest submission, which the cost above does
+not include. What a shader stores through the table lands in the shadow copy
 and in the pool's VRAM mirror, and no binding names it, so nothing notes it as a GPU write: it does not come back to
 guest memory, and the next whole copy-in of its page (the CPU rewrites other words of the same records) puts guest
 memory's stale bytes back over it in both copies. In the runs measured so far that copy-in always came before the
@@ -299,8 +300,9 @@ then on like a page with a noted GPU write, and has its stores written back to g
 submission that uses the table. It is off by default (`runtime/vk_memory.c`, "Pages a shader stores into", says why).
 `NX2NAVI_SHADOW_CHECK=1` logs every 60 frames how often a copy-in overwrote such a store and for which pools, how many
 write-backs landed on pages the CPU had written since their copy-in, and what the copy-ins cost and where they went.
-`--probe-vkmem` checks the read: a shader follows the table to a word of a pool that is never bound, and must read
-`0x13579BDF` and, after a plain CPU write, `0x2468ACE0`; and with `NX2NAVI_SHADOW_TABLE_STORES=1` the store: a GPU
+`--probe-vkmem` checks the sync: the shadow of a pool that is never bound must hold `0x13579BDF`, keep it through a
+plain CPU write and a guest submission that does not bind the table, and hold the written `0x2468ACE0` after one that
+does; and with `NX2NAVI_SHADOW_TABLE_STORES=1` the store: a GPU
 write into a shadow page that nothing notes must survive the CPU's writes of that page and reach guest memory. On
 Linux, run it for each backing:
 
