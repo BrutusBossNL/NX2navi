@@ -389,6 +389,14 @@ A change to what the library warm logs when the driver's cache of stage librarie
 `runtime/vk_pipeline.c` `lw_main`) passes `python tests\warm_hint_check.py`, which builds the header alone and checks
 the added text by GPU vendor and by why the cache was cold. No game files.
 
+A change to how a run ends when the GPU device is lost (`runtime/vk_device.c` `vk_device_lost_check`, the checks of
+`vk_lost` in the replay, upload and present paths, `runtime/vk_sync.c` `completion_main`) passes
+`python tests\device_lost_check.py <game exe>`, which runs the executable's `--probe-devlost`: with the device marked
+lost no completion callback runs and the submit, upload and wait paths return at once, and four threads that report a
+loss at the same moment end the process with exit code 72, one device report and one FATAL line. It needs a Vulkan
+device and opens no window; the device is not really lost, so what a driver answers after a loss is not covered.
+`device_lost_at = <n>` in `nx2navi.ini` ends a real run the same way at its n-th hand-over to the GPU queue.
+
 A change to where the lazy write-back is on by default (`runtime/wb_lazy_choice.h`, `runtime/vk_memory.c`
 `vk_mem_lazy_decide`) passes `python tests\wb_lazy_check.py`, which builds the header alone and checks the choice and
 its reason by platform, by GPU driver and by what the player set. No game files, no GPU.

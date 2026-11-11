@@ -1664,6 +1664,7 @@ static void rec_claim(void) {
 }
 
 int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t fence) {
+    if (vk_device_is_lost()) return 0;   // the run is ending (vk_device.c vk_device_lost_check): nothing is recorded
     uint64_t in_ns = kern_now_ns();
     perf_lock_timing_here();   // NX2NAVI_LOCK_TIME
     if (prof_replay_tid != plat_thread_id()) perf_replay_thread();   // the profiler follows the thread replaying now

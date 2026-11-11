@@ -534,7 +534,7 @@ static int usage(const char *argv0) {
                     "--probe-cfg | --probe-dpi | --probe-mods | --probe-kernel | --probe-ipc | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-shader | --probe-vkmem | "
                     "--probe-vkexec | --probe-astc | --probe-zstd | --probe-input | --probe-movie | --probe-crash-call | --probe-crash-null | --probe-discord | --probe-coop | "
-                    "--prepare-shaders | --warm-shaders | --prepare-pipelines | --probe-prewarm | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--prepare-shaders | --warm-shaders | --prepare-pipelines | --probe-prewarm | --probe-devlost | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
@@ -685,6 +685,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-zstd")) return probe_zstd();
     if (!strcmp(mode, "--probe-input")) return probe_gamepad();
     if (!strcmp(mode, "--probe-vkdevice")) return probe_vkdevice();
+    if (!strcmp(mode, "--probe-devlost")) return vk_sync_probe_devlost();
     if (!strcmp(mode, "--probe-movie")) {   // the AV1 decoder tells the graphics back end of each frame it writes: none here
         cfg.gpu = "null";
         return probe_movie();

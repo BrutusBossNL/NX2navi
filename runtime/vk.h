@@ -80,13 +80,25 @@ VkCtx *vk_ctx(void);                        // NULL until vk_init() succeeded
 int vk_init(void);                          // idempotent; 1 on success, 0 on failure (reason logged with rt_log)
 void vk_shutdown(void);
 int vk_selftest(void);                      // 0 on success
-// Call with the result of a failed queue submit, present or wait before stopping on it: VK_ERROR_DEVICE_LOST logs
-// what VK_EXT_device_fault reports (description, faulting addresses with their precision, vendor codes) once per
-// process, after the GPU breadcrumbs (vk_crumbs_report). Any other result returns at once.
-void vk_device_fault_report(VkResult r);
+// Call with the result of every queue submit, present, acquire or wait. Any result but VK_ERROR_DEVICE_LOST returns at
+// once, and the caller goes on with its own handling. A lost device ends the run here, in one place: the first thread
+// to arrive sets vk_lost, logs the GPU breadcrumbs (vk_crumbs_report) and what VK_EXT_device_fault reports
+// (description, faulting addresses with their precision, vendor codes), then ends the process as rt_fatal does (the
+// log written, a save commit under way finished) with exit code RT_LOST_EXIT (dispatch.h). `where` names the call for
+// the fatal line. Every later thread stops in this call and never returns to touch the device; the process ends
+// within LOST_EXIT_MS (vk_device.c) even when the first thread hangs on a lock one of them holds.
+void vk_device_lost_check(VkResult r, const char *where);
+// 1 from the moment a thread saw the device lost. The paths that would touch the device (the replay and its submit,
+// the uploads, the present, the completion thread's callbacks) read it where they start and return without doing so.
+extern volatile int32_t vk_lost;
+static inline int vk_device_is_lost(void) { return __atomic_load_n(&vk_lost, __ATOMIC_RELAXED); }
+// Asks the device whether it is lost with a call that has a result and needs no lock (the status of a fence nothing
+// signals), and ends the run through vk_device_lost_check when it is. The completion thread calls it before it runs
+// callbacks: a lost device may report the submissions' timeline as reached (vk_sync.c completion_main).
+void vk_device_lost_poll(void);
 
 // ---- GPU address history (vk_vaddr.c, NX2NAVI_VA_REPORT=1, 2 with call stacks): VK_EXT_device_address_binding_report's
-// reports, kept so vk_device_fault_report can name the objects that held a faulting address.
+// reports, kept so the lost device report (vk_device.c device_fault_report) can name the objects that held a faulting address.
 int vk_vaddr_wanted(void);
 void vk_vaddr_start(VkInstance instance);                 // create_instance, after vkCreateInstance
 void vk_vaddr_device(int supported);                      // create_device: the driver reports address bindings
@@ -157,7 +169,7 @@ const VkPassMark *vk_pass_mark_record(uint32_t id);   // the ring record of mark
 // The report's text for a started and a finished mark, three lines without a trailing newline: which marks (source:
 // the extension they came from), then each with its ring record. vk_pass_marks_report logs it; the probe checks it.
 void vk_pass_marks_format(const char *source, uint32_t started, uint32_t finished, char *o, size_t size);
-void vk_pass_marks_report(void);    // vk_device_fault_report: the AMD words and the NVIDIA checkpoints, formatted
+void vk_pass_marks_report(void);    // vk_device.c device_fault_report: the AMD words and the NVIDIA checkpoints, formatted
 
 // ---- window and present (gfx_present.c). Host threads only.
 // vk_present_image: blits the crop rectangle {x, y, w, h} of src (NULL, or w/h <= 0: the whole w x h image), scaled

@@ -319,7 +319,7 @@ static void flip_locked(void) {
     VkResult r = vk_dlssg_active() ? vk_dlssg_present(vk_ctx()->gfx_queue, &pi)
                : vk_fg_active()    ? vk_fg_present(&pi) : vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
-    vk_device_fault_report(r);
+    vk_device_lost_check(r, "the present");
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
 }
 
@@ -996,7 +996,7 @@ static void ng_present(VkSwapchainKHR sc, uint32_t idx) {
     vk_queue_lock();
     VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
-    vk_device_fault_report(r);
+    vk_device_lost_check(r, "the present of a generated frame");
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
     __atomic_add_fetch(&ng.presents, 1, __ATOMIC_RELAXED);
 }
@@ -1061,7 +1061,7 @@ static int ng_show(VkImage img, int set, int slot, uint64_t n) {
     vk_queue_lock();
     r = vkQueueSubmit2(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
     vk_queue_unlock();
-    if (r != VK_SUCCESS) { vk_device_fault_report(r); return 0; }
+    if (r != VK_SUCCESS) { vk_device_lost_check(r, "the submit of a generated frame"); return 0; }
     ng_present(ng.job.sc, j);
     return 1;
 }
@@ -1331,6 +1331,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         static VkFormat last = VK_FORMAT_UNDEFINED;
         if (src && fmt != last) last = fmt, rt_log("gfx: the game presents %dx%d images of format %d", w, h, (int)fmt);
     }
+    if (vk_device_is_lost()) return;   // the run is ending (vk_device.c vk_device_lost_check): nothing touches the device
     gfx_window_start();
     VkCtx *c = vk_ctx();
     plat_rmutex_lock(&g_pl);
@@ -1359,8 +1360,8 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
           : vk_fg_active()    ? vk_fg_acquire(g_sc, 1000000000ull, g_acquire[slot], &idx)
                               : vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
     }
-    vk_device_fault_report(r);
-    // lost, not ready: skip the frame. Acquires that keep timing out (1 s each) mean a swapchain nothing will free an
+    vk_device_lost_check(r, "the acquire of a swapchain image");
+    // not ready: skip the frame. Acquires that keep timing out (1 s each) mean a swapchain nothing will free an
     // image of again: three in a row rebuild it, where the picture used to stop for good.
     static uint32_t n_timeouts;
     if (r == VK_TIMEOUT || r == VK_NOT_READY) {
@@ -1554,7 +1555,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         g_flip_idx = idx;
         if (!defer) flip_locked();
     } else {
-        vk_device_fault_report(r);
+        vk_device_lost_check(r, "the present's submit");
         rt_log("gfx: present submit failed (%d)", (int)r);
         // The fence was reset after the acquire and the acquire's semaphore is signalled: left so, this slot's fence
         // wait would time out (5 s) at every later present and the picture stop for good. An empty batch takes the
@@ -1594,6 +1595,7 @@ void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int
 void gfx_present_boot(void) { present_image(VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_FORMAT_UNDEFINED, 1920, 1080, NULL, 0); }
 
 void vk_present_flip(void) {
+    if (vk_device_is_lost()) return;
     plat_rmutex_lock(&g_pl);
     flip_locked();
     plat_rmutex_unlock(&g_pl);

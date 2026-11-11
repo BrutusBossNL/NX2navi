@@ -428,6 +428,7 @@ int probe_discord(void);                                   // discord_rpc.c
 int probe_loader(void), probe_kernel(void), probe_ipc(void), probe_services(void), probe_fs(void);
 int probe_gfx_abi(void);                                   // gfx_abi_probe.c
 int probe_vkdevice(void);                                 // vk_device.c
+int vk_sync_probe_devlost(void);                          // vk_sync.c: --probe-devlost
 int probe_nvn(void), probe_nvn_tex(void);                  // nvn_probe.c, nvn_tex_probe.c
 int probe_window(void);                                    // gfx_window_probe.c
 int probe_shader(void);                                    // gfx_shader.c

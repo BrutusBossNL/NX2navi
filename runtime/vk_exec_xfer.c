@@ -311,7 +311,7 @@ static void oq_read(VkDevice dev, uint32_t first, uint32_t n) {
     VkResult r = vkGetQueryPoolResults(dev, oq_pool, first, n, sizeof OQB.v[0] * 2 * n, OQB.v, 2 * sizeof OQB.v[0],
                                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
     if (r != VK_SUCCESS && r != VK_NOT_READY) {
-        vk_device_fault_report(r);
+        vk_device_lost_check(r, "the read of occlusion query results");
         rt_fatal("vk: occlusion query results failed (%d)", (int)r);
     }
     OQB.first = first, OQB.n = n;
@@ -353,6 +353,7 @@ static void oq_cb(void *arg) {
         if (avail) sum += v;
         else {
             sum += 1;
+            vk_device_lost_poll();   // a query its submission never wrote: on a lost device the run ends here
             LOG_ONCE("vk: occlusion query slot %u not available after its fence, counted as visible", s->q[i]);
         }
     }
