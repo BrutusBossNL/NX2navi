@@ -1826,6 +1826,9 @@ static uint64_t marks_peak;
 static uint32_t marks_live;
 static int resolve_held;            // slot_resolve left the slot out for a held key or a retired entry
 static uint64_t n_disuse, n_disuse_bytes, n_disuse_back;   // since the last perf line
+// since the last perf line: eviction candidates kept because another descriptor is registered at their address
+// (shared_address), and holds dropped by a mark that another entry at the address had taken (vk_pool_marks_read)
+static uint64_t n_disuse_shared, n_disuse_diverted;
 static uint64_t n_retire_cancel, n_retire_freed;           // since the last perf line
 static uint64_t n_retire_stalled;                          // retired textures taken back because they never came due
 #define RETIRE_PATIENCE PRESENTS(5 * 60)
@@ -1907,6 +1910,32 @@ static int held_out(const TexKey *k) {
     return 0;
 }
 
+// tex_lock held. Whether a registered slot at e's address names another descriptor than e's: the same bytes through
+// another swizzle or format, or a view the game draws through. Such a texture is not retired by disuse. Its slots
+// do not all come back by the marks: a slot of the other descriptor that followed e gets an image of its own once
+// e is gone, an empty one when the descriptor is not a CPU-written one, and from then on that image takes the
+// marks of every slot at the address, so the held key of e was never dropped and the slots that named e showed
+// the stand-in for good: the ground of Hyrule Field and of Lon Lon Ranch drawn flat and see-through after 6,663
+// textures went under low commit and 928 came back.
+static int slot_names_other(int32_t id, const Tex *e) {
+    const TexSlot *s = &tslots[id];
+    if (!s->used || s->finalized || (uintptr_t)s->t.mem != e->key.addr) return 0;
+    TexKey sk;
+    make_key(&s->t, &sk);
+    return memcmp(&sk, &e->key, sizeof sk) != 0;
+}
+
+static int shared_address(const Tex *e) {
+    if (!sinfo || !slot_next) return 0;
+    uint32_t b = agen_idx(e->key.addr);
+    for (int32_t id = bucket_head[b]; id >= 0; id = slot_next[id])
+        if (slot_names_other(id, e)) return 1;
+    for (int32_t g = bucket_ghead[b]; g >= 0; g = grp[g].gnext)
+        for (int32_t id = grp[g].pub.head; id >= 0; id = slot_next[id])
+            if (slot_names_other(id, e)) return 1;
+    return 0;
+}
+
 // tex_lock held; returns the bytes retired (freed a few submissions later), counting those still retiring as freed
 static uint64_t evict_disused(uint64_t want) {
     if (!want || !vk_pool_marks_enabled() || __atomic_load_n(&vk_pool_marks_missed, __ATOMIC_RELAXED) || marks_reads < 2 ||
@@ -1928,6 +1957,14 @@ static uint64_t evict_disused(uint64_t want) {
         memmove(v + at + 1, v + at, sizeof *v * (size_t)(nv - 1 - at));
         v[at] = e;
     }
+    // A candidate whose address another descriptor shares stays (shared_address), and counts as sampled now, so the
+    // walk over its bucket is made once per disuse time and the next candidates get their turn.
+    int kept = 0;
+    for (int i = 0; i < nv; i++) {
+        if (shared_address(v[i])) v[i]->samp_frame = now, n_disuse_shared++;
+        else v[kept++] = v[i];
+    }
+    nv = kept;
     if (!nv) return 0;
     if (holds.n + (uint32_t)nv > HOLDS_MAX) {
         // keys of textures the game has let go of pile up: keep those a slot still holds out (cheld). Dropping them all
@@ -2008,9 +2045,12 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
             p->samp_frame = now;
             followed = 1;
         }
-        if (followed) continue;
+        // The slot's own key may be held although an entry at its address took the mark: the slot shows the stand-in
+        // then (slot_resolve follows fewer entries than the loop above credits), and only this drop makes its texture
+        // again. Left to the case where the loop found nothing, such a slot kept the stand-in for good.
         if (holds.n && nvn_hm_del(&holds, &k)) {   // the stand-in was sampled: the next pool refresh makes it
             n_disuse_back++;
+            n_disuse_diverted += followed != 0;
             s->cheld = 0;
             s->cwant = 1;   // on screen as a stand-in: made at the next refresh, whatever the frame's creation time
             tex_gen_bump(k.addr);
@@ -3361,6 +3401,11 @@ void vk_texture_new_submit(void) {
                    "in the upload batch %llu", (unsigned long long)f * 60, (unsigned long long)n_dinit_inline,
                    (unsigned long long)n_dinit_inpass, (unsigned long long)n_dinit_upload);
         n_dinit_inline = n_dinit_inpass = n_dinit_upload = 0;
+        if (n_disuse_shared || n_disuse_diverted)
+            rt_log("perf: frame %llu: unsampled textures kept because another descriptor shares their address %llu; "
+                   "holds dropped by a mark that another entry at the address had taken %llu",
+                   (unsigned long long)f * 60, (unsigned long long)n_disuse_shared, (unsigned long long)n_disuse_diverted);
+        n_disuse_shared = n_disuse_diverted = 0;
         rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms); "
                "skipped with unchanged bytes %llu (%.1f MiB)",
                (unsigned long long)f * 60, (unsigned long long)ru_n, ru_bytes / 1048576.0, ru_ns / 1e6,
