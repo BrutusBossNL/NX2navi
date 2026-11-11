@@ -135,6 +135,7 @@ NVN_API(nvnTextureBuilderGetStorageClass) { ret_x(c, storage_class(&TB(c)->d)); 
 NVN_API(nvnTextureBuilderGetFlags) { ret_x(c, (uint32_t)TB(c)->d.flags); }
 // size_t nvnTextureBuilderGetStorageSize(const NVNtextureBuilder *b)
 NVN_API(nvnTextureBuilderGetStorageSize) {
+    if (nvn_no_object(c, "nvnTextureBuilderGetStorageSize")) return;
     nvn_texlayout L;
     nvn_tex_layout(&TB(c)->d, &L);
     if (!L.bpb) rt_log("nvn: TextureBuilderGetStorageSize: unknown format %#x", TB(c)->d.format);
@@ -142,6 +143,7 @@ NVN_API(nvnTextureBuilderGetStorageSize) {
 }
 // size_t nvnTextureBuilderGetStorageAlignment(const NVNtextureBuilder *b)
 NVN_API(nvnTextureBuilderGetStorageAlignment) {
+    if (nvn_no_object(c, "nvnTextureBuilderGetStorageAlignment")) return;
     nvn_texlayout L;
     nvn_tex_layout(&TB(c)->d, &L);
     ret_x(c, L.align);
