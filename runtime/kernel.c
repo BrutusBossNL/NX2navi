@@ -2090,8 +2090,14 @@ void kern_bind_system_event(Cpu *c, uint64_t ev, int autoclear) {
     plat_mutex_lock(&g_se_lock);
     int i = 0;
     while (i < g_nse && g_se[i].ev != ev) i++;
-    if (i == g_nse) {
-        if (g_nse == (int)(sizeof g_se / sizeof *g_se)) rt_fatal("kern_bind_system_event: table full");
+    if (i == g_nse && g_nse == (int)(sizeof g_se / sizeof *g_se)) {
+        // Full: entries are never removed, and a long session binds events at new addresses (two per reload of a
+        // save). An entry whose event the guest destroyed (its state byte is 0, or its memory is gone) gives its slot.
+        i = 0;
+        while (i < g_nse && mem_readable(g_se[i].ev + SE_STATE, 1) && se_live(g_se[i].ev)) i++;
+        if (i == g_nse) rt_fatal("kern_bind_system_event: table full (%d live system events)", g_nse);
+        g_se[i].ev = ev;
+    } else if (i == g_nse) {
         g_se[g_nse++].ev = ev;
     }
     g_se[i].wh = wh;
