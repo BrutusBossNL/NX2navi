@@ -2074,6 +2074,22 @@ int vk_mem_shadow_storage(void) { return shadow_on; }
 
 static int gpa_shadow_pool(const PoolRec *r) { return r->kind == POOL_IMPORT && r->gpa_rec && r->smap; }
 
+// gen_lock held: nothing of the pool was stamped since its shadow's last copy-in. Its regions have this epoch's
+// write-watch snapshot (vk_mem_gpa_sync takes them for all pools at once), none of them is untracked, and none holds a
+// stamp newer than the shadow's sgen, which then stays as it is. With cpu the stamps are the CPU-side tables', as
+// shadow_sync_pool reads them. A table sync ran shadow_sync_pool for every pool at every part that uses the table,
+// 10,700 times a frame outdoors (3,772 pools, about three such parts), each with its own timer reads, snapshot walk
+// and region loop; with this test 1,500 pool syncs a frame are left, and the copy-ins went from 1.32 to 1.01 ms a
+// frame (RTX 5090 with NX2NAVI_SHADOW=1, 2026-11-10).
+static int shadow_pool_clean(const PoolRec *r, uint32_t epoch, int cpu) {
+    uint64_t r0 = r->import_lo >> SNAP_SHIFT, r1 = (r->import_hi - 1) >> SNAP_SHIFT;
+    if (!epoch || r1 >= SNAP_REGIONS) return 0;
+    const uint32_t *mx = cpu ? creg_max : reg_max;
+    for (uint64_t k = r0; k <= r1; k++)
+        if (snap_at[k] != epoch || snap_untracked[k] || mx[k] > r->sgen) return 0;
+    return 1;
+}
+
 void vk_mem_gpa_sync(void) {
     if (!gpa_part_used) return;
     gpa_part_used = 0;
@@ -2101,7 +2117,7 @@ void vk_mem_gpa_sync(void) {
     if (have) s_queries += snap_regions(run0, run1, epoch);
     for (int i = 0; i < pool_index.n; i++) {
         PoolRec *r = pool_index.e[i].buf;
-        if (gpa_shadow_pool(r)) shadow_sync_pool(r, epoch, cpu), s_syncs++;
+        if (gpa_shadow_pool(r) && !shadow_pool_clean(r, epoch, cpu)) shadow_sync_pool(r, epoch, cpu), s_syncs++;
     }
     plat_mutex_unlock(&gen_lock);
     // The uploads read the shadows just brought up to date, and the prologue records them ahead of the part, after
