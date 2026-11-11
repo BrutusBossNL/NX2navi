@@ -1055,7 +1055,7 @@ static void row_framegen(void) {
     // NVIDIA's set since the start but not running: "in use: off" and why (vk_dlssg_status; the log has the details).
     // Through NGX that is NVIDIA's frame generation library missing beside the game, or a GPU it does not run on.
     const int st = cur != 2 || restart ? DLSSG_RUNS : ngx ? (vk_ngxfg_max() ? DLSSG_RUNS : DLSSG_NO_FILES) : vk_dlssg_status();
-    if (st == DLSSG_NO_GPU) note = UI_MENU_FRAMEGEN_OFF_GPU;
+    if (st == DLSSG_UNAVAILABLE) note = UI_MENU_FRAMEGEN_UNAVAILABLE;
     else if (st == DLSSG_NO_FILES) note = UI_MENU_FRAMEGEN_OFF_FILES;
     int nv = opt_choice_index("NX2NAVI_FRAMEGEN", UI_MENU_FRAMEGEN, names, n, at, 0, desc, menu_text(note));
     if (nv >= 0 && nv < n) opt_apply("NX2NAVI_FRAMEGEN", values[nv]);
@@ -1281,13 +1281,17 @@ static void row_walk_key(void) {
 // layout, as a layout that puts A on the right button needs the face buttons named the other way round), but the game
 // reads its fonts and UI archive once at start (romfs.c overlay_init). While the folder in use differs: "files
 // missing" when the setup did not write the one asked for, why it was left out at start (damaged, a game resolution
-// that is not 16:9, a RomFS mod with the same files, NX2NAVI_ROMFS_PATCHES), else "prompts change after restart", and only then
-// *restart is set: a restart would bring the prompts asked for. NULL when they match.
+// that is not 16:9, a RomFS mod with the same files, NX2NAVI_ROMFS_PATCHES), else "prompts change after restart" with
+// *restart set: a restart would bring the prompts asked for. The action prompt's diamond of face buttons is laid out
+// for the pad layout at start too (romfs.c action_prompt_overlay), whatever the prompts: while the layout asks for the
+// other places, a restart would lay it out again, so *restart is set whatever the note, and with the folder in use the
+// note is "prompts change after restart". NULL when both match.
 static const char *prompts_note(bool *restart) {
-    *restart = false;
     const char *layout = cfg_value("NX2NAVI_PAD_LAYOUT"), *used = romfs_prompts();
     const char *want = input_prompts_folder(input_prompts_pick(cfg_get("NX2NAVI_PROMPTS"), layout), layout);
-    if (want == used || (want && used && !strcmp(want, used))) return nullptr;
+    int diamond = romfs_action_prompt();   // -1 when it could not be laid out: a restart would not change it
+    *restart = diamond >= 0 && diamond != input_pad_layout_pick(layout, 0);
+    if (want == used || (want && used && !strcmp(want, used))) return *restart ? menu_text(UI_MENU_PROMPTS_RESTART) : nullptr;
     // A game resolution of another shape needs a folder of its own for the PC prompts (romfs-patches-pc-<w>x<h>), which
     // the setup does not write: the shape is the reason then, not the setup.
     int off = romfs_prompts_off(want);

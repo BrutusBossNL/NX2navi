@@ -1627,9 +1627,10 @@ class MakeGameTest(Tmp):
             'for d in (0, 50, 100):\n'
             '    print(f"prepare-shaders: progress translate {d} 100", flush=True)\n'
             '    time.sleep(0.05)\n'
-            'print("prepare-shaders: progress build 10 100", flush=True)\n'
+            'print("prepare-shaders: progress build 10000 100000", flush=True)\n'
             'time.sleep(0.6)\n'
-            'print("prepare-shaders: progress build 100 100", flush=True)\n')
+            'for d in (99998, 99999, 100000):\n'
+            '    print(f"prepare-shaders: progress build {d} 100000", flush=True)\n')
         for name, value in (('KIT', kit), ('EVENTS', True), ('SHADER_BEAT_S', 0.1), ('SHADER_STALL_S', 0.3)):
             self.addCleanup(setattr, self.mg, name, getattr(self.mg, name))
             setattr(self.mg, name, value)
@@ -1650,7 +1651,10 @@ class MakeGameTest(Tmp):
         self.assertTrue(any(d.startswith("Reading the game's shaders") for d in details))
         self.assertIn('Translated 50 of 100 shaders', details)
         self.assertGreaterEqual(sum(1 for e in events if e['fraction'] == 0.55), 2)   # heartbeats while the build waits
-        self.assertTrue(any(d.startswith('Built 10 of 100') and 'still running' in d for d in details))
+        self.assertTrue(any(d.startswith('Built 10,000 of 100,000') and 'still running' in d for d in details))
+        for done in ('99,998', '99,999'):
+            event = next(e for e in events if e['detail'].startswith(f'Built {done} of 100,000'))
+            self.assertEqual(int(event['fraction'] * 100), 99)
         self.assertEqual([e['fraction'] for e in events if e['detail'] == 'Translated 50 of 100 shaders'][0], 0.25)
 
     def test_a_build_only_run_fills_the_whole_bar(self):
@@ -3224,7 +3228,7 @@ class FileCheckTest(Tmp):
 # PROMPT_TOOLS a new value (every install then draws its prompts again) and record both here; if it cannot, record
 # only the new digests.
 PROMPT_LOGIC = ('ad59f2c4533f6ea2630b916ef5f3695f72daffe9b2b7663eea4168a4f08e4249',
-                {'pad_prompts.py': '1b008475289e0dabfefb8c61969c719c6faa79bbfc8504593e5fe1e79d4d4d33',
+                {'pad_prompts.py': '780c246b5fde7a0e9dbf3f59ad16372e1737592add6f2f2d9825bee6df4e296f',
                  'prompt_art.py': '87edacabcddb4952f5862373815d7d46a05c67f350e0734025ae4d2f83b12038',
                  'button_icons.py': '3804e371a030965bc9eb4226f333b611651f25efaa67ee523b404edc3257818a'})
 

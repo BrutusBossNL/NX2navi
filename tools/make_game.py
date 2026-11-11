@@ -1701,8 +1701,9 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
         ld = (['-fuse-ld=lld'] if (msys / 'bin' / 'ld.lld.exe').is_file() else []) + ['-Wl,--stack,16777216']
     else:   # tools/build_game.py's Linux flags; the main thread's stack is the process's (ulimit -s), not the linker's
         ld = (['-fuse-ld=lld'] if shutil.which('ld.lld') else []) + ['-no-pie', '-Wl,-z,noexecstack', '-Wl,-rpath,$ORIGIN']
-    # the link map feeds tools/prof_report.py (symbols for an NX2NAVI_PROFILE sampling profile); both linkers write one
-    ld.append('-Wl,--Map=' + (cache_dir / 'ocarina.map').as_posix())
+    # the link map feeds tools/prof_report.py (symbols for an NX2NAVI_PROFILE sampling profile); both linkers write one.
+    # -Xlinker passes the path as one argument; -Wl, would cut it at every comma of the game folder's path (issue #470)
+    ld += ['-Xlinker', '--Map=' + (cache_dir / 'ocarina.map').as_posix()]
     lib = ['-Wl,--whole-archive', str(prebuilt[0]), '-Wl,--no-whole-archive'] if prebuilt else []
     stamp = [[o.name, o.stat().st_size, o.stat().st_mtime_ns] for o in objs]
     if prebuilt:
@@ -1773,7 +1774,7 @@ def shader_progress(phase, done, total, quiet_s, elapsed_s, build_only=False):
     if quiet_s >= SHADER_STALL_S:
         detail += (f'. No change for {int(quiet_s) // 60} min, but it is still running: one large shader can take '
                    'a while')
-    return {'step': 'shaders', 'fraction': round(fraction, 4), 'detail': detail}
+    return {'step': 'shaders', 'fraction': fraction, 'detail': detail}
 
 
 # In the game's shader-cache/: the translator identities its translations are of, newest first (runtime/gfx_shader.c,

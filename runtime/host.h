@@ -154,6 +154,7 @@ void mem_init(void);                                       // reserve every regi
                                                            // (up to 20 times, NX2NAVI_REEXEC), then fatal
 const RtGuestLayout *mem_layout(void);
 void mem_guest_census(uint64_t frame);   // NX2NAVI_TRACE=perf: committed bytes per guest region
+void mem_lazy_heap_report(uint64_t frame);   // NX2NAVI_TRACE=perf: the lazy heap's faults since the last line
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr);                      // 0x01
 uint32_t mem_set_permission(uint64_t a, uint64_t n, uint32_t perm);             // 0x02
 uint32_t mem_set_attribute(uint64_t a, uint64_t n, uint32_t mask, uint32_t at); // 0x03
@@ -184,7 +185,12 @@ int mem_freeze(uint64_t a);                                // makes the 2 MiB re
 int mem_frozen(uint64_t a);                                // the 2 MiB region of a is frozen: no page in it changed
                                                            // since its freeze
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
-                                                           // before a kernel write (file read) into guest memory
+                                                           // before a kernel write (file read) into guest memory;
+                                                           // also commits pages the lazy heap left reserved
+void mem_kernel_access(uint64_t a, uint64_t n);            // NX2NAVI_HEAP_LAZY: commits the reserved heap pages of
+                                                           // [a, a+n) before the kernel reads them (a file write)
+int mem_host_readable(uint64_t a, uint64_t n);             // plat_mem_readable that first commits the untouched
+                                                           // pages of the lazy heap in [a, a+n), which read zero
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
 // NX2NAVI_WB_PROBE=1 (memory.c, "Probed regions"): who reads what the GPU wrote back into guest memory.
 // NX2NAVI_WB_LAZY (memory.c, "Lazy write-back"): pages the GPU wrote that come down only when the CPU touches them.

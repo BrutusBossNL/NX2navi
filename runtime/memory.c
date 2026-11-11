@@ -49,6 +49,9 @@ static RtGuestLayout L;
 static uint64_t mods_lo, mods_hi;   // fixed module window
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static uint64_t heap_size, alias_bytes;
+static int heap_lazy;               // NX2NAVI_HEAP_LAZY, Windows: the heap is committed page run by page run on first use
+static uint64_t heap_lazy_faults, heap_lazy_bytes;   // accesses that committed heap pages, and the bytes they committed
+static uint64_t heap_lazy_ns, heap_lazy_max_ns;      // time in those faults, lock wait included, since the last report
 static uint8_t *alias_pages;        // 1 per mapped 4 KiB page of the alias region
 typedef struct { uint64_t dst, src, size; } StackMap;
 static StackMap stack_maps[MAX_STACK_MAPS];
@@ -615,8 +618,72 @@ static void thaw_range_locked(uint64_t a, uint64_t n, int why) {
     for (uint64_t r = r0; r <= r1; r++) thaw_locked(r, why);
 }
 
+// Lazy heap (NX2NAVI_HEAP_LAZY, Windows only; off by default). Windows charges every committed page to the system's
+// commit at once, and SetHeapSize asks for the whole application heap up front: in Castle Town after Hyrule Field the
+// heap held 6.8 GiB of commit of which 3.4 GiB had ever been resident, with 0.45 GB in the page file. With it on,
+// SetHeapSize only moves the heap's end, and a page of the heap is committed when something first reaches it: an access
+// of the game's or the runtime's code faults into access_fault, which commits the reserved runs of the 64 KiB around
+// it; a kernel read or write of a buffer (mem_thaw, mem_kernel_access) and a pointer check (mem_host_readable)
+// commit their range first, as the kernel and VirtualQuery do not fault. On Linux pages are committed on first touch
+// already.
+// frz_lock held exclusively. Commits the reserved pages of [a, a + n) inside the heap; returns the bytes committed. A
+// page another path committed is left alone: committing it again would make a read-only or inaccessible page (a
+// freeze, a probe, an armed lazy write-back) read-write behind their backs. The regions it commits into are thawed
+// first, as for any mapping change, so that no frozen region holds a read-write page.
+static uint64_t heap_lazy_commit_locked(uint64_t a, uint64_t n) {
+    uint64_t lo = a > L.heap.base ? a : L.heap.base, top = L.heap.base + __atomic_load_n(&heap_size, __ATOMIC_ACQUIRE);
+    uint64_t end = a + n < a ? UINT64_MAX : a + n, hi = end < top ? end : top, got = 0;
+    if (lo >= hi) return 0;
+    lo &= ~(PAGE - 1), hi = align_up(hi, PAGE);
+    int thawed = 0;
+    for (uint64_t x = lo, y; x < hi; x = y) {
+        if (plat_mem_state(x, hi, &y) != PLAT_MEM_RESERVED) continue;
+        if (!thawed) thaw_range_locked(lo, hi - lo, 3), thawed = 1;
+        if (!plat_mem_commit(x, y - x))
+            rt_fatal("memory: committing the heap's pages %#llx+%#llx on first use failed: the system's commit is "
+                     "used up", (unsigned long long)x, (unsigned long long)(y - x));
+        got += y - x;
+    }
+    heap_lazy_bytes += got;
+    return got;
+}
+
+// Commits the heap pages of [a, a + n) that the lazy heap left reserved; nothing when it is off.
+void mem_kernel_access(uint64_t a, uint64_t n) {
+    if (!heap_lazy || !n) return;
+    plat_mutex_lock(&frz_lock);
+    heap_lazy_commit_locked(a, n);
+    plat_mutex_unlock(&frz_lock);
+}
+
+// plat_mem_readable for a pointer the host is about to read: untouched heap pages of a lazy heap count as readable
+// (they are committed here, and read zero as they would have).
+int mem_host_readable(uint64_t a, uint64_t n) {
+    mem_kernel_access(a, n);
+    return plat_mem_readable(a, n);
+}
+
+// An access fault on a reserved page of the lazy heap: the 64 KiB around it is committed and the access runs again.
+// 0 when nothing was reserved there, so that a frozen, probed or armed page goes on to its own hook (a page another
+// thread committed meanwhile is retried by thaw_fault or the end of access_fault, as the heap is watched).
+static int heap_lazy_fault(uint64_t a) {
+    uint64_t heap = L.heap.base;
+    if (a < heap || a - heap >= __atomic_load_n(&heap_size, __ATOMIC_ACQUIRE)) return 0;
+    uint64_t t0 = plat_now_ns();
+    plat_mutex_lock(&frz_lock);
+    uint64_t got = heap_lazy_commit_locked(a & ~0xFFFFull, 0x10000);
+    if (got) {
+        uint64_t ns = plat_now_ns() - t0;
+        heap_lazy_faults++, heap_lazy_ns += ns;
+        if (ns > heap_lazy_max_ns) heap_lazy_max_ns = ns;
+    }
+    plat_mutex_unlock(&frz_lock);
+    return got != 0;
+}
+
 void mem_thaw(uint64_t a, uint64_t n) {
     plat_mutex_lock(&frz_lock);   // also when nothing is frozen: the hold keeps a read's buffer writable
+    if (heap_lazy) heap_lazy_commit_locked(a, n);   // the kernel's write would fail on a reserved page as well
     thaw_range_locked(a, n, 2);
     plat_mutex_unlock(&frz_lock);
 }
@@ -718,9 +785,11 @@ static int probe_fault(uint64_t a, int write, uint64_t ip) {
     return plat_mem_state(a & ~(PAGE - 1), (a & ~(PAGE - 1)) + PAGE, &end) >= PLAT_PROT_READ;
 }
 
-// The platform's access-fault hook: an armed page of the lazy write-back first, then the probe. A read that faulted on
+// The platform's access-fault hook: a reserved page of the lazy heap first, then an armed page of the lazy write-back,
+// then the probe. A read that faulted on
 // a page another thread gave back meanwhile runs again; a write goes on to thaw_fault.
 static int access_fault(uint64_t a, int write, uint64_t ip) {
+    if (heap_lazy && heap_lazy_fault(a)) return 1;
     if (__atomic_load_n(&lz_on, __ATOMIC_RELAXED) && lazy_fault(a, write)) return 1;
     if (__atomic_load_n(&prb_on, __ATOMIC_RELAXED)) return probe_fault(a, write, ip);
     if (write || a >= RT_ADDRESS_LIMIT || !watched(a, 1)) return 0;
@@ -860,6 +929,13 @@ void mem_init(void) {
         .pool = pool ? strtoull(pool, NULL, 0) : DEFAULT_POOL + res_heap_extra_bytes(),   // resolution.c
     };
     if (!L.pool) rt_fatal("memory: NX2NAVI_APP_POOL is 0");
+#ifdef _WIN32
+    if (cfg_bool("NX2NAVI_HEAP_LAZY")) {   // set before the game's first SetHeapSize
+        plat_mem_access_hook(access_fault);
+        heap_lazy = 1;
+        rt_log("mem: the heap is committed on first use (NX2NAVI_HEAP_LAZY)");
+    }
+#endif
 }
 
 const RtGuestLayout *mem_layout(void) { return &L; }
@@ -900,9 +976,10 @@ uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
         plat_mutex_unlock(&lock);
         return R_INVALID_STATE;
     }
-    if (size > heap_size) commit(L.heap.base + heap_size, size - heap_size, "heap");
-    if (size < heap_size) decommit(L.heap.base + size, heap_size - size, "heap");
-    heap_size = size;
+    uint64_t was = heap_size;
+    if (size > was && !heap_lazy) commit(L.heap.base + was, size - was, "heap");
+    __atomic_store_n(&heap_size, size, __ATOMIC_RELEASE);   // before a shrink: no first-use commit past the new end
+    if (size < was) decommit(L.heap.base + size, was - size, "heap");   // reserved pages in the range are fine
     __atomic_store_n(&map_gen, map_gen + 1, __ATOMIC_RELEASE);
     plat_mutex_unlock(&lock);
     if (addr) *addr = L.heap.base;
@@ -1337,6 +1414,23 @@ void mem_kernel_free(void *p, uint64_t size) {
 // NX2NAVI_TRACE=perf: how many bytes of each guest region are committed, so a process that has grown says which region
 // holds the memory. A region is reserved whole at start-up and committed page by page, so the walk reads each run of
 // pages of the same state; the alias window is the largest and costs the most steps when it is full.
+// NX2NAVI_TRACE=perf: what the lazy heap's first-use faults cost since the last line (perf.c, every perf window that had
+// some), so that a hitch can be told from them: the time includes the wait for frz_lock.
+void mem_lazy_heap_report(uint64_t frame) {
+    static uint64_t faults_prv, bytes_prv;
+    if (!heap_lazy) return;
+    plat_mutex_lock(&frz_lock);
+    uint64_t faults = heap_lazy_faults, bytes = heap_lazy_bytes, ns = heap_lazy_ns, max = heap_lazy_max_ns;
+    heap_lazy_ns = heap_lazy_max_ns = 0;
+    plat_mutex_unlock(&frz_lock);
+    if (faults == faults_prv && bytes == bytes_prv) return;
+    rt_log("mem: lazy heap at frame %llu: %llu faults and %.1f MiB committed since the last line, %.2f ms in the faults "
+           "(longest %.3f ms); %.0f of %.0f MiB committed", (unsigned long long)frame,
+           (unsigned long long)(faults - faults_prv), (bytes - bytes_prv) / 1048576.0, ns / 1e6, max / 1e6,
+           bytes / 1048576.0, __atomic_load_n(&heap_size, __ATOMIC_ACQUIRE) / 1048576.0);
+    faults_prv = faults, bytes_prv = bytes;
+}
+
 void mem_guest_census(uint64_t frame) {
     const RtGuestLayout *g = mem_layout();
     const struct { const char *name; RtRange r; } reg[] = {
@@ -1359,4 +1453,8 @@ void mem_guest_census(uint64_t frame) {
         o += snprintf(line + o, sizeof line - o, " %s %.0f", reg[i].name, committed / 1048576.0);
     }
     rt_log("%s; all %.0f", line, all / 1048576.0);
+    if (heap_lazy)
+        rt_log("mem: lazy heap at frame %llu: %.0f of %.0f MiB committed, by %llu faults and the rest by kernel "
+               "accesses and pointer checks", (unsigned long long)frame, heap_lazy_bytes / 1048576.0,
+               __atomic_load_n(&heap_size, __ATOMIC_ACQUIRE) / 1048576.0, (unsigned long long)heap_lazy_faults);
 }
