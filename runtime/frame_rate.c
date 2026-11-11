@@ -556,6 +556,11 @@ static void speed_report(uint64_t now, double step, int interval) {
         memcpy(last_pos, p, sizeof p);
         last_pos_ns = now;
     }
+    float global_step;   // Ocarina 1.1.1: the engine's global step (patches-v111.txt, the set ostep's second site)
+    if (probe && ostep_page && read_guest(MOD_MAIN_BASE + 0x4d41fc8, &global_step, 4)) {
+        size_t o = strlen(pos);
+        snprintf(pos + o, sizeof pos - o, "; global step %.3f frames", (double)global_step);
+    }
     if (os_step_hi > 0) {   // Ocarina: the shortest and longest step given in these frames, and the time still owed
         size_t o = strlen(pos);
         snprintf(pos + o, sizeof pos - o, "; step %.3f..%.3f frames, %.1f ms owed", os_step_lo * 60, os_step_hi * 60,
