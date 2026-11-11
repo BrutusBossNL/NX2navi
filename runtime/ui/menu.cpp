@@ -36,12 +36,14 @@ static int g_font_bad;
 #pragma clang diagnostic pop
 #include "ui/amiibo_page.h"
 #include "ui/binds_page.h"
+#include "ui/debug_menu.h"
 #include "ui/option_rows.h"
 #include "ui/perf_panel.h"
 
 extern "C" {
 #include "amiibo.h"
 #include "cheats.h"
+#include "debug_tools.h"
 #include "cfg.h"
 #include "folder_pick.h"
 #include "fs.h"
@@ -129,17 +131,34 @@ static int change_open(int want) {
 
 static void set_open(int open) { change_open(open); }
 
+// The debug menu (ui/debug_menu.cpp; F9 with NX2NAVI_DEBUG_MENU = 1) is laid out in this menu's place: open is the one
+// state for both, with its input, its sounds and the game's blocked pad, and g_debug says which window it shows.
+static std::atomic<int> g_debug{0};
+extern "C" int menu_debug_enabled(void) { return cfg_bool("NX2NAVI_DEBUG_MENU"); }
+
 static int g_failed_flag();
 // Until the game's first frame (menu_overlay_frame), boot screen included: the menu does not open, as it would not be
 // drawn while its keys queued up and changed settings once the game ran.
 static std::atomic<int> g_booting{1};
 extern "C" int menu_is_open(void) { return g_open.load(std::memory_order_relaxed); }
 extern "C" void menu_toggle(void) {
-    if (!g_failed_flag() && !g_booting.load(std::memory_order_acquire)) change_open(-1);
+    if (g_failed_flag() || g_booting.load(std::memory_order_acquire)) return;
+    if (!menu_is_open()) g_debug.store(0);   // F1 opens the settings; with either window open it closes that one
+    change_open(-1);
+}
+// F9: opens the debug menu, and closes it again; with the settings menu open it does nothing.
+extern "C" void menu_debug_toggle(void) {
+    if (!menu_debug_enabled() || g_failed_flag() || g_booting.load(std::memory_order_acquire)) return;
+    if (menu_is_open()) {
+        if (g_debug.load()) change_open(0);
+        return;
+    }
+    g_debug.store(1);
+    change_open(1);
 }
 
 // ---- events from the window adapter, queued while the menu is open; the present path hands them to ImGui
-enum { EV_KEY, EV_POS, EV_BUTTON, EV_WHEEL, EV_FOCUS, EV_MAX = 256 };
+enum { EV_KEY, EV_POS, EV_BUTTON, EV_WHEEL, EV_FOCUS, EV_CHAR, EV_MAX = 256 };
 struct Ev { int type, a, b; float x, y; };
 static Ev ev_q[EV_MAX];
 
@@ -158,6 +177,8 @@ static void push(Ev e) {
 }
 
 extern "C" void menu_event_key(int key, int down) { push({EV_KEY, key, down, 0, 0}); }
+// a typed character, for the debug menu's text fields (the settings menu has none)
+extern "C" void menu_event_char(unsigned c) { push({EV_CHAR, (int)c, 0, 0, 0}); }
 extern "C" void menu_event_mouse_pos(float x, float y) { push({EV_POS, 0, 0, x, y}); }
 extern "C" void menu_event_mouse_button(int button, int down) { push({EV_BUTTON, button, down, 0, 0}); }
 extern "C" void menu_event_wheel(float dx, float dy) { push({EV_WHEEL, 0, 0, dx, dy}); }
@@ -183,6 +204,7 @@ static void drain_events(ImGuiIO &io) {
         case EV_BUTTON: io.AddMouseButtonEvent(e.a, e.b != 0); break;
         case EV_WHEEL: io.AddMouseWheelEvent(e.x, e.y); break;
         case EV_FOCUS: io.AddFocusEvent(e.a != 0); break;
+        case EV_CHAR: io.AddInputCharacter((unsigned)e.a); break;
         }
     }
 }
@@ -1237,6 +1259,16 @@ static void tab_game(float scale) {
     // discord_rpc.c reads the setting on its own thread and connects or clears the status within half a second
     opt_toggle("NX2NAVI_DISCORD_RPC", UI_MENU_DISCORD_RPC, UI_MENU_DISCORD_RPC_DESC);
     rows_saves();
+    // The debug menu, a tool for testing with English text of its own: off unless switched on here
+    if (dbg_supported()) {
+        opt_group_text("Testing");
+        const bool on = cfg_bool("NX2NAVI_DEBUG_MENU");
+        if (opt_toggle_text("debug_menu", "Debug menu (F9)",
+                            "F9 opens a window for testing: the game's flags by name, the game's speed, and a search of "
+                            "its memory with values to set and hold. Changing flags or memory can break a save: keep a "
+                            "copy of the save first.", on))
+            opt_apply("NX2NAVI_DEBUG_MENU", on ? "0" : "1");
+    }
     opt_end();
 }
 
@@ -1760,6 +1792,8 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
             g_test.opened = frame;
             g_test.page = 0;
             g_tab_request = 0;
+            g_debug.store(cfg_get("NX2NAVI_MENU_TEST_DEBUG") != NULL);   // the test shoots the debug menu's tabs instead
+            if (g_debug.load()) debug_menu_tab(0);
             set_open(1);
             open = true;
         } else if (!g_perf_mode) {
@@ -1818,7 +1852,14 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     // no ImGui_ImplVulkan_NewFrame: all it does is upload Dear ImGui's own font atlas when the back end holds none,
     // which it never does here (fonts_up uploads it, ui/menu_art.cpp menu_font_upload)
     ImGui::NewFrame();
-    if (open) layout_menu(t->width, t->height, scale);
+    if (open && g_debug.load(std::memory_order_relaxed)) {
+        debug_menu_layout(t->width, t->height, scale);
+        // Esc, or B on the pad when no field is being typed in, closes it
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)))
+            set_open(0);
+    } else if (open) {
+        layout_menu(t->width, t->height, scale);
+    }
     perf_draw(t, scale);
     ImGui::Render();
     if (open) g_save_pending = opt_save_tick(0);
@@ -1828,11 +1869,12 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
         const char *dir = cfg_get("NX2NAVI_MENU_TEST_DIR");
         snprintf(path, sizeof path, "%s/menu-test-%llu-%d.png", dir ? dir : ".", (unsigned long long)frame, g_test.page);
         *shot = path;
-        if (++g_test.page == TAB_COUNT) {
+        if (++g_test.page == (g_debug.load() ? DEBUG_MENU_TABS : TAB_COUNT)) {
             g_test.page = -1;
             set_open(0);   // the next frame lays out nothing
         } else {
             g_tab_request = g_test.page;
+            if (g_debug.load()) debug_menu_tab(g_test.page);
         }
     }
     return ImGui::GetDrawData()->TotalVtxCount > 0;

@@ -411,6 +411,11 @@
 # has not been tested, and 3.1.6 on every other, where it runs at the same frame rate as the FSR 3.1 library's. When
 # it fails, the FSR 3.1 library takes over and the log says why (fg4:). Changes while the game runs take effect at once.
 # fsr4_fg = 0
+# The debug menu, a tool for testing (Ocarina of Time 1.1.1): with 1, F9 opens a window with the game's on/off flags
+# by name (the names found in your own game's event files), the game's speed, Link's position, and a search of the
+# game's memory with values to set and to hold. Changing flags or memory can break a save: keep a copy of the save
+# first. Do not bind F9 to a game button while it is on. The menu's Game tab has the switch. Takes effect at once.
+# debug_menu = 0
 # The DLSS model: default (NVIDIA's advice per mode: K for dlaa, quality and balanced, M for performance, L for
 # ultra_performance), k (K in every mode) or j (the other transformer model: slightly less ghosting behind moving
 # characters, a little more flicker). Any other model by its letter, a to m: on slower RTX cards the older model e is

@@ -30,6 +30,9 @@ void menu_perf_cycle(void);               // F10: the performance overlay off, f
 // ---- events from the window adapter, used only while the menu is open. key: an ImGuiKey; coordinates in pixels of the
 // window's client area, which is the swapchain image.
 void menu_event_key(int key, int down);
+void menu_event_char(unsigned c);        // a typed character (the debug menu's text fields)
+int menu_debug_enabled(void);            // NX2NAVI_DEBUG_MENU: F9 belongs to the debug menu (ui/debug_menu.cpp)
+void menu_debug_toggle(void);            // F9
 void menu_event_mouse_pos(float x, float y);
 void menu_event_mouse_button(int button, int down);   // 0 left, 1 right, 2 middle
 void menu_event_wheel(float dx, float dy);

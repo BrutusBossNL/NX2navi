@@ -47,6 +47,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "debug_tools.h"
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
@@ -582,7 +583,8 @@ void frame_step_present(uint64_t display_ns, int interval) {
         }
     }
     if (frame_free_running() && last_ns) {
-        if (dt > 0 && dt < STEP_RESET_S) ocarina_step_write(ocarina_step(dt));
+        // the debug menu's speed factor (debug_tools.c) multiplies the step the game is given
+        if (dt > 0 && dt < STEP_RESET_S) ocarina_step_write(ocarina_step(dt) * (double)dbg_speed_factor());
         else ocarina_step_reset();   // a load or a debugger stop: the intervals before it say nothing about the next
     }
     last_ns = display_ns;
