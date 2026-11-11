@@ -1820,8 +1820,9 @@ static int idle(const Tex *e, uint64_t now);
 // machine runs out of memory, and plat_commit_info reports the tighter of the two. Both drop only stale entries
 // (drop_stale), a few per check like the VRAM pressure.
 //
-// NX2NAVI_TEX_PROC_COMMIT_MB (default the installed memory, at least PROC_COMMIT_MIN_MB; 0 = off) counts the commit as
-// low too while this process's own commit is above it. The system's figure depends on the page file and on what else
+// NX2NAVI_TEX_PROC_COMMIT_MB (default the installed memory, at least PROC_COMMIT_MIN_MB; 0 = off) is a bound on this
+// process's own commit that is logged when passed; it counted the commit as low too until it was found that no texture
+// dropped could bring the process back under it (commit_is_low, at its end). The system's figure depends on the page file and on what else
 // runs: with a 64 GB limit it turned low at 59 GB in use, when this process alone held 42 GB on a PC with 32 GB of
 // memory, about half of it device memory, with the textures of five areas left behind. A process is not meant to need
 // more commit than the PC has memory: beyond that it lives on the page file, whatever its size. The bound holds until
@@ -1899,8 +1900,8 @@ static int commit_is_low(void) {
         char note[2048];   // the platform layer's own lines go to stderr only, so the log file gets this through here
         if (plat_commit_note(note, sizeof note)) rt_log("platform: %s", note);
         if (proc_commit_mb)
-            rt_log("vk: textures give way as under low commit while this process's commit%s is above %lld MB "
-                   "(NX2NAVI_TEX_PROC_COMMIT_MB; 0 = off)",
+            rt_log("vk: this process's commit%s is logged when it passes %lld MB (NX2NAVI_TEX_PROC_COMMIT_MB; 0 = off); "
+                   "textures give way only when the system's commit is low",
                    plat_commit_counts_vram() ? ", less the video memory in use on a discrete card," : "", proc_commit_mb);
     }
     if (!commit_free_mb && !proc_commit_mb) return 0;
@@ -1925,7 +1926,8 @@ static int commit_is_low(void) {
         rt_log("vk: this process's commit %s: %.0f MB less %.0f MB of video memory, the bound is %lld MB (system: %.0f "
                "of %.0f MB in use); released textures kept %d, %.0f MiB of own memory%s", high ? "high" : "no longer high",
                proc, dev, proc_commit_mb, used, limit, nreleased, rel_bytes / 1048576.0,
-               high ? ": dropping the stale ones" : "");
+               high ? ": the host's own memory, which dropping textures does not lower; textures give way only when the "
+                      "system's commit is low" : "");
     }
     proc_high = high;
     if (low != sys_low && commit_logs < 40) {   // a few lines, however often it flips
@@ -1946,7 +1948,12 @@ static int commit_is_low(void) {
         }
     }
     sys_low = low;
-    return commit_low = low || high;
+    // Only the system's figure makes textures give way. The process's bound compares its commit less the video memory
+    // in use, and a texture dropped lowers both by the same amount: past the bound nothing a drop does could bring it
+    // back under, and textures went one after the other for as long as the rest of the process stayed large, the ground
+    // flickering white with the system's commit to spare (#434). What is above it is the host's own memory (the
+    // game's heap, pipelines, caches); the bound is logged, and the system's figure still acts when the commit runs low.
+    return commit_low = low;
 }
 
 int vk_texture_commit_low(void) { return __atomic_load_n(&commit_low, __ATOMIC_RELAXED); }
@@ -2347,6 +2354,7 @@ static void slots_text(char *out, size_t n, const Tex *e) {
 // undefined image, which nothing else reports. One line per entry and up to MARK_LINES per address (said_at); the
 // marked slots that met such an entry are counted in the texture origins line whether or not a line was written.
 static uint64_t n_mark_empty, n_mark_none;   // since the last perf line: marked slots that met such an entry; that show none
+static uint64_t n_fin_other;   // since the last perf line: slots a finalize left current, registered by another texture there
 #define MARK_LINES 6
 #define MARK_LINES_ALL 20000
 static void marks_check(Tex *e, uint32_t id, uint64_t now, int followed) {
@@ -2502,10 +2510,17 @@ static void sweep_pressure(void) {   // tex_lock held
         }
     }
     if (over) {
-        uint64_t freed = 0;
-        for (Tex *e = rel_head, *next; e && dropped < PRESSURE_STEP; e = next) {
+        // Released entries that come back intact, by the rule drop_stale keeps: released STALE_FRAMES ago and reached by
+        // no lookup since (idle). The game releases and takes back hundreds of textures a frame in towns, and the
+        // release list is mostly those: dropped, each was made and uploaded again within frames and freed nothing.
+        // With the budget taken as 7.5 GiB (NX2NAVI_VRAM_BUDGET_MB), teleports from Hyrule Field through Kakariko
+        // Village, the Graveyard, Death Mountain Trail and Kokiri Forest dropped 82,288 under the pressure and the card
+        // stayed over its budget throughout; with this rule 34,699 went, a fifth fewer textures were made again, the
+        // render thread waited a third less on textures, and 4 draws met a texture gone where 11 had.
+        uint64_t freed = 0, now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        for (Tex *e = rel_head, *next; e && dropped < PRESSURE_STEP && now - e->rel_frame >= STALE_FRAMES; e = next) {
             next = e->rel_next;
-            if (!comes_back_intact(e)) continue;
+            if (!comes_back_intact(e) || !idle(e, now)) continue;
             freed += e->bytes;
             drop_tex(e, DROP_VRAM);
             dropped++, n_pressure_drops++;
@@ -3554,10 +3569,12 @@ void vk_texture_release(const tex_t *t) {
     if (sinfo)
         for (int id = bucket_head[agen_idx(k.addr)]; id >= 0; id = slot_next[id]) {
             TexSlot *s = &tslots[id];
-            if (s->finalized || (uintptr_t)s->t.mem != k.addr || s->t.serial != t->serial) continue;
+            if (s->finalized || (uintptr_t)s->t.mem != k.addr) continue;
             TexKey sk;
             make_key(&s->t, &sk);
-            if (!memcmp(&sk, &k, sizeof k)) s->finalized = 1, s->ce = NULL, changed = 1;
+            if (memcmp(&sk, &k, sizeof k)) continue;
+            if (s->t.serial != t->serial) n_fin_other++;
+            else s->finalized = 1, s->ce = NULL, changed = 1;
         }
     if (e && !e->released) {
         mark_released(e);
@@ -3956,12 +3973,13 @@ void vk_texture_new_submit(void) {
         rt_log("perf: frame %llu: texture origins: released entries dropped past RELEASED_MAX %llu, replaced by another "
                "descriptor at their address %llu; entries the CPU does not write made without content at an address it "
                "can see: on their own %llu, over a released entry %llu, over a live one %llu; marked slots that met an "
-               "entry without content %llu, that show no entry %llu",
+               "entry without content %llu, that show no entry %llu; slots a finalize left current, registered by another texture "
+               "of the same parameters at its storage (a streamed terrain heightmap) %llu",
                (unsigned long long)f * 60, (unsigned long long)n_drop_by[DROP_MAX], (unsigned long long)n_drop_by[DROP_REPLACED],
                (unsigned long long)n_cpu_empty[0], (unsigned long long)n_cpu_empty[1], (unsigned long long)n_cpu_empty[2],
-               (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none);
+               (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none, (unsigned long long)n_fin_other);
         memset(n_drop_by, 0, sizeof n_drop_by), memset(n_cpu_empty, 0, sizeof n_cpu_empty);
-        n_mark_empty = n_mark_none = 0;
+        n_mark_empty = n_mark_none = n_fin_other = 0;
         if (split_mode > 0)
             rt_log("perf: frame %llu: split fill: entries the CPU does not write started with their storage's bytes: "
                    "copied from the released entry they replaced %llu, filled from storage %llu (%.1f MiB, %.2f ms), "
