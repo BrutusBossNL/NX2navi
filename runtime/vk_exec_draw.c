@@ -1778,7 +1778,8 @@ static struct {
     int unres_more;                    // it left a lookup for the creation budget: the next submission walks again
     PoolSlot *ps;                      // [id]
     uint8_t *unres_on;                 // [id]: its last fill resolved to no entry (POOL_FAST: retried each submission)
-    int *unres, nunres, cunres;        // those slots (some may have left: unres_on clear)
+    uint8_t *unres_in;                 // [id]: the slot is in unres (once: pool_unres never lists it a second time)
+    int *unres, nunres, cunres;        // those slots (some may have left: unres_on clear, dropped by the next walk)
     uint32_t *ent;                     // [id]: the entry its last fill resolved to, held there (pool_hold); 0: none
     uint64_t dirty_pos;                // vk_texture_dirty_slots_locked position (0: the next sync walks every slot)
     int ready, uab, sealed;            // sealed: a part of the current submission already reads sets[cur]
@@ -1859,8 +1860,9 @@ static VkDescriptorSetLayout pool_layout_make(void) {
     PL.samp = calloc(VK_POOL_SAMP, sizeof *PL.samp);
     PL.ps = calloc(VK_POOL_TEX, sizeof *PL.ps);
     PL.unres_on = calloc(VK_POOL_TEX, 1);
+    PL.unres_in = calloc(VK_POOL_TEX, 1);
     PL.ent = calloc(VK_POOL_TEX, sizeof *PL.ent);
-    if (!PL.tok || !PL.view || !PL.samp || !PL.ps || !PL.unres_on || !PL.ent) rt_fatal("vk: out of memory");
+    if (!PL.tok || !PL.view || !PL.samp || !PL.ps || !PL.unres_on || !PL.unres_in || !PL.ent) rt_fatal("vk: out of memory");
     rt_log("vk: bindless texture pools: %d kinds x %d textures, %d samplers, %s, %d sets (one per submission in turn)%s",
            VK_POOL_KINDS, VK_POOL_TEX, VK_POOL_SAMP,
            PL.uab ? "update after bind" : "no update-after-bind on this GPU (entries written while bound are undefined)", PL.nsets,
@@ -2227,13 +2229,18 @@ static void pool_hold(uint32_t id, uint32_t ent) {
 
 // Slot id's last fill resolved to no entry (got 0) or to one: the slots without one are looked up again each
 // submission (pool_sync_entries), as the walk over every slot did: an entry their storage could not have then may be
-// made now, and its address generation then refills them.
+// made now, and its address generation then refills them. A slot that resolved keeps its place in the list until the
+// next walk drops it; when it stops resolving before that walk, that place serves again. Listing it a second time
+// made the list grow by one entry per such change (160,000 entries for the 32,768 slots after a minute in the Market),
+// and every 8th submission's walk over it then held the texture lock for 15 to 30 ms.
 static void pool_unres(uint32_t id, int got) {
     if (got || PL.unres_on[id]) {
         if (got) PL.unres_on[id] = 0;
         return;
     }
     PL.unres_on[id] = 1;
+    if (PL.unres_in[id]) return;
+    PL.unres_in[id] = 1;
     if (PL.nunres == PL.cunres) {
         int n = PL.cunres ? PL.cunres * 2 : 1024;
         int *p = realloc(PL.unres, sizeof *p * (size_t)n);
@@ -2501,6 +2508,7 @@ static void pool_sync_entries(VkExec *ex) {
                 int r = t && t == PL.tok[id] ? vk_texture_slot_retry_locked(id) : -1;
                 if (r) {   // resolves now (an entry it made changes its token: refilled), was refilled since, or
                     PL.unres_on[id] = 0;   // resolves to none until its token changes (the refill lists it again)
+                    PL.unres_in[id] = 0;
                     PL.unres[i] = PL.unres[--PL.nunres];
                     continue;
                 }
