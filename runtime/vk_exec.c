@@ -43,7 +43,9 @@ typedef struct {
 
 static VkExec X;
 static int x_ready;
-static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_exec_inline_begin)
+// The replay state this thread records with now (inside vk_exec_record, or a test's vk_exec_probe_inline), NULL when
+// it records none: vk_exec_inline_begin hands out its command buffer.
+static _Thread_local VkExec *x_cur;
 
 // ---- NX2NAVI_TRACE=gfx frame counters
 
@@ -51,7 +53,7 @@ VkExecFrame vk_exec_frame;
 static struct { const uint8_t *mem; uint32_t w, h, fmt, n; } fw[64];   // textures written this frame
 static int nfw;
 
-uint64_t vk_exec_recording_fence(void) { return x_here ? X.fence : 0; }
+uint64_t vk_exec_recording_fence(void) { return x_cur ? x_cur->fence : 0; }
 
 void vk_exec_frame_written(const tex_t *t) {
     if (!(rt_trace & RT_TRACE_GFX) || !t) return;
@@ -772,22 +774,23 @@ void vk_exec_pass_end(VkExec *ex) {
 }
 
 VkCommandBuffer vk_exec_inline_begin(int *reopen) {
-    VkExec *ex = &X;
+    VkExec *ex = x_cur;
     *reopen = 0;
-    if (!x_here || !ex->cb) return VK_NULL_HANDLE;
+    if (!ex || !ex->cb) return VK_NULL_HANDLE;
     *reopen = ex->in_pass;
     vk_exec_barrier(ex);   // ends the pass; feedback-layout targets go back to GENERAL
     return ex->cb;
 }
 
 void vk_exec_inline_end(int reopen) {
-    X.recorded++;
-    if (reopen) vk_exec_pass_begin(&X);
+    VkExec *ex = x_cur;   // set: the caller's vk_exec_inline_begin handed out its command buffer
+    ex->recorded++;
+    if (reopen) vk_exec_pass_begin(ex);
 }
 
 void vk_exec_probe_inline(VkCommandBuffer cb, uint64_t fence) {
     X.cb = cb, X.fence = fence;
-    x_here = cb != VK_NULL_HANDLE;
+    x_cur = cb != VK_NULL_HANDLE ? &X : NULL;
 }
 
 typedef struct { VkBuffer b; VmaAllocation a; } InlineBuf;
@@ -804,7 +807,7 @@ VkBuffer vk_exec_inline_buffer(VkDeviceSize size) {
                              .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     if (!t || vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &t->b, &t->a, NULL) != VK_SUCCESS) { free(t); return VK_NULL_HANDLE; }
-    vk_completion_add(X.fence, free_inline_buf, t);
+    vk_completion_add(x_cur->fence, free_inline_buf, t);   // inside vk_exec_inline_begin and _end
     return t->b;
 }
 
@@ -1701,7 +1704,7 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     split_draws = part_start = 0;
     split_at = split_n < 0 ? 0 : split_n ? split_n : INT_MAX;   // 0 until maybe_split reads the settings
     part_t0 = kern_now_ns();
-    x_here = 1;
+    x_cur = ex;
     int evo = evo_enabled() && gfx_submit_queue;
     int slot = evo ? evq_slot(gfx_submit_queue) : -1;
     if (evo && slot < 0) evo = 0;
@@ -1745,7 +1748,7 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
         evo_queue = 0;
     }
     vk_exec_pass_end(ex);
-    x_here = 0;
+    x_cur = NULL;
     vk_exec_event_sync(0);
     if (ex->recorded) vk_exec_barrier(ex), vk_exec_pool_marks(ex);   // later submissions see this one's writes
     // NX2NAVI_WB_SPLIT: the write-backs in a part of their own, after one that signals the executed timeline
