@@ -3228,7 +3228,7 @@ class FileCheckTest(Tmp):
 # PROMPT_TOOLS a new value (every install then draws its prompts again) and record both here; if it cannot, record
 # only the new digests.
 PROMPT_LOGIC = ('ad59f2c4533f6ea2630b916ef5f3695f72daffe9b2b7663eea4168a4f08e4249',
-                {'pad_prompts.py': '1b008475289e0dabfefb8c61969c719c6faa79bbfc8504593e5fe1e79d4d4d33',
+                {'pad_prompts.py': '780c246b5fde7a0e9dbf3f59ad16372e1737592add6f2f2d9825bee6df4e296f',
                  'prompt_art.py': '87edacabcddb4952f5862373815d7d46a05c67f350e0734025ae4d2f83b12038',
                  'button_icons.py': '3804e371a030965bc9eb4226f333b611651f25efaa67ee523b404edc3257818a'})
 
