@@ -700,6 +700,9 @@ extern int vk_sub_in_frame;   // replay: the submission being recorded is the fr
 // Runs fn(arg) on the completion thread once fence is done on the GPU (event writes, counter reports, sync state).
 // Callbacks run in the order they were added, after those of earlier values; a value already done runs at once there.
 void vk_completion_add(uint64_t fence, void (*fn)(void *), void *arg);
+// The same for a side effect the game's CPU reads (an occlusion count, a counter report, an event value): run before
+// the others, and by the wait after a frame's first submission itself (vk_sync.c "the executed timeline").
+void vk_completion_add_result(uint64_t fence, void (*fn)(void *), void *arg);
 // gfx_vulkan_backend (vk_backend.c): presents go to a present thread and run after the submissions made before them.
 void rdoc_init(void);                     // runtime/rdoc.c: NX2NAVI_RDOC debug capture; before vkCreateInstance
 int rdoc_active(void);

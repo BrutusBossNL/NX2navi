@@ -396,7 +396,7 @@ static void oq_segment(VkExec *ex, uint64_t addr, int reset) {
     s->addr = addr, s->seq = report_seq, s->reset = reset, s->lost = oq_lost, s->n = oq_nseg;
     memcpy(s->q, oq_seg, sizeof *s->q * oq_nseg);
     oq_nseg = 0, oq_lost = 0;
-    vk_completion_add(ex->fence, oq_cb, s);
+    vk_completion_add_result(ex->fence, oq_cb, s);
 }
 
 static void reset_counter(VkExec *ex, const p_reset_counter *p) {
@@ -601,7 +601,7 @@ static void signal_event(VkExec *ex, const p_signal_event *p) {
     EventWrite *e = malloc(sizeof *e);
     if (!e) rt_fatal("vk: out of memory");
     *e = (EventWrite){p->val, p->mode, p->value};
-    vk_completion_add(ex->fence, event_cb, e);
+    vk_completion_add_result(ex->fence, event_cb, e);
 }
 
 static void report_counter(VkExec *ex, const p_report_counter *p) {
@@ -620,7 +620,7 @@ static void report_counter(VkExec *ex, const p_report_counter *p) {
         CounterWrite *a = malloc(sizeof *a);
         if (!a) rt_fatal("vk: out of memory");
         *a = (CounterWrite){p->addr, report_seq};
-        vk_completion_add(ex->fence, counter_cb, a);
+        vk_completion_add_result(ex->fence, counter_cb, a);
     }
     Pending *e = pending_slot(p->addr, 1);
     if (e) e->seq = report_seq, e->frame = cond_frame, e->unknown = samples, e->type = (int)p->type;

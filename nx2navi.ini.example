@@ -864,12 +864,13 @@
 # are made inaccessible until their first read or write, which is logged with its instruction ("mem: write-back
 # probe"). The bytes are there all along; the probe only watches, at the cost of the faults it takes.
 # wb_probe = 0
-# 0: after each frame's first GPU submission the game waits until the video card has run it and everything before it
-# has reached the game's memory, the last frame's visibility results among them. 1: the wait ends as soon as the card
-# has run the submission, and what the card wrote goes back to the game's memory in a submission of its own. That is
-# about 0.7 ms less of every frame in the open (6 % at 85 frames a second), but the game then reads visibility
-# results that may be a frame old, and things near the camera can come and go from frame to frame. With shadow
-# storage (Linux, Wine) 1 changes nothing; 2 forces it there as well, for tests.
+# The wait after each frame's first GPU submission. 1 (default): it ends when the video card has run the submission
+# and the results the game reads next are in its memory (the last frame's visibility counts above all); what the card
+# wrote besides goes back to the game's memory in a submission of its own, behind the wait. 0: the game waits until
+# everything before it has reached its memory, about 0.7 ms more of every frame in the open. 3: the wait ends as soon
+# as the card has run the submission, without the visibility counts: the game then reads counts that may be a frame
+# old, and lit things near the camera can lose their light for single frames. With shadow storage (Linux, Wine) 1
+# and 3 change nothing; 2 forces 1 there as well, for tests.
 # wb_split = 1
 # 1: what the game's shaders write into its memory is copied back from the video card once, and after that only when
 # the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field), for about a third more frames
