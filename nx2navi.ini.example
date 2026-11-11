@@ -866,6 +866,14 @@
 # first one, so their draw pass is not ended and begun again at each of them (about 40 passes fewer a frame in a
 # village). 0: each such draw ends its pass and prepares its own count, as before.
 # mesh_ahead = 1
+# Graphics cards without mesh shaders (GTX 10 series, RX 500 and 5000 series, many integrated ones): the game's mesh
+# draws, most of the world, are computed in compute passes and drawn as ordinary triangles. auto (default) does that
+# only on such a card; 1 does it on every card (for testing: it is slower than mesh shaders); 0 never, and such a
+# card then draws no world.
+# mesh_fallback = auto
+# Video memory in MB for what those compute passes hand to the draws. A draw that needs more loses the geometry that
+# does not fit, and the log says so.
+# mesh_fallback_mb = 128
 # Windows, 1 (experimental): the game's heap is committed a 64 KiB run at a time where it is first used, instead of
 # all of it when the game sizes it. Windows counts committed memory against RAM plus the page file whether it is used
 # or not, and in Castle Town after Hyrule Field about 3.4 of the heap's 6.8 GiB had never been used. 0: committed up
