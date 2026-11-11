@@ -59,6 +59,20 @@ site osolver main 38afd20 1e380001 1e280001
 # manager, last read at main+0xa682ec, and every path from the site reaches a call before it reads x13 again.
 site opickup main a68300 1e38000c 1e38000c 5ac0118d 53057dad 0b0d018c   # fcvtzs w12, s0; clz w13, w12; lsr w13, w13, #5; add w12, w12, w13
 
+# Mouse camera: the camera's stick input update (main+0x37c300) puts the right stick through a radial dead zone of
+# 0.005, scales the radius to one, clamps it and raises it to StickExponent (2, the default of
+# game__component__PlayerCameraParam); then come the reset timer at +0x5e0 (the stick reads zero while it runs), the X/Y
+# inversion (w21 bits 1 and 2) and the idle test (flags +0x530 bit 4: the processed stick under 10%). At 37c45c s1 and
+# s0 hold the processed x and y for the stores at +0x538 and +0x53c: the host callback performs the displaced store of
+# s1 and adds the raw mouse counts to both (runtime/mouse_direct.c camera_input_oot), so the mouse never becomes a stick
+# value and meets no dead zone or curve. At 37c4f0, the displaced ldp d9, d8, [sp, #0x10] before the update's last
+# `str w8, [x20, #0x530]`, w8 holds the flags: a second callback clears the idle bit for an update the mouse moved in
+# (camera_activity_oot). x30 is the function's own saved one at both sites. The callbacks' addresses are page +0xfd0
+# and +0xfc0; the page is main+0x4ea0000 on this build.
+set mouse_direct NX2NAVI_MOUSE_DIRECT_PATCH 1
+site mouse_direct main 37c45c bd053a81 952c92dd   # str s1, [x20, #0x538] -> bl page+0xfd0
+site mouse_direct main 37c4f0 6d4123e9 952c92b4   # ldp d9, d8, [sp, #0x10] -> bl page+0xfc0
+
 # Game image: the graphics setup (main+0x1202ce0) fills the renderer's configuration with the size of the picture the
 # game presents, 2560x1440 at every console mode (config +0x14, copied to renderer +0x9c, which main+0x346be50 reads
 # for the main render target set, main+0xf49040), and the display settings object (main+0x31f3890) stores the same size

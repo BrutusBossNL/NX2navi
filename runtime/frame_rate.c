@@ -434,6 +434,16 @@ static double ocarina_step(double dt) {
     return step;
 }
 
+// The 60 Hz frames the game steps at each update where the set ostep gives them (Ocarina); 1 elsewhere, the game's own
+// nominal frame. The mouse camera divides by it (mouse_direct.c): the game multiplies camera input by this step.
+float frame_step_frames(void) {
+    if (!ostep_page) return 1.0f;
+    uint32_t bits = atomic_load_explicit(ostep_page, memory_order_acquire);
+    float f;
+    memcpy(&f, &bits, 4);
+    return f > 0 ? f : 1.0f;
+}
+
 static void ocarina_step_write(double dt) {
     static int on = -1;
     if (on < 0) {

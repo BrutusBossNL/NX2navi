@@ -343,6 +343,13 @@ A change to the step Ocarina is given each frame (`runtime/frame_rate.c` `ocarin
 display times: a held 60 fps limit gives exactly one frame every frame, a 240 fps limit never less than a quarter
 frame, uneven frame times one steady step, and game time follows the clock. No game files.
 
+A change to the mouse camera (`runtime/mouse_direct.c`, the mouse path of `runtime/input.c`, the set `mouse_direct` of
+`recomp/patches-v111.txt` or `patches-v143.txt`) passes `python tests\mouse_direct_check.py --cc <clang> --deps
+<ucrt64>\include`, which builds `mouse_direct.c`, and `input.c` with `--deps`, with the rest of the runtime stubbed and
+calls the camera hooks as their patch sites do, for each game version: the registers a site hands over and gets back,
+the same turn for the same mouse distance at every frame rate and stick camera speed, a single count, the idle bit, the
+pause after a camera reset, the capture and the mode, and scripted mouse counts. No game files.
+
 A change to which waits a signalled event or an ended thread wakes (`runtime/kernel.c` `wake_sync_waiters`, the
 `WaitSynchronization` service) passes `python tests\sync_wake_check.py`, which builds `kernel.c` with the platform
 layer and the rest of the runtime stubbed and runs guest threads whose entries are host functions: a signal wakes the
