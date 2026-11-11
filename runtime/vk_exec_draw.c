@@ -29,6 +29,8 @@
 #endif
 #include "vk_exec.h"
 #include "vk_gpa.h"
+#include "mesh_fb.h"
+#include "vk_mesh_fb.h"
 #include "platform/platform.h"
 #include "vk_dlaa.h"
 
@@ -446,7 +448,12 @@ static void twins_release(VkCtx *c);
 
 // Releases the stand-ins and the depth twins. The device must be idle; the game path leaves them to process exit like
 // the pipelines.
+static void mesh_ring_release(VkCtx *c);
+static void pool_marks_release(VkCtx *c);
+
 void vk_exec_draw_shutdown(void) {
+    vk_meshfb_shutdown();
+    if (vk_ctx()) mesh_ring_release(vk_ctx()), pool_marks_release(vk_ctx());   // made without the stand-ins below too
     if (!Z.ready) return;
     VkCtx *c = vk_ctx();
     twins_release(c);
@@ -948,6 +955,13 @@ static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, G
 // and *pending = 1 says the wait ended first.
 static int sf_mvprev;   // shader_for asks for the vertex shader's last-frame variant (per-object motion)
 
+// Probes only (mesh_fb_probe.c): the shader of the program stage whose control section is ctl, in place of a
+// translation. The probes build their programs from modules made here, which no translator has an input for.
+static struct { const uint8_t *ctl; const GfxShader *s; } probe_sh[16];
+static int n_probe_sh;
+void vk_exec_probe_shader(const uint8_t *ctl, const GfxShader *s) {
+    if (n_probe_sh < 16) probe_sh[n_probe_sh].ctl = ctl, probe_sh[n_probe_sh].s = s, n_probe_sh++;
+}
 static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pending, uint32_t await_ms) {
     const uint8_t *ctl, *code;
     uint32_t len;
@@ -955,6 +969,8 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     if (pending) *pending = 0;
     if (!ex->prog || !find_stage(ex->prog, st, &ctl, &code, &len)) return NULL;
     *present = 1;
+    for (int i = 0; i < n_probe_sh; i++)
+        if (probe_sh[i].ctl == ctl) return probe_sh[i].s;
     GfxShaderAnswers a;
     uint64_t serial = ex->prog->serial;
     answers_for(ex, st, ctl, slot_mask_of(serial, st), &a);
@@ -994,7 +1010,12 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
 
 // ---- descriptors
 
+// The mesh fallback (below, "mesh fallback") runs a program's task and mesh stages as compute modules: while it binds
+// one's resources, a compute module's bindings are those of this NVN stage (6 task, 7 mesh), not of the compute stage.
+static int mfb_stage;
+
 static int nvn_stage_of(int gfx_stage) {
+    if (gfx_stage == GFX_STAGE_CS && mfb_stage) return mfb_stage;
     return gfx_stage == GFX_STAGE_VS ? NVN_STAGE_VS : gfx_stage == GFX_STAGE_FS ? NVN_STAGE_FS
          : gfx_stage == GFX_STAGE_TS ? NVN_STAGE_TASK : gfx_stage == GFX_STAGE_MS ? NVN_STAGE_MESH : NVN_STAGE_CS;
 }
@@ -1373,6 +1394,8 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
         VkDescriptorBufferInfo t = vk_gpa_info();
         return t.buffer ? t : (VkDescriptorBufferInfo){Z.zbuf, 0, VK_WHOLE_SIZE};
     }
+    // The mesh fallback's own buffers (mesh_fb.c): no guest memory behind them
+    if (r->cbuf_slot >= MESHFB_CB_TASK && r->cbuf_slot <= MESHFB_CB_LIST) return vk_meshfb_buffer(r->cbuf_slot);
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     uint64_t max = LIM.sbo_max, align = LIM.sbo_align;
     VkDescriptorBufferInfo bi;
@@ -1906,6 +1929,15 @@ static void pool_marks_make(void) {
         vkUpdateDescriptorSets(c->device, 1, &w, 0, NULL);
     }
     __atomic_store_n(&PL.marks_ready, 1, __ATOMIC_RELEASE);   // the recording thread reads the rest after this
+}
+
+static void pool_marks_release(VkCtx *c) {   // vk_exec_draw_shutdown: a probe ends with the device idle
+    if (!PL.marks) return;
+    __atomic_store_n(&PL.marks_ready, 0, __ATOMIC_RELEASE);
+    vmaDestroyBuffer(c->vma, PL.marks, PL.marks_alloc);
+    for (int i = 0; i < MARKS_RB; i++)
+        if (PL.rb[i].buf) vmaDestroyBuffer(c->vma, PL.rb[i].buf, PL.rb[i].alloc), PL.rb[i].buf = VK_NULL_HANDLE;
+    PL.marks = VK_NULL_HANDLE;
 }
 
 void vk_exec_pool_marks(VkExec *ex) {
@@ -3121,7 +3153,7 @@ static int pb_key(const VkExec *ex, const VkPipeBinding *b, uint32_t k, uint64_t
         return 1;   // slot 1: the program's constants (pb_globals); others: the zero buffer
     }
     if (b->kind == GFX_RES_SSBO) {
-        if ((r->flags & 1) || r->ptr || r->cbuf_slot == VK_GPA_CB_SLOT) return 0;
+        if ((r->flags & 1) || r->ptr || r->cbuf_slot >= VK_GPA_CB_SLOT) return 0;   // the table, the mesh fallback's buffers
         int ubo, slot = ssbo_slot(r, st, &ubo);
         if (slot < 0 || slot >= 16) return 0;
         const p_bind_buf *p = ubo ? &ex->ubo[st][slot] : &ex->ssbo[st][slot];
@@ -3860,8 +3892,13 @@ static void prog_lead(const prog_t *p, int mesh) {
 }
 
 // mesh: a mesh draw (op_draw_mesh): the program's mesh and task stages stand in for the vertex stage, and nothing
-// vertex-related (vertex buffers, motion vector bookkeeping of vertex shaders) is bound or noted.
+// vertex-related (vertex buffers, motion vector bookkeeping of vertex shaders) is bound or noted. 2: a mesh draw of
+// the mesh fallback (mfb_draw): the vertex stage is mfb_cur_vs, in an ordinary pipeline without vertex input.
+static const GfxShader *mfb_cur_vs;
+
 static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) {
+    int fb = mesh == 2;   // from here on mesh says what the draw is, and !fb that its pipeline is a mesh pipeline
+    mesh = mesh != 0;
     if (ex->render_disabled) return vk_cond_draws_skip += ex->has_render_cond, draw_skipped(ex, mesh, SK_DISABLED);
     cb_res(ex);
     dummies_init();
@@ -3892,8 +3929,9 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         }
     } else {
         SM.valid = 0;
-        vs = shader_for(ex, vst, &has_vs, &vs_wait, 0);
-        if (mesh) ts = shader_for(ex, NVN_STAGE_TASK, &has_ts, &ts_wait, 0);
+        if (fb) vs = mfb_cur_vs, has_vs = 1;
+        else vs = shader_for(ex, vst, &has_vs, &vs_wait, 0);
+        if (mesh && !fb) ts = shader_for(ex, NVN_STAGE_TASK, &has_ts, &ts_wait, 0);
         fs = shader_for(ex, NVN_STAGE_FS, &has_fs, &fs_wait, 0);
         if (memo && vs && !vs_wait && !fs_wait && (!has_fs || fs))
             memo_key(ex, gen, &SM.k), SM.vs = vs, SM.fs = fs, SM.has_fs = has_fs, SM.valid = 1;
@@ -3927,6 +3965,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     VkPipeState s = ex->pipe;
     s.vs = vs, s.fs = fs, s.ts = ts;
     if (mesh) foliage_shadow_cull(ex, &s);
+    if (fb) memset(s.vattr, 0, sizeof s.vattr), memset(s.vstream, 0, sizeof s.vstream);   // whatever the last vertex draw left
     s.feedback = (uint8_t)((fbl & 0xff ? 1 : 0) | (fbl & 0x100 ? 2 : 0));
     s.prim = (uint8_t)prim;
     s.depth_minus_w = (uint8_t)(nvn_depth_minus_w() != 0);
@@ -3946,7 +3985,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     int fullscreen = 0;        // the wait is a full-screen draw's
     if (oneshot > 0 && oneshot_budget_on()) {
         budget = frame_wait();
-        wait_ms = oneshot_ms(budget, mesh, &s);
+        wait_ms = oneshot_ms(budget, mesh && !fb, &s);
         if (wait_ms) t0 = kern_now_ns();
     } else if (oneshot > 0) {
         wait_ms = ONESHOT_WAIT_MS;
@@ -3984,7 +4023,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             vk_exec_ahead(ex);
             // A mesh pipeline that is known to be compiling gets no fast link, so the few milliseconds a draw waits
             // for one are lost in every frame that meets it until the compile ends, 0.2 to 1.1 s later (MESH_WAIT_MS).
-            if (wait_ms && linking && mesh && vk_pipeline_building_ms(&s) > MESH_WAIT_MS) wait_ms = 0;
+            if (wait_ms && linking && mesh && !fb && vk_pipeline_building_ms(&s) > MESH_WAIT_MS) wait_ms = 0;
             if (wait_ms) p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
         }
         if (t0 && budget) {
@@ -3999,7 +4038,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             if (!w0) w0 = kern_now_ns();
             if (oneshot_budget_on()) {
                 uint64_t *pool = frame_wait(), b0 = kern_now_ns();
-                p = vk_pipeline_graphics_async(&s, &info, &pending, oneshot_ms(pool, mesh, &s));
+                p = vk_pipeline_graphics_async(&s, &info, &pending, oneshot_ms(pool, mesh && !fb, &s));
                 pool_charge(pool, b0);
             } else {
                 p = vk_pipeline_graphics_async(&s, &info, &pending, ONESHOT_WAIT_MS);
@@ -4045,7 +4084,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             delta = cfg_bool("NX2NAVI_DYN_DELTA");
             if (!delta) rt_log("vk_exec: every dynamic state recorded after each pipeline bind (NX2NAVI_DYN_DELTA=0)");
         }
-        if (delta) vk_exec_frame.dyn_calls += (uint64_t)vk_pipeline_set_dynamic_delta(ex->cb, &s, &B.dyn, mesh,
+        if (delta) vk_exec_frame.dyn_calls += (uint64_t)vk_pipeline_set_dynamic_delta(ex->cb, &s, &B.dyn, mesh && !fb,
                                                                                        &vk_exec_frame.dyn_left);
         else vk_pipeline_set_dynamic(ex->cb, &s);
         ex->recorded++;
@@ -4068,7 +4107,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     if (fbl & ex->fb_dirty) feedback_barrier(ex);
     feedback_written(ex, &s, fbl);
     if (!mesh) bind_vertex_buffers(ex);
-    if (vk_dump_armed) vk_dump_draw(ex, &s, p, info, mesh);
+    if (vk_dump_armed) vk_dump_draw(ex, &s, p, info, mesh && !fb);
     if (vk_hdr_track) vk_hdr_draw(ex, info);
     vk_exec_oq_draw(ex);
     DRS.issued[mesh]++;
@@ -4951,12 +4990,266 @@ static void mesh_shading_rate(VkExec *ex) {
     ex->recorded++;
 }
 
+// ---- mesh fallback: a mesh draw on a device without VK_EXT_mesh_shader (mesh_fallback, vk_device.c), or on any
+// device with mesh_fallback = 1. The program's task and mesh stages run as compute dispatches that write the
+// fallback's buffers, and an ordinary draw reads them (mesh_fb.c makes the modules, vk_mesh_fb.c holds the buffers):
+//   the draw's record        its workgroup count, copied on the GPU when the game's own record holds it
+//   [task dispatch           the task module, with the task stage's bindings
+//    scan                    lists the mesh workgroups the tasks started and counts them into the record]
+//   mesh dispatch            the mesh module, with the mesh stage's bindings
+//   draw                     one instance per mesh workgroup, with the generated vertex stage and the program's
+//                            fragment stage, the instance count from the record
+// Every step reads what the one before wrote, so a full barrier stands between them, and the dispatches cannot be
+// recorded inside a pass: each such draw ends the open pass, and the next draw begins it again. The buffers are
+// reused by every draw (vk_mesh_fb.c), which the barrier before a draw's first dispatch makes safe: the previous
+// draw's vertex stage has read them by then.
+//
+// The modules of a program are made once, on a thread of their own, with their compute pipelines (a mesh program of
+// the game is up to 900,000 SPIR-V words, and its pipeline compiles for as long as the mesh pipeline it replaces):
+// until they are ready the program's draws are skipped, like draws whose pipeline is being built. Without background
+// pipeline builds (the probes) they are made at the draw.
+typedef struct MfbCs {
+    const GfxShader *ms, *ts;              // the key: the translated mesh and task shaders (ts NULL: none)
+    MeshFbInfo mi, ti;
+    volatile int32_t state;                // 0 queued or being made, 1 ready, -1 failed
+    const GfxShader *cs_mesh, *cs_task;    // the compute modules (gfx_shader_own)
+    struct MfbCs *next;                    // the worker's queue
+} MfbCs;
+typedef struct { const GfxShader *ms; uint32_t mask; uint8_t type[32]; const GfxShader *vs; } MfbVs;
+#define MFB_TAB 4096
+static MfbCs *mfb_cs_tab[MFB_TAB];
+static MfbVs mfb_vs_tab[MFB_TAB];
+static struct {
+    PlatMutex lock;
+    PlatCond wake;
+    PlatThread *th;
+    MfbCs *head, *tail;
+    uint64_t made, failed, pending_skips;
+} MFB = {.lock = PLAT_MUTEX_INIT};
+
+static uint32_t mfb_binding_base(const GfxShader *s) {   // one past the highest binding the module declares
+    uint64_t n;
+    const uint32_t *w = gfx_shader_spirv(s, &n);
+    uint32_t top = 0;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len) break;
+        if (op == 71 && len == 4 && w[i + 2] == 33 && w[i + 3] > top) top = w[i + 3];   // OpDecorate Binding
+        i += len;
+    }
+    return top + 1;
+}
+
+// The compute module of stage (6 task, 7 mesh) of e, as a shader of the runtime's own with the stage's resources and
+// the fallback's buffers.
+static const GfxShader *mfb_module(const MfbCs *e, int stage, char *err, size_t cap) {
+    const GfxShader *src = stage == 6 ? e->ts : e->ms;
+    uint64_t n, on = 0;
+    const uint32_t *w = gfx_shader_spirv(src, &n);
+    uint32_t base = mfb_binding_base(src);
+    uint32_t *out = stage == 6 ? meshfb_task_cs(w, n, &e->ti, base, &on, err, cap)
+                               : meshfb_mesh_cs(w, n, &e->mi, base, e->ti.payload_bytes / 4, &on, err, cap);
+    if (!out) return NULL;
+    static const int task_slots[1] = {MESHFB_CB_TASK}, mesh_slots[3] = {MESHFB_CB_TASK, MESHFB_CB_MESH, MESHFB_CB_LIST};
+    char *res = stage == 6 ? meshfb_res_json(gfx_shader_res_json(src), base, task_slots, 1)
+              : e->mi.has_task ? meshfb_res_json(gfx_shader_res_json(src), base, mesh_slots, 3)
+                               : meshfb_res_json(gfx_shader_res_json(src), base + 1, mesh_slots + 1, 1);
+    const GfxShader *s = res ? gfx_shader_own(out, on, res) : NULL;
+    if (!s) snprintf(err, cap, "the converted module or its reflection is malformed");
+    free(out), free(res);
+    return s;
+}
+
+static void mfb_make(MfbCs *e) {
+    char err[200] = "";
+    const VkPipeInfo *info;
+    int ok = (e->cs_mesh = mfb_module(e, 7, err, sizeof err)) != NULL;
+    if (ok && e->ts) ok = (e->cs_task = mfb_module(e, 6, err, sizeof err)) != NULL;
+    if (ok && !vk_pipeline_compute(e->cs_mesh, &info)) ok = 0, snprintf(err, sizeof err, "the mesh stage's compute pipeline failed");
+    if (ok && e->ts && !vk_pipeline_compute(e->cs_task, &info)) ok = 0, snprintf(err, sizeof err, "the task stage's compute pipeline failed");
+    plat_mutex_lock(&MFB.lock);
+    uint64_t nth = ok ? ++MFB.made : ++MFB.failed;
+    plat_mutex_unlock(&MFB.lock);
+    if (!ok && (nth <= 8 || !(nth & (nth - 1))))
+        rt_log("vk: mesh fallback: a program's modules could not be made (%s): its draws are skipped (%llu such programs)", err,
+               (unsigned long long)nth);
+    __atomic_store_n(&e->state, ok ? 1 : -1, __ATOMIC_RELEASE);
+}
+
+static void mfb_worker(void *arg) {
+    (void)arg;
+    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);   // as the pipeline workers' optimised builds: the game's threads go first
+    for (;;) {
+        plat_mutex_lock(&MFB.lock);
+        while (!MFB.head) plat_cond_wait(&MFB.wake, &MFB.lock);
+        MfbCs *e = MFB.head;
+        if (!(MFB.head = e->next)) MFB.tail = NULL;
+        plat_mutex_unlock(&MFB.lock);
+        mfb_make(e);
+    }
+}
+
+// The entry of (ms, ts), made and queued at its first draw; NULL (logged) when the program's layout is not carried.
+static MfbCs *mfb_cs_get(VkExec *ex, const GfxShader *ms, const GfxShader *ts) {
+    uint32_t i = (uint32_t)((((uintptr_t)ms >> 4) * 0x9e3779b1u) ^ (((uintptr_t)ts >> 4) * 0x85ebca6bu)) & (MFB_TAB - 1);
+    for (uint32_t k = 0; k < MFB_TAB; k++, i = (i + 1) & (MFB_TAB - 1)) {
+        MfbCs *e = mfb_cs_tab[i];
+        if (e && (e->ms != ms || e->ts != ts)) continue;
+        if (e) return e;
+        const uint8_t *ctl, *code;
+        uint32_t len;
+        char err[160] = "";
+        e = calloc(1, sizeof *e);
+        if (!e) rt_fatal("vk: out of memory");
+        e->ms = ms, e->ts = ts, e->state = -1;
+        mfb_cs_tab[i] = e;   // a program that is refused is not looked at again
+        int ok = find_stage_scan(ex->prog, NVN_STAGE_MESH, &ctl, &code, &len) && len >= 0x80 &&
+                 meshfb_info(ctl, code, 7, &e->mi, err, sizeof err);
+        if (ok && ts) ok = find_stage_scan(ex->prog, NVN_STAGE_TASK, &ctl, &code, &len) && meshfb_info(ctl, code, 6, &e->ti, err, sizeof err);
+        if (ok && e->mi.has_task != (ts != NULL)) ok = 0, snprintf(err, sizeof err, "the mesh stage %s a task stage and the program has %s",
+                                                                   e->mi.has_task ? "expects" : "does not expect", ts ? "one" : "none");
+        if (!ok) {
+            warn_once(W_MESH, "mesh fallback: a program is not carried (%s): its draws are skipped", *err ? err : "no stage data");
+            return e;
+        }
+        e->state = 0;
+        if (!vk_pipeline_async_on()) {
+            mfb_make(e);
+            return e;
+        }
+        plat_mutex_lock(&MFB.lock);
+        if (!MFB.th) plat_cond_init(&MFB.wake), MFB.th = plat_thread_new(mfb_worker, NULL, "mesh fallback");
+        if (MFB.tail) MFB.tail->next = e;
+        else MFB.head = e;
+        MFB.tail = e;
+        plat_cond_signal(&MFB.wake);
+        plat_mutex_unlock(&MFB.lock);
+        return e;
+    }
+    rt_fatal("vk: mesh fallback: more than %d task and mesh program pairs", MFB_TAB);
+}
+
+// The vertex stage that draws e's mesh buffer slots for fragment shader fs: an output for every input fs reads, in
+// its type.
+static const GfxShader *mfb_vs_get(const MfbCs *e, const GfxShader *fs) {
+    GfxShaderIo fin[32];
+    uint8_t type[32] = {0};
+    uint32_t mask = fs ? gfx_shader_inputs(fs, fin) : 0;
+    for (int g = 0; g < 32; g++)
+        if (mask >> g & 1) type[g] = fin[g].type;
+    uint32_t i = (uint32_t)((((uintptr_t)e->ms >> 4) * 0x9e3779b1u) ^ (mask * 0x85ebca6bu)) & (MFB_TAB - 1);
+    for (uint32_t k = 0; k < MFB_TAB; k++, i = (i + 1) & (MFB_TAB - 1)) {
+        MfbVs *v = &mfb_vs_tab[i];
+        if (v->ms && (v->ms != e->ms || v->mask != mask || memcmp(v->type, type, 32))) continue;
+        if (v->ms) return v->vs;
+        static const char res[] = "{\"key\":\"meshfb\",\"stage\":\"vs\",\"notes\":[],\"cbufs\":[],\"sbufs\":[{\"binding\": 1, "
+                                  "\"slot\": -1, \"cb_slot\": 66, \"cb_offset\": 0, \"flags\": 0}],\"textures\":[],\"images\":[]}";
+        _Static_assert(MESHFB_CB_MESH == 66, "the vertex stage's reflection names the mesh buffer");
+        uint64_t n = 0;
+        uint32_t *w = meshfb_vs(&e->mi, mask, type, &n);
+        v->ms = e->ms, v->mask = mask, memcpy(v->type, type, 32);
+        v->vs = w ? gfx_shader_own(w, n, res) : NULL;
+        free(w);
+        if (!v->vs) warn_once(W_MESH, "mesh fallback: a vertex stage could not be made: its draws are skipped");
+        return v->vs;
+    }
+    rt_fatal("vk: mesh fallback: more than %d vertex stages", MFB_TAB);
+}
+
+// One of the draw's compute dispatches: module cs with the bindings of NVN stage `stage`, its group counts read from
+// the record at `at`. 0 when its pipeline is not there.
+static int mfb_dispatch(VkExec *ex, const GfxShader *cs, int stage, VkBuffer rec, VkDeviceSize at) {
+    const VkPipeInfo *info = NULL;
+    VkPipeline p = vk_pipeline_compute(cs, &info);
+    if (!p || !info || (info->pool && !pool_on())) return 0;
+    bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+    mfb_stage = stage;
+    bind_resources(ex, info);
+    mfb_stage = 0;
+    VkPassMark *m = dispatch_mark(ex, cs, 0, 0, 0);
+    vkCmdDispatchIndirect(ex->cb, rec, at);
+    vk_pass_mark_end(ex->cb, m);
+    ex->recorded++;
+    return 1;
+}
+
+// A mesh draw of `count` workgroups, or of the count in the game's record at ind (4 bytes, GPU-written).
+static void mfb_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind) {
+    if (ex->render_disabled) {
+        vk_cond_draws_skip += ex->has_render_cond;
+        draw_skipped(ex, 1, SK_DISABLED);
+        return;
+    }
+    if (!ex->prog) { draw_skipped(ex, 1, SK_NO_PROGRAM); return; }
+    cb_res(ex);
+    dummies_init();
+    int has_ms, has_ts, has_fs, w_ms = 0, w_ts = 0, w_fs = 0;
+    const GfxShader *ms = shader_for(ex, NVN_STAGE_MESH, &has_ms, &w_ms, 0);
+    const GfxShader *ts = shader_for(ex, NVN_STAGE_TASK, &has_ts, &w_ts, 0);
+    const GfxShader *fs = shader_for(ex, NVN_STAGE_FS, &has_fs, &w_fs, 0);
+    if (!has_ms) { draw_skipped(ex, 1, SK_NO_VERTEX_STAGE); return; }
+    if (w_ms || w_ts || w_fs) {
+        vk_exec_ahead(ex);
+        perf_count(PERF_CNT_SHADER_SKIP);
+        draw_skipped(ex, 1, SK_SHADER_PENDING);
+        return;
+    }
+    if (!ms || (has_ts && !ts) || (has_fs && !fs)) { draw_skipped(ex, 1, SK_SHADER_FAILED); return; }
+    MfbCs *c = mfb_cs_get(ex, ms, ts);
+    int state = __atomic_load_n(&c->state, __ATOMIC_ACQUIRE);
+    if (!state && !vk_exec_targets_recent(ex, pipe_skip_mode() >= 1)) {
+        // a target the game does not render every frame: the draw may not come again, so it waits for its modules
+        // from the frame's wait pool, as such a draw waits for a pipeline (prepare_draw_ex)
+        uint64_t *pool = frame_wait(), t0 = kern_now_ns();
+        while (!state && pool_ms(pool, t0)) plat_sleep_ms(1), state = __atomic_load_n(&c->state, __ATOMIC_ACQUIRE);
+        pool_charge(pool, t0);
+    }
+    if (!state) { MFB.pending_skips++; draw_skipped(ex, 1, SK_PIPE_PENDING); return; }
+    const GfxShader *vs = state > 0 ? mfb_vs_get(c, fs) : NULL;
+    if (!vs || !vk_meshfb_init()) { draw_skipped(ex, 1, SK_PIPE_FAILED); return; }
+    uint32_t verts = c->mi.maxp * c->mi.ipp, slot_words = meshfb_slot_words(&c->mi);
+    uint32_t most = vk_ctx()->props.limits.maxComputeWorkGroupCount[0];
+    if (count > most) count = most;   // a count the GPU wrote is not looked at here: the dispatch reads it as it is
+    VkBuffer rec;
+    int cmds;
+    vk_exec_barrier(ex);   // ends the pass; the culling's record and the last draw's reads come before what follows
+    VkDeviceSize at = vk_meshfb_record(ex->cb, ind ? ind->buffer : VK_NULL_HANDLE, ind ? ind->offset : 0, count, ts != NULL,
+                                       verts, slot_words, &rec, &cmds);
+    ex->recorded += (uint32_t)cmds;
+    vk_exec_barrier(ex);
+    if (ts) {
+        if (!mfb_dispatch(ex, c->cs_task, NVN_STAGE_TASK, rec, at)) { draw_skipped(ex, 1, SK_PIPE_FAILED); return; }
+        vk_exec_barrier(ex);
+        vk_meshfb_scan(ex->cb, at, c->ti.payload_bytes / 4, c->ti.threads, slot_words, verts);
+        B.pipe[1] = VK_NULL_HANDLE;   // the scan bound its own
+        ex->recorded += 4;
+        vk_exec_barrier(ex);
+    }
+    if (!mfb_dispatch(ex, c->cs_mesh, NVN_STAGE_MESH, rec, at + 16)) { draw_skipped(ex, 1, SK_PIPE_FAILED); return; }
+    vk_exec_barrier(ex);
+    vk_meshfb_note(ex->cb, at);
+    ex->recorded++;
+    vk_exec_barrier(ex);
+    c0_binst = 0;
+    mfb_cur_vs = vs;
+    int prim = c->mi.ipp == 1 ? NVN_DRAW_PRIMITIVE_POINTS : c->mi.ipp == 2 ? NVN_DRAW_PRIMITIVE_LINES : NVN_DRAW_PRIMITIVE_TRIANGLES;
+    if (!prepare_draw_ex(ex, prim, 0x7fffffff, 0, 2)) return;
+    vk_exec_frame.draws++;
+    vkCmdDrawIndirect(ex->cb, rec, at + 32, 1, sizeof(VkDrawIndirectCommand));
+    ex->recorded++;
+}
+
 static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
-    PFN_vkCmdDrawMeshTasksEXT fn = draw_mesh_fn();
-    if (!fn) return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader: skipped");
     static int on = -1;
     if (on < 0) on = rt_knob("MESH", "1");   // NX2NAVI_MESH=0: mesh draws are skipped (diagnosis)
     if (!d->count || !on) return;
+    if (vk_ctx()->mesh_fallback) {
+        if (d->first) warn_once(W_MESH, "a mesh draw from workgroup %u: drawn from workgroup 0", d->first);
+        mfb_draw(ex, d->count, NULL);
+        return;
+    }
+    PFN_vkCmdDrawMeshTasksEXT fn = draw_mesh_fn();
+    if (!fn) return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader: skipped");
     c0_binst = 0;
     if (!prepare_draw_ex(ex, NVN_DRAW_PRIMITIVE_TRIANGLES, 0x7fffffff, 0, 1)) return;
     if (d->first) warn_once(W_MESH, "a mesh draw from workgroup %u: drawn from workgroup 0", d->first);
@@ -4980,13 +5273,21 @@ static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
 // MESH_RING entries outlast the frames in flight: an entry is rewritten only after a barrier behind its last draw.
 enum { MESH_RING = 4096 };
 static VkBuffer mesh_ring;
+static VmaAllocation mesh_ring_alloc;
 static uint32_t mesh_ring_next;
 
 // NX2NAVI_GPU_PASSES: the workgroup counts of the indirect mesh draws of the timed frames, copied to host memory.
 int vk_gpu_passes_capturing(void);
 enum { MESH_COUNTS = 4096 };
 static VkBuffer mesh_count_buf;
+static VmaAllocation mesh_count_alloc;
 static uint32_t *mesh_count_map, mesh_count_n, mesh_count_was;
+
+static void mesh_ring_release(VkCtx *c) {   // vk_exec_draw_shutdown: a probe ends with the device idle
+    if (mesh_ring) vmaDestroyBuffer(c->vma, mesh_ring, mesh_ring_alloc);
+    if (mesh_count_buf) vmaDestroyBuffer(c->vma, mesh_count_buf, mesh_count_alloc);
+    mesh_ring = mesh_count_buf = VK_NULL_HANDLE, mesh_count_map = NULL;
+}
 uint32_t vk_exec_mesh_counts(const uint32_t **out) {
     *out = mesh_count_map;
     return mesh_count_map ? mesh_count_n : 0;
@@ -5001,8 +5302,7 @@ static void mesh_count_note(VkExec *ex, const VkMemSpan *src) {
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
         VmaAllocationInfo info;
-        VmaAllocation a;
-        if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &mesh_count_buf, &a, &info) != VK_SUCCESS) return;
+        if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &mesh_count_buf, &mesh_count_alloc, &info) != VK_SUCCESS) return;
         mesh_count_map = info.pMappedData;
     }
     if (mesh_count_n >= MESH_COUNTS) return;
@@ -5053,8 +5353,7 @@ static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 12ull * MESH_RING,
                                  .usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-        VmaAllocation a;
-        if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &mesh_ring, &a, NULL) != VK_SUCCESS) {
+        if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &mesh_ring, &mesh_ring_alloc, NULL) != VK_SUCCESS) {
             mesh_ring = VK_NULL_HANDLE;
             return 0;
         }
@@ -5107,7 +5406,8 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
         if (vk_ctx()->has_mesh_shader)
             fn = (PFN_vkCmdDrawMeshTasksIndirectEXT)vk_dpa(vk_ctx()->device, "vkCmdDrawMeshTasksIndirectEXT");
     }
-    if (!fn) return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader: skipped");
+    int fallback = vk_ctx()->mesh_fallback;
+    if (!fn && !fallback) return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader: skipped");
     static int on = -1;
     if (on < 0) on = rt_knob("MESH", "1");
     if (!on) return;
@@ -5117,6 +5417,12 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
                          (unsigned long long)d->ind);
     c0_binst = 0;
     VK_MEM_USE(ip);
+    if (fallback) {
+        mfb_draw(ex, 0, &ip);
+        vk_mem_count(ip.cls, VK_MUSE_IND, 4);
+        VK_MEM_BOUND(ip);
+        return;
+    }
     VkDeviceSize at;
     if (!mesh_ring_entry(ex, d, &ip, &at)) return warn_once(W_MESH, "the indirect mesh ring could not be created: skipped");
     if (!prepare_draw_ex(ex, NVN_DRAW_PRIMITIVE_TRIANGLES, 0x7fffffff, 0, 1)) return;
