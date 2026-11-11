@@ -5657,7 +5657,11 @@ static void log_cs_bindings_locked(const VkExec *ex) {
         if (ex->ubo[NVN_STAGE_CS][i].size)
             o += snprintf(line + o, sizeof line - o, " ubo%d=%#llx+%#x", i + 3,
                           (unsigned long long)ex->ubo[NVN_STAGE_CS][i].addr, (unsigned)ex->ubo[NVN_STAGE_CS][i].size);
-    rt_log("vk_exec:   its bindings:%s", line);
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    int ntex = -1, nimg = -1;
+    if (ex->prog && find_stage(ex->prog, NVN_STAGE_CS, &ctl, &code, &len) && ctl_nvn2(ctl)) ntex = ctl[0xb3], nimg = ctl[0xb6];
+    rt_log("vk_exec:   its bindings (control: %d texture, %d image entries):%s", ntex, nimg, line);
 }
 
 // NX2NAVI_LOG_CS_BINDS: an untranslated program the fallback leaves alone, so its output keeps what it held (black when
@@ -5704,8 +5708,19 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
     }
     const VkTexImage *dst = NULL, *src = NULL, *out;
     int in_place = 0;
+    // The output is looked for among the image slots the program uses: the count of image entries of its NVN2 control
+    // section (byte +0xb6), at least slot 0 (the networks' in-place passes count none and write slot 0). An image slot
+    // keeps its binding from earlier dispatches, so past that count lie other programs' images: with a 3840x2160
+    // picture the scene upscaler leaves its 3840x2160 RGB9E5 target in slot 2, the largest image bound to the movie
+    // network's last pass, and that pass's real output (2560x1440, slot 1, which the frame's last passes enlarge) kept
+    // stale bits for the whole movie: the Triforce movie after Gohma showed as frozen coloured stripes.
+    int nimg = 32;
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    if (ex->prog && find_stage(ex->prog, NVN_STAGE_CS, &ctl, &code, &len) && ctl_nvn2(ctl)) nimg = ctl[0xb6] ? ctl[0xb6] : 1;
+    if (nimg > 32) nimg = 32;
     vk_texture_lock();
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < nimg; i++) {
         uint64_t h = ex->img[NVN_STAGE_CS][i];
         view_t v; int hv = 0;
         const VkTexImage *t = h ? vk_texture_by_id_locked(NVN_HANDLE_TEX(h), &v, &hv) : NULL;
