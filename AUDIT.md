@@ -5,7 +5,9 @@ share, the path of one frame, the allocators, pools and caches, the leads for Ph
 has been reviewed.
 
 - Phase 1 (map, no code changes): written 2026-11-10 on branch `audit`, cut from `test-all-fixes` at `ed36773d`.
-- Phases 2 to 5: not started.
+- Phase 2 (baseline and instrumentation): done 2026-11-10 on branch `claude/audit-phase2-a12eef`. It has three
+  instrumentation commits (`c1ed77e4`, `d49a4dea`, `3a88b363`) and fixes nothing. See section 11.
+- Phases 3 to 5: not started.
 
 Citations name our code by file and function; a `~line` after them is a hint taken at `ed36773d` and will drift.
 
@@ -150,7 +152,10 @@ the PC.
 
 ### Sanitizer builds (Phase 2): what the code says
 
-Nothing here was tried.
+This was written before Phase 2 tried anything. The results are in section 11.4:
+- UBSan (trap mode) built and ran the route, with one report (F-1-02).
+- ASan built but cannot start: its shadow covers the guest's fixed windows, as feared below.
+- TSan does not exist here.
 
 **AddressSanitizer and UndefinedBehaviorSanitizer on Windows**
 
@@ -1310,6 +1315,24 @@ suspicion.
 - **L-43** `vk_backend.c` `vk_be_present` (asynchronous replay only). The "frame bound" wait (~561-567) blocks the
   game's present thread without giving its virtual core away, unlike `replay_drain` and `replay_enqueue`.
 
+**Leads added by Phase 2's measurements** (section 11.3). They are measured, but their causes are not traced.
+
+- **L-44** A periodic stall in the Market. In `bl_market_1`, after the script ended (Link standing, segment
+  `market-end`), every 8th frame took 25-30 ms from frame 13042 to 13786 (90 frames). The same pattern appears 5 times
+  in `bl_market_2`. Nothing is named:
+  - no render-thread wait, no work mark;
+  - GPU 3.15 ms per frame, "bound: cpu";
+  - 6 submits per frame, so it is not `vk_texture.c` `sweep_pressure`'s every-8-submits rhythm.
+
+  A profiled run (`NX2NAVI_PROFILE_SLOW`) would name it.
+- **L-45** The CPU frame grows while standing in Hyrule Field toward dusk (`bl_fieldlong`).
+  - Over 9 minutes the frame went from about 7.1 to 8.4 ms (140 → 118 fps).
+  - The GPU's time stayed at 4.37 ms, and every window was "bound: cpu".
+  - The size lines are flat, except released textures (165 → 542).
+- **L-46** `texture pool slots 32512/32768` in every area and run: the registered texture slots the bindless pool
+  covers (`vk_texture.c` `pool_slots`, `VK_POOL_TEX` 32768). What happens to a slot past `VK_POOL_TEX` was not checked.
+- **L-47** The first one or two world frames after every save load take 48-68 ms and 26-36 ms, with nothing named.
+
 ### Logic that assumes the original rate (pass 8)
 
 - **L-42** Assumptions in the host code:
@@ -1344,6 +1367,8 @@ Empty. Phase 3 fills it.
 
 | ID | Sev | Subsystem | Location | What happens | Trigger | Status | Fix | Risk | Lead | Commit / verified |
 |---|---|---|---|---|---|---|---|---|---|---|
+| F-1-01 | S1 | Save data (7) / guest code; the host cause is not traced | Lifted `f_700112b3b0` = `main+0x112b3b0`, called from `main+0x74d7b0`/`0x74d660` | The process dies with `FATAL: access violation (0xc0000005) at host … (nx2navi+0x42419ae), reading address 0x150` in guest code while a save loads | Load the test install's slot 1 (`E:\NX2navi-060b\game\profile\save\<user>\slot_01`: Kokiri Forest, child, 3 hearts, autosave dated 11/5/2026 12:07 a.m., blank thumbnail, `caption.sav` 11638 bytes against about 40 KB for the others) as the only slot (`E:\nx2devrun\out\audit\saves\one_d1`), then Load. Runs `probe_d1`, `probe_d1b` and `probe_d1_all` | confirmed: 3 of 3, including `ocarina_all.exe` (no Phase 2 code). It is the only Kokiri Forest save available. Not tried in the user's own install | Phase 3: trace what the guest reads at +0x150 and whether a host service (save, caption, `fs_host.c`) left it null | Unknown until traced; may touch the save format (ask the user first) | — | — |
+| F-1-02 | S4 | In-game menu (21) | `ui/menu_skin.cpp` `skin_atlas_fill`, lambda `lattice` (~265) | `x * 374761393` and `y * 668265263` are signed `int` multiplications that overflow for x ≥ 6 (undefined behaviour; on this compiler they wrap, so the grain looks as meant) | Any start: the menu's font atlas is filled at start-up | confirmed by UBSan: a trap `ud1 0xc` (multiply overflow) at `nx2navi+0x11782fd2`, `addr2line` → `menu_skin.cpp:265` (run `san_ubsan`, section 11.4) | Do the hash in `unsigned` (`(unsigned)x * 374761393u + …`) | None: the same bits, no gameplay or format change | — | — |
 
 ---
 
@@ -1467,6 +1492,433 @@ leads.
 
 **Memory**
 - Real sizes in play: how large the shader memory cache, the pipeline tables, the sampler cache, the lazy write-back
-  segment list and the deferred-destruction list get in a multi-hour session. Phase 2's memory logging per scene
-  should record them.
+  segment list and the deferred-destruction list get in a multi-hour session.
+  - Phase 2 now logs them (`mem: sizes`) and measured them over runs of up to 10 minutes (section 11.3): shader memory
+    cache about 3600 entries, 390 MiB; 3260-3360 pipelines; 175-178 samplers; 84-144 lazy ranges; 0-4 deferred
+    destructions at the snapshots.
+  - Multi-hour growth is still not measured.
 - What the front end does when `vk_pool_init` fails for a physical pool.
+
+---
+
+## 11. Phase 2: baseline and instrumentation
+
+Phase 2 was done on branch `claude/audit-phase2-a12eef`, cut from `audit` at `cc179d1d`. It added instrumentation in three
+commits and fixed nothing. All the runs were on the reference PC (RTX 5090, driver 621.01), with the runtime of this
+branch over the lifted game in `work\lift-pickup`, run from `E:\nx2devrun`.
+
+**The three instrumentation commits.** Each one built and each was shown working by a run. Each costs nothing while
+`NX2NAVI_TRACE=perf` is off: a call and a branch per marked site; the size, scene and segment code runs only with the
+trace.
+
+| Commit | What it adds | Shown working by |
+|---|---|---|
+| `c1ed77e4` (c1) | Work marks on any thread (`host.h` `PERF_M_*`, `perf.c` `perf_mark_add`): RomFS reads, zstd decodes, pipeline creates, guest memory maps, pool initialize/finalize, device memory allocations; named on the slow-frame line and per 60-frame window | `E:\nx2devrun\out\audit\c1_check` (exe `ocarina_audit_c1.exe`), Kakariko route |
+| `d49a4dea` (c2) | Route segments (input-script `MARK`, `perf.c` `perf_segment`) with mean, 1% low and worst frame, RAM and VRAM; scene lines from area loads (`romfs.c` `scene_note`, `perf.c` `perf_scene`) with a memory snapshot once settled | `c2_check` (`ocarina_audit_c2.exe`), `mark_check.txt` |
+| `3a88b363` (c3) | `mem: sizes` lines: entries and bytes of the caches, pools and tables (sixteen `*_sizes` functions, `perf.c` `sizes_log`), every 600 presents and with every snapshot | `probe_u0` (`ocarina_audit_c3.exe`) |
+
+Log lines from those runs:
+
+```
+c1: perf: slow frame 2186: 430.8 ms; blocked pipeline 0.0 xlate 0.0 texture 154.6 astc 26.4 fence 0.0 pacing 0.0; on any
+    thread: file reads 96.0 ms (597, 97.1 MiB, longest 0.7 ms), zstd decodes 404.2 ms (600, 336.3 MiB, longest 5.9 ms),
+    pipeline creates 3070.9 ms (25, 0.0 MiB, longest 463.9 ms), guest memory maps 0.1 ms (1, 5.0 MiB, longest 0.1 ms),
+    device memory allocations 99 (5464.9 MiB)
+c1: perf: frame 120: work in the window; on any thread: file reads 0.0 ms (1, 0.0 MiB, longest 0.0 ms), pipeline creates
+    2118.5 ms (17, 0.0 MiB, longest 342.6 ms), guest memory maps 0.0 ms (1, 0.0 MiB, longest 0.0 ms), pool init/finalize
+    179.7 ms (33, 85.0 MiB, longest 16.1 ms), device memory allocations 1 (64.0 MiB)
+c2: segment: 'kakariko-walk' frames 2264-4634, world 1.0-25.0 s: 2370 frames in 24.0 s, mean 10.11 ms (98.9 fps), 1% low
+    47.2 fps (21.20 ms), worst 43.3 ms at frame 3491; over 25 ms 10, 50 ms 0, 100 ms 0; ram working set 11612 MiB, private
+    23683 MiB; vram 8999 of 31419 MiB; on any thread: file reads 304.5 ms (981, 145.4 MiB, longest 10.0 ms), …
+c2: scene: KakarikoVillage_Adult, HyruleField_Adult settled (no area loaded for 10 s) at frame 2812, world 7.6 s; ram
+    working set 11120 MiB, private 20721 MiB; vram 6650 of 31419 MiB
+c3: mem: sizes frame 4200, pipelines and shaders: pipeline entries 3229; with a pipeline 2791; fast links 0; pipeline
+    failures 0; pipeline layouts 1249; … pipeline jobs queued or running 438; pipeline keys seen 3259, 0.1 MiB; shader
+    memory cache 3531, 384.4 MiB; of it reflection 7.4 MiB; failed shader keys 0/4096; …
+c3: mem: sizes frame 4200, GPU memory and textures: pool records 4428; of them physical 1; VRAM mirrors 546, 744.6 MiB; …
+    textures 6334; released textures 58, 6.6 MiB; … texture pool slots 32512/32768; sampler slots 242/4096;
+```
+
+The c2 run printed the world clock before it starts as `-0.0`; c3 prints `-`.
+
+The c1 and c2 runs are each the first run of a new exe name, so they ran with a cold driver cache. Their large
+pipeline-create sums come from that. In the warm baseline runs, `pipeline jobs queued or running` is 0 by the end of
+the first area.
+
+**Running the instrumentation.**
+
+- `NX2NAVI_TRACE=perf`, plus `NX2NAVI_PERF_SLOW_MS=25` for a line per frame of 25 ms or more.
+- A script line `@<ms> MARK <name>` names the route's segments.
+- `NX2NAVI_TEXUP_LOG_MS=16` adds the texture work per slow frame.
+- The dev folder's `nx2navi.ini` sets `perf_overlay = full`. Every run here (the earlier ones as well) took the
+  overlay's counts and GPU timestamps.
+
+### 11.1 Instrumentation map
+
+Every line below is written only with `NX2NAVI_TRACE=perf` unless the row says "always". "Added" names the Phase 2
+commit; the rest existed at `ed36773d`.
+
+**Frame-time markers (what a hitch waited for)**
+
+| Marker the prompt asks for | Log line | Written by | State |
+|---|---|---|---|
+| Frame time per frame window | `perf: frame N: interval avg … max … (… fps)`, every 60 presents | `perf.c` `perf_present` | existed |
+| Frame time over a period | `frametime: 60 s|exit: … mean … fps, 1% low … fps, over 25/50/100 ms`, worst frames with their waits (always) | `perf.c` `ft_report` | existed |
+| Frame time per route segment (mean, 1% low, worst) | `segment: '<name>' frames a-b, world …: … mean … ms (… fps), 1% low … fps (… ms), worst … ms at frame …; …; ram …; vram …` | `perf.c` `seg_close` | added (c2) |
+| A hitch with its causes | `perf: slow frame N: … ms; blocked pipeline … xlate … texture … astc … fence … pacing …` (frames ≥ `NX2NAVI_PERF_SLOW_MS`, default 50) | `perf.c` `perf_present` | existed (render-thread waits) |
+| Pipeline creation on the render thread | `blocked pipeline` in the two lines above | `vk_pipeline.c` → `perf_end(PERF_PIPE)` | existed |
+| Pipeline creation on any thread | `; on any thread: … pipeline creates X ms (n, …, longest Y ms)` on the slow-frame line, and `perf: frame N: work in the window; on any thread: …` every 60 presents | `vk_pipeline.c` `pipe_create_in` → `perf.c` `perf_mark_add` | added (c1) |
+| Shader translation | `xlate` / `shader xlate` in the perf lines; `shader disk reads` | `gfx_shader.c` → `perf_end(PERF_XLATE)` | existed |
+| Texture decode and upload | `texture` / `astc` in the perf lines; `texup: frame N: …` per frame over `NX2NAVI_TEXUP_LOG_MS` (creation, uploads, staging, storage copy, ASTC record, flush, new device memory) | `vk_texture.c` `vk_texstat_frame` | existed |
+| File IO | `file reads X ms (n, MiB, longest)` in the any-thread part | `romfs.c` `romfs_read` | added (c1) |
+| File IO, which files | `fs <t> rom <path>` per RomFS open (`NX2NAVI_TRACE=fs`) | `romfs.c` `fs_trace` | existed (opens only, no time) |
+| Decompression | `zstd decodes X ms (n, MiB out, longest)` in the any-thread part; `zstd: N calls on the host …` running totals (always, every 16384 calls) | `ov_zstd.c` `tracked_decode`, `stream_run`; `count` | added (c1) / existed |
+| Large allocations, guest side | `guest memory maps X ms (n, MiB)`: SetHeapSize, Map/UnmapPhysicalMemory | `memory.c` `mem_set_heap_size`, `alias_map` | added (c1) |
+| Large allocations, GPU pools | `pool init/finalize X ms (n, MiB)`: NVN memory pool initialize and finalize with their imports, device memory, mirror retire and GPU waits | `vk_memory.c` `vk_pool_init`, `vk_pool_fini` | added (c1) |
+| Large allocations, device memory | `device memory allocations n (MiB)`: every block and dedicated allocation VMA makes (no time; only while the headroom callback is installed, `NX2NAVI_VRAM_HEADROOM` default on) | `vk_headroom.c` `on_allocate` | added (c1) |
+| Large allocations, host heap | — | — | **missing**: there is no single funnel for the host's `malloc`; the big host allocations are named in section 5 instead |
+| GPU time and who bounds the frame | `perf: frame N: gpu avg … ; fence wait …; vram …; ram working set …, private …; bound: cpu|gpu|pace` | `perf.c` `perf_gpu_line` | existed |
+| Per-thread samples of a slow frame | `prof: slow frame N (… ms) -> <path>` (`NX2NAVI_PROFILE`, `NX2NAVI_PROFILE_SLOW`) | `prof_win.c` | existed (changes timing: not for the baseline, L-41) |
+| Per-frame record of any run part | `NX2NAVI_FLIGHT=1` dumps (`frames.tsv`) | `flight.c` | existed |
+| Scene transitions | `scene: <area> loads (frame, world)`; `scene: <areas> settled (no area loaded for 10 s) …; ram …; vram …` followed by the memory snapshot | `romfs.c` `scene_note` → `perf.c` `perf_scene`, `seg_frame` | added (c2) |
+| Route segments | input script line `<tick> MARK <name>` or `@<ms> MARK <name>`; `segment: '<name>' starts at frame …` | `input.c` `script_apply` → `perf.c` `perf_segment` | added (c2) |
+
+**Memory figures**
+
+| Figure the prompt asks for | Log line | Written by | State |
+|---|---|---|---|
+| Process RAM | `ram working set … MiB, private … MiB` in `perf: frame N: gpu …` (every 60 presents) and in every `segment:` and `scene: … settled` line | `perf.c` `perf_gpu_line`, `mem_text` | existed / added (c2) |
+| GPU memory | `vram U of B MiB` (driver budget figure, all processes) in the same lines; `mem: vram frame N: …`, `mem: vram by use frame N: …` (textures, released textures, mirrors, physical pools, ASTC scratch, headroom spare, other, free inside VMA blocks, outside VMA incl. swapchain/DLSS/pipelines/driver), heap lines, `mem: pools frame N` | `vk_memory.c` `vram_log`, `vram_use_log`, `heap_log`, `pool_census_log` | existed (every 600 presents) |
+| Sampled per scene and after every scene transition | `scene: <areas> settled (no area loaded for 10 s) at frame …; ram …; vram …` followed by the `mem: vram…` lines and the four `mem: sizes` lines; and the same snapshot at every segment's end | `perf.c` `seg_frame`, `seg_close` → `mem_snapshot` → `vk_memory.c` `vk_mem_snapshot`, `perf.c` `sizes_log` | added (c2, c3) |
+| Size of each cache and pool | `mem: sizes frame N, <group>: name count[/limit][, MiB]; …` in four groups, every 600 presents and with each snapshot | `perf.c` `sizes_log`, `perf_size`; one `*_sizes` function per subsystem (`memory.c`, `kernel.c`, `guest_setjmp.c`, `fs_host.c`, `romfs.c`, `ov_zstd.c`, `cfg.c`, `vk_memory.c`, `vk_gpa.c`, `vk_texture.c`, `vk_exec_draw.c`, `vk_sync.c`, `vk_usnap.c`, `nvn_api_cmd.c`, `vk_pipeline.c`, `gfx_shader.c`) | added (c3) |
+| Commit census (where committed memory lies) | `mem: commit census at frame …` | `prof_win.c` (`NX2NAVI_MEM_CENSUS=1`; it stalls frames by 65-240 ms, so not in the baseline) | existed |
+
+**Section 5's pools and caches against the figures.** By the numbers of section 5:
+
+- *A figure existed before Phase 2:* 60 (census by kind), 61 mirrors, 66 shadow storage (`shadow_log`), 73 deferred
+  destructions (count, "releases pending"), 74 headroom spare, 76 VMA blocks and heaps, 77 texture cache bytes (live and
+  released), 84 ASTC scratch, 110 DLSS memory (as DLSS reports it), 123 shader memory cache (count only, "shaders: N keys"
+  in the perf line), 129 the driver's share (only as "outside VMA").
+- *Added in Phase 2 (c3):* 2 guest heap and physical maps, 3 kernel region used and committed, 4 moved stacks, 5 lazy
+  write-back ranges (count and the array's room), 7/8 guest threads, 9 handles, 10 fibers, 11 system events, 16 setjmp
+  buffers, 21 settings and the replaced values kept, 23 RomFS handles, 25 zstd dictionaries, 26 zstd stream slots, 28/29
+  save files and listings open, 60 pool records, 67 write-back snapshot pool, 69 upload batches, 70 staging cache, 72 free
+  staging arena chunks, 75 device address records and blocks, 77 texture count, 78 disuse holds, 79 image requirements,
+  80 reuse keys, 81 texture and sampler slots, 82 samplers, 87 image views, 86 spare descriptor pools and transient chunks,
+  92 held continuations, 93/100 completion queue, 96 free uniform snapshot arenas, 97 uniform snapshot GPU writes, 99
+  command buffer slots, 103 recording-buffer pool, 104 texture pins and the sweep queue, 105 recording copies and zombies,
+  114 pipeline entries, built pipelines and fast links, 115 layouts, 116 stage libraries, 117 library and pipeline job
+  queues, 120 pipeline keys seen, 123 shader memory cache bytes (SPIR-V and reflection), 125 failed shader keys, 127
+  translation and load queues, 128 translator processes.
+- *Still no size figure:* fixed-size or static tables that cannot grow (1, 6, 13-15, 17, 20, 52, 55-57, 64, 68, 85, 88-90,
+  98, 101, 112); transient per-call buffers (30, 32, 63); off by default or debug only (24, 58, 102, 111, 113, 119); on disk
+  (19, 31, 118, 121, 126); and these that can grow and have no figure: 12 events, 22 per-thread settings memo, 27
+  per-thread zstd contexts, 33 mods, 34 cheats, 35 IPC sessions and domain objects (L-25), 36 offline socket events
+  (L-25), 37/38 message queues, 39 per-thread handles (L-26), 40-47 audio tables, rings and change events (L-25), 48-50
+  movie and Opus decoders, 51 input script, 53/54 menu art and dictionaries, 59 camera-speed copies, 62 mirror retry
+  state, 65 page-generation tables, 71 the staging VMA pool's blocks, 73 the bytes of the deferred destructions, 83
+  failed-create ring, 86 live per-command-buffer chunks and pools, 91 BC stand-ins, 94 pending reports, 95 occlusion
+  queries, 96 uniform snapshot arenas in use, 106 live-texture copies, 107 GVA ranges, 108/109 swapchain, HDR, FSR and
+  tonemap targets (counted only inside "outside VMA"), 122 the large-compute builder's cache, 124 shader use records.
+
+### 11.2 Test route and coverage
+
+Everything the route uses lives outside the repository, under `E:\nx2devrun\out\audit`:
+
+- `route\make_scripts.py` writes the input scripts: `route\route_full.txt` and `route\scene_<name>.txt`.
+- `route\baseline.sh` is the batch. It drives `route\arun.sh`, a wrapper around the stripes runner that waits while any other
+  game runs.
+- `route\baseline_table.py` reads the logs into the tables below.
+- `saves\` holds the save folders, copied (read only) from the user's save (`E:\nx2fix\profile-user\save\<user>`) and
+  from the test install's profile (`E:\NX2navi-060b\game\profile\save\<user>`):
+  - `u0`-`u5` and `d0`-`d5` are the whole folder with slot *k* copied into slot 0.
+  - `one_u<k>` and `one_d<k>` hold slot *k* alone.
+- `probes\` holds the probes that found where each save loads, and the menu explorations.
+- Each run's log and screenshots are in `<tag>\`.
+
+**How the game is driven.**
+
+- The Load screen lists the saves newest first. The title's A presses take the top one.
+- DPAD presses in the list are lost while it fades in. So each area is reached with a folder that holds one slot.
+- The pause menu:
+  - opens on Items;
+  - L and R move across Collection, Equipment, Items and System; MINUS opens the map.
+  - System lists Save, Load, Options, Special Actions and Title Screen. Its column moves with the left stick, not the
+    DPAD.
+  - Save opens a dialog with Cancel focused. A "Saved." notice takes one A press of its own.
+- The world clock (`frame_rate.c` `world_clock`) starts at the first load and never resets. So one timed script runs
+  through a return to the title and a reload.
+- An area is seen through RomFS opens. A reload that finds the area still in the game's own cache opens nothing, and
+  logs no `scene:` line.
+- The title screen's backdrop loads `Market_Adult` (and `HyruleField_Adult`) by itself. Every "scene" line before the
+  first save loads is the title's, not the save's.
+
+**Where each save loads** (probe runs `probe_<slot>`, scene lines and screenshots):
+
+| Save | Area (scene lines, then the screenshot) |
+|---|---|
+| user slot 0 | Hyrule Field at night, before the Market's gate (`HyruleField_Adult`, `Market_Adult`) |
+| user slot 1 | Market, adult (ruined, fog) |
+| user slot 2 | Kakariko Village by the graveyard path (`KakarikoVillage_Adult`, `Graveyard_Adult`) |
+| user slot 3 | Hyrule Field by day (`HyruleField_Adult`, `KakarikoVillage_Adult`) |
+| user slot 4 | Market, adult, at night |
+| user slot 5 (`townsave`) | Kakariko Village, at the gate |
+| test slot 0 | Death Mountain Trail (`DeathMountainTrail_Adult`) |
+| test slot 1 | Kokiri Forest, child, 3 hearts. **Loading it crashes** (F-1-01) |
+| test slots 2, 4 | Hyrule Field at night, by the Market |
+| test slot 3 | Market, adult |
+| test slot 5 | Kakariko Village, at the gate |
+
+**Coverage of the prompt's route**
+
+| Route step | Covered | How |
+|---|---|---|
+| Boot | yes | Every run: segment `boot` (first present to the script's first MARK) |
+| File select | yes | Segment `title` (title, Continue, Load list, Load) |
+| Kokiri Forest | **no** | The only Kokiri Forest save crashes when it loads (F-1-01). No other save is a child save, and scripted travel there is not possible. |
+| Hyrule Field day/night transition | partly | Day (user slot 3) and night (user slot 0) are measured separately. The change itself: `bl_fieldlong`, a 10-minute stand in the day field (see the baseline). |
+| Market | yes | User slot 1, adult Market (ruined, fog, ReDeads) |
+| A dungeon with heavy effects | **no** | No save stands in a dungeon. Death Mountain Trail (test slot 0) is the heaviest outdoor area reachable, and it is measured as a stand-in, not as a dungeon. |
+| A boss | **no** | No save is at a boss, and scripts cannot fight one |
+| Pause menu and every subscreen | yes | Every run: Items, Equipment, Collection, Items, System, the map |
+| Save, quit, reload | yes | `route_full.txt`: System → Save → Title Screen → Continue → the new save → Load, in one process |
+| Return to the first scene | yes | `route_full.txt` walks Kakariko Village again after the reload (segment `kakariko-return`, from the save point at the gate, so the path differs from the first walk) |
+| Added: Kakariko Village | yes | The town where players report slowdowns (section 1); the route's first scene |
+| Added: Graveyard edge | yes | User slot 2 |
+
+### 11.3 Baseline
+
+**Settings and method.**
+
+- Runs: `route\baseline.sh`, exe `ocarina_audit_c3.exe` (commit `3a88b363`).
+- Every run starts a fresh process on a fresh copy of its save.
+- Settings A, the earlier town measurements' settings: `FPS_LIMIT=unlimited FRAMEGEN=0 HDR=0 GAME_ASPECT=16:9`, DLSS
+  performance from the ini, window 2560x1440.
+- Settings U, the user's own: `FPS_LIMIT=120 FRAMEGEN=dlss FRAMEGEN_MULTIPLIER=2 HDR=1`.
+- Two runs of each set. Each run is r1 or r2.
+- All runs are warm. The exe had run more than 20 times before, so the driver cache was warm; the shared
+  `pipeline-cache.bin` and shader cache were warm too.
+- r1 is compared with r2, never with the cold c1/c2 runs.
+
+**Columns.**
+
+- Frames over 25 ms are counted.
+- RAM is the process's private bytes. The working set runs 10.1-11.2 GiB in the areas.
+- VRAM is the driver's figure for the device-local heaps (`vk_mem_vram`) at the segment's end.
+- "1% low" is the frame time at the slowest 1%, given as fps (`perf.c` `seg_close`, 50 us bins).
+
+**Segments.**
+
+- *Route* (`route_full.txt`, save `u5`):
+  - `title`: from the title to the world clock's start, so it includes the first save load;
+  - `kakariko`: 46 s walking the village;
+  - `pause-menu`: every subscreen;
+  - `save`;
+  - `title-return`;
+  - `reload`: the title, the Load list and the load;
+  - `kakariko-return`: 45 s walking from the save point.
+- *Scene runs* (`scene_<name>.txt`, one save each):
+  - `-settle`: 10 s standing right after the load;
+  - `-camera`: 13 s of camera turns;
+  - `-walk`: 9 s out and back;
+  - `-pause`: the subscreen tour.
+- *Boot* (first present to the title's first MARK, about 2 s). Settings A: 227.3 / 210.9 fps, 1% low 90.9 / 77.8,
+  worst 45.8 / 46.7 ms (one frame over 25 ms: the boot's pool initialize, 43 ms in `vk_pool_init`), private 11.4 GiB,
+  VRAM 964 MiB. Settings U: 118.9 / 119.2 fps, worst 53.4 / 50.7 ms.
+
+| Run set | Segment | Frames r1 / r2 | Mean fps r1 / r2 | 1% low fps r1 / r2 | Worst ms r1 / r2 | Frames >25 ms r1 / r2 | RAM private MiB r1 / r2 | VRAM MiB r1 / r2 |
+|---|---|---|---|---|---|---|---|---|
+| route | title | 1414 / 1480 | 108.1 / 110.8 | 51.8 / 50.4 | 294.6 / 274.2 | 7 / 7 | 19901 / 20057 | 6546 / 6670 |
+| route | kakariko | 6541 / 6561 | 140.7 / 141.1 | 90.9 / 92.2 | 15.0 / 14.1 | 0 / 0 | 24160 / 23891 | 10005 / 9634 |
+| route | pause-menu | 4911 / 4914 | 223.2 / 223.4 | 152.7 / 149.3 | 20.7 / 20.6 | 0 / 0 | 21863 / 21796 | 8020 / 7906 |
+| route | save | 3356 / 3357 | 240.0 / 240.0 | 215.1 / 217.4 | 10.5 / 9.5 | 0 / 0 | 21689 / 21638 | 7862 / 7762 |
+| route | title-return | 2254 / 2258 | 205.1 / 205.3 | 59.5 / 59.7 | 20.2 / 17.9 | 0 / 0 | 21666 / 21752 | 7726 / 7754 |
+| route | reload | 2830 / 2790 | 113.0 / 111.4 | 56.5 / 54.5 | 92.5 / 97.6 | 6 / 10 | 21778 / 21725 | 7916 / 7814 |
+| route | kakariko-return | 7290 / 6186 | 160.2 / 136.0 | 98.5 / 76.6 | 12.3 / 64.8 | 0 / 6 | 25770 / 22599 | 11471 / 8596 |
+| route_user | title | 1014 / 1028 | 76.8 / 78.2 | 46.5 / 46.0 | 290.6 / 279.9 | 8 / 8 | 20525 / 20603 | 7175 / 7239 |
+| route_user | kakariko | 5494 / 5397 | 118.2 / 116.1 | 92.2 / 85.8 | 13.9 / 15.0 | 0 / 0 | 24070 / 23620 | 9942 / 9499 |
+| route_user | pause-menu | 2640 / 2640 | 120.0 / 120.0 | 107.0 / 106.4 | 20.4 / 20.8 | 0 / 0 | 22122 / 22405 | 8349 / 8577 |
+| route_user | save | 1680 / 1680 | 120.0 / 120.0 | 114.3 / 114.3 | 9.5 / 9.4 | 0 / 0 | 22048 / 22134 | 8279 / 8320 |
+| route_user | title-return | 1207 / 1207 | 109.8 / 109.8 | 59.5 / 59.5 | 22.1 / 18.0 | 0 / 0 | 22139 / 22222 | 8262 / 8309 |
+| route_user | reload | 2131 / 2106 | 85.2 / 84.2 | 57.5 / 41.4 | 52.1 / 54.1 | 3 / 19 | 22523 / 22576 | 8730 / 8725 |
+| route_user | kakariko-return | 5083 / 5394 | 111.7 / 118.6 | 75.8 / 92.2 | 81.6 / 17.4 | 4 / 0 | 23321 / 25010 | 9360 / 10945 |
+| market | market-settle | 1510 / 1573 | 151.2 / 157.5 | 76.6 / 77.2 | 15.6 / 18.7 | 0 / 0 | 19441 / 19349 | 6414 / 6305 |
+| market | market-camera | 2255 / 2264 | 173.4 / 174.1 | 114.3 / 117.0 | 16.4 / 12.3 | 0 / 0 | 19744 / 19549 | 6436 / 6370 |
+| market | market-walk | 1325 / 1314 | 147.1 / 146.0 | 78.7 / 79.1 | 17.7 / 17.6 | 0 / 0 | 19760 / 19586 | 6436 / 6372 |
+| market | market-pause | 4713 / 4769 | 219.2 / 221.8 | 108.1 / 130.7 | 22.3 / 19.8 | 0 / 0 | 20325 / 20247 | 7019 / 7017 |
+| fieldday | field-day-settle | 1282 / 1265 | 128.3 / 126.5 | 101.0 / 101.5 | 10.8 / 10.8 | 0 / 0 | 20487 / 20373 | 7015 / 6951 |
+| fieldday | field-day-camera | 1825 / 1799 | 140.4 / 138.4 | 107.5 / 104.7 | 19.6 / 10.5 | 0 / 0 | 20677 / 20656 | 7045 / 7045 |
+| fieldday | field-day-walk | 1228 / 1223 | 136.5 / 135.8 | 77.2 / 84.7 | 18.9 / 18.4 | 0 / 0 | 21535 / 21250 | 7815 / 7581 |
+| fieldday | field-day-pause | 4704 / 4702 | 218.8 / 218.7 | 125.0 / 124.2 | 20.3 / 20.5 | 0 / 0 | 21909 / 21749 | 8244 / 8108 |
+| fieldnight | field-night-settle | 1139 / 1111 | 113.9 / 111.1 | 97.6 / 94.8 | 11.7 / 12.0 | 0 / 0 | 20187 / 20283 | 6697 / 6695 |
+| fieldnight | field-night-camera | 1748 / 1745 | 134.5 / 134.2 | 97.6 / 96.6 | 11.4 / 12.6 | 0 / 0 | 24265 / 24308 | 10283 / 10298 |
+| fieldnight | field-night-walk | 1033 / 1049 | 114.8 / 116.6 | 83.3 / 96.2 | 34.4 / 12.2 | 1 / 0 | 23133 / 22958 | 8744 / 8719 |
+| fieldnight | field-night-pause | 3643 / 3762 | 169.5 / 175.0 | 75.5 / 97.6 | 34.4 / 33.4 | 2 / 2 | 21686 / 21581 | 7783 / 7775 |
+| trail | trail-settle | 1666 / 1662 | 166.6 / 166.1 | 133.3 / 131.6 | 10.1 / 8.6 | 0 / 0 | 19155 / 19151 | 5933 / 5933 |
+| trail | trail-camera | 2057 / 2131 | 158.2 / 164.0 | 79.4 / 132.5 | 38.2 / 9.3 | 1 / 0 | 19638 / 19471 | 6202 / 6203 |
+| trail | trail-walk | 1464 / 1459 | 162.6 / 162.1 | 131.6 / 128.2 | 8.8 / 8.7 | 0 / 0 | 19966 / 19793 | 6503 / 6495 |
+| trail | trail-pause | 4795 / 4803 | 223.1 / 223.4 | 146.0 / 149.3 | 20.9 / 21.8 | 0 / 0 | 20290 / 20147 | 6902 / 6842 |
+| graveyard | graveyard-settle | 1100 / 1091 | 110.0 / 109.1 | 89.3 / 86.2 | 13.7 / 12.9 | 0 / 0 | 19659 / 19659 | 5983 / 5983 |
+| graveyard | graveyard-camera | 1776 / 1774 | 136.6 / 136.5 | 96.2 / 96.2 | 11.3 / 11.7 | 0 / 0 | 19977 / 19932 | 6232 / 6179 |
+| graveyard | graveyard-walk | 1014 / 1018 | 112.8 / 113.1 | 61.9 / 66.0 | 21.5 / 17.9 | 0 / 0 | 20481 / 20591 | 6703 / 6790 |
+| graveyard | graveyard-pause | 4633 / 4623 | 215.5 / 215.0 | 105.3 / 106.4 | 21.6 / 21.3 | 0 / 0 | 21065 / 21130 | 7273 / 7321 |
+
+
+`route_user` is settings U, capped at 120. With frame generation the window shows twice the frames; the table counts
+the frames the game draws.
+
+**The day/night change.** `bl_fieldlong`: user slot 3, 9.7 minutes of world time standing in Hyrule Field by day.
+
+- By the end the light reached dusk, not night. The full change is not covered.
+- Over the stand the mean fell from 140 fps (`field-day-camera`) to 118 fps (`field-day-end`, 519 s, 61244 frames, 1%
+  low 96.2 fps, worst 16.2 ms, none over 25 ms).
+- The GPU's time stayed at 4.36-4.37 ms per frame, and every window was "bound: cpu".
+- The CPU frame grew by about 1.3 ms. The size lines at frames 13200 and 73200 are flat apart from released textures
+  (165 → 542, 36 → 478 MiB). Lead L-45.
+
+**Memory in the areas** (segment ends, r1; private RAM / VRAM in MiB):
+
+| Area | Private RAM | VRAM |
+|---|---|---|
+| Market | 19.4-20.3 GiB | 6.3-7.0 GiB |
+| Death Mountain Trail | 19.2-20.3 GiB | 5.9-6.9 GiB |
+| Graveyard edge | 19.7-21.1 GiB | 6.0-7.3 GiB |
+| Hyrule Field by day | 20.4-21.9 GiB | 7.0-8.2 GiB |
+| Hyrule Field by night | 20.2-24.3 GiB | 6.7-10.3 GiB |
+| Kakariko | 23.9-24.2 GiB | 9.6-10.0 GiB |
+
+The `scene: … settled` snapshots are in each log.
+
+**Sizes at the end of the first scene and after returning to it** (route, settings A, `route\summary.md` has the full
+lines):
+
+| Figure | r1 Kakariko | r1 after the reload | r2 Kakariko | r2 after the reload |
+|---|---|---|---|---|
+| VRAM in use (driver) | 10005 MiB | 11471 MiB | 9634 MiB | 8596 MiB |
+| of it textures / released textures | 4731 / 2580 | 4908 / 3732 | 4673 / 2262 | 4996 / 892 |
+| VRAM mirrors | 783 (619 pools) | 802 (577) | 783 (619) | 1206 (948) |
+| outside VMA (swapchain, DLSS, pipelines, driver) | 1218 | 1134 | 1146 | 704 |
+| Private RAM | 24160 | 25770 | 23891 | 22599 |
+| Pool records / device address records | 4516 / 4515 of 65536 | 4600 / 4599 | 4516 / 4515 | 5145 / 5144 |
+| Textures / image views | 8292 / 19194 | 9056 / 20833 | 8374 / 19305 | 8554 / 18666 |
+| Texture pool slots | 32512 of 32768 | 32512 | 32512 | 32512 |
+| Recording copies | 51656, 12.6 MiB | 77724, 20.3 MiB | 51721, 12.6 MiB | 82842, 22.6 MiB |
+| Texture pins / pin sweep queue | 9076 / 9056 | 12321 / 12303 | 9126 / 9106 | 8460 / 8432 |
+| Completion queue | 618 | 457 | 678 | 579 |
+| Pipeline entries (all built) / layouts | 3258 / 886 | 3258 / 886 | 3354 / 894 | 3354 / 894 |
+| Shader memory cache | 3564, 386.2 MiB | 3567, 386.2 MiB | 3657, 394.4 MiB | 3676, 395.4 MiB |
+| Guest heap / physical maps | 6910 / 2674.5 MiB | 6910 / 2674.8 | 6910 / 2674.1 | 6910 / 2668.1 |
+| Handles / system events / setjmp buffers | 112 / 8 / 10 | 116 / 10 / 22 | 112 / 8 / 8 | 117 / 10 / 23 |
+| Lazy write-back ranges | 111 | 84 | 126 | 102 |
+
+Unchanged everywhere:
+
+- 84-85 guest threads, 3 fibers, 0 deferred destructions at the snapshot;
+- staging cache 24 of 24, 8 free arena chunks, 17 of 128 write-back snapshot chunks;
+- 0 shader failures, 0 translator processes, 0 pipeline jobs pending, 0 fast links;
+- 4 zstd dictionaries, 21 settings, no replaced setting values.
+
+Growth across the return, in both runs: setjmp buffers (+12/+15, never removed, L-10), system events (+2), recording
+copies (+26k/+31k). The VRAM figures differ between r1 and r2 because releases and mirror evictions fall at different
+times.
+
+**Hitches and their causes.** `route\slow_causes.py` over all 15 baseline logs:
+
+- 287 frames of 25 ms or more.
+- 132 have a render-thread wait or a work mark of at least a quarter of the frame. Mostly texture upload with zstd
+  decodes and file reads at an area load, fence waits right after it, and pool initialize/finalize.
+- 30 have something named, but less.
+- 125 have nothing named:
+  - 95 are the Market's periodic stall: 90 in r1, 5 in r2 (L-44);
+  - 20 are the one or two frames right after each save load, in every run: 48-68 ms, then 26-36 ms;
+  - 10 are single frames of 25-34 ms: 9 during the route's reloads, 1 in the night field.
+
+The unnamed time is outside the recorded waits and marks: the game's own threads or the driver. `NX2NAVI_PROFILE` with
+`NX2NAVI_PROFILE_SLOW` can name them. It suspends every thread every millisecond (L-41), so it stayed out of the
+baseline.
+
+**Other baseline observations** (recorded, not investigated):
+
+- The menu segments run at exactly 240.0 fps with `FPS_LIMIT=unlimited`: the game step's limit (`ostep`, up to 240
+  game frames a second).
+- In r2 the reload's area streaming ran into the `kakariko-return` segment. That gave 6 frames over 25 ms (worst
+  64.8 ms: texture 26.2 ms, 1563 MiB of new device memory), against 0 in r1. The segment's mean depends on when the load
+  ends.
+
+### 11.4 Sanitizers
+
+| Build | Built | Ran | Reported |
+|---|---|---|---|
+| UBSan (`-fsanitize=undefined -fsanitize-trap=undefined -fno-sanitize=vptr -g1`, runtime only) | yes: `work\build_rt_audit.py` with `AUDIT_CFLAGS`, `work\rt_obj_ubsan`, `ocarina_ubsan.exe` | yes, the full route | one report, then a clean route (below) |
+| ASan + UBSan (`-fsanitize=address` added, linked to `clang_rt.asan_dynamic-x86_64.lib`) | yes: `work\rt_obj_asan`, `ocarina_asan.exe` | no: it cannot start | — |
+| TSan | no | no | — |
+
+**What was built and how.**
+
+- The MSYS2 UCRT64 clang (23.1.4) ships no sanitizer runtimes. `lib\clang\23` holds only headers, and the
+  compiler-rt package would have to be downloaded, which was not done.
+- UBSan therefore runs in trap mode: every check is an `ud1` instruction whose operand names the check. The crash
+  handler logs the address, and `addr2line` on the `-g1` exe gives the line (`route\ubsan_once.sh`).
+- The standalone LLVM 23.1.5 for the MSVC target (`C:\Program Files\LLVM`) carries the ASan runtime DLL. A MinGW UCRT
+  program linked against its import library works: a test program (`E:\nx2devrun\out\audit\san\t.c`) had its heap overflow
+  reported in full.
+- Only `runtime/` was instrumented. The guest objects in `work\obj_pickup` are the uninstrumented ones (the generated
+  C is not built again).
+
+**UBSan results.**
+
+1. Run `san_ubsan`: a trap at start-up, in the menu thread's font atlas.
+   - `FATAL: illegal instruction (0xc000001d) at host … (nx2navi+0x11782fd2)`.
+   - The instruction is `ud1 0xc(%eax),%eax`: check 12, multiply overflow.
+   - `addr2line`: `ui/menu_skin.cpp:265`, the `lattice` lambda in `skin_atlas_fill`.
+   - Ledger F-1-02.
+2. With that one check skipped for that file (`work\asan\ubsan_ignore.txt`), run `san_ubsan2` went through the whole
+   route (boot, title, Kakariko, every pause subscreen, save, title, reload, Kakariko, 282 s of world time) with no
+   further trap.
+   - UBSan stops at its first report. So this says: no other undefined behaviour of the instrumented kinds was reached
+     on this route in `runtime/`.
+   - Its cost: Kakariko 119.5 fps against 140.7.
+
+**ASan result.** It cannot run with the guest's fixed layout.
+
+- Started directly (`ocarina_asan.exe --version` with the DLL on `PATH`), the runtime wrote "memory: a fixed region is
+  taken; re-running the process" 20 times, then `FATAL: memory: the module window is not free after 20 attempts`
+  (exit 70). This is `memory.c` `mem_init` → `reexec_or_fail`.
+- A probe under the same ASan DLL (`E:\nx2devrun\out\audit\san\vq.c`) shows why:
+  - the shadow starts at `0x80000000`;
+  - one reservation from allocation base `0x90000000` covers `0x100000000` to past `0x7010000000` (2046 GiB from
+    `0x100000000`, 1602 GiB from `0x7000000000`);
+  - so the module window (`MOD_MAIN_BASE`, `0x7000000000`) and the kernel region (`0x7010000000`) lie inside ASan's
+    shadow.
+- The Windows ASan runtime chooses the shadow's place itself, and no option moves it. ASan needs the guest windows
+  moved above the shadow, which `recomp/layout.py` decides (a generator change across subsystems). Not attempted;
+  waiting for the user if wanted.
+- The first `ASAN_OPTIONS` tried had a log path with a drive letter, whose colon the option parser takes as a
+  separator ("expected '='"). A path relative to the game folder works.
+
+**TSan.**
+
+- ThreadSanitizer has no Windows target.
+- No Linux machine is here, and WSL is not installed ("The Windows Subsystem for Linux is not installed").
+- Not built, not run.
+
+### 11.5 What Phase 2 could not do
+
+- **Route steps:**
+  - Kokiri Forest is not covered: its only save crashes on load (F-1-01).
+  - Dungeon and boss: no save is in one, and scripted input cannot travel or fight there.
+  - The full day/night change: only dusk was reached in 9.7 minutes.
+- **Saves:** no save of the user's loads as a child. The probes used copies of the user's slots (read only) and of the
+  test install's.
+- **Sanitizers:** ASan cannot start (shadow over the fixed guest layout); TSan does not exist here. UBSan stops at its
+  first report, so each further report needs a rebuild with an ignore list.
+- **Instrumentation not added:**
+  - a host `malloc` funnel for "large allocations" (there is none; the large host allocations are named by subsystem
+    instead);
+  - sizes for the items listed under "still no size figure" in 11.1;
+  - the game's own threads: their CPU time in a frame stays unnamed, as above.
+- **Not measured:**
+  - the commit census (`NX2NAVI_MEM_CENSUS=1`), which stalls frames by 65-240 ms;
+  - long sessions: the longest run is the 10-minute field stand; the multi-hour growth that section 10 asks about is
+    not measured;
+  - an AMD or Linux machine (not available).
