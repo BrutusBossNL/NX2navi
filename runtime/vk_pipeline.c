@@ -4232,7 +4232,8 @@ static void prewarm_run(void) {
 // GPU and driver in <dir>/pipeline-prewarm-skip.txt, and starts on them build no recorded pipelines ahead of play:
 // each one is built at its first draw instead, as with NX2NAVI_PIPE_PREBUILD=0. Another driver version, or deleting
 // the file, brings the prebuild back. Only the boot's own share is covered: a crash during play, where the pool also
-// builds what the boot left, says nothing about these builds.
+// builds what the boot left, says nothing about these builds. An orderly end of the process during the boot (the
+// window closed, the guest's ExitProcess, a --seconds run) deletes the marker as well: only a process that died leaves it.
 static int cache_dir(char *dir, size_t n);
 static void gpu_key(char *out, size_t n);
 static char PM_run[PLAT_PATH_MAX * 2 + 48];

@@ -324,6 +324,7 @@ void rt_frame_presented(const tex_t *t, uint64_t n) {
     fflush(stdout);
     fflush(stderr);
     fs_save_flush();
+    vk_pipeline_prewarm_marker_clear();   // an orderly end, not a driver crash in the boot's builds (vk_pipeline.c pm_skipped)
     vk_pipeline_save();   // no-op without the Vulkan back end
     prof_write();
     rtss_limit_restore();
