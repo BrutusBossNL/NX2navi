@@ -735,7 +735,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FRAMEGEN_UNAVAILABLE] = "in use: off: it needs an RTX 40 or newer; if you have one, see dlssg in the log",
     [UI_MENU_FRAMEGEN_OFF_FILES] = "in use: off, its files are missing",
     [UI_MENU_GAME_RES] = "Resolution",
-    [UI_MENU_GAME_RES_DESC] = "Height of the game's picture. Higher is sharper but costs more GPU power.",
+    [UI_MENU_GAME_RES_DESC] = "Size of the game's picture; outside fullscreen the window takes it too. Higher is sharper "
+                              "but costs more GPU power.",
     [UI_MENU_GAME_RES_NATIVE] = "Native",
     [UI_MENU_CHEATS_REBUILD] = "Rebuild the game now",
     [UI_MENU_CHEATS_REBUILD_DESC] = "Some cheats change the game's code and are not built into it: they are new or "
