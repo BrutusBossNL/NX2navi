@@ -148,6 +148,10 @@ void vk_exec_inline_end(int reopen);
 // recording a replay into cb for submission `fence`, so vk_exec_inline_begin hands cb out. Called from the record
 // callback of vk_sync_submit_own, where a replay would be recorded.
 void vk_exec_probe_inline(VkCommandBuffer cb, uint64_t fence);
+// vk_exec_draw.c, the replay workers: a draw context of their own (what draws keep from one to the next while they
+// record: vk_exec_draw.c DrawCtx), and the one the calling thread records with from now on (NULL: the replay's).
+void *vk_exec_draw_ctx_new(void);
+void vk_exec_draw_ctx_use(void *ctx);
 // vk_exec_draw.c: forget what the command buffer being recorded has bound (pipeline, sets, dynamic state, vertex
 // buffers): the replay continues in a new one (vk_sync_split).
 void vk_exec_draw_new_cb(void);
