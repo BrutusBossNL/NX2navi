@@ -660,6 +660,7 @@ int vk_sampler_slot_count_locked(void);
 // see-through ground until the area was loaded again (#569). 16 kinds x 40960 = 655,360 sampled images in set 2, under
 // NVIDIA's 1,048,576 update-after-bind limit with room for the bound slots. vk_texture_register logs a slot past it.
 #define VK_POOL_TEX 40960                           // as the translator's Accessor.TexturePoolLength
+#define VK_POOL_TEX_CARRIED 32768                   // the length before: carried translations still declare it
 #define VK_POOL_SAMP 4096                           // Accessor.SamplerPoolLength
 #define VK_POOL_KINDS 16                            // kind = depth * 8 + dim * 2 + arrayed, dim 1D 2D 3D CUBE
 extern volatile uint32_t vk_pool_kinds_used;        // bit k: a pipeline was made with a kind-k pool array
