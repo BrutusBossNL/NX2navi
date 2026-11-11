@@ -539,6 +539,8 @@ static struct {
     int fg_cam_ok;
     float fg_jx, fg_jy;
     int fg_fresh, fg_reset;      // fresh: not handed out yet (vk_dlaa_fg_inputs)
+    uint64_t presents;           // vk_dlaa_frame calls so far
+    uint64_t fg_at, hl_at;       // presents when the inputs and the HUD-less picture were made (fg_current)
     // the picture without the HUD for frame generation (vk_dlaa_fg_hudless): DLSS's output encoded to sRGB as the game's
     // last pass encodes its picture, then copied bit for bit into an RGBA8 UNORM image, the format the present reads; with
     // HDR on, DLSS's output as RGBA16F, as the game's float picture the present encodes (hl_srgb unused)
@@ -565,9 +567,20 @@ static struct {
     VkImage second_img;
 } F;
 
+// What an evaluation left for frame generation is for the present of its own frame. Frame generation takes it only
+// while its swapchain is in place, so with frame generation off the last evaluation's images stayed marked fresh for
+// as long as it was off. Among them is the game's own depth target, which the game replaces when the scene's size
+// changes: switching the upscaler off and on again with frame generation set (the menu's Upscaling row passes through
+// its choices without one) handed that destroyed image to frame generation's preparation, and AMD's driver ended the
+// process. Images made more than FG_INPUT_PRESENTS presents ago are therefore never handed out, and vk_dlaa_frame
+// drops them when the upscaler goes off or on.
+#define FG_INPUT_PRESENTS 4   // an evaluation is taken at its own present, or the one after when the present thread is behind
+static int fg_current(uint64_t made) { return D.presents - made <= FG_INPUT_PRESENTS; }
+
 int vk_dlaa_fg_hudless(VkImage *img, VkImageView *view, uint32_t *w, uint32_t *h, VkFormat *fmt) {
     if (!D.hl_fresh) return 0;
     D.hl_fresh = 0;
+    if (!fg_current(D.hl_at)) return 0;
     *img = D.hl, *view = D.hl_view, *w = D.hl_w, *h = D.hl_h, *fmt = D.hl_fmt;
     return 1;
 }
@@ -586,6 +599,7 @@ int vk_dlaa_fg_camera(VkDlaaCamera *c) {
 int vk_dlaa_fg_inputs(VkFfxImage *depth, VkFfxImage *mv, float *jx, float *jy, int *reset) {
     if (!D.fg_fresh || D.failed) return 0;
     D.fg_fresh = 0;
+    if (!fg_current(D.fg_at)) return 0;
     *depth = D.fg_depth, *mv = D.fg_mv, *jx = D.fg_jx, *jy = D.fg_jy, *reset = 0;
     return 1;
 }
@@ -1743,7 +1757,7 @@ evaluated:
     D.fg_depth = (VkFfxImage){z->image, z->format, w, h, 0};
     D.fg_mv = (VkFfxImage){e->mv, VK_FORMAT_R16G16_SFLOAT, w, h, 1};
     D.fg_depth_view = zv, D.fg_mv_view = e->mv_view;
-    D.fg_jx = jx, D.fg_jy = jy, D.fg_fresh = 1;
+    D.fg_jx = jx, D.fg_jy = jy, D.fg_at = D.presents, D.fg_fresh = 1;
     next_jitter(w, ow);
     if (++D.evals == 1 || D.evals == 300 || D.evals % 3600 == 0)   // 300: one early line with the frames counted
         rt_log("dlaa: %llu frames anti-aliased (scene %ux%u, output %ux%u; %llu frames without the DLAA point, %llu with camera "
@@ -1810,14 +1824,14 @@ static void hudless(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_t h) 
                    VK_FILTER_NEAREST);
     full_barrier(cb);
     if (hdr) {
-        D.hl_fresh = 1;
+        D.hl_at = D.presents, D.hl_fresh = 1;
         return;
     }
     VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                       .extent = {w, h, 1}};
     vkCmdCopyImage(cb, D.hl_srgb, VK_IMAGE_LAYOUT_GENERAL, D.hl, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
     full_barrier(cb);
-    D.hl_fresh = 1;
+    D.hl_at = D.presents, D.hl_fresh = 1;
 }
 
 static int scene_color(VkFormat f) {
@@ -1998,6 +2012,7 @@ void vk_dlaa_frame(void) {
     static unsigned cfg_seen;
     static int cfg_known;
     unsigned v = cfg_version();
+    D.presents++;
     if (cfg_known && v != cfg_seen) setting_presents = SETTING_PRESENTS;
     else if (setting_presents) setting_presents--;
     cfg_seen = v, cfg_known = 1;
@@ -2015,6 +2030,7 @@ void vk_dlaa_frame(void) {
         // either way the next DLAA frame starts a new history from an unjittered frame
         D.reset = 1, D.cam_prev_ok = 0, D.jit_ok = D.jit_used = D.armed = D.done = D.gbuf = D.ended = D.up = 0;
         D.hold = 0;
+        D.fg_fresh = D.hl_fresh = 0;   // frame generation gets nothing made before the switch (fg_current)
         memset(&F, 0, sizeof F);
         return;
     }
