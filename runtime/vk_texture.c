@@ -2269,7 +2269,15 @@ static void upload(Tex *e) {
         return;
     }
     e->chash_ok = e->t.L.size <= CHASH_MAX;   // the hash of what this upload copies (make_fresh_snap compares it)
-    if (e->chash_ok) e->chash = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
+    if (e->chash_ok) {
+        // read with the storage held mapped, as the copies below: the game unmaps a texture's memory on its own thread
+        if (mem_read_hold(e->pub.addr, e->t.L.size)) {
+            e->chash = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
+            mem_read_release();
+        } else {
+            e->chash_ok = 0;
+        }
+    }
     static __thread char ctx[160];   // what this thread copies, for a crash report
     snprintf(ctx, sizeof ctx, "texture upload %#llx (%llu bytes, fmt %#x %ux%u)", (unsigned long long)e->pub.addr,
              (unsigned long long)e->t.L.size, d->format, d->width, d->height);
@@ -2490,7 +2498,10 @@ static int same_content(const Tex *e) {
     static int on = -1;   // NX2NAVI_TEX_SAME=0: every write to the pages uploads again (diagnosis)
     if (on < 0) { const char *v = cfg_get("NX2NAVI_TEX_SAME"); on = !(v && !strcmp(v, "0")); }
     if (!on || !e->chash_ok || e->wt_n || e->t.L.size > CHASH_MAX) return 0;
-    if (content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size) != e->chash) return 0;
+    if (!mem_read_hold(e->pub.addr, e->t.L.size)) return 0;   // unmapped since: not the same; the upload deals with it
+    uint64_t h = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
+    mem_read_release();
+    if (h != e->chash) return 0;
     ru_same_n++, ru_same_bytes += e->t.L.size;
     return 1;
 }
