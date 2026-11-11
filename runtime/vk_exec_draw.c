@@ -592,35 +592,45 @@ static int texel_bytes(VkFormat f) {
     }
 }
 
-// R11G11B10F images written this frame as raw words (storage_view_format chose an integer view): Ocarina's last
-// post-process pass stores shared-exponent RGB9E5 texels into its R11G11B10F scene target that way, and the upscaler
-// that reads them (tensor-core, untranslatable) decodes them itself; the fallback blit must too (raw_9e5).
-static struct { VkImage img; uint64_t frame; } RAW[8];
+// Images written this frame through an integer storage view (storage_view_format), in the order of their writes (seq):
+// Ocarina's last post-process pass stores shared-exponent RGB9E5 texels that way into its R11G11B10F scene target, raw
+// words the upscaler that reads them (tensor-core, untranslatable) decodes itself, and the fallback blit must too
+// (raw_9e5). Now and then (1 of 529 frames sampled in a field) the same pass writes them into the RGB9E5 image at that
+// address instead, as native texels (raw_native_9e5); the R11G11B10F image there then holds an older picture.
+static struct { VkImage img; uint64_t frame, seq; } RAW[8];
+static uint64_t raw_seq;
 
 static void raw_note(VkImage img) {
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int k = 0;
+    raw_seq++;
     for (int i = 0; i < 8; i++) {
-        if (RAW[i].img == img) { RAW[i].frame = f; return; }
+        if (RAW[i].img == img) { RAW[i].frame = f, RAW[i].seq = raw_seq; return; }
         if (RAW[i].frame < RAW[k].frame) k = i;
     }
-    RAW[k].img = img, RAW[k].frame = f;
+    RAW[k].img = img, RAW[k].frame = f, RAW[k].seq = raw_seq;
 }
 
-static int raw_9e5(VkImage img, VkFormat f) {
-    if (f != VK_FORMAT_B10G11R11_UFLOAT_PACK32) return 0;
+// The order of img's last write through an integer view, 0 when it had none this frame or the one before.
+static uint64_t raw_written(VkImage img) {
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     for (int i = 0; i < 8; i++)
-        if (RAW[i].img == img && now - RAW[i].frame <= 1) return 1;
+        if (RAW[i].img == img && now - RAW[i].frame <= 1) return RAW[i].seq;
     return 0;
 }
 
-// The image written as raw RGB9E5 words this frame at t's place in memory, NULL when none was. The picture also resolves
-// as an RGB9E5 texture there: a VkImage of its own that nothing renders into, stale or never initialised. Looked up live
-// (texture lock held), as an image noted in RAW may be gone by now.
+static int raw_9e5(VkImage img, VkFormat f) { return f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && raw_written(img); }
+static int raw_native_9e5(VkImage img, VkFormat f) { return f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && raw_written(img); }
+
+// The image that holds this frame's post-process picture at t's place in memory, NULL when none was written: the
+// R11G11B10F image written as raw RGB9E5 words, or t itself when t is the RGB9E5 image and was written as native texels,
+// whichever was written last. The picture resolves as an RGB9E5 texture there, and that image is otherwise one nothing
+// renders into, stale or never initialised. Looked up live (texture lock held), as an image noted in RAW may be gone.
 static const VkTexImage *raw_9e5_twin(const VkTexImage *t) {
     const VkTexImage *o = vk_texture_at_locked(t, VK_FORMAT_B10G11R11_UFLOAT_PACK32);
-    return o && raw_9e5(o->image, o->format) ? o : NULL;
+    uint64_t ro = o && raw_9e5(o->image, o->format) ? raw_written(o->image) : 0;
+    uint64_t rt = raw_native_9e5(t->image, t->format) ? raw_written(t->image) : 0;
+    return rt > ro ? t : ro ? o : NULL;
 }
 
 // vk_dump.c: 1 when img was written as raw RGB9E5 words this frame (dump it decoded as such).
@@ -631,7 +641,8 @@ int vk_exec_raw_9e5(VkImage img, VkFormat f) { return raw_9e5(img, f); }
 static VkFormat storage_view_format(const VkTexImage *img, const view_t *v, int hv) {
     VkFormat f;
     if (hv && v->set_format && int_view_format(v->format, &f) && texel_bytes(f) && texel_bytes(f) == texel_bytes(img->format)) {
-        if (img->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) raw_note(img->image);
+        if (img->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || img->format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)
+            raw_note(img->image);
         return f;
     }
     return img->format;
@@ -5874,12 +5885,13 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
     }
     VkImage si = src ? src->image : VK_NULL_HANDLE, di = dst ? dst->image : VK_NULL_HANDLE;
     VkFormat sf = src ? src->format : VK_FORMAT_UNDEFINED;
-    if (src && dst && fallback_9e5_scene(sf, dst->format)) {
+    if (src && dst && fallback_9e5_scene(sf, dst->format)) {   // the image the post pass wrote this frame (raw_9e5_twin)
         const VkTexImage *twin = raw_9e5_twin(src);
-        si = twin ? twin->image : VK_NULL_HANDLE, sf = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+        si = twin ? twin->image : VK_NULL_HANDLE, sf = twin ? twin->format : VK_FORMAT_B10G11R11_UFLOAT_PACK32;
     }
+    int native = raw_native_9e5(si, sf);   // RGB9E5 texels in an RGB9E5 image: decoded as they are, no copy
     VkImageView dst_view = VK_NULL_HANDLE;   // for the tonemap pass, while the lock keeps the image
-    if (src && dst && (dst->usage & VK_IMAGE_USAGE_STORAGE_BIT) && raw_9e5(si, sf) &&
+    if (src && dst && (dst->usage & VK_IMAGE_USAGE_STORAGE_BIT) && (raw_9e5(si, sf) || native) &&
         dst->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && knob_tm_dispatch() != 2) {
         view_t nv;
         memset(&nv, 0, sizeof nv);
@@ -5906,8 +5918,9 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
         e5_blit = (fp.optimalTilingFeatures & need) == need ? 1 + !!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) : 0;
         rt_log("vk_exec: RGB9E5 fallback decode %s", e5_blit ? "on" : "unavailable (E5B9G9R9 is no blit source here)");
     }
-    VkImage e5 = !scratch && e5_blit && raw_9e5(si, sf) ? fallback_scratch(ex, sw, sh, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) : VK_NULL_HANDLE;
-    if (e5) {   // the raw words into a shared-exponent image (same texel size: a copy keeps the bits), then the blit
+    VkImage e5 = scratch || !e5_blit ? VK_NULL_HANDLE : native ? si
+               : raw_9e5(si, sf) ? fallback_scratch(ex, sw, sh, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) : VK_NULL_HANDLE;
+    if (e5 && !native) {   // the raw words into a shared-exponent image (same texel size: a copy keeps the bits), then the blit
         VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                           .extent = {sw, sh, 1}};
         vkCmdCopyImage(ex->cb, si, VK_IMAGE_LAYOUT_GENERAL, e5, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
