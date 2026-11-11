@@ -22,6 +22,9 @@ int vk_ffx_framegen_available(void);
 int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage *depth, const VkFfxImage *mv,
                    const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y);
 void vk_ffx_release(void);   // before the device goes away
+// The device's functions as the library is given them (ffxCreateBackendVKDesc.vkDeviceProcAddr): its pipeline creates
+// go through the runtime's pipeline caches (vk_pipeline.c vk_pipeline_create_foreign; NX2NAVI_FFX_PIPE_CACHE=0: not).
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_ffx_proc_addr(VkDevice dev, const char *name);
 
 #ifdef __cplusplus
 // The API's calls themselves, for vk_fg.cpp (0 = FFX_API_RETURN_OK): the library loaded first (vk_ffx_load).

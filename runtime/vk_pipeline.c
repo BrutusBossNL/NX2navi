@@ -593,6 +593,82 @@ static VkResult pipe_create_in(int kind, void *ci, VkPipeline *pipe, VkPipelineC
     return r;
 }
 
+// ---- pipelines of a library that draws on our device (FSR 3.1: vk_ffx.cpp vk_ffx_proc_addr)
+// Such a library creates its pipelines itself and passes no pipeline cache, so nothing of ours kept them: every
+// context it made (one per render and output size, and one for frame generation) compiled its passes again unless the
+// driver's own disk cache still had them, which a renamed or updated exe on NVIDIA and a driver without a disk cache
+// do not. vk_ffx.cpp hands the library these creates in the place of vkCreateComputePipelines and
+// vkCreateGraphicsPipelines; a create that names no cache goes through ours as pipe_create_in does: asked of P.cache
+// first without compiling, and compiled into the play cache when neither it nor the driver has the pipeline, so the
+// file a run writes (pipeline-cache-play.bin, or pipeline-cache.bin without a play cache) holds it for the next start.
+// Before the first pipeline of ours (P.ready 0) and with pipeline binaries on there is no cache to give: the create
+// goes to the driver as the library asked. infos: n VkComputePipelineCreateInfo (compute 1) or
+// VkGraphicsPipelineCreateInfo. Any thread.
+static struct { volatile uint64_t made, from_cache, compiled, uncached; } FP;
+
+void vk_pipeline_foreign_counts(VkForeignPipes *o) {
+    o->made = __atomic_load_n(&FP.made, __ATOMIC_RELAXED), o->from_cache = __atomic_load_n(&FP.from_cache, __ATOMIC_RELAXED);
+    o->compiled = __atomic_load_n(&FP.compiled, __ATOMIC_RELAXED), o->uncached = __atomic_load_n(&FP.uncached, __ATOMIC_RELAXED);
+}
+
+static VkResult foreign_one(VkDevice dev, int compute, VkPipelineCache cache, uint32_t n, const void *ci,
+                            const VkAllocationCallbacks *alloc, VkPipeline *out) {
+    return compute ? vkCreateComputePipelines(dev, cache, n, ci, alloc, out)
+                   : vkCreateGraphicsPipelines(dev, cache, n, ci, alloc, out);
+}
+
+VkResult vk_pipeline_create_foreign(VkDevice dev, int compute, uint32_t n, const void *infos,
+                                    const VkAllocationCallbacks *alloc, VkPipeline *out) {
+    VkPipelineCache cache = __atomic_load_n(&P.ready, __ATOMIC_ACQUIRE) && dev == P.device ? P.cache : VK_NULL_HANDLE;
+    if (!cache) {
+        VkResult r = foreign_one(dev, compute, VK_NULL_HANDLE, n, infos, alloc, out);
+        if (r == VK_SUCCESS) __atomic_fetch_add(&FP.made, n, __ATOMIC_RELAXED), __atomic_fetch_add(&FP.uncached, n, __ATOMIC_RELAXED);
+        return r;
+    }
+    VkResult r = VK_SUCCESS;
+    plat_mutex_lock_shared(&cache_rw);
+    if (!P.play) {   // one cache: whether it held them is not known here; its save looks at the data's size
+        r = foreign_one(dev, compute, cache, n, infos, alloc, out);
+        if (r == VK_SUCCESS) __atomic_fetch_add(&FP.made, n, __ATOMIC_RELAXED), __atomic_fetch_add(&cache_merges, n, __ATOMIC_RELAXED);
+    }
+    for (uint32_t i = 0; P.play && i < n; i++) {
+        // a copy of the create info: the flags are ours to change, the library's struct is not
+        VkComputePipelineCreateInfo cc;
+        VkGraphicsPipelineCreateInfo gc;
+        void *ci;
+        if (compute) cc = ((const VkComputePipelineCreateInfo *)infos)[i], ci = &cc;
+        else gc = ((const VkGraphicsPipelineCreateInfo *)infos)[i], ci = &gc;
+        PipeCiHead *hd = ci;
+        // Flags given in a VkPipelineCreateFlags2CreateInfo replace the struct's own, so the question "without
+        // compiling" cannot be put through hd->flags: such a create goes to the play cache at once.
+        int flags2 = 0;
+        for (const VkBaseInStructure *b = hd->pNext; b && !flags2; b = b->pNext)
+            flags2 = b->sType == VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR;
+        VkPipelineCreateFlags flags = hd->flags;
+        VkResult ri = VK_PIPELINE_COMPILE_REQUIRED;
+        out[i] = VK_NULL_HANDLE;
+        if (!flags2) {
+            hd->flags = flags | VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+            ri = foreign_one(dev, compute, cache, 1, ci, alloc, &out[i]);
+            hd->flags = flags;
+            if (ri == VK_SUCCESS) __atomic_fetch_add(&FP.from_cache, 1, __ATOMIC_RELAXED);
+        }
+        if (ri == VK_PIPELINE_COMPILE_REQUIRED) {
+            ri = foreign_one(dev, compute, P.play, 1, ci, alloc, &out[i]);
+            if (ri == VK_SUCCESS) {
+                __atomic_fetch_add(&FP.compiled, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&P.play_made, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&cache_merges, 1, __ATOMIC_RELAXED);   // autosave_once: the play file is due
+            }
+        }
+        if (ri == VK_SUCCESS) __atomic_fetch_add(&FP.made, 1, __ATOMIC_RELAXED);
+        else if (r == VK_SUCCESS) r = ri;   // the first that failed, as a create of several reports one result
+        if (ri != VK_SUCCESS) out[i] = VK_NULL_HANDLE;
+    }
+    plat_mutex_unlock_shared(&cache_rw);
+    return r;
+}
+
 static VkResult pipe_create(int kind, void *ci, VkPipeline *pipe) {
     PipeCiHead *hd = ci;
     VkResult r;

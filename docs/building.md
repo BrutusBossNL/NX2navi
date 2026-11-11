@@ -405,6 +405,15 @@ value no machine has free. What the builders do when they are refused (`warm_bui
 `lw_worker`) shows in a run's log: start the game with `build_free_mb` set above the machine's free commit and read the
 `vk_pipeline:` lines that name the commit headroom.
 
+A change to how FSR 3.1's pipelines reach the pipeline caches (`runtime/vk_ffx.cpp` `vk_ffx_proc_addr`,
+`runtime/vk_pipeline.c` `vk_pipeline_create_foreign`) passes `python tests\ffx_cache_check.py <game exe>`. It runs
+`--probe-ffx-cache` (one upscaling context on the device; no window, no game) twice on pipeline cache files of its own
+and once with `ffx_pipe_cache = 0`: the library's pipelines must come through the runtime's creates, the second run
+must compile none of them, and with the setting off none may come through. The executable needs
+`amd_fidelityfx_vk.dll` beside it; without it the probe and the test skip. The graphics driver's own cache can serve
+the first run too, so to see the files alone do it, run the probe from a copy of the executable under a name the
+driver has not seen: its first run compiles, its second does not.
+
 A change to the start's memory warning (`runtime/mem_need.h`, `runtime/memory.c` `mem_start_note`) passes
 `python tests\mem_need_check.py [<game exe>]`, which builds the header alone and checks when the game's need counts
 as short. With the executable it also runs `--probe-memneed` (it prints the machine's commit and the answer and

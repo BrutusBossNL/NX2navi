@@ -23,6 +23,8 @@
 //     --probe-nvn, --probe-nvn-tex, --probe-window, --probe-shader, --probe-vkmem, --probe-vkexec    graphics probes
 //     --probe-prewarm   the boot's pipeline stages from the caches next to the executable, the memory each leaves and
 //                       what a compute pipeline's first dispatch costs; skips without recorded shaders, runs no game
+//     --probe-ffx-cache one FSR 3.1 upscaling context and where its pipelines came from (the pipeline caches kept
+//                       across runs); skips without amd_fidelityfx_vk.dll, runs no game
 //     --probe-astc      the compute ASTC decoder against astc_decode_ldr; needs no game files
 //     --probe-zstd      host zstd streams (ov_zstd.c) on frames made here; needs no game files
 //     --probe-input     gamepad polls on a virtual gamepad, also while SDL's update takes long; needs no game files
@@ -534,7 +536,7 @@ static int usage(const char *argv0) {
                     "--probe-cfg | --probe-dpi | --probe-mods | --probe-kernel | --probe-ipc | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-shader | --probe-vkmem | "
                     "--probe-vkexec | --probe-astc | --probe-zstd | --probe-input | --probe-movie | --probe-crash-call | --probe-crash-null | --probe-discord | --probe-coop | "
-                    "--prepare-shaders | --warm-shaders | --prepare-pipelines | --probe-prewarm | --probe-buildgate | --probe-memneed | --probe-devlost | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--prepare-shaders | --warm-shaders | --prepare-pipelines | --probe-prewarm | --probe-buildgate | --probe-ffx-cache | --probe-memneed | --probe-devlost | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
@@ -696,6 +698,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--prepare-pipelines")) return vk_pipeline_prepare_pipelines();
     if (!strcmp(mode, "--probe-prewarm")) return vk_pipeline_probe_prewarm();
     if (!strcmp(mode, "--probe-buildgate")) return vk_pipeline_probe_buildgate();
+    if (!strcmp(mode, "--probe-ffx-cache")) return vk_ffx_probe_cache();
     if (!strcmp(mode, "--probe-memneed")) { mem_start_note(1); return 0; }
     if (!strcmp(mode, "--boot")) { mem_start_note(0); cfg.boot = 1; rt_boot(); return 0; }
     return usage(argv[0]);
