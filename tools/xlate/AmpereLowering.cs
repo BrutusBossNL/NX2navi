@@ -196,6 +196,13 @@ static class AmpereLowering
                     uint k16 = i.Bits(75, 1), cd = i.Bit(76) ? 3u : 1u;
                     see(i.Bits(16, 8) + cd); see(i.Bits(24, 8) + 1 + 2 * k16); see(i.Bits(32, 8) + k16); see(i.Bits(64, 8) + cd);
                 }
+                // 64- and 128-bit loads write Rd..Rd+1 or Rd..Rd+3, the stores read Rb..Rb+1 or Rb..Rb+3 (size 73-75: 5, 6).
+                // A program that names only Rd of its highest quad would otherwise put UR0 and UR1 in its top registers.
+                if (op is 0x381 or 0x981 or 0x984 or 0x983 or 0x386 or 0x986 or 0x388 or 0x988 or 0x387 or 0x987)
+                {
+                    uint size = i.Bits(73, 3), reg = op is 0x381 or 0x981 or 0x984 or 0x983 ? i.Bits(16, 8) : i.Bits(32, 8);
+                    if (size is 5 or 6 && reg < RZ) see(reg + (size == 6 ? 3u : 1u));
+                }
                 if (op == 0x3a9) see(i.Bits(64, 8));                                // ATOMG.CAS: the new value
                 if (op == 0x593 || (op == 0xb66 && i.Bit(78))) see(i.Bits(32, 8));   // SUATOM data, TLD.MS sample index
                 if (b < 0x080 || b is >= 0x160 and <= 0x16f) see(i.Bits(64, 8));   // C of ALU forms, TEX second destinations
