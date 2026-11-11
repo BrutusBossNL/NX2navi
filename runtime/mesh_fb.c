@@ -376,10 +376,14 @@ static uint32_t *convert(const uint32_t *w, uint64_t words, const MeshFbInfo *m,
         DO(&c, OpStore, fake_wg, E(&c, OpCompositeConstruct, c.t_v3uint, j, k0, k0));
         uint32_t at = mul(&c, g, K(&c, slot_words));
         uint32_t room = E(&c, OpULessThanEqual, c.t_bool, add(&c, at, K(&c, slot_words)), E(&c, OpArrayLength, c.t_uint, mesh_buf, 0));
-        // the primitive count starts at 0: a mesh program that emits nothing never writes it
-        uint32_t mg = if_begin(&c, first);
-        DO(&c, OpStore, SHARED(count_word), k0);
-        if_end(&c, mg);
+        // The whole stage buffer starts at 0: the vertex lines, the primitive count and the vertex indices. Workgroup
+        // memory is undefined at the start, a mesh program need not write every vertex it has room for or every index
+        // byte (nor its count when it emits nothing), and the slot below is copied whole and drawn: what an earlier
+        // workgroup left there became vertices and primitives. The payload area after it is copied in next.
+        Loop z = loop_begin(&c, counter, tid, K(&c, slot_words), threads);
+        DO(&c, OpStore, SHARED(z.i), k0);
+        loop_end(&c, &z);
+        uint32_t mg;
         if (m->has_task) {
             uint32_t pw = m->payload_bytes / 4;
             if (pw > task_words) pw = task_words;
