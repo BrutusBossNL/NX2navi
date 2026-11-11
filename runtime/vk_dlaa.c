@@ -519,6 +519,7 @@ static struct {
     int mv_ok;                   // -1 not built, 0 failed, 1 ready
     uint64_t mv_frames, mv_none, masked;   // masked: frames with the characters' bias mask
     uint64_t why[3];             // history resets: scene size changed, no camera, scene target changed
+    uint64_t target_kept;        // scene target changed and the history stayed (target_changed)
     // frames without a camera and what mv_pass did about them (dlaa_cam_keep, cam_note)
     uint64_t cam_none_draw, cam_none_snap;   // no scene-context draw this frame / one, not in the evaluating submission's copy
     uint64_t cam_at_draw;        // camera taken from the bytes the draw read, where the evaluating submission lacks them
@@ -950,6 +951,15 @@ static void fg_camera(const float *v, const double m[16]) {
     c->fov_y = P[5] != 0 ? 2.0f * (float)atan(1.0 / fabs(P[5])) : 1.0f;
     c->aspect = P[0] != 0 ? (float)fabs(P[5] / P[0]) : 1.777f;
     D.fg_cam_ok = 1;
+    // NX2NAVI_MOUSE_TRACE=1 (test runs, mouse_direct.c): the camera's direction each frame
+    static int trace = -1;
+    if (trace < 0) {
+        const char *e = cfg_get("NX2NAVI_MOUSE_TRACE");
+        trace = e && *e && strcmp(e, "0");
+    }
+    if (trace)
+        rt_log("mousetrace: cam t=%.3f fwd=%.6f,%.6f,%.6f pos=%.3f,%.3f,%.3f", plat_now_ns() / 1e6, c->fwd[0], c->fwd[1],
+               c->fwd[2], c->pos[0], c->pos[1], c->pos[2]);
 }
 
 // Frames without a camera (dlaa_cam_keep, NX2NAVI_DLAA_CAM_KEEP; 1 by default, 0 restores the old handling). Measured in
@@ -1515,21 +1525,23 @@ static int perf_quality(uint32_t w, uint32_t ow) {
 // Every 300 frames DLSS ran, the history resets and camera gaps of those frames, while there were any (at most 400 lines a
 // run): the measure for dlaa_cam_keep at one spot of the game.
 static void window_line(void) {
-    enum { N_ = 10 };
+    enum { N_ = 11 };
     static uint64_t last[N_];
     static int lines;
     if (D.evals % 300) return;
     uint64_t now[N_] = {D.why[0], D.why[1], D.why[2], D.mv_none, D.cam_none_draw, D.cam_none_snap, D.cam_kept,
-                        D.cam_at_draw, D.frames_missed, D.seconds}, d[N_], any = 0;
+                        D.cam_at_draw, D.frames_missed, D.seconds, D.target_kept}, d[N_], any = 0;
     for (int i = 0; i < N_; i++) d[i] = now[i] - last[i], last[i] = now[i];
     for (int i = 0; i < N_; i++) any |= d[i];
     if (!any || lines >= 400) return;
     lines++;
-    rt_log("dlaa: frames %llu-%llu: resets %llu size, %llu camera, %llu target; %llu without a camera (%llu without a "
+    rt_log("dlaa: frames %llu-%llu: resets %llu size, %llu camera, %llu target (%llu target changes with the history "
+           "kept); %llu without a camera (%llu without a "
            "scene-context draw, %llu not in DLSS's submission), %llu kept with zero motion; %llu cameras read at the draw; "
            "%llu frames without the DLAA point, %llu with a second scene after DLSS ran",
            (unsigned long long)(D.evals - 299), (unsigned long long)D.evals, (unsigned long long)d[0],
-           (unsigned long long)d[1], (unsigned long long)d[2], (unsigned long long)d[3], (unsigned long long)d[4],
+           (unsigned long long)d[1], (unsigned long long)d[2], (unsigned long long)d[10], (unsigned long long)d[3],
+           (unsigned long long)d[4],
            (unsigned long long)d[5], (unsigned long long)d[6], (unsigned long long)d[7], (unsigned long long)d[8],
            (unsigned long long)d[9]);
 }
@@ -1537,14 +1549,27 @@ static void window_line(void) {
 // dst: the target DLSS's picture goes to, NULL for the light target itself (DLAA in place).
 static void hudless(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_t h);
 
-// Another light target than last frame's: a new history. The first few are logged with the new target's size, to tell a
-// target the game made anew from two it alternates between.
-static void target_changed(const VkExecTarget *t) {
+// Another light target than last frame's. The game draws its scene into one of a few pooled targets of the same size
+// and moves to another whenever its pass list changes, in the middle of play with the camera and the scene carrying
+// on: 35 times in a walk of a minute through Kokiri Forest, three of them within eight frames on the ladder below
+// the tree house.
+// The history is the upscaler's own and not in the target, so where this frame's motion vectors are valid (cont: the
+// camera of this frame and of the last one, mv_pass 1) the history stays. A new history at each change showed as a few
+// soft, grainy frames every time, a flicker over the whole picture. Without valid vectors, and with
+// NX2NAVI_DLAA_TARGET_KEEP=0 (test), a new history as before. The first few are logged with the new target's size, to
+// tell a target the game made anew from the ones it alternates between.
+static void target_changed(const VkExecTarget *t, int cont) {
+    static int keep = -1;
+    if (keep < 0) keep = rt_knob("DLAA_TARGET_KEEP", "1");
+    int kept = keep && cont && D.last_color;
     if (D.last_color && D.target_logged < 16)
-        D.target_logged++, rt_log("dlaa: frame %llu: the light target changed from %p to %p (%ux%u format %d): new history",
+        D.target_logged++, rt_log("dlaa: frame %llu: the light target changed from %p to %p (%ux%u format %d): %s",
                                   (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1,
-                                  (void *)D.last_color, (void *)t->image, t->width, t->height, (int)t->format);
-    D.reset = 1, D.why[2]++, D.last_color = t->image;
+                                  (void *)D.last_color, (void *)t->image, t->width, t->height, (int)t->format,
+                                  kept ? "the history stays (the camera carries on)" : "new history");
+    if (kept) D.target_kept++;
+    else D.reset = 1, D.why[2]++;
+    D.last_color = t->image;
 }
 
 // DLSS's own video memory, the features and their history (NGX's DLSS statistics callback with the capability
@@ -1643,7 +1668,7 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     if (timed) T.cpu_drain += kern_now_ns() - c0;
     if (fsr) {   // FSR 3.1 (vk_ffx.cpp) in DLSS's place: the same images, then the same blit below
         if (t->level || t->base_layer || z->level || z->base_layer) return dl_fail("FSR 3.1 on a target that is not level 0, layer 0", 0);
-        if (D.last_color != t->image) target_changed(t);
+        if (D.last_color != t->image) target_changed(t, mv == 1);
         uint64_t now = plat_now_ns();
         double dt = D.last_eval_ns ? (now - D.last_eval_ns) / 1e6 : 0;
         D.last_eval_ns = now;
@@ -1657,6 +1682,8 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         goto evaluated;
     }
     if (!e->feat) {
+        // NX2NAVI_TRACE=perf: the release of the kept features (a device idle wait) and the create, as one mark
+        uint64_t t0 = perf_mark_begin();
         if (idle_free() != 2) release_kept(e, feat_released);
         feat_released = 0;
         p_setu(p, "CreationNodeMask", 1);
@@ -1681,13 +1708,14 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         p_setu(p, "DLSS.Hint.Render.Preset.Performance", (unsigned)pm);
         p_setu(p, "DLSS.Hint.Render.Preset.UltraPerformance", (unsigned)pl);
         NgxResult r = N.create(cb, NGX_FEATURE_SUPERSAMPLING, p, &e->feat);
+        perf_mark_end(PERF_M_NGX, t0, 0);
         if (!NGX_OK(r) || !e->feat) return dl_fail("DLSS feature creation", r);
         D.reset = 1;
         int q = perf_quality(w, ow), pr = q == 0 ? pm : q == 3 ? pl : pk;
         rt_log("dlaa: DLSS feature created at %ux%u -> %ux%u, quality value %d, preset %c (scene format %d, depth format "
                "%d)", w, h, ow, oh, q, 'A' + pr - 1, (int)t->format, (int)z->format);
     }
-    if (D.last_color != t->image) target_changed(t);
+    if (D.last_color != t->image) target_changed(t, mv == 1);
     NgxResourceVK rc = res_image(cv, t->image, t->format, w, h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
     NgxResourceVK ro = res_image(e->out_view, e->out, VK_FORMAT_R16G16B16A16_SFLOAT, ow, oh, VK_IMAGE_ASPECT_COLOR_BIT, 1);
     NgxResourceVK rz = res_image(zv, z->image, z->format, w, h, VK_IMAGE_ASPECT_DEPTH_BIT, 0);
@@ -2178,7 +2206,9 @@ int vk_ngxfg_evaluate(VkCommandBuffer cb, const VkNgxImage *bb, const VkNgxImage
         p_setu(p, "Width", bb->w);
         p_setu(p, "Height", bb->h);
         p_setu(p, "DLSSG.BackbufferFormat", (unsigned)bb->fmt);
+        uint64_t t0 = perf_mark_begin();
         NgxResult r = N.create(cb, NGX_FEATURE_FRAME_GENERATION, p, &FG.feat);
+        perf_mark_end(PERF_M_NGX, t0, 0);
         if (!NGX_OK(r) || !FG.feat) {
             FG.failed = 1, FG.feat = NULL;
             rt_log("ngxfg: DLSS Frame Generation feature creation failed (%08x): frame generation off", (unsigned)r);

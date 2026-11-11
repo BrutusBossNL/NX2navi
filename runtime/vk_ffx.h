@@ -22,6 +22,9 @@ int vk_ffx_framegen_available(void);
 int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage *depth, const VkFfxImage *mv,
                    const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y);
 void vk_ffx_release(void);   // before the device goes away
+// The device's functions as the library is given them (ffxCreateBackendVKDesc.vkDeviceProcAddr): its pipeline creates
+// go through the runtime's pipeline caches (vk_pipeline.c vk_pipeline_create_foreign; NX2NAVI_FFX_PIPE_CACHE=0: not).
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_ffx_proc_addr(VkDevice dev, const char *name);
 
 // AMD FSR 4 (vk_ffx4.cpp): the ML upscaler of AMD's FSR SDK 2.4, through amd_fidelityfx_loader_vk.dll and
 // amd_fidelityfx_upscaler_vk.dll beside the executable. vk_ffx_upscale runs it in FSR 3.1's place when the setting

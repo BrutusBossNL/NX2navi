@@ -83,6 +83,7 @@ uint64_t vk_headroom_held(void) { return (uint64_t)__atomic_load_n(&H.held, __AT
 
 static void VKAPI_PTR on_allocate(VmaAllocator a, uint32_t type, VkDeviceMemory m, VkDeviceSize size, void *user) {
     (void)a, (void)m, (void)size, (void)user;
+    perf_mark_add(PERF_M_DEVMEM, 0, size);   // NX2NAVI_TRACE=perf: every block and dedicated allocation VMA makes
     if (!H.on || type >= 64) return;
     if (plat_thread_id() == H.tid) {
         plat_inc64(&H.made);
@@ -157,6 +158,7 @@ static void top_up(const VkCtx *c, uint32_t type) {
 static void headroom_main(void *arg) {
     (void)arg;
     __atomic_store_n(&H.tid, plat_thread_id(), __ATOMIC_RELEASE);
+    if (vk_vaddr_wanted()) rt_log("vk: headroom: thread %u", H.tid);   // names this thread in the address history (vk_vaddr.c)
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
     uint64_t watch = 0;   // memory types seen so far
     for (;;) {
