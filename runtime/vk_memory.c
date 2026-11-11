@@ -110,8 +110,8 @@ static int shadow_on;                    // shadow mode: imported pools get shad
 static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size);
 static void shadow_touch(PoolRec *r);
 static void shadow_forget(PoolRec *r);
-static void mirror_retiring(PoolRec *r);  // vk_pool_fini: kept until mirror_retire (or vk_mem_shutdown)
-static void mirror_retire(void *arg);    // completion thread: destroys a finalized mirrored pool's record
+static void pool_retiring(PoolRec *r);  // pool_fini: kept until pool_retire (or vk_mem_shutdown)
+static void pool_retire(void *arg);    // completion thread: destroys a finalized pool's record
 static void grow(void **arr, int *cap, size_t elem);
 
 static PlatMutex pool_lock = PLAT_MUTEX_INIT;
@@ -356,8 +356,6 @@ static uint32_t gpa_cover(uint64_t a) {
     return rec;
 }
 
-static void gpa_retire(void *arg) { destroy_rec(vk_ctx(), arg); }
-
 static void pool_fini(pool_t *p) {
     VkCtx *c = vk_ctx();
     if (!c) return;
@@ -398,13 +396,17 @@ static void pool_fini(pool_t *p) {
         vk_queue_unlock();
     }
     vk_mem_collect();
+    // A record that waits for the next submission is on the retiring list until its callback runs: when no
+    // submission follows (a pool freed at the end), vk_mem_shutdown destroys it. Left to the callback alone, a
+    // shadow copy's buffer was still allocated when the allocator went, which stops the process there.
     // A mirrored pool's record and buffers outlive the submission being recorded, whose sync copies and write-backs may
     // name them (the game frees a pool only once the GPU is done with it, but its CPU writes may still be queued).
-    if (r->mbuf) mirror_retiring(r), vk_completion_add(vk_sync_issued() + 1, mirror_retire, r);
-    else if (r->gpa_rec && !r->used) vk_completion_add(vk_sync_issued() + 1, gpa_retire, r);   // the queue was not drained
+    if (r->mbuf) pool_retiring(r), vk_completion_add(vk_sync_issued() + 1, pool_retire, r);
+    // the queue was not drained
+    else if (r->gpa_rec && !r->used) pool_retiring(r), vk_completion_add(vk_sync_issued() + 1, pool_retire, r);
     // an unused physical pool may still be read through the virtual pages that mapped it (device addresses, which do not
     // mark it used): its buffer outlives the submission being recorded too
-    else if (r->kind == POOL_PHYS && !r->used) vk_completion_add(vk_sync_issued() + 1, gpa_retire, r);
+    else if (r->kind == POOL_PHYS && !r->used) pool_retiring(r), vk_completion_add(vk_sync_issued() + 1, pool_retire, r);
     else destroy_rec(c, r);
 }
 
@@ -2315,19 +2317,20 @@ static void mirror_forget(PoolRec *r) {
         }
 }
 
-// Finalized mirrored pools waiting for mirror_retire; vk_mem_shutdown destroys those whose callback never ran.
+// Finalized pools waiting for pool_retire (pool_fini says which); vk_mem_shutdown destroys those whose callback
+// never ran.
 static PoolRec **retiring;
 static int nretiring, cretiring;
 static PlatMutex retire_lock = PLAT_MUTEX_INIT;
 
-static void mirror_retiring(PoolRec *r) {
+static void pool_retiring(PoolRec *r) {
     plat_mutex_lock(&retire_lock);
     if (nretiring == cretiring) grow((void **)&retiring, &cretiring, sizeof *retiring);
     retiring[nretiring++] = r;
     plat_mutex_unlock(&retire_lock);
 }
 
-static void mirror_retire(void *arg) {
+static void pool_retire(void *arg) {
     plat_mutex_lock(&retire_lock);
     for (int i = 0; i < nretiring; i++)
         if (retiring[i] == arg) { retiring[i] = retiring[--nretiring]; break; }
