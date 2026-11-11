@@ -1537,6 +1537,15 @@ int vk_texture_pool_fresh_locked(void) {
 // slot_resolve's last answer was none because of its stale rule (vk_texture_slot_retry_locked)
 static int resolve_stale;
 
+// NX2NAVI_TRACE=perf, since the last perf line: slots a finalize marked (its own texture object's), slots at the storage
+// with the same parameters registered with another texture object, which a finalize leaves current
+// (vk_texture_release), and lookups the stale rule answered with the stand-in (slot_resolve). _hm: of them, the
+// terrain's streamed heightmaps (R32F 260x260), whose stand-in draws a chunk of ground at height zero.
+static uint64_t n_fin_own, n_fin_other, n_fin_other_hm, n_stale, n_stale_hm;
+static int terrain_heightmap(const tex_t *t) {
+    return t->d.format == NVN_FORMAT_R32F && t->d.width == 260 && t->d.height == 260;
+}
+
 int vk_texture_slot_retry_locked(int id) {
     if (id < 0 || id >= ntslots || !tslots[id].used || !tslots[id].t.mem) return -1;
     resolve_stale = 0;
@@ -2354,7 +2363,6 @@ static void slots_text(char *out, size_t n, const Tex *e) {
 // undefined image, which nothing else reports. One line per entry and up to MARK_LINES per address (said_at); the
 // marked slots that met such an entry are counted in the texture origins line whether or not a line was written.
 static uint64_t n_mark_empty, n_mark_none;   // since the last perf line: marked slots that met such an entry; that show none
-static uint64_t n_fin_other;   // since the last perf line: slots a finalize left current, registered by another texture there
 #define MARK_LINES 6
 #define MARK_LINES_ALL 20000
 static void marks_check(Tex *e, uint32_t id, uint64_t now, int followed) {
@@ -3573,8 +3581,12 @@ void vk_texture_release(const tex_t *t) {
             TexKey sk;
             make_key(&s->t, &sk);
             if (memcmp(&sk, &k, sizeof k)) continue;
-            if (s->t.serial != t->serial) n_fin_other++;
-            else s->finalized = 1, s->ce = NULL, changed = 1;
+            if (s->t.serial != t->serial) {   // another texture object's registration: it stays current
+                n_fin_other++, n_fin_other_hm += terrain_heightmap(&s->t);
+                continue;
+            }
+            s->finalized = 1, s->ce = NULL, changed = 1;
+            n_fin_own++;
         }
     if (e && !e->released) {
         mark_released(e);
@@ -3723,7 +3735,7 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         // after its released image was evicted; registering the descriptor again makes it current.
         if (!e && any) e = any;
         else if (!e && !cpu_slot) e = own && own->superseded ? NULL : own;   // a superseded one: entry_of takes it back
-        else if (!e && cpu_slot && s->finalized) stale = 1;
+        else if (!e && cpu_slot && s->finalized) stale = 1, n_stale++, n_stale_hm += terrain_heightmap(&s->t);
     }
     resolve_stale = stale;
     if (!e && s->t.mem && !stale) {
@@ -3973,13 +3985,18 @@ void vk_texture_new_submit(void) {
         rt_log("perf: frame %llu: texture origins: released entries dropped past RELEASED_MAX %llu, replaced by another "
                "descriptor at their address %llu; entries the CPU does not write made without content at an address it "
                "can see: on their own %llu, over a released entry %llu, over a live one %llu; marked slots that met an "
-               "entry without content %llu, that show no entry %llu; slots a finalize left current, registered by another texture "
-               "of the same parameters at its storage (a streamed terrain heightmap) %llu",
+               "entry without content %llu, that show no entry %llu",
                (unsigned long long)f * 60, (unsigned long long)n_drop_by[DROP_MAX], (unsigned long long)n_drop_by[DROP_REPLACED],
                (unsigned long long)n_cpu_empty[0], (unsigned long long)n_cpu_empty[1], (unsigned long long)n_cpu_empty[2],
-               (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none, (unsigned long long)n_fin_other);
+               (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none);
         memset(n_drop_by, 0, sizeof n_drop_by), memset(n_cpu_empty, 0, sizeof n_cpu_empty);
-        n_mark_empty = n_mark_none = n_fin_other = 0;
+        n_mark_empty = n_mark_none = 0;
+        rt_log("perf: frame %llu: texture finalizes: slots marked %llu; slots of another live texture with the same "
+               "parameters at the storage, left current %llu (terrain heightmaps %llu); lookups the stale rule gave the "
+               "stand-in %llu (terrain heightmaps %llu)", (unsigned long long)f * 60, (unsigned long long)n_fin_own,
+               (unsigned long long)n_fin_other, (unsigned long long)n_fin_other_hm, (unsigned long long)n_stale,
+               (unsigned long long)n_stale_hm);
+        n_fin_own = n_fin_other = n_fin_other_hm = n_stale = n_stale_hm = 0;
         if (split_mode > 0)
             rt_log("perf: frame %llu: split fill: entries the CPU does not write started with their storage's bytes: "
                    "copied from the released entry they replaced %llu, filled from storage %llu (%.1f MiB, %.2f ms), "
