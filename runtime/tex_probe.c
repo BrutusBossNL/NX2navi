@@ -352,7 +352,11 @@ static int test_import(pool_t *pool) {
     vk_mem_resolve(a + 0x1000, 0x20000, &sp);
     mem_written_pages(a, pool->size, pages, 64);
     vk_mem_gpu_pending(a + 0x1000, 0x20000);
-    vk_mem_shadow_sync();   // as a submit does: the part's CPU inputs go in before its GPU work
+    // As a submit does: a new write-watch epoch (the copy-in reads each region's snapshot once per submission, so a
+    // second sync in the same epoch would not see the CPU writes made since the first), then the part's CPU inputs
+    // go in before its GPU work.
+    vk_texture_new_submit();
+    vk_mem_shadow_sync();
     copy_wait(sb, 0, sp.buffer, sp.offset, 0x20000);
     vk_gpu_written(a + 0x1000, 0x20000);
     GCHECK(!memcmp(m + 0x1000, s, 0x20000), "GPU copy into the imported heap range differs from the source");
@@ -370,6 +374,7 @@ static int test_import(pool_t *pool) {
     // A GPU write noted for the part being submitted must not keep the part's CPU inputs out: a buffer the shaders
     // add to and the CPU resets (the game's lighting accumulators) depends on the reset reaching the GPU first.
     vk_mem_gpu_pending(a + 0x30000, 0x4000);
+    vk_texture_new_submit();
     vk_mem_shadow_sync();
     copy_wait(sp.buffer, sp.offset, sb, 0, 0x4000);
     vmaInvalidateAllocation(c->vma, sa, 0, VK_WHOLE_SIZE);
