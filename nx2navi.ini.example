@@ -239,11 +239,11 @@
 # texture (0 = the CPU untiles the blocks first).
 # astc_gpu_deswizzle = 1
 # With astc = gpu: 1 keeps the decoder's scratch buffer from one upload batch to the next instead of making it again for
-# each, to shorten the hitches when an area loads (0 = one per batch; off until a play test measures it).
-# astc_scratch_keep = 0
+# each, to shorten the hitches when an area loads (0 = one per batch).
+# astc_scratch_keep = 1
 # With astc = gpu: 1 stages a texture's ASTC blocks in the shared staging ranges instead of a buffer of their own
-# (0 = a buffer each; off until a play test measures it).
-# astc_arena = 0
+# (0 = a buffer each).
+# astc_arena = 1
 # A render target that needs an image of its own takes the image of a released one of the same size and format
 # instead of making a new one (0 = always a new image).
 # tex_reuse = 1

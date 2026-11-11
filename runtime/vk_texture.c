@@ -2755,12 +2755,13 @@ static int astc_bl_regions(const Tex *e, uint32_t levels, uint32_t layers, int b
     return 1;
 }
 
-// NX2NAVI_ASTC_ARENA=1 (default 0 until a play test measured it): the raw ASTC blocks for the GPU decoder stage in a
+// NX2NAVI_ASTC_ARENA=1 (the default): the raw ASTC blocks for the GPU decoder stage in a
 // range of the staging arena (vk_staging_at) like the other formats, not in a VkBuffer of their own. vk_astc_record
 // reads its source only through a buffer copy at each region's src, so the range's offset is added to the regions. A
 // buffer per texture cost a vmaCreateBuffer and, after the batch, a vmaDestroyBuffer each; an area load uploads
 // thousands. The check mode keeps its own buffer (astc_check reads the blocks at the regions' src offsets). 0: a buffer
-// per texture.
+// per texture. With the kept scratch, a Kakariko walk at 1440p (2026-11-11) went from 342 device memory allocations
+// and 6 frames over 50 ms to 233 and 3.
 static int astc_arena(void) {
     static int on = -1;
     if (on < 0) {
