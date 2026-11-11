@@ -2536,7 +2536,10 @@ static class AmpereLowering
     // localBytes: the local memory size the lowered program needs when that changed (spill mode), else 0. Graphics
     // programs carry it in their header already; compute and task/mesh programs need it from the translator's host
     // (job "local_mem").
-    public static byte[] Lower(byte[] code, int size, bool graphics, out int localBytes, int[] table = null, MeshInfo mesh = null)
+    // computeLocal: a compute program's own local memory in bytes, where its spill area starts (0: the translator's
+    // compute default of 0x1000).
+    public static byte[] Lower(byte[] code, int size, bool graphics, out int localBytes, int[] table = null, MeshInfo mesh = null,
+                               int computeLocal = 0)
     {
         localBytes = 0;
         int header = graphics || mesh != null ? 0x80 : 0;
@@ -2555,9 +2558,9 @@ static class AmpereLowering
         try { lowered = new Lowerer(insns, sph, !graphics, table, mesh) { C1 = C1Bytes }.Run(out branches, out first); }
         catch (RegisterPressureException)
         {
-            // Local memory after the program's own: the header's sizes (translator: low + high + CRS / 32), or the
-            // translator's compute default (0x1000) for compute programs.
-            spillAt = 0x1000;
+            // Local memory after the program's own: the header's sizes (translator: low + high + CRS / 32), or for a
+            // compute program its own size (computeLocal), the translator's compute default (0x1000) when not given.
+            spillAt = computeLocal > 0 ? computeLocal : 0x1000;
             if (header != 0)
                 spillAt = ((int)(BitConverter.ToUInt32(code, 4) & 0xffffff) + (int)(BitConverter.ToUInt32(code, 8) & 0xffffff)
                            + (int)(BitConverter.ToUInt32(code, 12) & 0xffffff) / 32 + 15) & ~15;
