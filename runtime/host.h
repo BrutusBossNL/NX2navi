@@ -441,6 +441,7 @@ int vk_pipeline_prepare_shaders(void);                     // vk_pipeline.c: --p
 int vk_pipeline_warm_shaders(void);                        // vk_pipeline.c: --warm-shaders (tools/build_game.py)
 int vk_pipeline_prepare_pipelines(void);                   // vk_pipeline.c: --prepare-pipelines (the shared pipeline list)
 int vk_pipeline_probe_prewarm(void);                       // vk_pipeline.c: --probe-prewarm
+int vk_pipeline_probe_buildgate(void);                     // vk_pipeline.c: --probe-buildgate
 // vk_device.c: the drivers' own shader caches beside the exe (MESA_SHADER_CACHE_DIR, on NVIDIA's Linux driver
 // __GL_SHADER_DISK_CACHE_PATH and _SIZE) in the environment, once; before any thread can load a Vulkan driver
 void vk_driver_cache_env(void);

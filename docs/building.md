@@ -397,6 +397,14 @@ loss at the same moment end the process with exit code 72, one device report and
 device and opens no window; the device is not really lost, so what a driver answers after a loss is not covered.
 `device_lost_at = <n>` in `nx2navi.ini` ends a real run the same way at its n-th hand-over to the GPU queue.
 
+A change to the memory gate of the background pipeline builds (`runtime/vk_build_gate.h`, `runtime/vk_pipeline.c`
+`gate_enter`) passes `python tests\build_gate_check.py [<game exe>]`, which builds the header alone and checks what it
+admits and refuses and that builds under way count through their reservations. With the executable it also runs
+`--probe-buildgate` (no device, no window, no build) with the settings in effect, with `build_free_mb = 0` and with a
+value no machine has free. What the builders do when they are refused (`warm_builder`, `pipe_worker`, `lb_worker`,
+`lw_worker`) shows in a run's log: start the game with `build_free_mb` set above the machine's free commit and read the
+`vk_pipeline:` lines that name the commit headroom.
+
 A change to where the lazy write-back is on by default (`runtime/wb_lazy_choice.h`, `runtime/vk_memory.c`
 `vk_mem_lazy_decide`) passes `python tests\wb_lazy_check.py`, which builds the header alone and checks the choice and
 its reason by platform, by GPU driver and by what the player set. No game files, no GPU.
