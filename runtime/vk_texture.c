@@ -2347,6 +2347,8 @@ static void upload(Tex *e) {
             static volatile int32_t n_gone;
             log_limited(&n_gone, "texture %#llx (%llu bytes): storage released during the upload; uploaded as zeros",
                         (unsigned long long)e->pub.addr, (unsigned long long)e->t.L.size);
+            // the image holds zeros, not the bytes hashed above: the same bytes mapped back there upload again
+            e->chash_ok = 0;
         }
         if (gdsw && !sk) {
             if (held) memcpy(stg, t->mem, size);
@@ -2416,9 +2418,11 @@ static void upload(Tex *e) {
                                      e->pub.image, e->pub.aspect, rbuf);
             perf_end(PERF_ASTC, a0);
             vk_texstat_time(VK_TS_ASTC, a0);
-            if (!checked)
+            if (!checked) {
                 log_limited(&n_undecoded, "ASTC texture %#llx (fmt %#x %ux%u) not decoded on the GPU: left as it was",
                             (unsigned long long)e->pub.addr, d->format, d->width, d->height);
+                e->chash_ok = 0;   // the image does not hold the bytes hashed above: the next write uploads, equal or not
+            }
         } else {
             for (k = k0; k < k1; k++) rg[k].bufferOffset += soff;
             vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, k1 - k0, rg + k0);
