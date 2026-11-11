@@ -830,7 +830,10 @@ NVN_API(nvnWindowAcquireTexture) {
     // first submission (nvn_api_core.c nvnQueueSubmitCommands) removes the rest. NX2NAVI_ACQUIRE_WAIT=0 leaves it to the
     // clock; =2 waits for the newest present of any image (one frame in flight at most).
     static int acq_wait = -1;
-    if (acq_wait < 0) acq_wait = rt_knob("ACQUIRE_WAIT", "1");
+    if (acq_wait < 0) {   // a number: the on/off reader took every value but 0 for 1, so 2 could not be chosen
+        const char *e = cfg_get("NX2NAVI_ACQUIRE_WAIT");
+        acq_wait = e && (*e == '0' || *e == '2') && !e[1] ? *e - '0' : 1;
+    }
     uint64_t *fe = img_fence_of(o, idx), want = fe ? *fe : 0;
     if (acq_wait == 2) want = last_present_fence;
     if (acq_wait && want) {
