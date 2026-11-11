@@ -3314,12 +3314,13 @@ typedef struct Job {
     uint32_t fs_off;
     uint8_t low;                       // in the low queue, or running at below-normal priority
     uint8_t prebuild, demanded;        // from the key file; a draw asked for it before it was ready
-    int worker;                        // running on A.thread[worker]; -1 queued
+    int worker;                        // running on A.thread[worker]; -1 queued; JOB_ON_DRAW on the thread that waits for it
     VkPipeState s;
     GKey k;
 } Job;
 
 #define MAX_WORKERS 4
+#define JOB_ON_DRAW (-2)
 
 static struct {
     int on;                            // set once by vk_pipeline_async_enable, before the replay runs
@@ -3330,6 +3331,7 @@ static struct {
     Job *low, *low_tail;               // prebuild
     uint32_t inflight;                 // queued or running, both queues
     int low_running;                   // pool workers running a job taken from the low queue
+    uint64_t first, taken;             // waited-for jobs moved to the head of the draw queue; built by the waiting thread
     PlatCond idle;           // with P.lock: no job queued or running
 } A = {.idle = PLAT_COND_INIT};
 
@@ -3655,6 +3657,38 @@ static void lib_worker(void *arg) {
     }
 }
 
+// The whole build of job j, which the caller took off its queue, and the job's end: its pipeline is entered, the
+// threads waiting for it are woken and j is freed. lowrun: 1 on a pool worker that took j from the low queue. Caller
+// holds P.lock, which is released for the build.
+static void job_build(Job *j, int lowrun) {
+    plat_mutex_unlock(&P.lock);
+    VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
+    plat_mutex_lock(&P.lock);
+    if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
+    ready_note(j->p, 0);
+    if (pipe && j->p->fast) P.g.swaps++;
+    j->p->building = 0;
+    j->p->job = NULL;
+    if (pipe) {
+        P.stats.graphics++, P.stats.async_built++;
+        if (!j->prebuild) keys_note(&j->s);
+    } else {
+        P.stats.failures++;
+        rt_log("vk_pipeline: graphics pipeline not built: pipeline creation failed");
+    }
+    if (j->prebuild) {
+        if (pipe) K.built++;
+        else K.failed++;
+        K.promoted += j->demanded;
+        if (!--K.left && !K.loading) prebuild_report();
+    }
+    A.low_running -= lowrun;
+    if (!--A.inflight) plat_cond_broadcast(&A.idle);
+    plat_cond_broadcast(&done_cv);
+    if (pipe && (!j->prebuild || j->demanded)) perf_count(PERF_CNT_PIPE_ASYNC);   // a draw waited for it
+    free(j);
+}
+
 static void pipe_worker(void *arg) {
     int me = (int)(intptr_t)arg;
     plat_mutex_lock(&P.lock);
@@ -3712,32 +3746,7 @@ static void pipe_worker(void *arg) {
                 vkDestroyPipeline(P.device, f, NULL);
             }
         }
-        plat_mutex_unlock(&P.lock);
-        VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
-        plat_mutex_lock(&P.lock);
-        if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
-        ready_note(j->p, 0);
-        if (pipe && j->p->fast) P.g.swaps++;
-        j->p->building = 0;
-        j->p->job = NULL;
-        if (pipe) {
-            P.stats.graphics++, P.stats.async_built++;
-            if (!j->prebuild) keys_note(&j->s);
-        } else {
-            P.stats.failures++;
-            rt_log("vk_pipeline: graphics pipeline not built: pipeline creation failed");
-        }
-        if (j->prebuild) {
-            if (pipe) K.built++;
-            else K.failed++;
-            K.promoted += j->demanded;
-            if (!--K.left && !K.loading) prebuild_report();
-        }
-        A.low_running -= lowrun;
-        if (!--A.inflight) plat_cond_broadcast(&A.idle);
-        plat_cond_broadcast(&done_cv);
-        if (pipe && (!j->prebuild || j->demanded)) perf_count(PERF_CNT_PIPE_ASYNC);   // a draw waited for it
-        free(j);
+        job_build(j, lowrun);
     }
     return;
 }
@@ -3805,7 +3814,7 @@ static void promote(Pipe *p) {
     if (!j || !j->low) return;
     if (j->prebuild && !j->demanded && !p->info.pipeline) p->t_miss = plat_now_ns();
     j->low = 0, j->demanded = 1;
-    if (j->worker < 0) {
+    if (j->worker == -1) {
         if (j->prev) j->prev->next = j->next;
         else A.low = j->next;
         if (j->next) j->next->prev = j->prev;
@@ -3816,10 +3825,50 @@ static void promote(Pipe *p) {
         A.tail = j;
         plat_cond_signal(&work_cv);
         if (U.lib_workers) plat_cond_signal(&lib_cv);   // its fast link (lib_worker)
-    } else if (A.prio_low[j->worker]) {
+    } else if (j->worker >= 0 && A.prio_low[j->worker]) {
         A.prio_low[j->worker] = 0;
         plat_thread_set_priority(A.thread[j->worker], PLAT_PRIO_NORMAL);
     }
+}
+
+// A draw waits up to wait_ms for the pipeline of job j, which has no fast link (a mesh pipeline, a pipeline without
+// stage libraries, or one whose link failed) and so needs its whole build. While the job is still queued the wait
+// buys nothing: the draw queue is first in, first out, and the jobs before it are the fast links and builds of other
+// draws' misses, so on a burst of new pipelines the one a draw stood waiting for started last and the draw was
+// skipped at the end of its wait all the same.
+// - The job goes to the head of the draw queue and a worker is woken, so the next free worker takes it.
+// - A wait longer than TAKE_WAIT_MS is not one of a frame's budgets (vk_exec_draw.c frame_wait is at most 500 ms): the
+//   caller wants this pipeline whatever it takes (a one-shot draw with NX2NAVI_ONESHOT_BUDGET=0). With no worker idle
+//   the job is then built here at once (job_build), as a library no worker took is (lib_wait). A wait inside a
+//   budget is never turned into a build on this thread: a compile takes 0.2 to 1.1 s for a mesh pipeline, and the
+//   budget exists so that the replay thread is not held that long.
+// Caller holds P.lock; it is released while the job is built here.
+#define TAKE_WAIT_MS 500u
+static void job_wanted(Job *j, uint32_t wait_ms) {
+    if (!j || j->worker != -1 || j->low) return;   // running already, or gone
+    Job *q = NULL;
+    if (A.head != j) {
+        for (q = A.head; q && q->next != j; q = q->next) {}
+        if (!q) return;
+    }
+    if (wait_ms > TAKE_WAIT_MS && !U.idle) {
+        if (q) {
+            if (!(q->next = j->next)) A.tail = q;
+        } else if (!(A.head = j->next)) {
+            A.tail = NULL;
+        }
+        j->next = j->prev = NULL;
+        j->worker = JOB_ON_DRAW;
+        A.taken++;
+        job_build(j, 0);
+        return;
+    }
+    if (q) {   // to the head
+        if (!(q->next = j->next)) A.tail = q;
+        j->next = A.head, A.head = j;
+        A.first++;
+    }
+    plat_cond_signal(&work_cv);
 }
 
 // Enters a missing pipeline: built here (mode 0), or queued for a draw (1) or for the prebuild (2). Failures are
@@ -3897,7 +3946,7 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
 // A job still in the draw queue goes to the head of the low queue: its pipeline has (or is about to have) a fast-linked
 // one, so the optimised build waits behind other draws' misses. Caller holds P.lock.
 static void job_lower(Job *j) {
-    if (!j || j->worker >= 0 || j->low) return;
+    if (!j || j->worker != -1 || j->low) return;
     if (A.head == j) {
         if (!(A.head = j->next)) A.tail = NULL;
     } else {
@@ -4093,6 +4142,7 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
         promote(p);
         uint64_t p0 = wait_ms ? perf_begin() : 0;   // the wait counts as the render thread's pipeline time
         double now;
+        if (wait_ms) job_wanted(p->job, wait_ms);   // releases P.lock when it builds the job here
         while (p->building && !p->info.pipeline && wait_ms && (now = now_ms()) < end)
             plat_cond_wait_ms(&done_cv, &P.lock, (uint32_t)(end - now) + 1);
         if (wait_ms) perf_end(PERF_PIPE, p0);
@@ -6488,6 +6538,10 @@ static void save_with(uint32_t wait_ms) {
         if (P.g.hints)
             rt_log("vk_pipeline: gpl: looking ahead named %llu pipeline states not known yet and queued %llu stage libraries "
                    "for them", (unsigned long long)P.g.hints, (unsigned long long)P.g.hint_libs);
+        if (A.first || A.taken)
+            rt_log("vk_pipeline: whole builds a draw waited for while they were still queued: %llu moved to the head of "
+                   "the queue, %llu built by the waiting thread (a wait outside the frame's budget, no worker idle)",
+                   (unsigned long long)A.first, (unsigned long long)A.taken);
         if (U.waits || U.queued)
             rt_log("vk_pipeline: gpl: library jobs for waiting draws: %llu queued, %llu built by a worker, %llu by the "
                    "thread that needed them (no worker free), %llu waits ended at their limit; %llu fast links on the %d "
