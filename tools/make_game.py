@@ -136,7 +136,7 @@ LIFT_FIXES = [
 ]
 WIN = os.name == 'nt'
 if WIN:
-    LINK_LIBS = ['-lvulkan-1', '-lSDL3', '-lopus', '-lvpx', '-l:libdav1d.a', '-lzstd', '-l:libatomic.a', '-lbcrypt',
+    LINK_LIBS = ['-lvulkan-1', '-lSDL3', '-lopus', '-lvpx', '-l:libdav1d.a', '-lzstd', '-l:libatomic.a', '-lbcrypt', '-lws2_32',
                  '-limm32', '-luuid', '-lole32', '-luser32', '-lshell32', '-lgdi32', '-ladvapi32', '-lwinmm']
 else:   # tools/build_game.py's Linux libraries, plus dav1d (the AV1 movies) and libatomic
     LINK_LIBS = ['-lvulkan', '-lSDL3', '-lopus', '-lvpx', '-ldav1d', '-lzstd', '-l:libstdc++.a', '-latomic',
@@ -149,7 +149,7 @@ XLATE_NAME = 'nx2navi_xlate.exe' if WIN else 'nx2navi_xlate'
 GENERATED_HEADERS = ('layout.h', 'patches.h', 'romfs_config.h')
 RUNTIME_LIB = 'libnx2navirt.a'
 RUNTIME_PATTERNS = ('*.c', '*.cpp', 'platform/*.c', 'ui/*.cpp', 'third_party/imgui/*.cpp',
-                    'third_party/imgui/backends/*.cpp')
+                    'third_party/imgui/backends/*.cpp', 'third_party/monocypher/*.c')
 INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+)"', re.M)
 
 # Runs a script the way `python script.py` does, with the script's folder first on sys.path. The launcher's
