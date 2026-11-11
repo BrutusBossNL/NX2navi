@@ -827,10 +827,13 @@ void perf_present(uint64_t frame) {
             char marks[700];
             marks[0] = 0;
             mark_text(&fm, marks, 0, sizeof marks);
-            rt_log("perf: slow frame %llu: %.1f ms; blocked pipeline %.1f xlate %.1f texture %.1f astc %.1f fence %.1f pacing %.1f%s",
+            // drain: the wait for the present thread's previous job; replay: the replays since the last present, the
+            // pipeline, translation and texture waits above included (the rest of a slow frame is the game's own work)
+            rt_log("perf: slow frame %llu: %.1f ms; blocked pipeline %.1f xlate %.1f texture %.1f astc %.1f fence %.1f pacing %.1f "
+                   "drain %.1f; replay %.1f%s",
                    (unsigned long long)frame, d / 1e6, frame_ns[PERF_PIPE] / 1e6, frame_ns[PERF_XLATE] / 1e6,
                    frame_ns[PERF_TEX] / 1e6, frame_ns[PERF_ASTC] / 1e6, frame_ns[PERF_FENCE] / 1e6,
-                   frame_ns[PERF_PACE] / 1e6, marks);
+                   frame_ns[PERF_PACE] / 1e6, frame_ns[PERF_DRAIN] / 1e6, rep / 1e6, marks);
         }
     }
     memset(frame_ns, 0, sizeof frame_ns);
