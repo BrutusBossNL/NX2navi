@@ -1701,14 +1701,54 @@ static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
     return k < (int)n ? k : (int)n - 1;
 }
 
-// Released entries with another descriptor at the same address are replaced; past RELEASED_MAX released entries the
-// oldest one goes at each release (it comes back on demand, a mirrored one re-uploaded from its storage). NX2navi
+// Released entries with another descriptor at the same address are replaced; past RELEASED_MAX released entries one
+// goes at each release (it comes back on demand, a mirrored one re-uploaded from its storage). NX2navi
 // finalizes and initializes transient textures every frame, so a released entry is mostly taken back within frames.
 // Dropping all of them at once when the count passed 4096 destroyed thousands of images in one frame: 333-422 ms
 // frames every 40-50 s on a GTX 1050 Ti, then the textures still in use were created and uploaded again.
+//
+// The one that goes is the oldest release that no lookup reaches any more (idle) or whose content is gone
+// (overwritten), not the oldest release as such. A released entry is not dead to the game (drop_stale, below, has the
+// reasons): a descriptor registered for it still resolves to it. Ocarina reads its scene picture in every frame through
+// a second descriptor at the picture's address (RGB9E5, 1920x1080, the input of its own upscaler) whose entry was
+// released once, a few seconds into the area, and was looked up from then on: it headed the list for the rest of
+// the session. One frame at the limit, as it was:
+//   1. the count of released entries passes RELEASED_MAX at a release, and the head of the list, that entry, is
+//      destroyed although the frame before sampled it;
+//   2. later in the frame the game's descriptor is looked up, finds no entry, and one is made again; its content is
+//      copied from the released scene target at its address (start_at);
+//   3. the frame comes out with the 3D scene black and the interface intact; the next one is whole again. Why the
+//      frame with the remade entry is black was not traced.
+// The count reaches the limit where released entries pile up: with the game's own upscaler in use (upscaler = fsr)
+// its render targets lie at new addresses in every frame, 2 to 13 new entries a frame, and the count went from 540
+// to 2,040 within 2,400 frames in Hyrule Field. Measured there (RTX 5090, 2026-11-11, Link running, 13,630 frames
+// kept of each run): 8 black frames in 5 of 7 runs. Where the remake was logged (3 runs, 4 black frames) each is the
+// frame after it, and where the drop was logged (2 runs) it is this sweep taking that entry as the count first
+// reaches the limit; in one of the two runs without a black frame that came after the frames kept. With the rule
+// below a run of 18,730 frames dropped 834 released entries past the limit from frame 11,600 on and showed no black
+// frame. A session with DLSS as the upscaler had the same black frame at Lon Lon Ranch while its log showed 2,032 to
+// 2,047 released entries, kept there by a low system commit; that it is the same drop is read from those counts, not
+// logged.
+// When every released entry is still looked up, the one whose last lookup is the oldest goes.
 #define RELEASED_MAX 2048
+static int idle(const Tex *e, uint64_t now);
+
 static void sweep_released(void) {
-    while (nreleased > RELEASED_MAX && rel_head) drop_tex(rel_head, DROP_MAX);
+    while (nreleased > RELEASED_MAX && rel_head) {
+        uint64_t now = frames_now();
+        Tex *gone = NULL, *lru = rel_head;
+        for (Tex *e = rel_head; e && !gone; e = e->rel_next) {   // in release order
+            if (e->overwritten || idle(e, now)) gone = e;
+            else if (e->use_frame < lru->use_frame) lru = e;
+        }
+        if (!gone) {
+            static volatile int32_t n_all_used;
+            log_limited(&n_all_used, "all %d released textures are still looked up: the one looked up longest ago goes "
+                        "(%#llx fmt %#x %ux%u, last in frame %llu)", nreleased, (unsigned long long)lru->key.addr,
+                        lru->t.d.format, lru->t.d.width, lru->t.d.height, (unsigned long long)lru->use_frame);
+        }
+        drop_tex(gone ? gone : lru, DROP_MAX);
+    }
 }
 
 // NX2NAVI_TEX_VRAM_PRESSURE (percent of the device-local budget, default VRAM_PRESSURE_DEFAULT; 0 = off): above it, each
