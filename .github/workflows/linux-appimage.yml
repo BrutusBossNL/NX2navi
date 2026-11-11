@@ -35,7 +35,16 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Shader compilers
         # make_appimage.py compiles the runtime's own shaders (tools/build_shaders.py: glslc, spirv-as, spirv-val)
-        run: sudo apt-get update && sudo apt-get install -y glslc spirv-tools
+        # The runner's sources go through a mirror list whose first host (azure.archive.ubuntu.com) stopped resolving
+        # on 2026-11-11, and apt then failed every fetch: the sources name Ubuntu's own archive instead.
+        run: |
+          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu/|' \
+            /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y glslc spirv-tools && exit 0
+            echo "apt failed ($i), trying again in 30 s"; sleep 30
+          done
+          exit 1
       - name: Shader translator and VMA
         run: |
           uv venv -q --python 3.12 .venv
