@@ -121,7 +121,8 @@ void perf_count(int kind) {
 // ---- NX2NAVI_TRACE=perf work marks (host.h PERF_M_*): any thread adds; the present takes the frame's sums (mark_frame),
 // names them on a slow frame's line and adds them to the 60-frame window's line.
 static const char *const mark_name[PERF_M_N] = {"file reads", "zstd decodes", "pipeline creates", "guest memory maps",
-                                                "pool init/finalize", "device memory allocations"};
+                                                "pool init/finalize", "device memory allocations",
+                                                "DLSS feature creates"};
 static volatile int64_t mk_ns[PERF_M_N], mk_n[PERF_M_N], mk_bytes[PERF_M_N], mk_max[PERF_M_N];   // since the last present
 typedef struct { uint64_t ns[PERF_M_N], n[PERF_M_N], bytes[PERF_M_N], max[PERF_M_N]; } MarkSums;
 static MarkSums mk_win;   // the 60-frame window's, present thread only
