@@ -93,6 +93,16 @@ typedef struct Tex {
     uint8_t in_gwin;              // in gwin[]
     int pidx;                     // 1 + its index in pent[] (vk_texture_pool_note_locked); 0: not listed
     int ph;                       // 1 + its index in pref[] (pool_ref); 0: none
+    // Where the entry and its content came from ("origins", below drop_note), for the lines of NX2NAVI_TRACE=perf
+    uint8_t had;                  // HAD_*: what put content into the image of an entry the CPU does not write
+    uint8_t og_start;             // START_*: how its content started (start_at)
+    uint8_t og_drop;              // DROP_*: the drop of this descriptor's last entry, when the ring still knew it
+    uint8_t og_reimg;             // made with the image of a released entry (create_tex, reuse)
+    uint8_t said;                 // marks_check wrote its line for this entry
+    uint32_t og_backs;            // times it was taken back after a release (entry_of)
+    uint64_t og_frame;            // gfx_counters.frames when it was made
+    uint64_t og_drop_frame;       // gfx_counters.frames of the drop og_drop names
+    uint64_t og_back_frame;       // gfx_counters.frames when it was last taken back
 } Tex;
 
 // A slot keeps what vk_texture_by_id resolved for it, so a draw binding skips the key lookup and the address chain: the
@@ -483,17 +493,23 @@ static int same_but_swizzle(const TexKey *a, const TexKey *b) {
 
 // Textures whose content the CPU provides in pool memory. Display, compressible, zcull,
 // depth, multisample and GPU-only storage stays GPU-owned.
-static int tex_mirrored(const tex_t *t) {
-    if (!t->mem || nvn_gpu_only((uintptr_t)t->mem)) return 0;
-    if (t->has_layout) return 1;
-    if (!(t->pool_flags & (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED))) return 0;
+// mirror_refused: NULL for such a texture, else the rule that leaves it out, in words for a log line.
+static const char *mirror_refused(const tex_t *t) {
+    if (!t->mem) return "no storage";
+    if (nvn_gpu_only((uintptr_t)t->mem)) return "storage in the GPU-only address window";
+    if (t->has_layout) return NULL;
+    if (!(t->pool_flags & (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED)))
+        return "a pool the CPU has no access to";
     if (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_ADAPTIVE_ZCULL |
                       NVN_TEXTURE_FLAGS_DEPTH16_PREFER_FAST_CLEAR | NVN_TEXTURE_FLAGS_ZCULL_SUPPORT_STENCIL))
-        return 0;
-    if (t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
-    if (t->d.format >= 0x31 && t->d.format <= 0x36) return 0;   // stencil / depth formats
-    return 1;
+        return "texture flags (one of 0x1, 0x8, 0x80, 0x100, 0x400)";
+    if (t->d.samples > 1) return "multisample";
+    if (t->d.target == NVN_TEXTURE_TARGET_BUFFER) return "a buffer texture";
+    if (t->d.format >= 0x31 && t->d.format <= 0x36) return "a depth or stencil format";
+    return NULL;
 }
+
+static int tex_mirrored(const tex_t *t) { return !mirror_refused(t); }
 
 static void log_limited(volatile int32_t *n, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void log_limited(volatile int32_t *n, const char *fmt, ...) {
@@ -626,6 +642,16 @@ static int tex_reuse_on(void) {
 }
 
 static void destroy_tex(Tex *e);
+
+// Why an entry was destroyed (drop_tex), in the order of drop_names.
+enum { DROP_NONE, DROP_MAX, DROP_CAP, DROP_COMMIT, DROP_VRAM, DROP_IDLE_VRAM, DROP_IDLE_COMMIT, DROP_DISUSE,
+       DROP_OVERWRITTEN, DROP_REPLACED, DROP_REUSED, DROP_RANGE, DROP_EXACT, DROP_SHUTDOWN, DROP_N };
+static void drop_tex(Tex *e, int why);
+// How an entry's content started (start_at; Tex.og_start), in the order of start_names.
+enum { START_NEW, START_UPLOAD_LIVE, START_COPY_LIVE, START_COPY_RELEASED, START_EMPTY_LIVE, START_EMPTY_RELEASED,
+       START_N };
+// What put content into the image of an entry the CPU does not write (Tex.had); a GPU write is pub.gpu_owned.
+enum { HAD_COPY = 1, HAD_TEXELS = 2 };
 
 // Whether an image with these requirements can lie in the pool memory at e's address (*sp: that memory).
 static int pool_fits(VkCtx *c, const Tex *e, const VkMemoryRequirements *req, uint64_t guest_size, VkMemSpan *sp) {
@@ -1117,8 +1143,8 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
             img = a->pub.image, e->alloc = a->alloc;
             vk_exec_image_gone(img);   // the views and records of the texture it was
             a->pub.image = VK_NULL_HANDLE, a->alloc = NULL;
-            destroy_tex(a);
-            e->reused = 1;
+            drop_tex(a, DROP_REUSED);
+            e->reused = 1, e->og_reimg = 1;
             n_reused++;
         }
     }
@@ -1474,6 +1500,131 @@ static void destroy_tex(Tex *e) {
     vk_defer_free(e);
 }
 
+// ---- origins (NX2NAVI_TRACE=perf; a run without it tests the flag and counts the drops, nothing more)
+// A texture drawn without its content leaves nothing in the log: no call fails and the image exists. What can still be
+// told afterwards is where the entry came from, so each entry keeps how it was made and how its content started
+// (og_*, had), and the last DROPS_N destroyed entries keep their descriptor and the reason they went. An entry made
+// for a descriptor that is still in that ring says which drop it follows (origin_made), and the lines about one
+// address list what was dropped there (others_at). The users are marks_check, which names an entry a shader sampled
+// while nothing had ever put content into its image, and the lines of start_at.
+#define DROPS_N 4096
+typedef struct { uint64_t kh, addr, frame; uint32_t format, flags, w, h; uint8_t why, mirrored, released; } DropRec;
+static DropRec drops[DROPS_N];
+static uint64_t ndrops;
+static uint64_t n_drop_by[DROP_N];   // entries destroyed since the last perf line, by reason
+static const char *const drop_names[DROP_N] = {
+    "", "past RELEASED_MAX released entries", "past the released entries' size cap", "under commit pressure",
+    "under VRAM pressure", "idle, under VRAM pressure", "idle, under commit pressure", "unsampled (disuse)",
+    "overwritten at another address", "replaced by another descriptor at its address", "its image went to another texture",
+    "its storage went", "made whole again (texture detail)", "shutdown"};
+static const char *const start_names[START_N] = {
+    "started on its own", "filled from storage over a live entry", "content copied from a live entry",
+    "content copied from a released entry", "started empty over a live entry", "started empty over a released entry"};
+
+static uint64_t frames_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED); }
+
+static uint64_t key_hash(const TexKey *k) {   // FNV-1a; make_key zeroes the key's padding
+    uint64_t h = 0xcbf29ce484222325ull;
+    const uint8_t *b = (const uint8_t *)k;
+    for (size_t i = 0; i < sizeof *k; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    return h;
+}
+
+// destroy_tex with the reason, which every caller gives.
+static void drop_tex(Tex *e, int why) {
+    n_drop_by[why]++;
+    if (rt_trace & RT_TRACE_PERF)
+        drops[ndrops++ % DROPS_N] = (DropRec){key_hash(&e->key), e->key.addr, frames_now(), (uint32_t)e->t.d.format,
+                                              (uint32_t)e->t.d.flags, e->t.d.width, e->t.d.height, (uint8_t)why,
+                                              e->pub.mirrored, e->released != 0};
+    destroy_tex(e);
+}
+
+// A new entry: the frame, and the drop of its descriptor's last entry when the ring still holds it.
+static void origin_made(Tex *e) {
+    e->og_frame = frames_now();
+    if (!(rt_trace & RT_TRACE_PERF)) return;
+    uint64_t kh = key_hash(&e->key), n = ndrops < DROPS_N ? ndrops : DROPS_N;
+    for (uint64_t i = 1; i <= n; i++) {   // newest first
+        const DropRec *r = &drops[(ndrops - i) % DROPS_N];
+        if (r->kh != kh || r->addr != e->key.addr) continue;
+        e->og_drop = r->why, e->og_drop_frame = r->frame;
+        return;
+    }
+}
+
+// "fmt 0x25 (vk 37) 256x256x1, 9 levels, 1 layers, target 1, samples 0, flags 0x1, pool flags 0x22"
+static int desc_text(char *out, size_t n, const Tex *e) {
+    const nvn_texdesc *d = &e->t.d;
+    return snprintf(out, n, "fmt %#x (vk %d) %ux%ux%u, %u levels, %u layers, target %d, samples %d, flags %#x, pool flags %#x",
+                    d->format, (int)e->f.vk, d->width, d->height, d->depth, e->pub.levels + e->pub.skip, e->pub.layers,
+                    d->target, d->samples, (unsigned)d->flags, (unsigned)e->t.pool_flags);
+}
+
+// "made at frame 100 again after a drop at frame 90 (under commit pressure); started empty over a released entry; ..."
+static int origin_text(char *out, size_t n, const Tex *e) {
+    int k = snprintf(out, n, "made at frame %llu", (unsigned long long)e->og_frame);
+    if (e->og_drop && k < (int)n)
+        k += snprintf(out + k, n - (size_t)k, " again after a drop at frame %llu (%s)", (unsigned long long)e->og_drop_frame,
+                      drop_names[e->og_drop]);
+    if (k < (int)n) k += snprintf(out + k, n - (size_t)k, "; %s", start_names[e->og_start]);
+    if (e->og_reimg && k < (int)n) k += snprintf(out + k, n - (size_t)k, "; with a released entry's image");
+    if (e->og_backs && k < (int)n)
+        k += snprintf(out + k, n - (size_t)k, "; taken back %u times, last at frame %llu", e->og_backs,
+                      (unsigned long long)e->og_back_frame);
+    return k < (int)n ? k : (int)n - 1;
+}
+
+// Whether nothing ever put content into e's image: an entry the CPU writes that was not uploaded, or one it does not
+// write, at an address the CPU can see, that the GPU never wrote and that got no copy and no texels.
+static int no_content(const Tex *e) {
+    if (e->pub.gpu_owned) return 0;
+    if (e->pub.mirrored) return !e->uploaded;
+    return !e->had && e->key.addr && !nvn_gpu_only(e->key.addr);
+}
+
+// Lines per address for one kind of event: up to `most` each, in a table of the first SAID_N addresses that had one
+// (a later address always gets its line), so a session's limit is by address, not a count of lines.
+#define SAID_N 4096
+typedef struct { uint64_t addr[SAID_N]; uint16_t n[SAID_N]; } SaidAt;
+static int said_at(SaidAt *s, uint64_t addr, unsigned most) {
+    uint32_t i = (uint32_t)(addr * 0x9E3779B97F4A7C15ull >> 52);
+    for (int probe = 0; probe < 64; probe++, i = (i + 1) % SAID_N) {
+        if (s->addr[i] && s->addr[i] != addr) continue;
+        s->addr[i] = addr;
+        return s->n[i] < most ? (s->n[i]++, 1) : 0;
+    }
+    return 1;
+}
+
+// The other descriptors at e's address: every entry in the cache with its state, and what the ring knows was dropped
+// there, newest first. skip: an entry the caller describes itself (NULL: none).
+static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
+    int k = 0, any = 0;
+    out[0] = 0;
+    for (const Tex *p = nvn_hm_get(&by_addr, &e->key.addr); p && k < (int)n - 1; p = p->next_at) {
+        if (p == e || p == skip) continue;
+        k += snprintf(out + k, n - (size_t)k, "%s[%s%s%s%s: fmt %#x flags %#x %ux%u, %s, %s]", any++ ? " " : "",
+                      p->released ? "released" : "live", p->superseded ? ", superseded" : "", p->retiring ? ", retiring" : "",
+                      p->pub.gpu_owned ? ", GPU-written" : "", p->t.d.format, (unsigned)p->t.d.flags, p->t.d.width,
+                      p->t.d.height, p->pub.mirrored ? (p->uploaded ? "CPU-written, uploaded" : "CPU-written, not uploaded")
+                                                     : (no_content(p) ? "not CPU-written, no content" : "not CPU-written"),
+                      start_names[p->og_start]);
+    }
+    uint64_t have = ndrops < DROPS_N ? ndrops : DROPS_N;
+    int listed = 0;
+    for (uint64_t i = 1; i <= have && listed < 4 && k < (int)n - 1; i++) {
+        const DropRec *r = &drops[(ndrops - i) % DROPS_N];
+        if (r->addr != e->key.addr) continue;
+        k += snprintf(out + k, n - (size_t)k, "%s[dropped at frame %llu (%s): fmt %#x flags %#x %ux%u, %s%s]", any++ ? " " : "",
+                      (unsigned long long)r->frame, drop_names[r->why], r->format, r->flags, r->w, r->h,
+                      r->mirrored ? "CPU-written" : "not CPU-written", r->released ? ", released then" : ", live then");
+        listed++;
+    }
+    if (!any) k = snprintf(out, n, "none");
+    return k < (int)n ? k : (int)n - 1;
+}
+
 // Released entries with another descriptor at the same address are replaced; past RELEASED_MAX released entries the
 // oldest one goes at each release (it comes back on demand, a mirrored one re-uploaded from its storage). NX2navi
 // finalizes and initializes transient textures every frame, so a released entry is mostly taken back within frames.
@@ -1481,7 +1632,7 @@ static void destroy_tex(Tex *e) {
 // frames every 40-50 s on a GTX 1050 Ti, then the textures still in use were created and uploaded again.
 #define RELEASED_MAX 2048
 static void sweep_released(void) {
-    while (nreleased > RELEASED_MAX && rel_head) destroy_tex(rel_head);
+    while (nreleased > RELEASED_MAX && rel_head) drop_tex(rel_head, DROP_MAX);
 }
 
 // NX2NAVI_TEX_VRAM_PRESSURE (percent of the device-local budget, default VRAM_PRESSURE_DEFAULT; 0 = off): above it, each
@@ -1700,7 +1851,7 @@ static uint64_t stale_after(const Tex *e) {
     return gap > GPU_STALE_FRAMES ? gap : GPU_STALE_FRAMES;
 }
 
-static int drop_stale(uint64_t keep, uint64_t *count) {   // returns the entries dropped: PRESSURE_STEP, more may follow
+static int drop_stale(uint64_t keep, uint64_t *count, int why) {   // returns the entries dropped: PRESSURE_STEP, more may follow
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int dropped = 0;
     const uint64_t stale = STALE_FRAMES;
@@ -1710,7 +1861,7 @@ static int drop_stale(uint64_t keep, uint64_t *count) {   // returns the entries
             next = e->rel_next;
             if (!e->bytes || (!any && !comes_back_intact(e) && !e->overwritten)) continue;
             if (now - e->rel_frame < stale_after(e) || (!e->overwritten && !idle(e, now))) continue;
-            destroy_tex(e);
+            drop_tex(e, why);
             dropped++, (*count)++;
         }
     return dropped;
@@ -1724,7 +1875,7 @@ static void drop_overwritten(void) {
     for (Tex *e = rel_head, *next; e && now - e->rel_frame >= OVERWRITTEN_KEEP && dropped < PRESSURE_STEP; e = next) {
         next = e->rel_next;
         if (!e->overwritten || now - e->ow_frame < OVERWRITTEN_KEEP) continue;
-        destroy_tex(e);
+        drop_tex(e, DROP_OVERWRITTEN);
         dropped++, n_over_drops++;
     }
 }
@@ -1758,7 +1909,7 @@ void vk_texture_want_room(uint64_t bytes) {
                                                                  __ATOMIC_RELAXED)) {}
 }
 
-static uint64_t evict_idle(uint64_t want, uint64_t used, uint64_t budget) {   // tex_lock held; returns the bytes freed
+static uint64_t evict_idle(uint64_t want, uint64_t used, uint64_t budget, int why) {   // tex_lock held; returns the bytes freed
     if (vk_sync_fence_done() < evict_wait) return 0;
     Tex *v[EVICT_STEP];
     int nv = 0;
@@ -1776,7 +1927,7 @@ static uint64_t evict_idle(uint64_t want, uint64_t used, uint64_t budget) {   //
     }
     uint64_t freed = 0;
     int n = 0;
-    for (; n < nv && freed < want; n++) freed += v[n]->bytes, destroy_tex(v[n]);
+    for (; n < nv && freed < want; n++) freed += v[n]->bytes, drop_tex(v[n], why);
     if (!n) return 0;
     n_evict += (uint64_t)n, n_evict_bytes += freed;
     evict_wait = vk_sync_issued() + 2;
@@ -1884,7 +2035,7 @@ static void retire_sweep(void) {
             e->retiring = 0, retiring_bytes -= e->bytes;
             nvn_hm_put(&holds, &e->key, (void *)(uintptr_t)1);
             n_retire_freed++;
-            destroy_tex(e);
+            drop_tex(e, DROP_DISUSE);
             continue;
         }
         retiring[k++] = e;
@@ -2028,9 +2179,79 @@ static uint64_t evict_disused(uint64_t want) {
     return retiring_bytes;
 }
 
+// The registered slots at e's address, for marks_check's line: how many, those of e's own descriptor ("f": finalized),
+// those whose last lookup gave e (a slot of another descriptor among them follows e), and the other descriptors' with
+// format and flags; up to 8 ids of each.
+static void slot_note(int32_t id, const Tex *e, int *n, int *n_own, int *n_show, int *n_other, char *own, char *show,
+                      char *other, size_t own_cap, size_t other_cap) {
+    const TexSlot *s = &tslots[id];
+    if (!s->used || (uintptr_t)s->t.mem != e->key.addr) return;
+    ++*n;
+    TexKey sk;
+    make_key(&s->t, &sk);
+    size_t at;
+    if (!memcmp(&sk, &e->key, sizeof sk)) {
+        if (++*n_own <= 8 && (at = strlen(own)) < own_cap - 1)
+            snprintf(own + at, own_cap - at, " %d%s", (int)id, s->finalized ? "f" : "");
+    } else if (++*n_other <= 8 && (at = strlen(other)) < other_cap - 1) {
+        snprintf(other + at, other_cap - at, " %d (fmt %#x flags %#x%s)", (int)id, s->t.d.format, (unsigned)s->t.d.flags,
+                 s->finalized ? ", finalized" : "");
+    }
+    if (s->ce == e && s->cgen == agen[sinfo[id] & 0xffff] && ++*n_show <= 8 && (at = strlen(show)) < own_cap - 1)
+        snprintf(show + at, own_cap - at, " %d", (int)id);
+}
+
+static void slots_text(char *out, size_t n, const Tex *e) {
+    char own[112] = "", show[112] = "", other[360] = "";
+    int total = 0, n_own = 0, n_show = 0, n_other = 0;
+    uint32_t b = agen_idx(e->key.addr);
+    for (int32_t id = bucket_head[b]; id >= 0; id = slot_next[id])
+        slot_note(id, e, &total, &n_own, &n_show, &n_other, own, show, other, sizeof own, sizeof other);
+    for (int32_t g = bucket_ghead[b]; g >= 0; g = grp[g].gnext)
+        for (int32_t id = grp[g].pub.head; id >= 0; id = slot_next[id])
+            slot_note(id, e, &total, &n_own, &n_show, &n_other, own, show, other, sizeof own, sizeof other);
+    snprintf(out, n, "%d registered; %d of this descriptor:%s; %d showing this entry:%s; %d of other descriptors:%s", total,
+             n_own, n_own ? own : " none", n_show, n_show ? show : " none", n_other, n_other ? other : " none");
+}
+
+// NX2NAVI_TRACE=perf, from vk_pool_marks_read: a shader sampled slot id, and nothing has ever put content into e, the
+// entry the slot shows or one credited with the mark (no_content): the picture drawn through it is an empty or
+// undefined image, which nothing else reports. One line per entry and up to MARK_LINES per address (said_at); the
+// marked slots that met such an entry are counted in the texture origins line whether or not a line was written.
+static uint64_t n_mark_empty, n_mark_none;   // since the last perf line: marked slots that met such an entry; that show none
+#define MARK_LINES 6
+#define MARK_LINES_ALL 20000
+static void marks_check(Tex *e, uint32_t id, uint64_t now, int followed) {
+    if (!no_content(e)) return;
+    // an entry the CPU writes is uploaded by its first check, which one just made (again) has not had yet
+    if (e->pub.mirrored && now - e->og_frame < 4) return;
+    n_mark_empty++;
+    if (e->said) return;
+    e->said = 1;
+    static SaidAt said;
+    static uint32_t total;
+    if (total >= MARK_LINES_ALL || !said_at(&said, e->key.addr, MARK_LINES)) return;
+    total++;
+    char d[224], og[320], state[160], slots[640], others[640];
+    desc_text(d, sizeof d, e);
+    origin_text(og, sizeof og, e);
+    slots_text(slots, sizeof slots, e);
+    others_at(others, sizeof others, e, NULL);
+    if (e->pub.mirrored)
+        snprintf(state, sizeof state, "CPU-written, not uploaded%s",
+                 e->up_retry ? " (an upload that had no memory waits for its next try)" : "");
+    else
+        snprintf(state, sizeof state, "not CPU-written (%s), never drawn into, copied into or filled", mirror_refused(&e->t));
+    rt_log("perf: frame %llu: sampled without content: texture %#llx (%llu bytes) [%s]: %s; %s; marked slot %u%s; slots "
+           "at the address: %s; other descriptors there: %s", (unsigned long long)now, (unsigned long long)e->key.addr,
+           (unsigned long long)e->t.L.size, d, state, og, id, followed ? " (of another descriptor, credited to this entry)" : "",
+           slots, others);
+}
+
 void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
     lock();
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int trace = (rt_trace & RT_TRACE_PERF) != 0;
     if (n > (uint32_t)ntslots) n = (uint32_t)ntslots;
     uint32_t marked = 0;
     for (uint32_t id = 0; id < n; id++) {
@@ -2040,14 +2261,17 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
         if (s->ce && s->cgen == agen[sinfo[id] & 0xffff]) {   // what the slot resolves to now
             if (s->ce->retiring) retire_cancel(s->ce);   // not expected: retiring bumps the slot's generation
             s->ce->samp_frame = now;
+            if (trace) marks_check(s->ce, id, now, 0);
             continue;
         }
+        if (trace && !s->ce && s->cgen == agen[sinfo[id] & 0xffff]) n_mark_none++;   // its last lookup gave no entry
         TexKey k;
         make_key(&s->t, &k);
         Tex *e = nvn_hm_get(&by_key, &k);
         if (e && !e->released) {
             if (e->retiring) retire_cancel(e);   // retired, and its stand-in was sampled: back as it is
             e->samp_frame = now;
+            if (trace) marks_check(e, id, now, 0);
             continue;
         }
         // The slot has no entry of its own: it samples another descriptor's image at its address (slot_resolve follows
@@ -2064,6 +2288,7 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
             if (p->retiring) retire_cancel(p);
             p->samp_frame = now;
             followed = 1;
+            if (trace) marks_check(p, id, now, 1);
         }
         // The slot's own key may be held although an entry at its address took the mark: the slot shows the stand-in
         // then (slot_resolve follows fewer entries than the loop above credits), and only this drop makes its texture
@@ -2109,7 +2334,7 @@ static void commit_evict(void) {   // tex_lock held, the commit is low and the r
     }
     uint64_t used = 0, budget = 0;
     vk_mem_vram_live(&used, &budget);
-    uint64_t freed = evict_idle(COMMIT_EVICT_STEP, used, budget);
+    uint64_t freed = evict_idle(COMMIT_EVICT_STEP, used, budget, DROP_IDLE_COMMIT);
     if (freed < COMMIT_EVICT_STEP) evict_disused(COMMIT_EVICT_STEP - freed);
 }
 
@@ -2154,18 +2379,18 @@ static void sweep_pressure(void) {   // tex_lock held
             next = e->rel_next;
             if (!comes_back_intact(e)) continue;
             freed += e->bytes;
-            destroy_tex(e);
+            drop_tex(e, DROP_VRAM);
             dropped++, n_pressure_drops++;
         }
-        if (tex_evict && freed < over) freed += evict_idle(over - freed, used, budget);
+        if (tex_evict && freed < over) freed += evict_idle(over - freed, used, budget, DROP_IDLE_VRAM);
         if (tex_evict && freed < over) evict_disused(over - freed);
     }
     int low = commit_is_low(), more = 0;   // more: the released entries have stale ones left for the next check
     if (rel_head) {
         drop_overwritten();
         uint64_t cap = released_cap_bytes();
-        if (rel_bytes > cap) drop_stale(cap, &n_cap_drops);
-        if (rel_bytes > COMMIT_LOW_KEEP && low) more = drop_stale(COMMIT_LOW_KEEP, &n_commit_drops) == PRESSURE_STEP;
+        if (rel_bytes > cap) drop_stale(cap, &n_cap_drops, DROP_CAP);
+        if (rel_bytes > COMMIT_LOW_KEEP && low) more = drop_stale(COMMIT_LOW_KEEP, &n_commit_drops, DROP_COMMIT) == PRESSURE_STEP;
     }
     if (low && !more) commit_evict();
 }
@@ -2800,6 +3025,41 @@ static void create_failed(const TexKey *k) {
     failed_hold[i].k = *k, failed_hold[i].until_ns = plat_now_ns() + 2000000000ull;
 }
 
+// NX2NAVI_TRACE=perf: a line for each event of the two kinds that can leave a descriptor showing an image without
+// content, up to START_LINES per address and kind (said_at).
+//  - over: e, which the CPU writes, was made over the live entry `over` and is filled from its storage. `over` stays
+//    as it is, and a slot that names its descriptor goes on showing it, whatever it holds.
+//  - gone: e, which the CPU does not write, was made at an address the CPU can see, and the released CPU-written entry
+//    there was destroyed (gone: its description, gone_rel: the frame of its release). Nothing uploads e; a slot of e's
+//    descriptor that showed the destroyed entry's image (slot_resolve follows it while it is live) shows e's from now on.
+// flag: e was taken back (over), e got a copy of another entry's content (gone).
+static uint64_t n_cpu_empty[3];   // since the last perf line: entries the CPU does not write, at an address it can see,
+                                  // that started without content: on their own, over a released entry, over a live one
+#define START_LINES 8
+#define START_LINES_ALL 20000
+static void start_line(const Tex *e, const Tex *over, const char *gone, uint64_t gone_rel, int flag) {
+    static SaidAt said[2];
+    static uint32_t total[2];
+    int kind = over ? 0 : 1;
+    if (total[kind] >= START_LINES_ALL || !said_at(&said[kind], e->key.addr, START_LINES)) return;
+    total[kind]++;
+    char d[224], o[224], og[320];
+    desc_text(d, sizeof d, e);
+    if (over) {
+        const char *why = mirror_refused(&over->t);
+        desc_text(o, sizeof o, over);
+        origin_text(og, sizeof og, over);
+        rt_log("perf: frame %llu: texture %#llx filled from storage over a live entry%s: new [%s]; live [%s], %s%s%s, %s",
+               (unsigned long long)frames_now(), (unsigned long long)e->key.addr, flag ? " (taken back)" : "", d, o,
+               why ? "not CPU-written: " : "CPU-written", why ? why : "", no_content(over) ? ", no content" : "", og);
+    } else {
+        rt_log("perf: frame %llu: texture %#llx, not CPU-written (%s), %s after the released CPU-written entry at its "
+               "address was destroyed: new [%s]; destroyed [%s], released at frame %llu",
+               (unsigned long long)frames_now(), (unsigned long long)e->key.addr, mirror_refused(&e->t),
+               flag ? "got another entry's content" : "started empty", d, gone, (unsigned long long)gone_rel);
+    }
+}
+
 static int depth_alias_log(void) {   // NX2NAVI_DEPTH_ALIAS_LOG=1: start_at logs each new depth entry over a live texture
     static int on = -1;
     if (on < 0) on = rt_knob("DEPTH_ALIAS_LOG", "0");
@@ -2821,6 +3081,10 @@ static int depth_alias_log(void) {   // NX2NAVI_DEPTH_ALIAS_LOG=1: start_at logs
 // it there (a black frame with FSR 3.1 and its frame generation, two presents long).
 static void start_at(Tex *e, const TexKey *k, int taken_back) {
     int alias = 0;
+    int trace = (rt_trace & RT_TRACE_PERF) != 0;
+    int gone = 0, rel_other = 0;   // released entries at the address: CPU-written ones destroyed here, others superseded
+    char gone_desc[224] = "";      // trace: the last destroyed one, described while it existed
+    uint64_t gone_rel = 0;
     Tex *src = NULL, *rsrc = NULL;
     const char *why = "no live texture with GPU content";   // for the log of an alias left empty
     const Tex *other = NULL;
@@ -2832,10 +3096,18 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
         if (taken_back && p->use_frame >= e->rel_frame && alias_has_gpu_content(p)) newer = 1;
         if (p->released) {
             if (p->pub.mirrored) {
-                destroy_tex(p);
+                if (trace) {
+                    int n = desc_text(gone_desc, sizeof gone_desc, p);
+                    if (n > 0 && n < (int)sizeof gone_desc)
+                        snprintf(gone_desc + n, sizeof gone_desc - (size_t)n, ", %s", p->pub.gpu_owned ? "GPU-written"
+                                 : p->uploaded ? "uploaded" : "not uploaded");
+                    gone_rel = p->rel_frame;
+                }
+                gone++;
+                drop_tex(p, DROP_REPLACED);
                 continue;
             }
-            p->superseded = 1;
+            p->superseded = 1, rel_other = 1;
             const char *unused;
             if (tex_alias && alias_has_gpu_content(p) && alias_compatible(e, p, &unused) &&
                 (!rsrc || p->use_frame > rsrc->use_frame))
@@ -2876,9 +3148,12 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
         if (taken_back) init_new(e);
         return;
     }
-    if (src && alias_copy(e, src)) {
+    int copied = src && alias_copy(e, src);
+    if (copied) {
         n_alias_copied++;
         if (from_released) n_alias_released++;
+        e->og_start = from_released ? START_COPY_RELEASED : START_COPY_LIVE;
+        e->had |= HAD_COPY;
         if (e->pub.mirrored) {   // the content is src's GPU render, newer than the storage bytes
             vk_mem_changed(e->pub.addr, e->t.L.size, 0, &e->wgen);
             e->uploaded = 1;
@@ -2888,9 +3163,15 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
         e->chash_ok = 0;
     } else {
         init_new(e);
+        e->og_start = alias ? (e->pub.mirrored ? START_UPLOAD_LIVE : START_EMPTY_LIVE)
+                    : (gone || rel_other) && !e->pub.mirrored ? START_EMPTY_RELEASED : START_NEW;
+        // an entry the CPU does not write, at an address the CPU can see, that starts without content
+        if (!e->pub.mirrored && !nvn_gpu_only(k->addr)) n_cpu_empty[alias ? 2 : gone || rel_other ? 1 : 0]++;
         if (alias) {
-            if (e->pub.mirrored) n_alias_upload++;
-            else {
+            if (e->pub.mirrored) {
+                n_alias_upload++;
+                if (trace) start_line(e, other, NULL, 0, taken_back);
+            } else {
                 n_alias_uninit++;
                 static int logged;
                 // what an empty start over live memory was, to tell a black frame's cause; depth buffers start empty
@@ -2907,6 +3188,7 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
             }
         }
     }
+    if (trace && gone && !e->pub.mirrored && !nvn_gpu_only(k->addr)) start_line(e, NULL, gone_desc, gone_rel, copied);
 }
 
 static Tex *entry_of(const tex_t *t) {
@@ -2925,6 +3207,7 @@ static Tex *entry_of(const tex_t *t) {
             rt_log("vk: texture aliases: %s", tex_alias ? "a new image takes the live image's content" : "a new image starts empty");
         }
         if (!(e = create_tex(t, &k, tex_alias))) return create_failed(&k), NULL;
+        origin_made(e);
         perf_count(PERF_CNT_TEX_NEW);
         start_at(e, &k, 0);
         e->next_at = nvn_hm_get(&by_addr, &k.addr);
@@ -2941,6 +3224,7 @@ static Tex *entry_of(const tex_t *t) {
         if (gap > e->back_gap) e->back_gap = gap > UINT32_MAX ? UINT32_MAX : (uint32_t)gap;
         e->released = 0, nreleased--, rel_unlink(e), n_site[2]++, tex_gen_flip(e, e->superseded || e->overwritten);
         e->overwritten = 0;
+        e->og_backs++, e->og_back_frame = e->samp_frame;
         if (e->superseded) {   // its image may still be in use: the first barrier waits for all earlier work
             e->superseded = 0, e->reused = 1;
             n_restarts++;
@@ -3106,7 +3390,7 @@ void vk_texture_range_gone(uint64_t lo, uint64_t size, VmaAllocation alloc) {
         Tex *e = by_key.vals[i];
         if (e && ((e->key.addr >= lo && e->key.addr - lo < size) || (alloc && e->bound_to == alloc))) list[n++] = e;
     }
-    for (int i = 0; i < n; i++) destroy_tex(list[i]);
+    for (int i = 0; i < n; i++) drop_tex(list[i], DROP_RANGE);
     free(list);
     unlock();
 }
@@ -3407,7 +3691,7 @@ const VkTexImage *vk_texture_exact_by_id_locked(int id, view_t *view, int *has_v
         log_limited(&n_logged, "texture detail: texture %#llx (fmt %#x %ux%u, %u levels) is read by texel position or its "
                     "size is asked for: made whole again (%llu so far)", (unsigned long long)e->pub.addr, e->t.d.format,
                     e->t.d.width, e->t.d.height, e->pub.levels + e->pub.skip, (unsigned long long)n_exact);
-        destroy_tex(e);
+        drop_tex(e, DROP_EXACT);
     }
     return vk_texture_by_id_locked(id, view, has_view);
 }
@@ -3483,6 +3767,15 @@ void vk_texture_new_submit(void) {
         n_cap_drops = n_pressure_drops = n_commit_drops = n_commit_past = n_evict = n_evict_bytes = 0;
         n_disuse = n_disuse_bytes = n_disuse_back = n_retire_freed = n_retire_cancel = 0;
         n_reused = n_reuse_new = n_bind_skips = n_restarts = n_overwritten = n_over_drops = 0;
+        rt_log("perf: frame %llu: texture origins: released entries dropped past RELEASED_MAX %llu, replaced by another "
+               "descriptor at their address %llu; entries the CPU does not write made without content at an address it "
+               "can see: on their own %llu, over a released entry %llu, over a live one %llu; marked slots that met an "
+               "entry without content %llu, that show no entry %llu",
+               (unsigned long long)f * 60, (unsigned long long)n_drop_by[DROP_MAX], (unsigned long long)n_drop_by[DROP_REPLACED],
+               (unsigned long long)n_cpu_empty[0], (unsigned long long)n_cpu_empty[1], (unsigned long long)n_cpu_empty[2],
+               (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none);
+        memset(n_drop_by, 0, sizeof n_drop_by), memset(n_cpu_empty, 0, sizeof n_cpu_empty);
+        n_mark_empty = n_mark_none = 0;
     }
     unlock();
 }
@@ -3612,6 +3905,7 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
     if (g->level < e->pub.skip) return 1;
     uint32_t il = g->level - e->pub.skip;
     if (il >= e->pub.levels) return 0;
+    e->had |= HAD_TEXELS;
     uint32_t w = (uint32_t)r->width, h = (uint32_t)r->height;
     int rgb = e->f.expand_rgb, astc = e->f.astc_bw != 0, agpu = astc && vk_astc_gpu();
     size_t texels = (size_t)w * h, ib = agpu ? 0 : astc ? 4 : rgb ? (size_t)g->bpb / 3 * 4 : 0;
@@ -4405,7 +4699,7 @@ void vk_texture_shutdown(void) {
     int n = 0;
     for (uint32_t i = 0; i < by_key.cap; i++)
         if (by_key.vals[i]) list[n++] = by_key.vals[i];
-    for (int i = 0; i < n; i++) destroy_tex(list[i]);
+    for (int i = 0; i < n; i++) drop_tex(list[i], DROP_SHUTDOWN);
     free(list);
     for (uint32_t i = 0; i < samplers.cap; i++)
         if (samplers.vals[i] && c) vkDestroySampler(c->device, (VkSampler)samplers.vals[i], NULL);
