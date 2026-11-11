@@ -165,6 +165,12 @@
 # pipe_feedback = 1
 # pipeline-cache.bin larger than this (MB) starts empty and is rewritten (0: no limit).
 # pipeline_cache_max_mb = 512
+# 1: the pipelines a run compiles go into pipeline-cache-play.bin, a small file of its own, so pipeline-cache.bin
+# (hundreds of MB) is not written again while you play; the small file is folded into the large one at a start once
+# it has grown. 0: one file, written whole whenever a run made a new pipeline.
+# pipeline_cache_play = 1
+# The size (MB) at which pipeline-cache-play.bin is folded into pipeline-cache.bin at a start.
+# pipeline_cache_play_mb = 64
 # 1: where the driver has VK_KHR_pipeline_binary, compiled pipelines are kept in pipeline-binaries.bin under the
 # runtime's own keys, so a renamed or updated exe starts without compiling them again (pipeline-cache.bin is then
 # not used). Default 0 (pipeline-cache.bin only) while it is being tested.

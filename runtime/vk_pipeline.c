@@ -85,6 +85,11 @@ static struct {
     int cache_control;                 // pipelineCreationCacheControl: a create can ask for the pipeline caches only
     int feedback;                      // NX2NAVI_PIPE_FEEDBACK: 1 count pipeline cache hits, 2 also log each compute and graphics build
     uint64_t cache_loaded;             // bytes of pipeline-cache.bin the driver took at boot
+    VkPipelineCache play;              // what this run compiles (pipeline-cache-play.bin); VK_NULL_HANDLE: all goes into cache
+    uint64_t play_loaded;              // bytes of pipeline-cache-play.bin the driver took at boot
+    uint64_t saved[2];                 // the data size of cache [0] and play [1] that their files hold; 0: not known
+    int fold;                          // the play file's content was merged into cache: saving cache removes the play file
+    volatile uint64_t play_made;       // pipelines this run compiled into play
     int pv_last;                       // provokingVertexLast enabled: NVN's default is the last vertex
     VkShaderStageFlags sg32_stages;    // stages that accept requiredSubgroupSize = 32 (0: not available)
     int reconverge;                    // modules with subgroup ops get MaximallyReconvergesKHR (spirv_reconverge)
@@ -107,6 +112,7 @@ static struct {
     PFN_vkCmdSetColorWriteMaskEXT set_wmask;
     PFN_vkCmdSetAlphaToCoverageEnableEXT set_a2c;
     char cache_path[PLAT_PATH_MAX * 2];
+    char play_path[PLAT_PATH_MAX * 2 + 8];   // pipeline-cache-play.bin beside cache_path
     VkPipeStats stats;
 } P = {.lock = PLAT_MUTEX_INIT};
 
@@ -525,17 +531,62 @@ static PlatMutex cache_rw = PLAT_MUTEX_INIT;
 // but the background builder of large compute shaders) for P.cache itself. A create into it does not hold cache_rw, so
 // a build of minutes does not keep pipeline-cache.bin from being saved; bg_merge moves its content into P.cache.
 static __thread VkPipelineCache own_cache;
+// 1 on a thread whose creates take no pipeline cache of ours at all (the library warm in play, lw_worker and lw_probe):
+// what it builds is wanted in the driver's own disk cache only. Built into P.cache, the 37,572 stage libraries of a
+// warm grew it by 1.6 GB (2026-11-11: a save of 2026.7 MB in play, +1612 MB since the boot); the file was then over
+// NX2NAVI_PIPELINE_CACHE_MAX_MB, so the next start dropped it whole and compiled the pipelines it had held.
+static __thread int no_cache;
 // New content in P.cache that P.stats does not count, for autosave_once to save: bg_merge's merges, and the compiles
 // of pipelines built for the cache only (lb_compute keep 0).
 static volatile uint32_t cache_merges;
 
+// ---- the play cache (NX2NAVI_PIPELINE_CACHE_PLAY, default 1; needs pipelineCreationCacheControl)
+// pipeline-cache.bin holds what the preparation built and what earlier runs made: 300 MB and more on an install. One
+// file can only be written whole, so a single new pipeline in play had the whole of it copied out of the driver and
+// written again (2026-11-11: saves of 358.1 MB for 0.3 MB of new data, and 302 to 306 MB written in each of seven
+// sessions that added about 0.5 MB each). So what a run compiles goes into a second cache, P.play, with a file of its
+// own, pipeline-cache-play.bin beside the first: a create asks P.cache with
+// VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT, which gives the pipeline when that cache or the driver's
+// own has it and VK_PIPELINE_COMPILE_REQUIRED when not, and only then builds into P.play (pipe_create_in). In play
+// only the play file is saved; pipeline-cache.bin is not written.
+// The play file is read back at the next start, into P.play and merged into P.cache in memory (cache_load), so the
+// first create finds its pipelines. Once
+// it has grown to NX2NAVI_PIPELINE_CACHE_PLAY_MB (default 64) it is merged into P.cache at the start, before play: the
+// autosave thread writes pipeline-cache.bin once and removes the play file (cache_save). The preparation modes
+// (--prepare-shaders, --warm-shaders, --prepare-pipelines) merge it at any size and build into P.cache alone, as before.
+// A pipeline the driver's own cache gives to the first create enters P.cache in memory only: it is in a file again
+// when the play file is next folded in, or when the driver no longer has it and it is compiled.
+// Without the device feature, with pipeline binaries on, or with the setting 0, P.play stays VK_NULL_HANDLE and
+// everything goes into P.cache as before.
+static int prep_mode;   // a preparation mode (set before ensure_init): no play cache
+
+static VkResult pipe_create_one(int kind, void *ci, VkPipeline *pipe, VkPipelineCache cache) {
+    return kind == 2 ? vkCreateComputePipelines(P.device, cache, 1, ci, NULL, pipe)
+                     : vkCreateGraphicsPipelines(P.device, cache, 1, ci, NULL, pipe);
+}
+
 static VkResult pipe_create_in(int kind, void *ci, VkPipeline *pipe, VkPipelineCache cache) {
+    if (no_cache) cache = VK_NULL_HANDLE;
     int shared = cache && !own_cache;
     if (cache && own_cache) cache = own_cache;
     uint64_t t0 = perf_mark_begin();   // NX2NAVI_TRACE=perf: the create on any thread, its wait for cache_rw included
     if (shared) plat_mutex_lock_shared(&cache_rw);
-    VkResult r = kind == 2 ? vkCreateComputePipelines(P.device, cache, 1, ci, NULL, pipe)
-                           : vkCreateGraphicsPipelines(P.device, cache, 1, ci, NULL, pipe);
+    VkResult r;
+    if (shared && P.play) {
+        PipeCiHead *hd = ci;
+        VkPipelineCreateFlags flags = hd->flags;
+        hd->flags = flags | VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+        r = pipe_create_one(kind, ci, pipe, cache);
+        hd->flags = flags;
+        if (r == VK_PIPELINE_COMPILE_REQUIRED) {
+            // Not in P.cache nor in the driver's own cache: from P.play, or compiled into it. A caller that asked for
+            // cached pipelines only (its own FAIL_ON_PIPELINE_COMPILE_REQUIRED) gets the play cache's answer.
+            r = pipe_create_one(kind, ci, pipe, P.play);
+            if (r == VK_SUCCESS && *pipe) __atomic_fetch_add(&P.play_made, 1, __ATOMIC_RELAXED);
+        }
+    } else {
+        r = pipe_create_one(kind, ci, pipe, cache);
+    }
     if (shared) plat_mutex_unlock_shared(&cache_rw);
     perf_mark_end(PERF_M_PIPE, t0, 0);
     return r;
@@ -593,7 +644,62 @@ static VkResult pipe_create(int kind, void *ci, VkPipeline *pipe) {
     return r;
 }
 
-// Cache data whose header names another device or driver is dropped before Vulkan sees it.
+// The data of the pipeline cache file at path for vkCreatePipelineCache (malloc'd, its size in *size), NULL when the
+// run starts without it, which the log says with the file's size. Cache data whose header names another device or
+// driver is dropped before Vulkan sees it.
+// NX2NAVI_PIPELINE_CACHE_MAX_MB (default 512; 0 no limit): a larger file starts the run empty, and the run's
+// saves replace it. The file only grows: entries of earlier translators and builds stay, and on NVIDIA
+// (621.01) an entry another executable wrote is neither used nor written again, so a renamed or updated exe
+// compiles while the file keeps its size (2026-11-09: 650 MB, 15-18 % of the pipelines read from it). The
+// whole file sits in process memory twice at the boot (this read and the driver's copy) and is copied out
+// at every save of it, which a 16 GB machine near its commit limit cannot spare. The size is checked before the
+// read, so a file that is dropped never takes its size in memory. Sizes are 64-bit all the way
+// (vk_cache_file.h cache_file_read): a file past 2 GB is read with the limit raised or off, and refused by
+// its real size otherwise.
+static void *cache_data_read(VkCtx *c, const char *path, size_t *size) {
+    *size = 0;
+    if (!path[0]) return NULL;
+    uint64_t cap = (uint64_t)strtoull(cfg_value("NX2NAVI_PIPELINE_CACHE_MAX_MB"), NULL, 10) << 20, len = 0;
+    int why = CACHE_FILE_NONE;
+    void *data = cache_file_read(path, sizeof(VkPipelineCacheHeaderVersionOne), cap, &len, &why);
+    if (!data) {
+        if (why == CACHE_FILE_OVER_CAP)
+            rt_log("vk_pipeline: %s holds %.0f MB, over NX2NAVI_PIPELINE_CACHE_MAX_MB %llu: starting empty; this run "
+                   "rewrites it", path, len / 1048576.0, (unsigned long long)(cap >> 20));
+        else if (why != CACHE_FILE_NONE)
+            rt_log("vk_pipeline: %s (%llu bytes, %.1f MB) is not read: %s; starting empty", path,
+                   (unsigned long long)len, len / 1048576.0, cache_file_why(why));
+        return NULL;
+    }
+    VkPipelineCacheHeaderVersionOne h;
+    memcpy(&h, data, sizeof h);
+    if (h.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || h.vendorID != c->props.vendorID ||
+        h.deviceID != c->props.deviceID || memcmp(h.pipelineCacheUUID, c->props.pipelineCacheUUID, VK_UUID_SIZE)) {
+        rt_log("vk_pipeline: %s (%.1f MB) was written by another device or driver; starting empty", path,
+               len / 1048576.0);
+        free(data);
+        return NULL;
+    }
+    *size = (size_t)len;
+    return data;
+}
+
+// A pipeline cache from data (may be NULL: empty); VK_NULL_HANDLE when the driver makes none. *kept: the size of
+// the data it holds afterwards. A driver may drop initial data it does not accept without failing the create, which
+// leaves every build of the run compiling while the cache file looks valid.
+static VkPipelineCache cache_make(VkCtx *c, const void *data, size_t size, size_t *kept) {
+    VkPipelineCache cache = VK_NULL_HANDLE;
+    VkPipelineCacheCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = size,
+                                    .pInitialData = size ? data : NULL};
+    if (vkCreatePipelineCache(c->device, &ci, NULL, &cache) != VK_SUCCESS) {
+        ci.initialDataSize = 0, ci.pInitialData = NULL;
+        if (vkCreatePipelineCache(c->device, &ci, NULL, &cache) != VK_SUCCESS) cache = VK_NULL_HANDLE;
+    }
+    *kept = 0;
+    if (cache && vkGetPipelineCacheData(c->device, cache, kept, NULL) != VK_SUCCESS) *kept = 0;
+    return cache;
+}
+
 static void cache_load(VkCtx *c) {
     cache_path_init();
     pb_init(c);
@@ -601,52 +707,67 @@ static void cache_load(VkCtx *c) {
         rt_log("vk_pipeline: %s is not read or written while pipeline binaries are on", P.cache_path);
         return;
     }
-    void *data = NULL;
-    size_t size = 0;
-    if (P.cache_path[0]) {
-        // NX2NAVI_PIPELINE_CACHE_MAX_MB (default 512; 0 no limit): a larger file starts the run empty, and the run's
-        // saves replace it. The file only grows: entries of earlier translators and builds stay, and on NVIDIA
-        // (621.01) an entry another executable wrote is neither used nor written again, so a renamed or updated exe
-        // compiles while the file keeps its size (2026-11-09: 650 MB, 15-18 % of the pipelines read from it). The
-        // whole file sits in process memory twice at the boot (this read and the driver's copy) and is copied out
-        // at every save, which a 16 GB machine near its commit limit cannot spare. The size is checked before the
-        // read, so a file that is dropped never takes its size in memory. Sizes are 64-bit all the way
-        // (vk_cache_file.h cache_file_read): a file past 2 GB is read with the limit raised or off, and refused by
-        // its real size otherwise.
-        uint64_t cap = (uint64_t)strtoull(cfg_value("NX2NAVI_PIPELINE_CACHE_MAX_MB"), NULL, 10) << 20, len = 0;
-        int why = CACHE_FILE_NONE;
-        data = cache_file_read(P.cache_path, sizeof(VkPipelineCacheHeaderVersionOne), cap, &len, &why);
-        if (data) size = (size_t)len;
-        else if (why == CACHE_FILE_OVER_CAP)
-            rt_log("vk_pipeline: %s holds %.0f MB, over NX2NAVI_PIPELINE_CACHE_MAX_MB %llu: starting empty; this run "
-                   "rewrites it", P.cache_path, len / 1048576.0, (unsigned long long)(cap >> 20));
-        else if (why != CACHE_FILE_NONE)
-            rt_log("vk_pipeline: %s (%llu bytes, %.1f MB) is not read: %s; starting empty", P.cache_path,
-                   (unsigned long long)len, len / 1048576.0, cache_file_why(why));
-        VkPipelineCacheHeaderVersionOne h;
-        if (size) memcpy(&h, data, sizeof h);
-        if (size && (h.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || h.vendorID != c->props.vendorID ||
-                     h.deviceID != c->props.deviceID || memcmp(h.pipelineCacheUUID, c->props.pipelineCacheUUID, VK_UUID_SIZE))) {
-            rt_log("vk_pipeline: %s (%.1f MB) was written by another device or driver; starting empty", P.cache_path,
-                   size / 1048576.0);
-            size = 0;
-        }
-    }
-    VkPipelineCacheCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = size,
-                                    .pInitialData = size ? data : NULL};
-    if (vkCreatePipelineCache(c->device, &ci, NULL, &P.cache) != VK_SUCCESS) {
-        ci.initialDataSize = 0, ci.pInitialData = NULL;
-        if (vkCreatePipelineCache(c->device, &ci, NULL, &P.cache) != VK_SUCCESS) P.cache = VK_NULL_HANDLE;
-    }
+    size_t size = 0, kept = 0;
+    void *data = cache_data_read(c, P.cache_path, &size);
+    P.cache = cache_make(c, data, size, &kept);
     free(data);
-    // What the driver kept of the file: a driver may drop initial data it does not accept without failing the create,
-    // which leaves every build of the run compiling while the cache file looks valid.
-    size_t kept = 0;
-    if (P.cache && vkGetPipelineCacheData(c->device, P.cache, &kept, NULL) != VK_SUCCESS) kept = 0;
     P.cache_loaded = kept;
+    // The file holds this data when the driver took all of it: a save is due only once the cache has grown (cache_save).
+    P.saved[0] = size && kept == size ? kept : 0;
     if (size)
         rt_log("vk_pipeline: %s: %.1f MB read, the driver holds %.1f MB of it", P.cache_path, size / 1048576.0,
                kept / 1048576.0);
+    if (!P.cache || !P.cache_path[0]) return;
+
+    // The play cache (see above pipe_create_in).
+    snprintf(P.play_path, sizeof P.play_path, "%s", P.cache_path);
+    size_t n = strlen(P.play_path);
+    if (n > 4 && !strcmp(P.play_path + n - 4, ".bin")) n -= 4;
+    snprintf(P.play_path + n, sizeof P.play_path - n, "-play.bin");
+    int want = cfg_bool("NX2NAVI_PIPELINE_CACHE_PLAY") && !prep_mode, on = want && P.cache_control;
+    size_t psize = 0, pkept = 0;
+    void *pdata = cache_data_read(c, P.play_path, &psize);
+    VkPipelineCache play = psize || on ? cache_make(c, pdata, psize, &pkept) : VK_NULL_HANDLE;
+    free(pdata);
+    uint64_t fold_at = (uint64_t)strtoull(cfg_value("NX2NAVI_PIPELINE_CACHE_PLAY_MB"), NULL, 10) << 20;
+    int fold = play && psize && (!on || psize >= fold_at);
+    if (fold) {
+        // Into P.cache now; the file is written by the first save, which then removes the play file. A run that ends
+        // before that save finds both files as they were and merges again.
+        VkResult r = vkMergePipelineCaches(c->device, P.cache, 1, &play);
+        vkDestroyPipelineCache(c->device, play, NULL);
+        play = VK_NULL_HANDLE;
+        if (r == VK_SUCCESS) {
+            P.fold = 1, P.saved[0] = 0;
+            rt_log("vk_pipeline: %s: %.1f MB read, the driver holds %.1f MB of it; merged into the cache of %s, which is "
+                   "written once now (%s)", P.play_path, psize / 1048576.0, pkept / 1048576.0, P.cache_path,
+                   prep_mode ? "a preparation builds into that file alone"
+                   : !want ? "NX2NAVI_PIPELINE_CACHE_PLAY=0"
+                   : !P.cache_control ? "no pipelineCreationCacheControl on this device"
+                   : "it reached the size at which it is folded in, before play");
+            if (on) play = cache_make(c, NULL, 0, &pkept), psize = 0;
+        } else {
+            rt_log("vk_pipeline: %s did not merge into the cache of %s (%d); it is left as it is and not used in this run",
+                   P.play_path, P.cache_path, (int)r);
+            on = 0;
+        }
+    } else if (psize) {
+        // Kept as the play cache, so its file goes on holding what earlier runs made, and merged into P.cache in
+        // memory, where the first create of pipe_create_in finds its pipelines. Without the merge that create took
+        // them from the driver's own cache when it had them, at 8 ms a pipeline against 0.4 ms from ours.
+        VkResult r = vkMergePipelineCaches(c->device, P.cache, 1, &play);
+        rt_log("vk_pipeline: %s: %.1f MB read, the driver holds %.1f MB of it%s", P.play_path, psize / 1048576.0,
+               pkept / 1048576.0, r == VK_SUCCESS ? "" : "; it did not merge into the other cache in memory");
+    }
+    P.play = on ? play : VK_NULL_HANDLE;
+    P.play_loaded = P.play ? pkept : 0;
+    // An empty play cache is not written (its data is a header): its size counts as saved, as a whole file's does.
+    P.saved[1] = P.play && (!psize || pkept == psize) ? pkept : 0;
+    if (P.play)
+        rt_log("vk_pipeline: what this run compiles goes into %s; %s is not written in play", P.play_path, P.cache_path);
+    else if (want && !P.cache_control)
+        rt_log("vk_pipeline: no play cache (no pipelineCreationCacheControl on this device): a new pipeline has %s "
+               "written whole", P.cache_path);
 }
 
 // The float widths spirv_nan_preserve declares on this device (P.nan_preserve), from NX2NAVI_VK_NAN_PRESERVE: 0 off,
@@ -5134,10 +5255,12 @@ static void bg_merge(VkPipelineCache own, int built) {
     int locked = 0;
     while (built && !LB.stop && !(locked = plat_mutex_trylock(&cache_rw))) plat_sleep_ms(2);
     if (locked) {
-        VkResult r = vkMergePipelineCaches(P.device, P.cache, 1, &own);
+        // what play compiled: into the play cache when there is one, so its file gets it and not pipeline-cache.bin
+        VkResult r = vkMergePipelineCaches(P.device, P.play ? P.play : P.cache, 1, &own);
         plat_mutex_unlock(&cache_rw);
         if (r == VK_SUCCESS) __atomic_fetch_add(&cache_merges, 1, __ATOMIC_RELAXED);
-        else rt_log("vk_pipeline: background compute build: its cache did not merge into %s (%d)", P.cache_path, (int)r);
+        else rt_log("vk_pipeline: background compute build: its cache did not merge into %s (%d)",
+                    P.play ? P.play_path : P.cache_path, (int)r);
     }
     vkDestroyPipelineCache(P.device, own, NULL);
 }
@@ -5537,6 +5660,7 @@ static double lw_build(const GfxWarmEnt *e) {
 static void lw_worker(void *arg) {
     (void)arg;
     plat_thread_priority(PLAT_PRIO_IDLE);
+    no_cache = 1;   // into the driver's own cache only (see no_cache)
     for (;;) {
         size_t i = (size_t)plat_inc64(&LW.next) - 1;
         if (i >= LW.n || LW.stop) break;
@@ -5972,6 +6096,7 @@ static int seed_pipelines(const char *dir) {
 
 // nx2navi.exe --prepare-pipelines: the list's pipelines alone, for a folder whose shaders are prepared already.
 int vk_pipeline_prepare_pipelines(void) {
+    prep_mode = 1;   // builds into pipeline-cache.bin alone (cache_load)
     if (!ensure_init()) {
         fprintf(stderr, "prepare-pipelines: no Vulkan device\n");
         return 1;
@@ -5991,6 +6116,7 @@ int vk_pipeline_prepare_pipelines(void) {
 // cache key), the seed next to nx2navi.exe is translated on every core, then every prepared variant's stage library or
 // compute pipeline is built once into the driver's disk cache (lb_warm_prepared). No game runs.
 int vk_pipeline_prepare_shaders(void) {
+    prep_mode = 1;   // builds into pipeline-cache.bin alone (cache_load)
     if (!ensure_init()) {
         fprintf(stderr, "prepare-shaders: no Vulkan device\n");
         return 1;
@@ -6013,6 +6139,7 @@ int vk_pipeline_prepare_shaders(void) {
 // 1.8 s) and holds a limited amount: preparing another build dir evicted this one's libraries, and a library a draw
 // needed then took 40-220 ms in play instead of 0.2 ms. Seconds when the libraries are still there.
 int vk_pipeline_warm_shaders(void) {
+    prep_mode = 1;   // builds into pipeline-cache.bin alone (cache_load)
     if (!ensure_init()) {
         fprintf(stderr, "warm-shaders: no Vulkan device\n");
         return 1;
@@ -6257,10 +6384,62 @@ void vk_pipeline_stats(VkPipeStats *s) {
 
 static PlatMutex save_lock = PLAT_MUTEX_INIT;   // one cache save at a time; shutdown takes it to destroy the cache
 
-// Copies P.cache's data into pipeline-cache.bin, with cache_rw held exclusively for the copy only (not the file write).
+// Copies a pipeline cache's data into its file, with cache_rw held exclusively for the copy only (not the file write):
+// P.play into pipeline-cache-play.bin when there is a play cache, else P.cache into pipeline-cache.bin; and P.cache
+// once, with or without a play cache, after the play file was merged into it at the start (P.fold), which then
+// removes the play file.
+// Only when the data changed: the size of a cache's data is asked first, and a cache whose data has the size its file
+// holds is neither copied nor written. A pipeline cache only gains entries, so the same size is the same data. Before,
+// every save copied and wrote the whole cache whenever a pipeline had been created since the last one, also when the
+// cache had held it: three saves of 358.1 MB in one run that added 0.3 MB (2026-11-11).
 // The lock is only ever tried, never waited for: a waiting exclusive request would hold back every new build
 // (a shared request queues behind it), so a pending save could stall the replay. wait_ms: how long to keep trying
 // while builds run (0: one try). Returns 0 when no build-free moment came, 1 otherwise (saved, or nothing to save).
+static int cache_save_one(int which, uint32_t wait_ms) {
+    VkPipelineCache cache = which ? P.play : P.cache;
+    const char *path = which ? P.play_path : P.cache_path;
+    if (!cache) return 1;
+    uint64_t until = plat_now_ms() + wait_ms;
+    while (!plat_mutex_trylock(&cache_rw)) {
+        if (plat_now_ms() >= until) return 0;
+        plat_sleep_ms(2);
+    }
+    size_t size = 0;
+    void *data = NULL;
+    int sized = vkGetPipelineCacheData(P.device, cache, &size, NULL) == VK_SUCCESS && size;
+    int same = sized && size == P.saved[which];
+    int got = sized && !same && (data = malloc(size)) && vkGetPipelineCacheData(P.device, cache, &size, data) == VK_SUCCESS;
+    plat_mutex_unlock(&cache_rw);
+    static uint64_t skipped[2];
+    if (same) skipped[which]++;
+    if (sized && !same && !got) rt_log("vk_pipeline: %s not saved: no copy of its %.1f MB", path, size / 1048576.0);
+    if (got) {
+        uint64_t t0 = plat_now_ms();
+        if (!plat_file_write_atomic(path, data, size)) {
+            rt_log("vk_pipeline: cannot write %s (%.1f MB)", path, size / 1048576.0);
+        } else {
+            uint64_t loaded = which ? P.play_loaded : P.cache_loaded;
+            rt_log("vk_pipeline: %s saved: %.1f MB (%+.1f MB since the boot) written in %llu ms; %llu saves before it were "
+                   "skipped with the data unchanged", path, size / 1048576.0, ((double)size - (double)loaded) / 1048576.0,
+                   (unsigned long long)(plat_now_ms() - t0), (unsigned long long)skipped[which]);
+            P.saved[which] = size, skipped[which] = 0;
+            if (!which && P.fold) {   // the play file's content is in pipeline-cache.bin now
+                P.fold = 0;
+                plat_file_delete(P.play_path);
+                rt_log("vk_pipeline: %s removed: %s holds its pipelines", P.play_path, P.cache_path);
+            }
+            if (P.feedback) {
+                char when[96];
+                snprintf(when, sizeof when, "at a save of %.1f MB (%+.1f MB since the boot)", size / 1048576.0,
+                         ((double)size - (double)loaded) / 1048576.0);
+                fb_log(when);
+            }
+        }
+    }
+    free(data);
+    return 1;
+}
+
 static int cache_save(uint32_t wait_ms) {
     if (!P.ready || !P.cache || !P.cache_path[0]) return 1;
     // Not under P.lock: holding P.lock through the copy and the file write (about 60 ms on the 1.4.3 fight) stopped
@@ -6270,31 +6449,11 @@ static int cache_save(uint32_t wait_ms) {
         plat_mutex_unlock(&save_lock);
         return 1;
     }
-    uint64_t until = plat_now_ms() + wait_ms;
-    while (!plat_mutex_trylock(&cache_rw)) {
-        if (plat_now_ms() >= until) {
-            plat_mutex_unlock(&save_lock);
-            return 0;
-        }
-        plat_sleep_ms(2);
-    }
-    size_t size = 0;
-    void *data = NULL;
-    int got = vkGetPipelineCacheData(P.device, P.cache, &size, NULL) == VK_SUCCESS && size && (data = malloc(size)) &&
-              vkGetPipelineCacheData(P.device, P.cache, &size, data) == VK_SUCCESS;
-    plat_mutex_unlock(&cache_rw);
-    if (got) {
-        if (!plat_file_write_atomic(P.cache_path, data, size)) rt_log("vk_pipeline: cannot write %s", P.cache_path);
-        else if (P.feedback) {
-            char when[96];
-            snprintf(when, sizeof when, "at a save of %.1f MB (%+.1f MB since the boot)", size / 1048576.0,
-                     ((double)size - (double)P.cache_loaded) / 1048576.0);
-            fb_log(when);
-        }
-    }
-    free(data);
+    int ok = 1;
+    if (!P.play || P.fold) ok = cache_save_one(0, wait_ms);
+    if (P.play) ok = cache_save_one(1, wait_ms) && ok;
     plat_mutex_unlock(&save_lock);
-    return 1;
+    return ok;
 }
 
 // Builds still running after this long at a save that waits (exit, the shader preparation) leave the file as it was.
@@ -6352,7 +6511,8 @@ static void save_with(uint32_t wait_ms) {
     gfx_shader_record_flush(1);
     if (P.ready && !P.cache) pb_log("at a save");   // with P.cache the line comes with its own save below
     if (!cache_save(wait_ms) && wait_ms)
-        rt_log("vk_pipeline: %s not saved: pipeline builds kept running for %u ms", P.cache_path, (unsigned)wait_ms);
+        rt_log("vk_pipeline: %s not saved: pipeline builds kept running for %u ms", P.play ? P.play_path : P.cache_path,
+               (unsigned)wait_ms);
 }
 
 // The save at exit and after the shader preparation: it waits up to SAVE_WAIT_MS for a moment with no build running.
@@ -6377,7 +6537,7 @@ static void autosave_once(void) {
     VkPipeStats s;
     vk_pipeline_stats(&s);
     uint64_t n = s.graphics + s.compute + cache_merges;   // a merge comes after its pipeline was counted (bg_main)
-    if (n == last_n) return;
+    if (n == last_n && !P.fold) return;                    // P.fold: the play file merged at the start is to be written
     // Only at a moment with no build running (cache_save): while one runs the save waits for the next tick, 500 ms
     // on, before it logs or flushes anything, so a busy stretch does not repeat the statistics lines every tick.
     if (P.cache && P.cache_path[0]) {
@@ -6439,7 +6599,8 @@ void vk_pipeline_shutdown(void) {
     }
     plat_mutex_lock(&save_lock);   // not while the autosave thread copies it
     if (P.cache) vkDestroyPipelineCache(P.device, P.cache, NULL);
-    P.cache = VK_NULL_HANDLE;
+    if (P.play) vkDestroyPipelineCache(P.device, P.play, NULL);
+    P.cache = P.play = VK_NULL_HANDLE;
     plat_mutex_unlock(&save_lock);
     memset(&P.stats, 0, sizeof P.stats);
     plat_xchg32(&P.ready, 0);
