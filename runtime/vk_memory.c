@@ -2026,16 +2026,24 @@ static void mirror_mode(int discrete, int nvidia_own) {
     const char *g = cfg_get("NX2NAVI_MIRROR_GAP");
     mirror_gap = g && *g ? atoi(g) : 2;
     if (mirror_gap < 0) mirror_gap = 0;
-    // Submissions a region stays unwritten before it is frozen. 60 rather than 300: in a fight 100 of the 257 MiB
-    // queried a frame lay in regions idle for 30-299 submissions, and a thaw by a write costs about 60 us.
     if (rt_knob("FLUSH_SPAN", "0")) {
         flush_cap = 1;
         rt_log("mem: a pool's flushes copy one span from the lowest to the highest (NX2NAVI_FLUSH_SPAN=1)");
     }
     flush_upload = rt_knob("FLUSH_UPLOAD", "0") == 1;
     if (flush_upload) rt_log("mem: flushed ranges are copied into the mirrors as well as written pages (NX2NAVI_FLUSH_UPLOAD=1)");
+    // Submissions a region stays unwritten before it is frozen (NX2NAVI_FREEZE_IDLE; 0: no freezing). 60 was chosen
+    // when a thaw by a write cost about 60 us: in a fight 100 of the 257 MiB queried a frame lay in regions idle for
+    // 30-299 submissions. While the game streams an area, though, it creates and finalizes up to 1,500 memory pools a
+    // second, the driver pins and unpins the imported ones, and every VirtualQuery and VirtualProtect in the process
+    // waits behind that: a thaw took 10-20 ms with frz_lock held, which the replay needs too. The streaming buffers,
+    // idle for a few frames at a time, were frozen and thawed about five times a second, and walking from Kakariko
+    // Village through the Bottom of the Well to the Graveyard had a frame of 25-90 ms in 18-24% of its seconds (11%
+    // with freezing off, at 3-3.6 ms a frame more of write-watch queries over 3.5 GiB). At 1800 (about 3 s) a walk
+    // through Hyrule Field and Ganon's Castle froze 0.1 regions a second, thawed none, queried 14 MiB in 0.03 ms a
+    // frame, and had such a frame in 1 of 253 seconds.
     const char *fi = cfg_get("NX2NAVI_FREEZE_IDLE");
-    freeze_idle = fi && *fi ? atoi(fi) : 60;
+    freeze_idle = fi && *fi ? atoi(fi) : 1800;
     if (freeze_idle < 0) freeze_idle = 0;
     const char *sh = cfg_get("NX2NAVI_SHADOW");
 #ifdef _WIN32
