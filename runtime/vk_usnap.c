@@ -357,6 +357,7 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     summary();
     if (!RT_KNOB_ON(U.mode - 1)) {
         U.off_subs++;
+        wr_prune();   // vk_usnap_drop goes on listing the GPU's writes with snapshots off: without this the list only grew
         return;
     }
     if (adopt(handles, n)) return;
