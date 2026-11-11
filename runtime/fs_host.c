@@ -558,7 +558,9 @@ static uint32_t save_commit_locked(void) {
     return 0;
 }
 
-// The background commit: commit_pending from the game's Commit until the thread has run save_commit_locked.
+// The background commit: commit_pending counts the game's Commits whose thread has not run save_commit_locked to its
+// end yet. A count, not a flag: with two Commits entered at once the first thread's end cleared the flag while the
+// second still waited for tx_lock, and a save write then went into the working copy the second was copying.
 static PlatMutex pend_lock = PLAT_MUTEX_INIT;
 static PlatCond pend_cv = PLAT_COND_INIT;
 static volatile int32_t commit_pending;
@@ -586,7 +588,7 @@ static uint32_t commit_run(void) {
     plat_dec32(&save_writers);
     plat_mutex_unlock(&tx_lock);
     plat_mutex_lock(&pend_lock);
-    commit_pending = 0;
+    plat_dec32(&commit_pending);
     plat_mutex_unlock(&pend_lock);
     plat_cond_broadcast(&pend_cv);
     return r;
@@ -612,7 +614,7 @@ static uint32_t save_commit(void) {
         return 0;
     }
     plat_inc32(&save_writers);   // fs_save_busy until the thread is done
-    plat_xchg32(&commit_pending, 1);
+    plat_inc32(&commit_pending);
     plat_mutex_unlock(&pend_lock);
     if (plat_thread_spawn(commit_main, NULL, "save commit", 0)) {
         return 0;
