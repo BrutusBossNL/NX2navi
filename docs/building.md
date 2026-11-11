@@ -465,6 +465,12 @@ Runtime probes, each a mode of `nx2navi.exe` (the list is at the top of `runtime
 part of `--probe-vkexec` translate shaders of the census below: they look for `build/<ver>/shaders/jobs.json` of the
 exe's own version first, then of the other one.
 `--probe-vkmem` also checks CPU-backed texture uploads and rewrites, GPU-written texture aliases, and memory write watches.
+`--probe-meshfb` (no game files) draws mesh programs of the runtime's own, with and without a task stage and with
+direct and GPU-written workgroup counts, through `VK_EXT_mesh_shader` and through the mesh fallback, and compares the
+pictures; on a device without mesh shaders only the fallback draws. A change to `runtime/mesh_fb.c`,
+`runtime/vk_mesh_fb.c` or the fallback's part of `runtime/vk_exec_draw.c` passes it. With
+`NX2NAVI_PROBE_MESHFB_DIR=<folder>` it converts the game's own task and mesh translations instead, for `spirv-val`
+(the top of `runtime/mesh_fb_probe.c` says what the folder holds).
 A change to the texture detail (`runtime/vk_texture.c` "texture detail": `detail_skip`, `upload`, `astc_bl_regions`)
 passes it three times, with `NX2NAVI_TEXTURE_DETAIL` set to `full`, `reduced` and `low`: each time ASTC textures are
 uploaded and rewritten, and every level and layer of their images must hold the game's level it stands for.
