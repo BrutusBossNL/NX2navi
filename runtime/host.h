@@ -434,7 +434,7 @@ int probe_census_dir(char *dir, size_t n);                 // gfx_shader_probe.c
 int probe_vkmem(void), probe_vkexec(void), probe_astc(void);                 // tex_probe.c, vk_exec_probe.c, astc_probe.c
 int probe_zstd(void);                                      // ov_zstd.c
 int probe_gamepad(void);                                   // input.c
-int probe_movie(void);                                     // movie_probe.c: host VP9 movie::Decoder on one RomFS movie
+int probe_movie(void);                                     // movie_probe.c: the host movie decoders on one RomFS movie
 int vk_pipeline_prepare_shaders(void);                     // vk_pipeline.c: --prepare-shaders (tools/prepare_shaders.py)
 int vk_pipeline_warm_shaders(void);                        // vk_pipeline.c: --warm-shaders (tools/build_game.py)
 int vk_pipeline_prepare_pipelines(void);                   // vk_pipeline.c: --prepare-pipelines (the shared pipeline list)

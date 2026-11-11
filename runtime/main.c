@@ -25,7 +25,7 @@
 //     --probe-astc      the compute ASTC decoder against astc_decode_ldr; needs no game files
 //     --probe-zstd      host zstd streams (ov_zstd.c) on frames made here; needs no game files
 //     --probe-input     gamepad polls on a virtual gamepad, also while SDL's update takes long; needs no game files
-//     --probe-movie     host VP9 movie::Decoder on one RomFS movie; skips without game data
+//     --probe-movie     the host movie decoders on one RomFS movie (VP9 movie::Decoder, AV1 movie::VideoDecoder); skips without game data
 //     --boot            run the game to the first NVN call
 //     --seconds S       run the game (implies --boot's start-up) until the world clock (game time since the loaded
 //                       save's first frame) passed S seconds, then exit 0 at that present
@@ -679,7 +679,10 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-zstd")) return probe_zstd();
     if (!strcmp(mode, "--probe-input")) return probe_gamepad();
     if (!strcmp(mode, "--probe-vkdevice")) return probe_vkdevice();
-    if (!strcmp(mode, "--probe-movie")) return probe_movie();
+    if (!strcmp(mode, "--probe-movie")) {   // the AV1 decoder tells the graphics back end of each frame it writes: none here
+        cfg.gpu = "null";
+        return probe_movie();
+    }
     if (!strcmp(mode, "--prepare-shaders")) return vk_pipeline_prepare_shaders();
     if (!strcmp(mode, "--warm-shaders")) return vk_pipeline_warm_shaders();
     if (!strcmp(mode, "--prepare-pipelines")) return vk_pipeline_prepare_pipelines();
