@@ -604,6 +604,19 @@ static void cache_load(VkCtx *c) {
         fseek(f, 0, SEEK_END);
         long len = ftell(f);
         fseek(f, 0, SEEK_SET);
+        // NX2NAVI_PIPELINE_CACHE_MAX_MB (default 512; 0 no limit): a larger file starts the run empty, and the run's
+        // saves replace it. The file only grows: entries of earlier translators and builds stay, and on NVIDIA
+        // (621.01) an entry another executable wrote is neither used nor written again, so a renamed or updated exe
+        // compiles while the file keeps its size (2026-11-09: 650 MB, 15-18 % of the pipelines read from it). The
+        // whole file sits in process memory twice at the boot (this read and the driver's copy) and is copied out
+        // at every save, which a 16 GB machine near its commit limit cannot spare. The size is checked before the
+        // read, so a file that is dropped never takes its size in memory.
+        uint64_t cap = (uint64_t)strtoull(cfg_value("NX2NAVI_PIPELINE_CACHE_MAX_MB"), NULL, 10) << 20;
+        if (len > 0 && cap && (uint64_t)len > cap) {
+            rt_log("vk_pipeline: %s holds %.0f MB, over NX2NAVI_PIPELINE_CACHE_MAX_MB %llu: starting empty; this run "
+                   "rewrites it", P.cache_path, len / 1048576.0, (unsigned long long)(cap >> 20));
+            len = 0;
+        }
         if (len > (long)sizeof(VkPipelineCacheHeaderVersionOne) && (data = malloc((size_t)len)) &&
             fread(data, 1, (size_t)len, f) == (size_t)len)
             size = (size_t)len;
@@ -613,18 +626,6 @@ static void cache_load(VkCtx *c) {
         if (size && (h.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || h.vendorID != c->props.vendorID ||
                      h.deviceID != c->props.deviceID || memcmp(h.pipelineCacheUUID, c->props.pipelineCacheUUID, VK_UUID_SIZE))) {
             rt_log("vk_pipeline: %s was written by another device or driver; starting empty", P.cache_path);
-            size = 0;
-        }
-        // NX2NAVI_PIPELINE_CACHE_MAX_MB (default 512; 0 no limit): a larger file starts the run empty, and the run's
-        // saves replace it. The file only grows: entries of earlier translators and builds stay, and on NVIDIA
-        // (621.01) an entry another executable wrote is neither used nor written again, so a renamed or updated exe
-        // compiles while the file keeps its size (2026-11-09: 650 MB, 15-18 % of the pipelines read from it). The
-        // whole file sits in process memory twice at the boot (this read and the driver's copy) and is copied out
-        // at every save, which a 16 GB machine near its commit limit cannot spare.
-        uint64_t cap = (uint64_t)strtoull(cfg_value("NX2NAVI_PIPELINE_CACHE_MAX_MB"), NULL, 10) << 20;
-        if (size && cap && size > cap) {
-            rt_log("vk_pipeline: %s holds %.0f MB, over NX2NAVI_PIPELINE_CACHE_MAX_MB %llu: starting empty; this run "
-                   "rewrites it", P.cache_path, size / 1048576.0, (unsigned long long)(cap >> 20));
             size = 0;
         }
     }
