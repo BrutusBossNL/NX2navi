@@ -4099,6 +4099,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         vk_mvsurvey_draw(ex);
         vk_mvprev_draw(ex);
     }
+    vk_dlaa_jitter_check(ex);   // a draw with another jitter than the viewport recorded last records it again
     record_fixed(ex);
     repeat_stats(ex, info);
     {   // the replay's binding path is the CPU cost the frame profile needs to separate from recording
