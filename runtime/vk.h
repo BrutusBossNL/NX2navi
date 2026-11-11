@@ -348,10 +348,12 @@ void vk_mem_fatal_note(char *out, size_t n);   // the memory mode and the lazy w
 void vk_mem_shadow_sync(void);
 // A shader of the part being recorded reads through the device address table (vk_gpa.c), also when its descriptors
 // are reused: with shadow storage the part's prologue (vk_mem_gpa_sync) then brings every pool the table names up to
-// date with the CPU's writes, since the pools such a shader reaches are never resolved.
+// date with the CPU's writes, since the pools such a shader reaches are never resolved. fence: the submission's value,
+// at which what the shaders stored through the table goes back to guest memory.
 void vk_mem_gpa_use(void);
-void vk_mem_gpa_sync(void);
+void vk_mem_gpa_sync(uint64_t fence);
 int vk_mem_shadow_storage(void);   // CPU-visible pools are shadow copies of guest memory, not imports (NX2NAVI_SHADOW)
+int vk_mem_shadow_table_stores(void);   // shadow storage keeps what shaders store through the table (NX2NAVI_SHADOW_TABLE_STORES)
 void vk_mem_gpu_pending(uint64_t addr, uint64_t size);
 void vk_gpu_written(uint64_t addr, uint64_t size);
 // The same for a GPU write into a VRAM mirror, which went back to guest memory with the submission: the texture checks

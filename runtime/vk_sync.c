@@ -82,12 +82,35 @@ static int hold_max = -1;
 // write-backs follow in a part of their own, which signals the timeline as before. A submission without that split
 // signals both at its end. vk_sync_exec_wait waits on exec_tl; every other wait, the fences the game asks for among
 // them, still covers the write-backs. NX2NAVI_WB_SPLIT=0: no split, and the wait is the fence's.
+// Not with shadow storage (vk_memory.c): there the game does need the write-backs before it goes on. With an import a
+// write-back stores into guest memory on the GPU, right behind the passes. With a shadow copy it stores into the copy,
+// and the bytes reach guest memory in the fence's completion callback (shadow_wb_cb), after the write-back part, the
+// fence and the callbacks queued before it, while the game is already rewriting for its next frame what those passes
+// wrote. A write-back that lands after such a rewrite puts the GPU's older bytes over it in guest memory and moves the
+// page's base copy along, so the next copy-in finds nothing the CPU changed; and a rewrite with the value the base
+// copy holds (a reset to zero) is no difference at any time. The GPU then goes on from its own last output, as the
+// game's lighting accumulators do, which the shaders add to and the CPU resets.
+// Measured: with the split the whole 3D scene came out brighter for single frames (3.8 of 255, the interface as it
+// was), each of them a frame whose main work was held at its CPU event wait and replayed late, together with the next
+// frame's: standing outdoors, 695, 624, 443, 323 and 2 of 1,800 frames in five runs, and none in eight runs without
+// the split (RTX 5090 with NX2NAVI_SHADOW=1, 2026-11-10). A player on Linux (RX 7800 XT, RADV) saw the open field lit
+// in one frame and flat in the next; that it is the same fault is not confirmed on their machine. Which words the
+// write-backs overtook was not traced: NX2NAVI_SHADOW_CHECK counts no byte that both sides changed to different
+// values, which fits a reset to the base copy's value.
+// NX2NAVI_WB_SPLIT=2 keeps the split with shadow storage too, to measure that fault.
 static VkSemaphore exec_tl;
 static uint64_t exec_sig;             // sub_lock: the newest value a submitted part signals on exec_tl
 static int wb_split = -1;
 
 int vk_sync_wb_split(void) {
-    if (wb_split < 0) wb_split = cfg_bool("NX2NAVI_WB_SPLIT");
+    if (wb_split < 0) {
+        const char *e = cfg_get("NX2NAVI_WB_SPLIT");
+        int forced = e && !strcmp(e, "2");
+        wb_split = cfg_bool("NX2NAVI_WB_SPLIT") && (forced || !vk_mem_shadow_storage());
+        if (vk_mem_shadow_storage())
+            rt_log("vk: the wait after a frame's first submission %s (shadow storage; NX2NAVI_WB_SPLIT=2 leaves them out)",
+                   wb_split ? "leaves out its write-backs" : "covers its write-backs and their copies into guest memory");
+    }
     return wb_split && exec_tl != VK_NULL_HANDLE;
 }
 
@@ -508,7 +531,7 @@ static CmdSlot *take_slot(VkCtx *c, uint64_t fence) {
 // First brings the shadow storage up to date with the CPU's writes, which needs no command buffer.
 static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
     vk_mem_shadow_sync();   // shadow storage: the CPU's writes go in before the part is submitted
-    vk_mem_gpa_sync();      // a part whose shaders read through the device address table never resolved the pools they reach
+    vk_mem_gpa_sync(fence);   // a part whose shaders read through the device address table never resolved the pools they reach
     vk_mem_lazy_part_end();   // what the part left in the mirror and has to write back after all joins the snapshots
     if (!vk_mem_mirror_pending()) return VK_NULL_HANDLE;
     int i = claim_slot(c, fence);   // before reading slots: the claim may move it
