@@ -583,9 +583,11 @@ uint32_t *meshfb_vs(const MeshFbInfo *m, uint32_t out_mask, const uint8_t out_ty
         for (int g = 0; g < 32; g++) {
             if (!loc_var[g]) continue;
             int t = out_type[g] < 3 ? out_type[g] : 0;
+            // A component outside the program's output map reads as Maxwell gives an unwritten one: (0, 0, 0, 1), the w
+            // as the bits of 1.0f whatever the type, as vk_pipeline.c spirv_add_outputs pads a missing output.
             uint32_t comp[4];
             for (int k = 0; k < 4; k++) {
-                uint32_t word_k = gen[g][k] ? gen[g][k] : k0;
+                uint32_t word_k = gen[g][k] ? gen[g][k] : k == 3 ? K(&c, 0x3f800000) : k0;
                 comp[k] = t == 2 ? word_k : E(&c, OpBitcast, t_scalar[t], word_k);
             }
             DO(&c, OpStore, loc_var[g], E(&c, OpCompositeConstruct, t_v4[t], comp[0], comp[1], comp[2], comp[3]));

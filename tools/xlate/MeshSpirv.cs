@@ -306,6 +306,9 @@ static class MeshSpirv
             // outputs
             uint tV4 = Ty(OpTypeVector, tFloat, 4);
             uint pOutFloat = Ptr(ScOutput, tFloat);
+            uint fZero = Id(), fOne = Id();
+            globals.Add(new Insn(OpConstant, new[] { tFloat, fZero, 0u }));
+            globals.Add(new Insn(OpConstant, new[] { tFloat, fOne, 0x3f800000u }));
             uint posVar = 0, sizeVar = 0;
             var generic = new Dictionary<int, uint>();
             foreach (int a in m.Lines)
@@ -343,6 +346,16 @@ static class MeshSpirv
                         uint ptr = comp == uint.MaxValue ? Emit(OpAccessChain, pOutFloat, var, v) : Emit(OpAccessChain, pOutFloat, var, v, C(comp));
                         Do(OpStore, ptr, value);
                     }
+                    // A component of an output vector that the program's output map leaves out reads as Maxwell gives an
+                    // unwritten one, (0, 0, 0, 1), instead of whatever the output held.
+                    void Defaults(uint var, int first)
+                    {
+                        for (int k = 0; k < 4; k++)
+                            if (!m.Lines.Contains(first + 4 * k))
+                                Do(OpStore, Emit(OpAccessChain, pOutFloat, var, v, C((uint)k)), k == 3 ? fOne : fZero);
+                    }
+                    if (posVar != 0) Defaults(posVar, 0x70);
+                    foreach (var (g, var) in generic) Defaults(var, 0x80 + 16 * g);
                 });
             }
             for (int k = 0; k * threads < maxP; k++)
