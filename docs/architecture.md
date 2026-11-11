@@ -155,6 +155,12 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   is built ahead only when a run has dispatched it: a pipeline of one holds about 100 MiB of device memory whether it
   is used or not, also after it is destroyed, and the list has about twenty of them that the game never dispatches
   (`runtime/vk_pipeline.c`, "compute pipelines the boot keeps").
+  The pipeline cache is two files beside the game. `pipeline-cache.bin` holds what the preparation built and what
+  earlier runs made; what a run compiles goes into `pipeline-cache-play.bin`, so one new pipeline in play writes a
+  small file and not hundreds of megabytes. A cache is written only when its data grew. The small file is merged
+  into the large one at a start once it reached `pipeline_cache_play_mb`, and by every preparation; the stage
+  libraries the library warm builds in play go to the driver's own cache alone (`runtime/vk_pipeline.c`, "the play
+  cache", `cache_save`).
 - The game's tensor-core upscaler is replaced by a decode-and-scale pass (`vk_tonemap.c`); `vk_fsr.c` runs AMD FSR 1
   (EASU, RCAS) on the present when the window is larger than the picture.
 - HDR (`vk_hdr.c`): the game tonemaps its scene into a float target, upscales it, draws the HUD into a second float

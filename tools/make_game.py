@@ -1830,6 +1830,47 @@ def shader_carry(out):
     return (out / 'shader-prepared.bin').is_file() and bool(cache_identities(out))
 
 
+# The head of shader-prepared.bin (runtime/prp_file.h): magic, version, record size, and from version 2 on what the
+# list was prepared from: sha256 of seed-programs.bin, sha256 of seed-answers.bin, the translator identity.
+PREPARED_HEAD = struct.Struct('<8sII')
+SEED_FILES = ('seed-programs.bin', 'seed-answers.bin')
+
+
+def prepared_from(out):
+    """What the game folder's prepared shader list says it was prepared from: {'programs', 'answers', 'translator'}
+    as hex digests; {} for a list that does not say (written before the list recorded it); None without a list."""
+    try:
+        with open(out / 'shader-prepared.bin', 'rb') as f:
+            data = f.read(PREPARED_HEAD.size + 96)
+    except OSError:
+        return None
+    if len(data) < PREPARED_HEAD.size:
+        return {}
+    magic, version, _rec = PREPARED_HEAD.unpack_from(data)
+    if magic != b'NX2NSPRP' or version != 2 or len(data) < PREPARED_HEAD.size + 96:
+        return {}
+    body = data[PREPARED_HEAD.size:]
+    return {'programs': body[:32].hex(), 'answers': body[32:64].hex(), 'translator': body[64:96].hex()}
+
+
+def seed_changed(out):
+    """Why the shaders prepared before cannot stay in use, given the seed just written into the game folder
+    (SEED_FILES): a sentence, or '' when the list was prepared from this very seed. A list that does not say what it
+    was prepared from counts as changed: nothing tells whether it holds what this seed names.
+    The translator is not compared: input ids do not depend on it and the game carries the translations of the one
+    before over (shader_carry)."""
+    was = prepared_from(out)
+    if not was:
+        return 'the shaders prepared before do not say which shader seed they were prepared from'
+    try:
+        now = {'programs': sha256_file(out / SEED_FILES[0]), 'answers': sha256_file(out / SEED_FILES[1])}
+    except OSError:
+        return ''   # no seed to compare with: as before the list recorded it
+    if (was['programs'], was['answers']) != (now['programs'], now['answers']):
+        return 'the shader seed changed since the shaders were prepared'
+    return ''
+
+
 def shader_run(cmd, cwd=None, build_only=False):
     """Runs a shader preparation command and returns its exit code. Its output is read as it comes: the counts
     nx2navi.exe prints become progress events, the other lines go on to the log, and while nothing moves an event
@@ -1921,7 +1962,8 @@ def step_shaders(out, update=False):
     (shader_run reports its progress).
     update: after a kit update the shaders prepared before stay in use and the game translates them again in the
     background (shader_carry), so the update does not wait the minutes a full preparation takes; the driver's cache
-    gets their stage libraries again (warm_driver_cache)."""
+    gets their stage libraries again (warm_driver_cache). Only a list prepared from the seed this kit writes stays
+    (seed_changed): with another seed, or a list that does not say, everything is prepared again as at the install."""
     # The game translates with the copy beside it. The compile step refreshes that copy, but a kit that changes only
     # the translator runs this step again alone (step_key), which would then prepare with the old one. Only a kit that
     # has one: the compile step, which always runs first, stops a build without it.
@@ -1931,7 +1973,22 @@ def step_shaders(out, update=False):
             for name in (XLATE_NAME, 'nx2navi_xlate.id'):
                 copy_if_changed(d / name, out / name)
             break
-    if update and shader_carry(out):
+    cmd = [sys.executable, '-u', str(KIT / 'tools' / 'prepare_shaders.py'), str(out), '--romfs', str(out / 'romfs'),
+           '--exefs', str(out / 'exefs'), '--no-list', '--exe', EXE_NAME]
+    why = ''
+    carry = update and shader_carry(out)
+    if carry and prepared_from(out) is not None:
+        # The seed this kit makes from the game files, written without preparing anything (seconds): the list
+        # prepared before stays in use only when it was prepared from this seed. Another seed names other shader
+        # variants (a newer pipeline list, a change to which variants are prepared), and those the old list lacks
+        # would be translated when play first draws them. A seed that cannot be written leaves things as they were.
+        if shader_run(cmd + ['--no-run']) == 0:
+            why = seed_changed(out)
+        if why:
+            say(f'  {why}: preparing them again')
+    if carry and not why:
+        for seed in SEED_FILES:
+            (out / seed).unlink(missing_ok=True)
         say('  the shaders prepared before this update stay in use; the game translates them again in the background')
         if loose_shaders(out) >= PACK_LOOSE_MIN:
             # minutes without a count (4 on a player's 328,000 files): the row says what runs meanwhile
@@ -1939,14 +1996,12 @@ def step_shaders(out, update=False):
             pack_shader_cache(out)
         warm_driver_cache(out)
         return
-    cmd = [sys.executable, '-u', str(KIT / 'tools' / 'prepare_shaders.py'), str(out), '--romfs', str(out / 'romfs'),
-           '--exefs', str(out / 'exefs'), '--no-list', '--exe', EXE_NAME]
     rc = shader_run(cmd)
     if rc:
         fail('preparing the shaders failed (the lines above say why); the game still runs, compiling shaders as it '
              'meets them. Run the build again to retry this step')
     # translated now: the shader cache holds them. seed-pipeline-keys.bin stays: --warm-shaders builds from it again
-    for seed in ('seed-programs.bin', 'seed-answers.bin'):
+    for seed in SEED_FILES:
         (out / seed).unlink(missing_ok=True)
     pack_shader_cache(out)
 
