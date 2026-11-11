@@ -4278,3 +4278,23 @@ void vk_texture_shutdown(void) {
     if (sinfo) memset(sinfo, 0, sizeof *sinfo << 20);   // no slot is registered: tokens 0
     unlock();
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the texture cache's entries (the bytes are in the "mem: vram" line), the
+// released ones, those retired by disuse, the sampler cache, the image requirements cache, the disuse holds, the
+// reuse keys, and the pool's texture and sampler slots. Counters, and a walk of at most 4096 sampler slots.
+void vk_texture_sizes(PerfSizes *s) {
+    lock();
+    uint64_t imgs = by_key.n, rel = (uint64_t)nreleased, relb = rel_bytes, ret = (uint64_t)nretiring, retb = retiring_bytes,
+             smp = samplers.n, reqs = img_reqs.n, hold = holds.n, reuse_keys = reuse.n, tslot = pool_slots, sslot = 0;
+    for (int i = 0; i < nsslots; i++) sslot += sslots[i].used != 0;
+    unlock();
+    perf_size(s, "textures", imgs, 0, PERF_SIZE_NONE);
+    perf_size(s, "released textures", rel, 0, relb);
+    perf_size(s, "retiring textures", ret, 0, retb);
+    perf_size(s, "samplers", smp, 0, PERF_SIZE_NONE);
+    perf_size(s, "image requirements", reqs, 0, PERF_SIZE_NONE);
+    perf_size(s, "disuse holds", hold, HOLDS_MAX, PERF_SIZE_NONE);
+    perf_size(s, "reuse keys", reuse_keys, 0, PERF_SIZE_NONE);
+    perf_size(s, "texture pool slots", tslot, VK_POOL_TEX, PERF_SIZE_NONE);
+    perf_size(s, "sampler slots", sslot, VK_POOL_SAMP, PERF_SIZE_NONE);
+}

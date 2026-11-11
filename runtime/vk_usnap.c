@@ -490,3 +490,14 @@ void vk_usnap_shutdown(void) {
     free_arenas = NULL;
     plat_mutex_unlock(&free_lock);
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the free uniform snapshot arenas (the free list is never trimmed) and the
+// GPU-write list (the replay thread's; read without a lock, a line may be one write behind).
+void vk_usnap_sizes(PerfSizes *s) {
+    uint64_t n = 0, b = 0;
+    plat_mutex_lock(&free_lock);
+    for (const Arena *a = free_arenas; a; a = a->next) n++, b += a->size;
+    plat_mutex_unlock(&free_lock);
+    perf_size(s, "free uniform snapshot arenas", n, 0, b);
+    perf_size(s, "uniform snapshot GPU writes", (uint64_t)__atomic_load_n(&U.nwr, __ATOMIC_RELAXED), 0, PERF_SIZE_NONE);
+}

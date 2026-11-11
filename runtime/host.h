@@ -63,6 +63,29 @@ void perf_mark_add(int kind, uint64_t ns, uint64_t bytes);   // nothing while th
 // (romfs.c, the area's static placement file) and takes the memory snapshot once no area has loaded for 10 s.
 void perf_segment(const char *name);
 void perf_scene(const char *name);
+// NX2NAVI_TRACE=perf "mem: sizes" lines (perf.c sizes_log): the entries and bytes of the caches, pools and tables no
+// other line gives, every 600 presents and with each memory snapshot. Each subsystem's *_sizes function (weak no-ops
+// in perf.c) adds its own with perf_size, taking its locks briefly on the present thread. count or bytes UINT64_MAX:
+// not known; limit 0: none.
+typedef struct { char line[1800]; int n; uint64_t frame; const char *group; } PerfSizes;
+void perf_size(PerfSizes *s, const char *name, uint64_t count, uint64_t limit, uint64_t bytes);
+#define PERF_SIZE_NONE UINT64_MAX
+void mem_sizes(PerfSizes *s);         // memory.c
+void kern_sizes(PerfSizes *s);        // kernel.c
+void setjmp_sizes(PerfSizes *s);      // guest_setjmp.c
+void fs_host_sizes(PerfSizes *s);     // fs_host.c
+void romfs_sizes(PerfSizes *s);       // romfs.c
+void zstd_sizes(PerfSizes *s);        // ov_zstd.c
+void cfg_sizes(PerfSizes *s);         // cfg.c
+void vk_mem_sizes(PerfSizes *s);      // vk_memory.c
+void vk_gpa_sizes(PerfSizes *s);      // vk_gpa.c
+void vk_texture_sizes(PerfSizes *s);  // vk_texture.c
+void vk_exec_sizes(PerfSizes *s);     // vk_exec_draw.c
+void vk_sync_sizes(PerfSizes *s);     // vk_sync.c
+void vk_usnap_sizes(PerfSizes *s);    // vk_usnap.c
+void nvn_cmd_sizes(PerfSizes *s);     // nvn_api_cmd.c
+void vk_pipeline_sizes(PerfSizes *s); // vk_pipeline.c
+void gfx_shader_sizes(PerfSizes *s);  // gfx_shader.c
 // NX2NAVI_REPLAY_TIME=1: how long the replay spends in each kind of op (perf.c perf_replay_op reports it with the
 // frame-time summary). Draws and dispatches include their bindings and the vkCmd calls they record; binds are the state
 // and resource binds between them; xfer is copies and clears.

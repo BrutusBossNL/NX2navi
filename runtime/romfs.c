@@ -1341,3 +1341,12 @@ HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKcPvm", ov_mount_rom);
 HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKc", ov_mount_rom);
 HOST_OVERRIDE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", ov_query_cache);
 HOST_OVERRIDE("_ZN2nn2fs24InitializeForApplicationEv", ov_initialize);
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): open RomFS handles against the table.
+void romfs_sizes(PerfSizes *s) {
+    uint64_t n = 0;
+    plat_mutex_lock_shared(&lock);
+    for (unsigned j = 1; j < NH; j++) n += handles[j] != 0;
+    plat_mutex_unlock_shared(&lock);
+    perf_size(s, "RomFS handles open", n, NH - 1, PERF_SIZE_NONE);
+}

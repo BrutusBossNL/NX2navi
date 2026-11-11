@@ -3931,3 +3931,33 @@ void vk_mem_shutdown(void) {
     for (uint64_t i = 0; i < GEN_CHUNKS; i++) free(gen_chunk[i]), gen_chunk[i] = NULL, free(cgen_chunk[i]), cgen_chunk[i] = NULL;
     plat_mutex_unlock(&gen_lock);
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): pool records, VRAM mirrors, the deferred destruction list, upload batches,
+// the staging cache and arena, the write-back merge snapshot pool and the shadow storage's base copies. Counters only:
+// cmd_lock is taken by every upload and release, so nothing is walked under it.
+void vk_mem_sizes(PerfSizes *s) {
+    plat_mutex_lock_shared(&pool_lock);
+    uint64_t pools = (uint64_t)pool_index.n, phys = (uint64_t)nphys;
+    plat_mutex_unlock_shared(&pool_lock);
+    plat_rmutex_lock(&cmd_lock);
+    uint64_t dead_n = (uint64_t)ndead, infl = (uint64_t)ninflight, spare_b = (uint64_t)nspare, stg_n = (uint64_t)stg_ncache,
+             stg_b = (uint64_t)stg_cache_bytes, arena_n = (uint64_t)narena_free;
+    plat_rmutex_unlock(&cmd_lock);
+    plat_mutex_lock(&snap_pool_lock);
+    uint64_t snap_n = (uint64_t)nsnap_pool, snap_b = snap_pool_bytes;
+    plat_mutex_unlock(&snap_pool_lock);
+    plat_mutex_lock(&shadow_lock);
+    uint64_t sb = s_sb_pages;
+    plat_mutex_unlock(&shadow_lock);
+    perf_size(s, "pool records", pools, 0, PERF_SIZE_NONE);
+    perf_size(s, "of them physical", phys, 0, PERF_SIZE_NONE);
+    perf_size(s, "VRAM mirrors", (uint64_t)__atomic_load_n(&m_live_n, __ATOMIC_RELAXED), 0,
+              (uint64_t)__atomic_load_n(&m_live_bytes, __ATOMIC_RELAXED));
+    perf_size(s, "deferred destructions", dead_n, 0, PERF_SIZE_NONE);
+    perf_size(s, "upload batches in flight", infl, 0, PERF_SIZE_NONE);
+    perf_size(s, "spare upload batches", spare_b, 0, PERF_SIZE_NONE);
+    perf_size(s, "staging cache", stg_n, STG_CACHE, stg_b);
+    perf_size(s, "free staging arena chunks", arena_n, ARENA_KEEP, arena_n * ARENA_CHUNK);
+    perf_size(s, "write-back snapshot pool", snap_n, SNAP_POOL_N, snap_b);
+    perf_size(s, "shadow base copies", sb, 0, sb * SB_PAGE);
+}

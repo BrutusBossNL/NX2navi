@@ -26,6 +26,7 @@ static CfgEntry entries[CFG_MAX_KEYS];
 static int n_entries;
 static unsigned version;
 static PlatMutex set_lock = PLAT_MUTEX_INIT;   // cfg_set, cfg_reset, cfg_save
+static uint64_t kept_n, kept_bytes;            // set_lock: values cfg_set replaced and kept for readers (cfg_sizes)
 static int save_ok = 1;                         // the last cfg_save_to wrote (or had nothing to write)
 
 // Every name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside this list is
@@ -534,6 +535,7 @@ void cfg_set(const char *name, const char *value) {
     while (i < n && strcmp(entries[i].key, key)) i++;
     if (i < n) {
         if (!entries[i].value || strcmp(entries[i].value, value)) {
+            if (entries[i].value) kept_n++, kept_bytes += strlen(entries[i].value) + 1;   // cfg_sizes
             __atomic_store_n(&entries[i].value, strdup(value), __ATOMIC_RELEASE);   // the old string stays for readers
             entries[i].dirty = 1;
         }
@@ -1009,4 +1011,13 @@ void cfg_init(void) {
         rt_log("cfg: device profile Steam Deck: defaults for the keys nx2navi.ini does not set (NX2NAVI_DEVICE_PROFILE=desktop "
                "turns it off)");
     start_values();
+}
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): settings entries, and the replaced values cfg_set keeps for readers.
+void cfg_sizes(PerfSizes *s) {
+    plat_mutex_lock(&set_lock);
+    uint64_t n = (uint64_t)n_entries, kn = kept_n, kb = kept_bytes;
+    plat_mutex_unlock(&set_lock);
+    perf_size(s, "settings", n, CFG_MAX_KEYS, PERF_SIZE_NONE);
+    perf_size(s, "replaced setting values kept", kn, 0, kb);
 }

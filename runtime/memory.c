@@ -1364,3 +1364,24 @@ void mem_guest_census(uint64_t frame) {
     }
     rt_log("%s; all %.0f", line, all / 1048576.0);
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the guest heap and physical maps, the kernel region's bump and commit, the
+// moved stacks, and the lazily written ranges with their array's room.
+void mem_sizes(PerfSizes *s) {
+    plat_mutex_lock_shared(&lock);
+    uint64_t heap = heap_size, alias = alias_bytes, stacks = nstack_maps;
+    plat_mutex_unlock_shared(&lock);
+    plat_mutex_lock_shared(&klock);
+    uint64_t kused = kbump ? kbump - RT_KERNEL_BASE : 0, kcom = kcommitted ? kcommitted - RT_KERNEL_BASE : 0;
+    plat_mutex_unlock_shared(&klock);
+    plat_mutex_lock_shared(&frz_lock);
+    uint64_t lz = (uint64_t)lz_n, lzc = (uint64_t)lz_cap;
+    plat_mutex_unlock_shared(&frz_lock);
+    perf_size(s, "guest heap", PERF_SIZE_NONE, 0, heap);
+    perf_size(s, "guest physical maps", PERF_SIZE_NONE, 0, alias);
+    perf_size(s, "kernel region used", PERF_SIZE_NONE, 0, kused);
+    perf_size(s, "kernel region committed", PERF_SIZE_NONE, 0, kcom);
+    perf_size(s, "moved stacks", stacks, sizeof stack_maps / sizeof *stack_maps, PERF_SIZE_NONE);
+    perf_size(s, "lazy write-back ranges", lz, 0, PERF_SIZE_NONE);
+    perf_size(s, "their array's room", lzc, 0, PERF_SIZE_NONE);
+}

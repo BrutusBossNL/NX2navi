@@ -6669,3 +6669,28 @@ int vk_pipeline_selftest(void) {
     printf("vk_pipeline selftest: %s\n", ok ? "passed" : "FAILED");
     return ok ? 0 : 1;
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the pipeline table's entries with their pipelines and fast links (never
+// evicted), layouts, stage libraries, the job queues and the pipeline-keys.bin set. A walk of the hash chains under P.lock
+// held shared: the workers' inserts and a draw's memo miss wait for it (well under a millisecond).
+void vk_pipeline_sizes(PerfSizes *s) {
+    uint64_t ent = 0, built = 0, fast = 0, libn = 0, libb = 0, lq = 0;
+    plat_mutex_lock_shared(&P.lock);
+    for (int i = 0; i < PIPE_BUCKETS; i++)
+        for (const Pipe *p = pipes[i]; p; p = p->next) ent++, built += p->info.pipeline != VK_NULL_HANDLE, fast += p->fast != VK_NULL_HANDLE;
+    for (int i = 0; i < LIB_BUCKETS; i++)
+        for (const Lib *b = libs[i]; b; b = b->next) libn++, libb += b->pipe != VK_NULL_HANDLE;
+    for (const LibJob *j = U.head; j; j = j->next) lq++;
+    uint64_t lay = P.stats.layouts, fails = P.stats.failures, jobs = A.inflight, seen = K.seen_n, seen_b = (uint64_t)K.seen_cap * 8;
+    plat_mutex_unlock_shared(&P.lock);
+    perf_size(s, "pipeline entries", ent, 0, PERF_SIZE_NONE);
+    perf_size(s, "with a pipeline", built, 0, PERF_SIZE_NONE);
+    perf_size(s, "fast links", fast, 0, PERF_SIZE_NONE);
+    perf_size(s, "pipeline failures", fails, 0, PERF_SIZE_NONE);
+    perf_size(s, "pipeline layouts", lay, 0, PERF_SIZE_NONE);
+    perf_size(s, "stage library entries", libn, 0, PERF_SIZE_NONE);
+    perf_size(s, "built stage libraries", libb, 0, PERF_SIZE_NONE);
+    perf_size(s, "library jobs queued", lq, 0, PERF_SIZE_NONE);
+    perf_size(s, "pipeline jobs queued or running", jobs, 0, PERF_SIZE_NONE);
+    perf_size(s, "pipeline keys seen", seen, 0, seen_b);
+}

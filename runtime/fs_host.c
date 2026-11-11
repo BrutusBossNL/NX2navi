@@ -2033,3 +2033,14 @@ int probe_fs(void) {
     printf("probe-fs: passed (%llu files, %d sampled)\n", (unsigned long long)files, SAMPLES);
     return 0;
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): open save-data files and directory listings against their tables.
+void fs_host_sizes(PerfSizes *s) {
+    uint64_t nf = 0, nd = 0;
+    plat_mutex_lock_shared(&lock);
+    for (int i = 0; i < NFILES; i++) nf += files[i].h != NULL;
+    for (int i = 0; i < NDIRS; i++) nd += dirs[i].used != 0;
+    plat_mutex_unlock_shared(&lock);
+    perf_size(s, "save files open", nf, NFILES, PERF_SIZE_NONE);
+    perf_size(s, "save listings open", nd, NDIRS, PERF_SIZE_NONE);
+}

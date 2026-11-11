@@ -2306,3 +2306,23 @@ int kern_svc(Cpu *c, uint32_t imm) {
     }
     return r;
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): guest threads, the handle table, the system-event table and fibers, each
+// against its fixed size (the tables are fatal when full).
+void kern_sizes(PerfSizes *s) {
+    uint64_t threads = 0, handles = 0, fibers = 0, ses;
+    plat_mutex_lock_shared(&G);
+    for (RtThread *t = g_all; t; t = t->all) threads++;
+    for (int i = 0; i < MAX_H; i++) handles += g_h[i].type != 0;
+    plat_mutex_unlock_shared(&G);
+    plat_mutex_lock_shared(&g_se_lock);
+    ses = (uint64_t)g_nse;
+    plat_mutex_unlock_shared(&g_se_lock);
+    plat_mutex_lock_shared(&g_fiber_lock);
+    for (int i = 0; i < FIBER_MAX; i++) fibers += g_fibers[i] != NULL;
+    plat_mutex_unlock_shared(&g_fiber_lock);
+    perf_size(s, "guest threads", threads, 0, PERF_SIZE_NONE);
+    perf_size(s, "handles", handles, MAX_H, PERF_SIZE_NONE);
+    perf_size(s, "system events", ses, sizeof g_se / sizeof *g_se, PERF_SIZE_NONE);
+    perf_size(s, "fibers", fibers, FIBER_MAX, PERF_SIZE_NONE);
+}

@@ -763,3 +763,15 @@ void vk_sync_shutdown(void) {
     }
     plat_mutex_unlock(&start_lock);
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): command buffer slots (read without sub_lock, which a whole replay holds),
+// the completion queue and the submissions held back.
+void vk_sync_sizes(PerfSizes *s) {
+    uint64_t slots = (uint64_t)__atomic_load_n(&nslots, __ATOMIC_RELAXED);
+    plat_mutex_lock(&st_lock);
+    uint64_t q = (uint64_t)qn;
+    plat_mutex_unlock(&st_lock);
+    perf_size(s, "command buffer slots", slots, 0, PERF_SIZE_NONE);
+    perf_size(s, "completion queue", q, 0, PERF_SIZE_NONE);
+    perf_size(s, "held submissions", (uint64_t)__atomic_load_n(&held_n, __ATOMIC_RELAXED), 0, PERF_SIZE_NONE);
+}

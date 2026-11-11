@@ -189,9 +189,63 @@ static struct {
 } seg;
 
 __attribute__((weak)) void vk_mem_snapshot(uint64_t frame) { (void)frame; }
+
+// ---- "mem: sizes" lines (host.h PerfSizes): one line per group; a line that grows past the log's line size goes out
+// and the group goes on in the next.
+#define SIZES_WEAK(f) __attribute__((weak)) void f(PerfSizes *s) { (void)s; }
+SIZES_WEAK(mem_sizes) SIZES_WEAK(kern_sizes) SIZES_WEAK(setjmp_sizes) SIZES_WEAK(fs_host_sizes) SIZES_WEAK(romfs_sizes)
+SIZES_WEAK(zstd_sizes) SIZES_WEAK(cfg_sizes) SIZES_WEAK(vk_mem_sizes) SIZES_WEAK(vk_gpa_sizes) SIZES_WEAK(vk_texture_sizes)
+SIZES_WEAK(vk_exec_sizes) SIZES_WEAK(vk_sync_sizes) SIZES_WEAK(vk_usnap_sizes) SIZES_WEAK(nvn_cmd_sizes)
+SIZES_WEAK(vk_pipeline_sizes) SIZES_WEAK(gfx_shader_sizes)
+
+static void sizes_flush(PerfSizes *s) {
+    if (s->n > 0) rt_log("mem: sizes frame %llu, %s:%s", (unsigned long long)s->frame, s->group, s->line);
+    s->n = 0, s->line[0] = 0;
+}
+
+void perf_size(PerfSizes *s, const char *name, uint64_t count, uint64_t limit, uint64_t bytes) {
+    if (s->n > (int)sizeof s->line - 120) sizes_flush(s);
+    int n = snprintf(s->line + s->n, sizeof s->line - (size_t)s->n, " %s", name);
+    if (count != PERF_SIZE_NONE) n += snprintf(s->line + s->n + n, sizeof s->line - (size_t)(s->n + n), " %llu", (unsigned long long)count);
+    if (limit) n += snprintf(s->line + s->n + n, sizeof s->line - (size_t)(s->n + n), "/%llu", (unsigned long long)limit);
+    if (bytes != PERF_SIZE_NONE)
+        n += snprintf(s->line + s->n + n, sizeof s->line - (size_t)(s->n + n), "%s%.1f MiB", count != PERF_SIZE_NONE ? ", " : " ",
+                      bytes / 1048576.0);
+    n += snprintf(s->line + s->n + n, sizeof s->line - (size_t)(s->n + n), ";");
+    if (n > 0 && s->n + n < (int)sizeof s->line) s->n += n;
+    else s->line[s->n] = 0;
+}
+
+static void sizes_log(uint64_t frame) {
+    static const struct { const char *group; void (*fn[7])(PerfSizes *); } groups[] = {
+        {"guest memory, kernel, files and settings", {mem_sizes, kern_sizes, setjmp_sizes, fs_host_sizes, romfs_sizes, zstd_sizes, cfg_sizes}},
+        {"GPU memory and textures", {vk_mem_sizes, vk_gpa_sizes, vk_texture_sizes}},
+        {"replay and submission", {vk_exec_sizes, vk_sync_sizes, vk_usnap_sizes, nvn_cmd_sizes}},
+        {"pipelines and shaders", {vk_pipeline_sizes, gfx_shader_sizes}},
+    };
+    PerfSizes s;
+    for (size_t g = 0; g < sizeof groups / sizeof *groups; g++) {
+        s.n = 0, s.line[0] = 0, s.frame = frame, s.group = groups[g].group;
+        for (int i = 0; i < 7 && groups[g].fn[i]; i++) groups[g].fn[i](&s);
+        sizes_flush(&s);
+    }
+}
+
+// The memory lines of a segment's end or a settled scene: the back end's (vk_mem_snapshot), then the sizes.
+static void mem_snapshot(uint64_t frame) {
+    vk_mem_snapshot(frame);
+    sizes_log(frame);
+}
 __attribute__((weak)) int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact) {
     (void)used, (void)budget, (void)exact;
     return 0;
+}
+
+// The world clock as the segment and scene lines give it: seconds, or "-" before the loaded save's first frame.
+static const char *wtxt(int64_t w, char *b) {
+    if (w < 0) return "-";
+    snprintf(b, 24, "%.1f", w / 1e6);
+    return b;
 }
 
 void perf_segment(const char *name) {
@@ -204,8 +258,9 @@ void perf_segment(const char *name) {
 
 void perf_scene(const char *name) {
     if (!(rt_trace & RT_TRACE_PERF)) return;
-    rt_log("scene: %s loads (frame %llu, world %.1f s)", name,
-           (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), frame_step_world_us() / 1e6);
+    char wb[24];
+    rt_log("scene: %s loads (frame %llu, world %s s)", name,
+           (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), wtxt(frame_step_world_us(), wb));
     plat_mutex_lock(&seg_lock);
     size_t n = strlen(scene_name);
     if (n + strlen(name) + 2 < sizeof scene_name) snprintf(scene_name + n, sizeof scene_name - n, "%s%s", n ? ", " : "", name);
@@ -238,13 +293,14 @@ static void seg_close(uint64_t frame, uint64_t now, int at_exit) {
     for (int b = SEG_BINS - 1; b >= 0; b--)
         if ((acc += seg.hist[b]) >= cut) { low = (uint64_t)(b + 1) * SEG_BIN_NS; break; }
     if (low > seg.max) low = seg.max;
-    rt_log("segment: '%s' frames %llu-%llu, world %.1f-%.1f s: %llu frames in %.1f s, mean %.2f ms (%.1f fps), 1%% low %.1f "
+    char w0[24], w1[24];
+    rt_log("segment: '%s' frames %llu-%llu, world %s to %s s: %llu frames in %.1f s, mean %.2f ms (%.1f fps), 1%% low %.1f "
            "fps (%.2f ms), worst %.1f ms at frame %llu; over 25 ms %llu, 50 ms %llu, 100 ms %llu; %s%s",
-           seg.name, (unsigned long long)seg.f0, (unsigned long long)frame, seg.w0 / 1e6, frame_step_world_us() / 1e6,
+           seg.name, (unsigned long long)seg.f0, (unsigned long long)frame, wtxt(seg.w0, w0), wtxt(frame_step_world_us(), w1),
            (unsigned long long)seg.frames, (now - seg.t0) / 1e9, seg.sum / 1e6 / seg.frames, seg.frames * 1e9 / seg.sum,
            low ? 1e9 / low : 0.0, low / 1e6, seg.max / 1e6, (unsigned long long)seg.max_frame,
            (unsigned long long)seg.over25, (unsigned long long)seg.over50, (unsigned long long)seg.over100, mem, marks);
-    if (!at_exit) vk_mem_snapshot(frame);
+    if (!at_exit) mem_snapshot(frame);
 }
 
 static void seg_open(const char *name, uint64_t frame, uint64_t now) {
@@ -278,14 +334,16 @@ static void seg_frame(uint64_t frame, uint64_t now, uint64_t d, const MarkSums *
     if (asked) {
         seg_close(frame, now, 0);
         seg_open(name, frame, now);
-        rt_log("segment: '%s' starts at frame %llu, world %.1f s", name, (unsigned long long)frame, seg.w0 / 1e6);
+        char wb[24];
+        rt_log("segment: '%s' starts at frame %llu, world %s s", name, (unsigned long long)frame, wtxt(seg.w0, wb));
     }
     if (settled) {
         char mem[160];
         mem_text(mem, sizeof mem, 1);
-        rt_log("scene: %s settled (no area loaded for 10 s) at frame %llu, world %.1f s; %s", scenes,
-               (unsigned long long)frame, frame_step_world_us() / 1e6, mem);
-        vk_mem_snapshot(frame);
+        char wb[24];
+        rt_log("scene: %s settled (no area loaded for 10 s) at frame %llu, world %s s; %s", scenes,
+               (unsigned long long)frame, wtxt(frame_step_world_us(), wb), mem);
+        mem_snapshot(frame);
     }
 }
 
@@ -814,4 +872,5 @@ void perf_present(uint64_t frame) {
     sum = max = n = ab_b = 0;
     memset(wait_ns, 0, sizeof wait_ns);
     win_start = now;
+    if (frame % 600 == 0) sizes_log(frame);   // beside vk_memory.c's 600-frame memory lines
 }

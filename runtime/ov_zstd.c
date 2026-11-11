@@ -739,3 +739,16 @@ int probe_zstd(void) {
 }
 
 #endif
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): host dictionaries (never freed) and stream slots taken.
+void zstd_sizes(PerfSizes *s) {
+    uint64_t d, st = 0;
+    plat_mutex_lock(&dict_lock);
+    d = (uint64_t)ndicts;
+    plat_mutex_unlock(&dict_lock);
+    plat_mutex_lock(&stream_lock);
+    for (int i = 0; i < NSTREAM; i++) st += streams[i].s != 0;
+    plat_mutex_unlock(&stream_lock);
+    perf_size(s, "zstd dictionaries", d, NDICT, PERF_SIZE_NONE);
+    perf_size(s, "zstd stream slots", st, NSTREAM, PERF_SIZE_NONE);
+}

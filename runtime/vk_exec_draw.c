@@ -5808,3 +5808,19 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
     op_draw_impl(ex, op, payload);
     perf_replay_op_at(op_is_draw(op) ? PERF_RP_DRAW : PERF_RP_BIND, op, plat_now_ns() - t0);
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the image view cache (under the texture lock), the spare descriptor pools
+// and transient chunks, and the continuations held for event order.
+void vk_exec_sizes(PerfSizes *s) {
+    vk_texture_lock();
+    uint64_t views = view_of.n, imgs = views_by_image.n;
+    vk_texture_unlock();
+    plat_mutex_lock(&spare_lock);
+    uint64_t sp = (uint64_t)nspare_pool, sc = (uint64_t)nspare_chunk;
+    plat_mutex_unlock(&spare_lock);
+    perf_size(s, "image views", views, 0, PERF_SIZE_NONE);
+    perf_size(s, "images with views", imgs, 0, PERF_SIZE_NONE);
+    perf_size(s, "spare descriptor pools", sp, SPARE_POOLS, PERF_SIZE_NONE);
+    perf_size(s, "spare transient chunks", sc, SPARE_CHUNKS, sc * CHUNK_BYTES);
+    perf_size(s, "held continuations", (uint64_t)vk_exec_held(), 36, PERF_SIZE_NONE);
+}
