@@ -184,7 +184,9 @@
 # the new translator cannot translate keeps its old translation. 0: shaders the new translator has not translated yet
 # are translated before they are used (at start or when the game first draws them), as earlier versions did.
 # shader_carry = 1
-# Vulkan graphics pipeline library, 0 or 1. Default: on.
+# Vulkan graphics pipeline library, 0 or 1. Default: on, except with AMD's Windows driver for RX 5000 and RX 6000
+# cards, which faults when it links a burst of new pipelines (the game ended at every enemy killed); there it is off,
+# new pipelines are built whole, and gpl = 1 turns it on again.
 # gpl = 1
 
 # Textures and memory.
