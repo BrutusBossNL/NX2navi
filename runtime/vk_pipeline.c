@@ -521,18 +521,20 @@ static void pb_log(const char *when) {
 // compiled with P.cache and its binaries captured. The create info is restored before returning.
 typedef struct { VkStructureType sType; const void *pNext; VkPipelineCreateFlags flags; } PipeCiHead;
 
-// Builds into P.cache against reads of its data. Every create with P.cache holds this shared (pipe_create_in); the
-// normal autosave holds it exclusively and only takes it when no build is running. The NVIDIA exit snapshot uses
-// shared access too, so an unfinished compile cannot prevent saving completed data; merges still take exclusive
-// access. The Vulkan rules
-// allow reading a cache created without VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT while pipelines are
-// built into it, but Intel's Windows driver (101.8991 on an Arc 140V) crashed inside vkGetPipelineCacheData during the
-// copy, reading through a null entry, with compute and library builds running beside the autosave.
+// Builds into P.cache against reads of its data. Every create with P.cache holds this shared (pipe_create_in); a save
+// holds it exclusively for the copy of the data and only takes it when no build is running. The Vulkan rules allow
+// reading a cache created without VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT while pipelines are built into
+// it, but Intel's Windows driver (101.8991 on an Arc 140V) crashed inside vkGetPipelineCacheData during the copy,
+// reading through a null entry, with compute and library builds running beside the autosave. So no copy is made while
+// a build runs, on any driver.
 static PlatMutex cache_rw = PLAT_MUTEX_INIT;
+// Set while the save at exit waits for cache_rw: the builds already in the driver finish, and new ones wait in
+// cache_build_enter until the copy is made. Without it the boot's prewarm workers started builds back to back, no moment
+// without one came within the save's 5 s, and the pipelines built in that run were not saved (a window closed during
+// the prewarm, 2026-11-11). The autosave never sets it, so it never holds a build back.
 static volatile int32_t cache_saving_at_exit;
 
-// Normal autosaves never hold new builds back. At process exit, let existing
-// driver calls finish without admitting more until the cache has been copied.
+// Takes cache_rw shared for a build into P.cache; while the save at exit waits for its copy, first waits for that.
 static void cache_build_enter(void) {
     for (;;) {
         while (__atomic_load_n(&cache_saving_at_exit, __ATOMIC_ACQUIRE)) plat_sleep_ms(1);
@@ -6175,10 +6177,16 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     LB.n = n;
     LB.idle = 1;
     int cpus = (int)plat_cpu_usable();
-    // Two threads for the recent-pipeline prefix by default, then one for the remaining cache-warming work. Lower
-    // tail concurrency leaves more CPU/driver capacity for rendering without removing any prepared variants. An
-    // explicit thread setting retains its requested concurrency throughout. A cold driver can spend far longer on
-    // a request than the idle-priority shader loader; fewer concurrent builds also reduce driver contention.
+    // Two threads by default, not half the CPUs. On a 32-thread CPU with NVIDIA's driver, 16 builders kept the driver's
+    // lock busy: 77% of the process's running time was a spin loop in nvoglv64.dll (about 8 cores), the prebuild had not
+    // finished after 34,000 frames, and lib_prebuild = 0 took it to 5% and the game to its frame limit (RTX 4080 SUPER,
+    // driver 617.14, 2026-11-08). With the driver's disk cache warm (--prepare-shaders, --warm-shaders) a build takes
+    // well under a millisecond, so two threads still finish the list quickly.
+    // The two take the shaders dispatched most recently (e[0..n_keep)); one goes on with the rest (lb_next), which is
+    // only built into the caches. Where the rest still runs during play, two builders there cost frames: one against
+    // two for the whole list, one 20 s route each on an RTX 5090, Castle Town 76.1 against 73.7 fps with 1 frame over
+    // 25 ms against 6, Hyrule Field 85.7 against 80.7 fps. NX2NAVI_LIB_PREBUILD_THREADS keeps its count for the whole
+    // list.
     int t = te && *te ? atoi(te) : (cpus < 4 ? 1 : 2);   // idle priority; a cold driver takes ~2 s per large compute shader
     LB.tail_one = !(te && *te);
     t = t < 1 ? 1 : t > LB_MAX_THREADS ? LB_MAX_THREADS : t;
@@ -6753,23 +6761,19 @@ static PlatMutex save_lock = PLAT_MUTEX_INIT;   // one cache save at a time; shu
 // every save copied and wrote the whole cache whenever a pipeline had been created since the last one, also when the
 // cache had held it: three saves of 358.1 MB in one run that added 0.3 MB (2026-11-11).
 // The lock is only ever tried, never waited for: a waiting exclusive request would hold back every new build
-// (a shared request queues behind it), so a pending autosave could stall the replay. Only the final process-exit
-// snapshot uses shared access on NVIDIA; other drivers retain the admission gate and exclusive snapshot, including
-// the reported Intel concurrent-read failure above. wait_ms: how long to keep trying
-// while builds run (0: one try). Returns 0 when no build-free moment came, -1 when the data could not be copied or
-// its file not written (the log says which), 1 otherwise (saved, or nothing to save).
+// (a shared request queues behind it), so a pending autosave could stall the replay. The save at exit (exiting) holds
+// new builds back instead (cache_saving_at_exit) and so only waits for the builds already running. wait_ms: how long to
+// keep trying while builds run (0: one try). Returns 0 when no build-free moment came, -1 when the data could not be
+// copied or its file not written (the log says which), 1 otherwise (saved, or nothing to save).
 static int cache_save_one(int which, uint32_t wait_ms, int exiting) {
     VkPipelineCache cache = which ? P.play : P.cache;
     const char *path = which ? P.play_path : P.cache_path;
     if (!cache) return 1;
-    VkCtx *ctx = vk_ctx();
-    int concurrent = exiting && ctx && ctx->props.vendorID == 0x10de;
-    int gated = exiting && !concurrent;
     uint64_t until = plat_now_ms() + wait_ms;
-    if (gated) __atomic_store_n(&cache_saving_at_exit, 1, __ATOMIC_RELEASE);
-    while (!(concurrent ? plat_mutex_trylock_shared(&cache_rw) : plat_mutex_trylock(&cache_rw))) {
+    if (exiting) __atomic_store_n(&cache_saving_at_exit, 1, __ATOMIC_RELEASE);
+    while (!plat_mutex_trylock(&cache_rw)) {
         if (plat_now_ms() >= until) {
-            if (gated) __atomic_store_n(&cache_saving_at_exit, 0, __ATOMIC_RELEASE);
+            if (exiting) __atomic_store_n(&cache_saving_at_exit, 0, __ATOMIC_RELEASE);
             return 0;
         }
         plat_sleep_ms(2);
@@ -6778,26 +6782,10 @@ static int cache_save_one(int which, uint32_t wait_ms, int exiting) {
     void *data = NULL;
     int sized = vkGetPipelineCacheData(P.device, cache, &size, NULL) == VK_SUCCESS && size;
     int same = sized && size == P.saved[which];
-    int got = 0;
-    for (int attempt = 0; sized && !same && attempt < (concurrent ? 3 : 1); attempt++) {
-        // The cache may grow between the size query and read. A little spare capacity absorbs small additions; an
-        // incomplete read is retried from a fresh size query. Never replace the last saved cache with a partial one.
-        size_t spare = concurrent ? 65536 : 0;
-        if (size > SIZE_MAX - spare) break;
-        size_t capacity = size + spare;
-        if (!(data = malloc(capacity))) break;
-        size = capacity;
-        VkResult r = vkGetPipelineCacheData(P.device, cache, &size, data);
-        if (r == VK_SUCCESS && size && size <= capacity) { got = 1; break; }
-        free(data), data = NULL;
-        if (!concurrent || r != VK_INCOMPLETE) break;
-        sized = vkGetPipelineCacheData(P.device, cache, &size, NULL) == VK_SUCCESS && size;
-    }
-    if (concurrent) plat_mutex_unlock_shared(&cache_rw);
-    else plat_mutex_unlock(&cache_rw);
-    // Release admission before logging, file IO or taking any other lock. A
-    // paused builder may still own its caller's pipeline or library lock.
-    if (gated) __atomic_store_n(&cache_saving_at_exit, 0, __ATOMIC_RELEASE);
+    int got = sized && !same && (data = malloc(size)) && vkGetPipelineCacheData(P.device, cache, &size, data) == VK_SUCCESS;
+    plat_mutex_unlock(&cache_rw);
+    // The held-back builds go on before the log line and the file write: one of them may hold a lock those wait for.
+    if (exiting) __atomic_store_n(&cache_saving_at_exit, 0, __ATOMIC_RELEASE);
     static uint64_t skipped[2];
     int failed = !sized || (!same && !got);
     if (same) skipped[which]++;
@@ -6913,11 +6901,13 @@ static int save_with(uint32_t wait_ms, int exiting) {
     return saved;
 }
 
-// The save at exit and after the shader preparation: it waits up to SAVE_WAIT_MS for a moment with no build running.
+// The save after the shader preparation and at shutdown: it waits up to SAVE_WAIT_MS for a moment with no build running.
 void vk_pipeline_save(void) {
     save_with(SAVE_WAIT_MS, 0);
 }
 
+// The save as the process ends (window closed, the game's exit, a timed run's end): new builds wait while it waits up to
+// SAVE_WAIT_MS for the running ones to finish (cache_saving_at_exit).
 void vk_pipeline_save_exit(void) {
     save_with(SAVE_WAIT_MS, 1);
 }

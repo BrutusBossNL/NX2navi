@@ -1,4 +1,7 @@
-"""Windows: exercise exit snapshots during builds, growing cache data, and the conservative other-driver path."""
+"""Windows: the pipeline cache save at exit holds new builds back, waits for the running ones, and copies the cache only
+while no build runs; the autosave never holds a build back. Builds runtime/vk_pipeline.c's cache_build_enter and
+cache_save_one into a test program against stand-ins for the driver and the file system.
+Usage: python tests/cache_exit_snapshot_check.py [path to clang]"""
 from pathlib import Path
 import subprocess
 import sys
@@ -29,12 +32,8 @@ typedef SRWLOCK PlatMutex;
 typedef void *VkPipelineCache;
 typedef int VkResult;
 #define VK_SUCCESS 0
-#define VK_INCOMPLETE 5
-typedef struct { struct { unsigned vendorID; } props; } VkCtx;
-static VkCtx context = {{0x8086}};
-static VkCtx *vk_ctx(void) { return &context; }
 static size_t mock_size = 4;
-static int grow_once, grow_always, query_fail;
+static int query_fail;
 static PlatMutex cache_rw = SRWLOCK_INIT;
 static volatile int32_t cache_saving_at_exit;
 static volatile LONG active, snapshots;
@@ -49,7 +48,6 @@ static struct {
 static void plat_mutex_lock_shared(PlatMutex *m) { AcquireSRWLockShared(m); }
 static void plat_mutex_unlock_shared(PlatMutex *m) { ReleaseSRWLockShared(m); }
 static int plat_mutex_trylock(PlatMutex *m) { return TryAcquireSRWLockExclusive(m); }
-static int plat_mutex_trylock_shared(PlatMutex *m) { return TryAcquireSRWLockShared(m); }
 static void plat_mutex_unlock(PlatMutex *m) { ReleaseSRWLockExclusive(m); }
 static void plat_sleep_ms(uint32_t ms) { Sleep(ms); }
 static uint64_t plat_now_ms(void) { return GetTickCount64(); }
@@ -58,7 +56,7 @@ static void fb_log(const char *when) { (void)when; assert(!cache_saving_at_exit)
 static void plat_file_delete(const char *path) { (void)path; }
 static int plat_file_write_atomic(const char *path, const void *data, size_t size) {
     (void)path;
-    assert(!cache_saving_at_exit); // admission must reopen before IO and diagnostics
+    assert(!cache_saving_at_exit);   // builds go on before the file write
     assert(size == mock_size && !memcmp(data, "test", 4));
     writes++;
     if (block_file) {
@@ -69,12 +67,9 @@ static int plat_file_write_atomic(const char *path, const void *data, size_t siz
 }
 static int vkGetPipelineCacheData(int device, VkPipelineCache cache, size_t *size, void *data) {
     (void)device; (void)cache;
-    if (context.props.vendorID != 0x10de) assert(!active);
+    assert(!active);   // never a copy while a build runs, on any driver
     InterlockedIncrement(&snapshots);
     if (!data && query_fail) return -1;
-    if (data && (grow_once || grow_always)) {
-        grow_once = 0; mock_size = *size + 100; return VK_INCOMPLETE;
-    }
     if (data) { assert(*size >= mock_size); memcpy(data, "test", 4); }
     *size = mock_size;
     return VK_SUCCESS;
@@ -105,6 +100,9 @@ int main(void) {
     new_in = CreateEventW(NULL, TRUE, FALSE, NULL);
     file_in = CreateEventW(NULL, TRUE, FALSE, NULL);
     release_file = CreateEventW(NULL, TRUE, FALSE, NULL);
+
+    // The save at exit: a build is running; a build that comes while the save waits is held back until the copy is
+    // made, and goes on before the file is written.
     HANDLE old = CreateThread(NULL, 0, builder, (void *)1, 0, NULL);
     assert(WaitForSingleObject(old_in, 2000) == WAIT_OBJECT_0);
     block_file = 1;
@@ -117,50 +115,35 @@ int main(void) {
     assert(WaitForSingleObject(new_in, 20) == WAIT_TIMEOUT);
     SetEvent(release_old);
     assert(WaitForSingleObject(file_in, 2000) == WAIT_OBJECT_0);
-    assert(WaitForSingleObject(new_in, 2000) == WAIT_OBJECT_0); // IO does not hold admission closed
+    assert(WaitForSingleObject(new_in, 2000) == WAIT_OBJECT_0);
     SetEvent(release_file);
     join(old); join(next); join(saving);
     assert(save_result == 1 && snapshots == 2 && writes == 1 && !cache_saving_at_exit);
 
-    // Ordinary autosave does not wait behind an active build or close admission.
+    // The autosave does not wait for a running build and holds none back.
     cache_build_enter();
     assert(cache_save_one(0, 0, 0) == 0 && !cache_saving_at_exit);
-    // A final save times out on a genuinely long driver call and restores admission.
+    // The save at exit gives up on a build that outlasts its wait, and lets builds in again.
     assert(cache_save_one(0, 1, 1) == 0 && !cache_saving_at_exit);
     plat_mutex_unlock_shared(&cache_rw);
     cache_build_enter(); plat_mutex_unlock_shared(&cache_rw);
 
+    // Data of the size already saved is not written again.
     block_file = 0;
-    assert(cache_save_one(0, 100, 1) == 1 && writes == 1); // unchanged data is not rewritten
+    assert(cache_save_one(0, 100, 1) == 1 && writes == 1);
+    // A failed write or size query keeps the file and the size it was saved at.
     P.saved[0] = 0; fail_file = 1;
     assert(cache_save_one(0, 100, 1) == -1 && !cache_saving_at_exit && P.saved[0] == 0);
-    // NVIDIA exit reads can finish while a build remains active; normal autosaves retain the conservative path.
-    fail_file=0;context.props.vendorID=0x10de;P.saved[0]=0;
-    ResetEvent(old_in);ResetEvent(release_old);
-    old=CreateThread(NULL,0,builder,(void *)1,0,NULL);
-    assert(WaitForSingleObject(old_in,2000)==WAIT_OBJECT_0);
-    assert(active==1);
-    int before=writes;
-    assert(cache_save_one(0,100,1)==1 && writes==before+1 && active==1 && !cache_saving_at_exit);
-    assert(cache_save_one(0,0,0)==0 && active==1); // no gameplay autosave behavior change
-    SetEvent(release_old);join(old);
+    fail_file = 0; P.saved[0] = mock_size; query_fail = 1;
+    int before = writes;
+    assert(cache_save_one(0, 100, 1) == -1 && writes == before && P.saved[0] == mock_size);
+    query_fail = 0;
 
-    // Cache growth retries a fresh size query, and a partial result never replaces an existing file.
-    P.saved[0]=0;grow_once=1;
-    assert(cache_save_one(0,100,1)==1 && P.saved[0]==mock_size);
-    before=writes;
-    assert(cache_save_one(0,100,1)==1 && writes==before);
-    uint64_t saved=P.saved[0];mock_size++;grow_always=1;
-    assert(cache_save_one(0,100,1)==-1 && writes==before && P.saved[0]==saved);
-    grow_always=0;query_fail=1;
-    assert(cache_save_one(0,100,1)==-1 && writes==before && P.saved[0]==saved);
-    query_fail=0;
-
-    // A merge owns exclusive access: even the concurrent snapshot must not race it.
+    // A merge holds the cache exclusively: the save at exit waits for it like for a build.
     assert(plat_mutex_trylock(&cache_rw));
-    assert(cache_save_one(0,0,1)==0 && writes==before);
+    assert(cache_save_one(0, 0, 1) == 0 && writes == before && !cache_saving_at_exit);
     plat_mutex_unlock(&cache_rw);
-    puts("Exit snapshot: active builds, merge exclusion, cache growth/retry, partial/error preservation and fallback passed");
+    puts("cache save at exit: builds held back and waited for, autosave unchanged, timeout, failures and merges passed");
     return 0;
 }
 '''
