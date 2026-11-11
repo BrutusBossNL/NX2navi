@@ -240,7 +240,7 @@ void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws
 int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size),
                     int (*clean)(uint64_t lo, uint64_t hi, void *ctx));
 uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t off, void *ctx);
-int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t out[][2], int max);
+int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t h0, int64_t delta, uint64_t out[][2], int max);
 int mem_lazy_armed(uint64_t a, uint64_t n);
 void mem_lazy_window(int open);
 void mem_lazy_release(uint64_t a, uint64_t n);

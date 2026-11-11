@@ -200,6 +200,7 @@ static uint8_t lz_touch_n[RT_ADDRESS_LIMIT >> FRZ_SHIFT];     // frz_lock: piece
 static uint32_t lz_heavy_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];   // frz_lock: ... of its last touch taken as a reader's
 static int lz_chunk;                    // the setting, read in mem_init
 static uint64_t lz_pieces, lz_piece_bytes, lz_heavy;   // frz_lock, since the last report
+static uint64_t lz_foreign;             // frz_lock, since the start: segments of another buffer mem_lazy_skip gave back
 // frz_lock: the first faults on armed pages since the last report, for its lines (trace perf)
 #define LZ_NOTES 8
 static struct { uint64_t addr, lo, hi, out; uint32_t tid; uint8_t write, stale, hold; } lz_note[LZ_NOTES];
@@ -429,13 +430,23 @@ uint64_t mem_lazy_arm(uint64_t a, uint64_t n, uint64_t h0, uint64_t h1, uint64_t
 }
 
 // The armed parts of [a, a + n), sorted, into out (at most max); they count as stale from here on: the caller leaves
-// the bytes it is about to write there in the mirror. Returns how many.
-int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t out[][2], int max) {
+// the bytes it is about to write there in the mirror h0, at buffer offset address + delta. Returns how many.
+// A segment there that was armed for another buffer (a mirror evicted since, whose range a write-back armed while the
+// eviction ran) is given back instead, without a fetch: its buffer may be gone, and since its mirror went every GPU
+// write went to guest memory, so guest memory holds the bytes. Marked stale, it would have its next touch copy from the
+// freed buffer, a GPU read fault that loses the device.
+int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t h0, int64_t delta, uint64_t out[][2], int max) {
     if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED) || !n || a >= RT_ADDRESS_LIMIT || a + n > RT_ADDRESS_LIMIT) return 0;
     int any = 0, k = 0;
     for (uint64_t r = a >> FRZ_SHIFT; r <= (a + n - 1) >> FRZ_SHIFT && !any; r++) any = lzr[r];
     if (!any) return 0;
     plat_mutex_lock(&frz_lock);
+    for (int i = lz_n; i-- > 0;)
+        if (lzs[i].lo < a + n && lzs[i].hi > a && (lzs[i].h0 != h0 || lzs[i].delta != delta)) {
+            lzs[i].stale = 0;
+            lz_foreign++;
+            lazy_drop_locked(i, 4);
+        }
     for (int i = 0; i < lz_n && k < max; i++) {
         uint64_t lo = lzs[i].lo > a ? lzs[i].lo : a, hi = lzs[i].hi < a + n ? lzs[i].hi : a + n;
         if (lo >= hi) continue;
@@ -582,9 +593,15 @@ void mem_lazy_report(uint64_t frame, uint64_t skipped) {
     memcpy(no, lz_no, sizeof no);
     memset(lz_no, 0, sizeof lz_no);
     lz_no_small = lz_arm_calls = 0;
-    uint64_t pieces = lz_pieces, piece_bytes = lz_piece_bytes, heavy = lz_heavy;
+    uint64_t pieces = lz_pieces, piece_bytes = lz_piece_bytes, heavy = lz_heavy, foreign = lz_foreign;
     lz_pieces = lz_piece_bytes = lz_heavy = 0;
     plat_mutex_unlock(&frz_lock);
+    static uint64_t foreign_said;
+    if (foreign != foreign_said) {
+        foreign_said = foreign;
+        rt_log("mem: lazy write-back: %llu armed ranges named a mirror that is no longer the pool's, given back without "
+               "a fetch so far", (unsigned long long)foreign);
+    }
     rt_log("mem: lazy write-back at frame %llu: %d ranges armed, %.1f MiB; since the last line %.1f MiB left in the "
            "mirror, %llu read and %llu write faults (%llu inside a part's window), %llu other releases, %llu fetches of "
            "%.1f MiB in %.2f ms, %llu arms refused (a CPU write not in the mirror yet)", (unsigned long long)frame, n,

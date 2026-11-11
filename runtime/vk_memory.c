@@ -1677,9 +1677,16 @@ void vk_gpu_written_back(uint64_t addr, uint64_t size) {
     if (!shadow_on) mem_probe(addr, size);
     VkMemSpan sp;
     if (size && wb_lazy() && vk_mem_lookup(addr, size, &sp) && sp.pool) {   // or newer ones stay in the mirror from here on
+        // The check and the arm under pool_lock: mirror_evict releases what is armed in the pool's range and drops its
+        // mirror under the exclusive lock, and pool_fini takes the pool off the index under it. Without the lock an arm
+        // could land between the two and name the evicted mirror, which mem_lazy_skip gives back again later.
         PoolRec *r = sp.pool;
-        if (r->mstate == MS_ON && r->mbuf && r->buf && addr >= r->import_lo && addr + size <= r->import_hi)
+        plat_mutex_lock_shared(&pool_lock);
+        const pidx_ent *e = pidx_find(&pool_index, (uintptr_t)addr, size);
+        if (e && e->buf == r && r->mstate == MS_ON && r->mbuf && r->buf && addr >= r->import_lo &&
+            addr + size <= r->import_hi)
             mem_lazy_arm(addr, size, (uint64_t)(uintptr_t)r->mbuf, (uint64_t)(uintptr_t)r->buf, addr - r->import_lo, r);
+        plat_mutex_unlock_shared(&pool_lock);
     }
 }
 
@@ -3090,7 +3097,7 @@ static void gpu_wrote(const VkMemSpan *sp, uint64_t size, int shader) {
         return;
     }
     uint64_t g0 = r->import_lo + sp->offset, g1 = g0 + size, run = g0, out[16][2];
-    int k = mem_lazy_skip(g0, size, out, 16);
+    int k = mem_lazy_skip(g0, size, (uint64_t)(uintptr_t)r->mbuf, -(int64_t)r->import_lo, out, 16);
     for (int i = 0; i <= k; i++) {
         uint64_t lo = i < k ? out[i][0] : g1, hi = i < k ? out[i][1] : g1;
         if (lo > run) {   // not armed: written back as ever
