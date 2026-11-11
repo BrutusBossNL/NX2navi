@@ -98,7 +98,10 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   (`vk_exec_draw.c pool_sync`); slots that resolve alike share one lookup.
   Finalization is retained on registered slots independently of image-cache eviction: a stale CPU-backed descriptor
   cannot recreate an image from freed storage or follow newly reused CPU bytes. Registration makes it current again;
-  finalized descriptors may still follow live GPU-owned content.
+  finalized descriptors may still follow live GPU-owned content. A finalize marks none while another texture with the
+  same parameters is live at the storage, as the game reuses terrain heightmap storage that way
+  (`vk_backend.c vk_be_texture_release`), and only the slots registered before it (the asynchronous replay applies
+  releases late, registrations at once).
 - Shaders: Ampere (SM86) code is lowered to Maxwell (`tools/xlate/AmpereLowering.cs`) and translated to SPIR-V by the
   pinned shader translator (`tools/vendor/ryujinx`, 1.3.2) with our patches (`tools/xlate/patches/`), built with .NET 10 NativeAOT as
   `nx2navi_xlate.exe` and run as separate processes. Translations are cached on disk; shaders and pipelines seen in

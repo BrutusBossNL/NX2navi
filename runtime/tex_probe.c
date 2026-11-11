@@ -840,6 +840,14 @@ static int test_textures(pool_t *tpool, pool_t *phys) {
     const VkTexImage *renewed = vk_texture_by_id(5, NULL, NULL);
     GCHECK(renewed && renewed->format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK && renewed->width == 64 && renewed->height == 48,
            "re-registered CPU slot 5 did not resolve its own descriptor");
+    // A release applied after a later registration of its descriptor (the asynchronous replay queues releases, a
+    // registration takes effect at once) leaves that registration current: the texture made again at the storage.
+    uint32_t mark = vk_texture_reg_mark();
+    vk_texture_register(6, &b, NULL);
+    vk_texture_release_at(&b, mark);
+    const VkTexImage *kept = vk_texture_by_id(6, NULL, NULL);
+    GCHECK(kept && kept->width == 64 && kept->height == 48 && !vk_texture_by_id(5, NULL, NULL),
+           "a release finalized slot 6, registered after it, or left slot 5, registered before it, current");
     vk_texture_release(&b);
     // Once the live texture at its storage holds GPU content the storage bytes lack, the finalized CPU slot follows it.
     // The live texture is cleared on the GPU and noted as rendered into, as a draw into it would be; the slot's image
