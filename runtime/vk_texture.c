@@ -1707,8 +1707,8 @@ static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
 // Dropping all of them at once when the count passed 4096 destroyed thousands of images in one frame: 333-422 ms
 // frames every 40-50 s on a GTX 1050 Ti, then the textures still in use were created and uploaded again.
 //
-// The one that goes is the oldest release that no lookup reaches any more (idle) or whose content is gone
-// (overwritten), not the oldest release as such. A released entry is not dead to the game (drop_stale, below, has the
+// The one that goes is the oldest release that nothing sampled or drew into lately (samp_frame) or whose content is
+// gone (overwritten), not the oldest release as such. A released entry is not dead to the game (drop_stale, below, has the
 // reasons): a descriptor registered for it still resolves to it. Ocarina reads its scene picture in every frame through
 // a second descriptor at the picture's address (RGB9E5, 1920x1080, the input of its own upscaler) whose entry was
 // released once, a few seconds into the area, and was looked up from then on: it headed the list for the rest of
@@ -1729,23 +1729,35 @@ static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
 // frame. A session with DLSS as the upscaler had the same black frame at Lon Lon Ranch while its log showed 2,032 to
 // 2,047 released entries, kept there by a low system commit; that it is the same drop is read from those counts, not
 // logged.
-// When every released entry is still looked up, the one whose last lookup is the oldest goes.
+// "Lately" is by sampling, not by lookups. The first form of this rule spared every entry a lookup still reached
+// (idle), and the texture pool's refresh looks up every registered slot in each submission that draws through the
+// pool: an entry whose descriptor the game merely leaves registered counts as looked up for good. With the game's own
+// upscaler in use its render targets move to new addresses in every frame and each leaves such an entry behind, 3 to
+// 7 a frame: over a town all 2,049 released entries were "looked up", the sweep fell back to the oldest lookup, which
+// among entries all stamped in the same submission is no order at all, and took entries still drawn: 200 to 450 a
+// window of 60 frames, with buildings black or wrongly lit for single frames. samp_frame is stamped when a marked
+// shader samples the entry's slot (vk_pool_marks_read) and by every lookup that is not the pool refresh (touch: a
+// draw's fixed binding, a render target, a copy), so a target the game draws into or reads is recent by it and one
+// it only keeps registered is not.
+// With this rule a player's session of 30,000 frames through eight areas kept the list at its limit, dropped
+// 50,182 entries past it, and showed none of those frames (2026-11-11, a hand test; no scripted run was made).
+// When every released entry was sampled within SWEEP_UNSAMPLED presents, the one sampled longest ago goes.
 #define RELEASED_MAX 2048
-static int idle(const Tex *e, uint64_t now);
+#define SWEEP_UNSAMPLED PRESENTS(120)
 
 static void sweep_released(void) {
     while (nreleased > RELEASED_MAX && rel_head) {
         uint64_t now = frames_now();
         Tex *gone = NULL, *lru = rel_head;
         for (Tex *e = rel_head; e && !gone; e = e->rel_next) {   // in release order
-            if (e->overwritten || idle(e, now)) gone = e;
-            else if (e->use_frame < lru->use_frame) lru = e;
+            if (e->overwritten || now - e->samp_frame >= SWEEP_UNSAMPLED) gone = e;
+            else if (e->samp_frame < lru->samp_frame) lru = e;
         }
         if (!gone) {
             static volatile int32_t n_all_used;
-            log_limited(&n_all_used, "all %d released textures are still looked up: the one looked up longest ago goes "
+            log_limited(&n_all_used, "all %d released textures were sampled or drawn into lately: the one longest ago goes "
                         "(%#llx fmt %#x %ux%u, last in frame %llu)", nreleased, (unsigned long long)lru->key.addr,
-                        lru->t.d.format, lru->t.d.width, lru->t.d.height, (unsigned long long)lru->use_frame);
+                        lru->t.d.format, lru->t.d.width, lru->t.d.height, (unsigned long long)lru->samp_frame);
         }
         drop_tex(gone ? gone : lru, DROP_MAX);
     }
