@@ -1512,6 +1512,186 @@ static uint32_t *spirv_add_outputs(const uint32_t *w, uint64_t n, uint32_t missi
     return o;
 }
 
+// The locations a mesh module writes (its Output variables with a Location), and whether it draws points (execution
+// mode OutputPoints). 0 when the module cannot be read.
+static uint32_t spirv_mesh_outputs(const uint32_t *w, uint64_t n, int *points) {
+    enum { OP_EXECUTION_MODE = 16, MODE_OUTPUT_POINTS = 27 };
+    uint32_t bound = n >= 5 && w[3] < (1u << 22) ? w[3] : 0, mask = 0;
+    uint8_t *out = bound ? calloc(bound, 1) : NULL;
+    int8_t *loc = bound ? malloc(bound) : NULL;
+    *points = 0;
+    if (!out || !loc) return free(out), free(loc), 0;
+    memset(loc, -1, bound);
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) break;
+        const uint32_t *a = w + i + 1;
+        if (op == OP_EXECUTION_MODE && len >= 3 && a[1] == MODE_OUTPUT_POINTS) *points = 1;
+        else if (op == SPV_OP_DECORATE && len >= 4 && a[1] == SPV_DEC_LOCATION && a[0] < bound && a[2] < 32) loc[a[0]] = (int8_t)a[2];
+        else if (op == SPV_OP_VARIABLE && len >= 4 && a[2] == SPV_SC_OUTPUT && a[1] < bound) out[a[1]] = 1;
+        else if (op == SPV_OP_FUNCTION) break;
+        i += len;
+    }
+    for (uint32_t id = 0; id < bound; id++)
+        if (out[id] && loc[id] >= 0) mask |= 1u << loc[id];
+    free(out), free(loc);
+    return mask;
+}
+
+// A fragment module whose inputs at the locations of `missing` read what Maxwell gives a fragment input no earlier
+// stage writes: (0, 0, 0, 1), or with `points` the point sprite's coordinate (s, t, 0, 1). Each such Input variable
+// (a float or a float vector) becomes a Private one, the access chains through it Private pointers, its decorations
+// go, and the entry function stores the value into it before anything else. NULL when nothing is to be done or the
+// module does not have the expected layout.
+static uint32_t *spirv_fs_fill_inputs(const uint32_t *w, uint64_t n, uint32_t missing, int points, uint64_t *out_n) {
+    enum { SC_INPUT = 1, SC_PRIVATE = 6, OP_EXECUTION_MODE = 16, OP_TYPE_POINTER = 32, OP_LABEL = 248, OP_LOAD = 61,
+           OP_STORE = 62, OP_ACCESS_CHAIN = 65, OP_IN_BOUNDS_ACCESS_CHAIN = 66, OP_COMPOSITE_CONSTRUCT = 80,
+           OP_COMPOSITE_EXTRACT = 81, OP_DECORATE_ID = 332, BUILTIN_POINT_COORD = 16, MAX_FILL = 32, MAX_PRIV = 64 };
+    if (!missing || n < 5 || w[3] >= (1u << 22)) return NULL;
+    uint32_t old_bound = w[3], bound = old_bound;
+    uint32_t *pt_type = calloc(old_bound, 4), *vec_comp = calloc(old_bound, 4), *vec_n = calloc(old_bound, 4);
+    int8_t *loc = malloc(old_bound);
+    uint8_t *fill = calloc(old_bound, 1);      // 1: a filled variable, 2: an access chain through one
+    uint32_t *o = NULL;
+    if (!pt_type || !vec_comp || !vec_n || !loc || !fill) goto done;
+    memset(loc, -1, old_bound);
+    uint32_t f32 = 0, v2 = 0, entry = 0;
+    uint64_t ep_at = 0, ann_end = 0, fn_at = 0;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) goto done;
+        const uint32_t *a = w + i + 1;
+        if (op == SPV_OP_ENTRY_POINT && !ep_at) ep_at = i, entry = a[1];
+        else if (op == SPV_OP_DECORATE || op == 72 || op == OP_DECORATE_ID) {
+            ann_end = i + len;
+            if (op == SPV_OP_DECORATE && len >= 4 && a[1] == SPV_DEC_LOCATION && a[0] < old_bound && a[2] < 32)
+                loc[a[0]] = (int8_t)a[2];
+        } else if (op == SPV_OP_TYPE_FLOAT && len >= 3 && a[1] == 32) f32 = a[0];
+        else if (op == SPV_OP_TYPE_VECTOR && len >= 4 && a[0] < old_bound) {
+            vec_comp[a[0]] = a[1], vec_n[a[0]] = a[2];
+            if (a[1] == f32 && a[2] == 2) v2 = a[0];
+        } else if (op == OP_TYPE_POINTER && len >= 4 && a[0] < old_bound) pt_type[a[0]] = a[2];
+        else if (op == SPV_OP_FUNCTION) { fn_at = i; break; }
+        i += len;
+    }
+    if (!ep_at || !ann_end || !fn_at || !f32 || !entry || ann_end > fn_at) goto done;
+    // the variables to fill, and the Private pointer types they and the chains through them need (pass 1)
+    uint32_t vars[MAX_FILL], vtype[MAX_FILL], nvars = 0, priv[MAX_PRIV][2], npriv = 0;   // priv: Input pointer type -> Private
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        uint32_t ptr = 0;
+        if (op == SPV_OP_VARIABLE && len >= 4 && a[2] == SC_INPUT && a[1] < old_bound && a[0] < old_bound && i < fn_at) {
+            int l = loc[a[1]];
+            uint32_t t = pt_type[a[0]];
+            int floaty = t == f32 || (t < old_bound && vec_comp[t] == f32 && vec_n[t] >= 2 && vec_n[t] <= 4);
+            if (l >= 0 && (missing >> l & 1) && floaty && nvars < MAX_FILL) {
+                fill[a[1]] = 1, vars[nvars] = a[1], vtype[nvars++] = t, ptr = a[0];
+            }
+        } else if ((op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN) && len >= 4 && a[2] < old_bound && fill[a[2]] &&
+                   a[1] < old_bound && a[0] < old_bound) {
+            fill[a[1]] = 2, ptr = a[0];
+        }
+        if (ptr) {
+            uint32_t k = 0;
+            while (k < npriv && priv[k][0] != ptr) k++;
+            if (k == npriv) {
+                if (npriv == MAX_PRIV) goto done;
+                priv[npriv][0] = ptr, priv[npriv++][1] = bound++;
+            }
+        }
+        i += len;
+    }
+    if (!nvars) goto done;
+    // the globals added before the first function: two constants, gl_PointCoord, and the Private pointer types not yet
+    // declared (a filled variable's goes right before the variable, below; an access chain's is only used in a function)
+    uint32_t extra[MAX_PRIV * 4 + 32], ne = 0, c0 = bound++, c1 = bound++, pc_ptr = 0, pc_var = 0;
+    uint8_t declared[MAX_PRIV] = {0};
+    extra[ne++] = 4u << 16 | SPV_OP_CONSTANT, extra[ne++] = f32, extra[ne++] = c0, extra[ne++] = 0;
+    extra[ne++] = 4u << 16 | SPV_OP_CONSTANT, extra[ne++] = f32, extra[ne++] = c1, extra[ne++] = 0x3f800000;
+    if (points) {
+        if (!v2) v2 = bound++, extra[ne++] = 4u << 16 | SPV_OP_TYPE_VECTOR, extra[ne++] = v2, extra[ne++] = f32, extra[ne++] = 2;
+        pc_ptr = bound++, pc_var = bound++;
+        extra[ne++] = 4u << 16 | OP_TYPE_POINTER, extra[ne++] = pc_ptr, extra[ne++] = SC_INPUT, extra[ne++] = v2;
+        extra[ne++] = 4u << 16 | SPV_OP_VARIABLE, extra[ne++] = pc_ptr, extra[ne++] = pc_var, extra[ne++] = SC_INPUT;
+    }
+    o = malloc((n + ne + (uint64_t)npriv * 4 + 16 + (uint64_t)nvars * 12 + 32) * 4);
+    if (!o) goto done;
+    uint32_t *p = o;
+    memcpy(p, w, 5 * 4), p += 5;
+    int in_entry = 0, stored = 0;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        if (i == fn_at) {
+            for (uint32_t k = 0; k < npriv; k++)
+                if (!declared[k]) *p++ = 4u << 16 | OP_TYPE_POINTER, *p++ = priv[k][1], *p++ = SC_PRIVATE, *p++ = pt_type[priv[k][0]];
+            memcpy(p, extra, ne * 4), p += ne;
+        }
+        if (i == ep_at) {   // the interface: filled variables out before SPIR-V 1.4 (Private is not listed), gl_PointCoord in
+            uint32_t *head = p, name_words = (uint32_t)(strnlen((const char *)(a + 2), (len - 3) * 4) / 4 + 1);
+            for (uint32_t k = 0; k < len; k++) {
+                uint32_t v = w[i + k];
+                if (k >= 3 + name_words && v < old_bound && fill[v] == 1 && w[1] < 0x00010400) continue;
+                *p++ = v;
+            }
+            if (pc_var) *p++ = pc_var;
+            *head = (uint32_t)(p - head) << 16 | SPV_OP_ENTRY_POINT;
+            i += len;
+            continue;
+        }
+        if ((op == SPV_OP_DECORATE || op == OP_DECORATE_ID) && len >= 3 && a[0] < old_bound && fill[a[0]] == 1) {
+            i += len;   // Location, Flat and the like belong to Input variables
+            if (i == ann_end && pc_var)
+                *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = pc_var, *p++ = SPV_DEC_BUILTIN, *p++ = BUILTIN_POINT_COORD;
+            continue;
+        }
+        if (op == SPV_OP_VARIABLE && len >= 4 && a[1] < old_bound && fill[a[1]] == 1)   // its pointer type first
+            for (uint32_t k = 0; k < npriv; k++)
+                if (priv[k][0] == a[0] && !declared[k])
+                    declared[k] = 1, *p++ = 4u << 16 | OP_TYPE_POINTER, *p++ = priv[k][1], *p++ = SC_PRIVATE, *p++ = pt_type[priv[k][0]];
+        memcpy(p, w + i, len * 4);
+        if ((op == SPV_OP_VARIABLE || op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN) && len >= 4 &&
+            a[1] < old_bound && fill[a[1]]) {
+            for (uint32_t k = 0; k < npriv; k++)
+                if (priv[k][0] == a[0]) p[1] = priv[k][1];
+            if (op == SPV_OP_VARIABLE) p[3] = SC_PRIVATE;
+        }
+        p += len;
+        if (i + len == ann_end && pc_var)   // gl_PointCoord's BuiltIn after the last decoration
+            *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = pc_var, *p++ = SPV_DEC_BUILTIN, *p++ = BUILTIN_POINT_COORD;
+        if (op == SPV_OP_FUNCTION && len >= 5) in_entry = a[1] == entry;
+        i += len;
+        if (op == OP_LABEL && in_entry && !stored) {   // the entry's first block: its OpVariables, then the stores
+            while (i < n && (w[i] & 0xffff) == SPV_OP_VARIABLE) memcpy(p, w + i, (w[i] >> 16) * 4), p += w[i] >> 16, i += w[i] >> 16;
+            uint32_t sx = c0, sy = c0;
+            if (pc_var) {
+                uint32_t pc = bound++;
+                sx = bound++, sy = bound++;
+                *p++ = 4u << 16 | OP_LOAD, *p++ = v2, *p++ = pc, *p++ = pc_var;
+                *p++ = 5u << 16 | OP_COMPOSITE_EXTRACT, *p++ = f32, *p++ = sx, *p++ = pc, *p++ = 0;
+                *p++ = 5u << 16 | OP_COMPOSITE_EXTRACT, *p++ = f32, *p++ = sy, *p++ = pc, *p++ = 1;
+            }
+            for (uint32_t k = 0; k < nvars; k++) {
+                uint32_t t = vtype[k], c = t == f32 ? 1 : vec_n[t], comp[4] = {sx, sy, c0, c1}, val = comp[0];
+                if (c > 1) {
+                    val = bound++;
+                    *p++ = (3 + c) << 16 | OP_COMPOSITE_CONSTRUCT, *p++ = t, *p++ = val;
+                    for (uint32_t q = 0; q < c; q++) *p++ = comp[q];   // x y z w in order: (s, t, 0, 1) or (0, 0, 0, 1)
+                }
+                *p++ = 3u << 16 | OP_STORE, *p++ = vars[k], *p++ = val;
+            }
+            stored = 1;
+        }
+    }
+    if (!stored) { free(o), o = NULL; goto done; }
+    o[3] = bound;
+    *out_n = (uint64_t)(p - o);
+done:
+    free(pt_type), free(vec_comp), free(vec_n), free(loc), free(fill);
+    return o;
+}
+
 // Two fixes for what the translator declares but a shader does not use (NULL: nothing to change):
 //  - the fragment shader interlock capability and extension, which the translator adds to every fragment shader when the host
 //    reports interlock support (SpirvGenerator.cs) and vk_device.c does not enable; kept when the shader interlocks;
@@ -2847,24 +3027,33 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     }
     if (s->fs) {
         GfxShaderIo fin[32], vout[32];
-        uint32_t need = gfx_shader_inputs(s->fs, fin), have = mesh ? ~0u : gfx_shader_outputs(s->vs, vout), missing = 0;
+        // a mesh stage's outputs from its module (spirv_mesh_outputs): the translation reflects none
+        int points = 0;
+        uint32_t need = gfx_shader_inputs(s->fs, fin), missing = 0,
+                 have = mesh ? (vcode ? spirv_mesh_outputs(vcode, vw, &points) : ~0u) : gfx_shader_outputs(s->vs, vout);
         for (int i = 0; i < 32; i++) {
             if (!(need >> i & 1) || fin[i].packed) continue;
             if (!(have >> i & 1)) missing |= 1u << i;
             else if (!mesh && vout[i].type != fin[i].type)
                 LOG_ONCE("vk_pipeline: varying %d is type %d in the vertex stage, %d in the fragment stage", i, vout[i].type, fin[i].type);
         }
-        if (missing && !l->set1) {
+        if (missing && !l->set1 && !mesh) {
             uint64_t n2 = 0;
             vpatched = spirv_add_outputs(vcode, vw, missing, fin, &n2);
             if (!vpatched) LOG_ONCE("vk_pipeline: cannot add missing vertex outputs (mask %#x)", missing);
             else vcode = vpatched, vw = n2;
         }
         const uint32_t *fcode = gfx_shader_spirv(s->fs, &fw);
+        if (missing && mesh && fcode) {   // inputs no mesh output feeds read as Maxwell gives them (spirv_fs_fill_inputs)
+            uint64_t n2 = 0;
+            uint32_t *f = spirv_fs_fill_inputs(fcode, fw, missing, points, &n2);
+            if (f) fcode = fpatched = f, fw = n2;
+            else LOG_ONCE("vk_pipeline: cannot fill fragment inputs the mesh stage lacks (mask %#x)", missing);
+        }
         if (k->dsb) {
             uint64_t n2 = 0;
             uint32_t *d = spirv_dual_source(fcode, fw, &n2);
-            if (d) fcode = fpatched = d, fw = n2;
+            if (d) free(fpatched), fcode = fpatched = d, fw = n2;
             else LOG_ONCE("vk_pipeline: SRC1 blend factors but the fragment shader writes no colour output 1");
         }
         if (l->set1 || fs_off) {
