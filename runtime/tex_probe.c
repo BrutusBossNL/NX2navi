@@ -857,6 +857,47 @@ static int detail_case(pool_t *pool, uint64_t off, uint64_t room, uint32_t size,
     return 0;
 }
 
+// An ASTC upload whose GPU decode gets no scratch memory (vk_astc.c scratch_get, as when the video memory is used up;
+// forced here through vk_astc_scratch_fail) does not count as done: the texture stays "not uploaded", is left alone for
+// the frames of the wait, and the first lookup after them uploads it, after which the image holds the storage's blocks.
+// Skipped (0) where ASTC is not decoded on the GPU: there is no scratch buffer then.
+static int detail_retry(pool_t *pool, uint64_t off, uint64_t room) {
+    if (!vk_astc_gpu()) return 0;
+    tex_t t = make_tex(pool, off, 0x80, 128, 128, 1, 24);   // ASTC 8x8
+    GCHECK(t.L.size <= room && off + room <= pool->size, "the retry case's storage does not fit the probe's pool");
+    if (detail_fill(&t, 1, 0)) return 1;
+    uint8_t want[4];
+    detail_color(0, 0, 0, want);
+    uint64_t r0 = vk_texture_upload_retries();
+    uint32_t ups = 0;
+    int ch, pw;
+    vk_astc_scratch_fail(1);
+    const VkTexImage *img = vk_texture_get(&t);
+    vk_astc_scratch_fail(0);
+    GCHECK(img && img->mirrored, "the retry case's texture image");
+    if (img->format != VK_FORMAT_R8G8B8A8_UNORM && img->format != VK_FORMAT_BC3_UNORM_BLOCK) return 0;   // native ASTC
+    vk_texture_debug(img, &ups, &ch, &pw);
+    GCHECK(vk_texture_upload_retries() == r0 + 1 && ups == 1,
+           "an ASTC upload whose decode had no memory was not left for another try (%llu tries noted, %u uploads)",
+           (unsigned long long)(vk_texture_upload_retries() - r0), ups);
+    img = vk_texture_get(&t);   // inside the wait: left alone
+    vk_texture_debug(img, &ups, &ch, &pw);
+    GCHECK(ups == 1, "the upload was tried again inside its wait (%u uploads)", ups);
+    __atomic_fetch_add(&gfx_counters.frames, 30, __ATOMIC_RELAXED);   // vk_texture.c UP_RETRY_FRAMES
+    img = vk_texture_get(&t);
+    vk_texture_debug(img, &ups, &ch, &pw);
+    GCHECK(ups == 2 && vk_texture_upload_retries() == r0 + 1, "the upload was not tried again after its wait (%u uploads)", ups);
+    GCHECK(detail_level_is(img, 0, 0, 128, 128, want), "after the second try the image does not hold the storage's blocks");
+    img = vk_texture_get(&t);   // uploaded now: nothing more
+    vk_texture_debug(img, &ups, &ch, &pw);
+    GCHECK(ups == 2, "an uploaded texture was uploaded again (%u uploads)", ups);
+    g_gpu_checks += 4;
+    vk_texture_release(&t);
+    printf("probe-vkmem: an ASTC upload whose decode had no scratch memory is tried again after its wait and then holds "
+           "its blocks\n");
+    return 0;
+}
+
 static int test_detail(pool_t *pool) {
     const char *v = cfg_value("NX2NAVI_TEXTURE_DETAIL");
     int most = !strcmp(v, "full") ? 0 : !strcmp(v, "reduced") ? 1 : !strcmp(v, "low") ? 2 : vk_texture_detail_auto();
@@ -864,7 +905,8 @@ static int test_detail(pool_t *pool) {
     // ones the rule leaves whole: 128x128, and 512x512 without smaller levels
     if (detail_case(pool, 0, 0x80000, 1024, 6, 1, 20, most > 1 ? 2 : (uint32_t)most) ||
         detail_case(pool, 0x80000, 0x40000, 256, 4, 3, 21, most ? 1 : 0) ||
-        detail_case(pool, 0xc0000, 0x10000, 128, 4, 1, 22, 0) || detail_case(pool, 0xd0000, 0x20000, 512, 1, 1, 23, 0))
+        detail_case(pool, 0xc0000, 0x10000, 128, 4, 1, 22, 0) || detail_case(pool, 0xd0000, 0x20000, 512, 1, 1, 23, 0) ||
+        detail_retry(pool, 0xf0000, 0x10000))
         return 1;
     // the sampler of a texture made without levels: an open LOD clamp is the slot's sampler, a closed one moves down
     samp_par sp;

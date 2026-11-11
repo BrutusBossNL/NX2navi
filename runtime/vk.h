@@ -460,9 +460,12 @@ typedef struct { VkDeviceSize src; uint32_t w, h, slices, level, layer; VkOffset
 // into img (VK_IMAGE_LAYOUT_GENERAL). The caller records its usual barriers around an image copy before and after the
 // call. readback (optional, host-visible, TRANSFER_DST): also gets the decoded texels, the regions one after the other.
 // bc: img is BC3 (TexVkFormat.astc_bc); the texels are encoded to BC3 blocks before the copy, and readback is ignored.
-// 0 when the decoder is unavailable or the scratch buffer cannot be allocated (nothing recorded).
+// 1 when recorded. 0 when the decoder is unavailable or cannot take these regions, and -1 when its scratch buffer
+// cannot be allocated: nothing is recorded in either case, and after -1 the same call can succeed once memory is free.
 int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, const VkAstcRegion *rg, int n, uint32_t bw,
                    uint32_t bh, int srgb, int bc, VkImage img, VkImageAspectFlags aspect, VkBuffer readback);
+void vk_astc_scratch_fail(int n);   // a test's hook: the next n scratch buffer requests fail (tex_probe.c)
+uint64_t vk_texture_upload_retries(void);   // uploads left to be tried again: their decode had no memory (vk_texture.c upload)
 VkDeviceSize vk_astc_region_bytes(const VkAstcRegion *r, uint32_t bw, uint32_t bh);   // source bytes the region reads
 void vk_astc_stats(uint64_t *dispatches, uint64_t *texels);   // since start
 uint64_t vk_astc_scratch_bytes(void);                          // the decoder's shared scratch now

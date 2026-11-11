@@ -466,7 +466,12 @@ static int scratch_keep(void) {
 
 // A scratch of at least need bytes for recording into cb; *reused: earlier work (in cb, or with the keep rule in an
 // earlier batch) may still use it. 0 on failure.
+// A test's hook (vk.h): the next n requests for the scratch buffer fail, as when the video memory is used up.
+static volatile int32_t scratch_fail_n;
+void vk_astc_scratch_fail(int n) { plat_xchg32(&scratch_fail_n, n); }
+
 static VkBuffer scratch_get(VkCtx *c, VkCommandBuffer cb, VkDeviceSize need, int *reused) {
+    if (plat_cas32(&scratch_fail_n, 0, 0) > 0 && plat_add32(&scratch_fail_n, -1) >= 0) return VK_NULL_HANDLE;
     int keep = scratch_keep();
     plat_mutex_lock(&g_lock);
     uint64_t now = kern_now_ns();
@@ -573,9 +578,9 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     VkBuffer sb = scratch_get(c, cb, cap_in + cap_out + cap_bc, &reused);
     if (!sb) {
         if (plat_inc32(&n_fail) <= 16)
-            rt_log("vk: ASTC scratch buffer of %llu bytes failed: texture left undecoded",
+            rt_log("vk: ASTC scratch buffer of %llu bytes failed: texture left undecoded for now",
                    (unsigned long long)(cap_in + cap_out + cap_bc));
-        return 0;
+        return -1;   // no memory at this moment: the caller tries again later (vk_texture.c upload)
     }
     plat_mutex_lock(&g_lock);
     int need_tab = !G.tab_uploaded;
