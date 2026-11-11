@@ -205,8 +205,8 @@ def states(app):
 
     def custom_picker():   # the Custom scheme with two picked colours, and its picker on the button colour
         from . import art
-        was = {k: s.get(k) for k in ('theme', 'custom_background', 'custom_buttons')}
-        s.update(theme='custom', custom_background='#3a1d5c', custom_buttons='#2f6fb0')
+        was = {k: s.get(k) for k in ('theme', 'custom_background', 'custom_panel', 'custom_buttons')}
+        s.update(theme='custom', custom_background='#3a1d5c', custom_panel='#24324a', custom_buttons='#2f6fb0')
         app.apply_look()
         app.open_picker('buttons')
         s.update(was)

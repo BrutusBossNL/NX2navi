@@ -60,7 +60,9 @@ DEPTH = {'first_run': 0, 'home': 0, 'job': 1, 'saves': 1, 'settings': 1, 'custom
 PICKER_BOX = (614, 100, 336, 452)
 SQUARE = (667, 160, 897, 390)
 BAR = (667, 408, 897, 430)
-CUSTOM_LABELS = {'background': 'Background Color', 'buttons': 'Button Color'}
+CUSTOM_LABELS = {'background': 'Background Color', 'panel': 'Panel Color', 'buttons': 'Button Color'}
+CUSTOM_DESC = {'background': 'The color behind the menus.', 'panel': 'The color of the panels and the top bar.',
+               'buttons': 'The color of the buttons.'}
 DIMS = (0, 20, 40, 60, 80)      # Background Dimming, in percent
 SOUND_LEVELS = (('off', 'Off'), ('low', 'Low'), ('medium', 'Medium'), ('high', 'High'))
 
@@ -980,13 +982,9 @@ class App:
                 desc=('The launcher\'s colours. Custom lets you pick your own.',)),
         ]
         if art.theme == 'custom':
-            rows += [
-                Row('value', CUSTOM_LABELS['background'], art.CUSTOM['background'], 'swatch',
-                    on=lambda: self.open_picker('background'), desc=('The color behind the menus.',)),
-                Row('value', CUSTOM_LABELS['buttons'], art.CUSTOM['buttons'], 'swatch',
-                    on=lambda: self.open_picker('buttons'),
-                    desc=('The color of the buttons, the panels and the top bar.',)),
-            ]
+            rows += [Row('value', CUSTOM_LABELS[slot], art.CUSTOM[slot], 'swatch',
+                         on=lambda sl=slot: self.open_picker(sl), desc=(CUSTOM_DESC[slot],))
+                     for slot in art.CUSTOM_SLOTS]
         rows += [
             Row('value', 'Background', Path(self.settings['background']).name if custom else 'Choose a Picture',
                 'arrow', on=self.choose_background, desc=bg_desc),

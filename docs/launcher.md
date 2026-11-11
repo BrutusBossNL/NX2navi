@@ -38,13 +38,14 @@ Customize Launcher (on the home screen) makes the look the player's own:
 - Color Scheme: Forest (the colours above), Volcano, Lake, Desert, Temple and Shadow. A scheme is the first one with
   its woods, accents, backdrop and glow turned to other hues (`art.THEMES`, `art.recolor`), so each keeps the same
   light and dark steps and the same readable text. The window is drawn again in the new colours at once. The names
-  are plain words, not the game's. Custom, the last one, takes two colours of the player's: Background Color for the
-  backdrop and Button Color for the buttons, the panels and the title band. Each opens a picker in the description
+  are plain words, not the game's. Custom, the last one, takes three colours of the player's: Background Color for
+  the backdrop, Panel Color for the list panel, the description box and the title band, and Button Color for the
+  rows' cells and the orange choices in them. Each opens a picker in the description
   box's place: a square of the hue's colours (saturation across, brightness up and down) and a hue bar under it, to
   click or drag on, Hue, Saturation and Brightness rows for the arrows and the gamepad, and Hex Code, where a code
   such as `#3A7BD5` is typed. The picked colour stands in for one colour of the first scheme (`art.CUSTOM_SLOTS`) and
-  the rest of its group follows it, lighter and darker as in the first scheme (`art.follow`); light buttons get dark
-  text. The window takes the new colour as the mouse moves; Reset brings back the first scheme's colour.
+  the rest of its part of the window follows it, lighter and darker as in the first scheme (`art.follow`); text on
+  a light button or panel turns dark. The window takes the new colour as the mouse moves; Reset brings back the first scheme's colour.
 - Background: a picture of the player's own behind the panels instead of the scheme's backdrop (`launcher/ui/picture.py`:
   PNG, JPEG, WebP, BMP, GIF or TIFF, read with Pillow). It fills the window below the title band, so none of it is
   hidden under the band: cut to that shape around its middle and scaled evenly, never stretched, and kept as
@@ -75,8 +76,8 @@ Customize Launcher (on the home screen) makes the look the player's own:
   starts the launcher of `app/current.txt` with `--play`: the game starts as Play starts it, and the process waits
   for it, so Steam counts the game as running while it is.
 
-The choices are `theme`, `custom_background`, `custom_buttons`, `background`, `background_dim`, `animations` and
-`sounds` in `data/launcher.json`.
+The choices are `theme`, `custom_background`, `custom_panel`, `custom_buttons`, `background`, `background_dim`,
+`animations` and `sounds` in `data/launcher.json`.
 
 Navi (`art.NAVI`, 22 x 21 pixels, drawn in whole pixels at every size) is also the icon of `NX2navi.exe`,
 `NX2navi-Setup.exe`, the window and its taskbar button (`art.navi_ico`, written into the release by
@@ -86,8 +87,8 @@ identity (`NX2navi.Launcher`), so the taskbar groups and pins it under NX2navi r
 Screens (`launcher/ui/app.py`): first run (dump, install folder, Desktop Shortcut, Check for Updates at Start,
 Update Channel, Begin Installation); the steps of an install, update or rebuild with their progress, the build log's
 last lines and Cancel, and after a failure Try Again and Copy Report; home (Play, Updates, Game Folder, Saves,
-Rebuild the Game, Customize Launcher, Settings); customize (Color Scheme, with Custom Background Color and Button
-Color, Background, with a picture set Background Dimming and Remove Background, Animations, Sounds, Add to Steam on
+Rebuild the Game, Customize Launcher, Settings); customize (Color Scheme, with Custom Background Color, Panel Color and
+Button Color, Background, with a picture set Background Dimming and Remove Background, Animations, Sounds, Add to Steam on
 Windows, Back); the colour picker (Hue, Saturation, Brightness, Hex Code, Reset, Done); saves (Export Save, Add Log and Settings, Export To, Import a Save, Import a Save Folder,
 Open Saves Folder, Back); settings (update check, Install Updates Automatically, Hide Launcher While Playing, Keep
 Build Cache, Update Channel, the folders, Open Logs Folder, Uninstall, Back); uninstall (keep or remove the built game).

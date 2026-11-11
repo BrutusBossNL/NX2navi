@@ -2713,23 +2713,44 @@ class LookTest(Tmp):
     def test_the_custom_scheme(self):
         art = self.art
         self.assertEqual(art.custom_palette({}), art.BASE)          # nothing picked yet: the first scheme's colours
-        pal = art.custom_palette({'background': '#3A7BD5', 'buttons': '#802020'})
+        slots = art.CUSTOM_SLOTS
+        self.assertEqual(list(slots), ['background', 'panel', 'buttons'])
+        parts = [k for _, keys, _ in slots.values() for k in keys]
+        self.assertEqual(len(parts), len(set(parts)), 'a colour in two parts')
+        self.assertEqual(set(parts), set(art.GROUPS['scene'] + art.GROUPS['wood'] + art.GROUPS['accent']))
+        pal = art.custom_palette({'background': '#3A7BD5', 'panel': '#203040', 'buttons': '#802020'})
         self.assertEqual(pal['tint_mid'], '#3a7bd5')                 # the picked colours exactly where they stand in
+        self.assertEqual(pal['panel'], '#203040')
         self.assertEqual(pal['label_mid'], '#802020')
-        self.assertEqual(pal['orange'], art.BASE['orange'])          # the other groups stay
-        for group, ref in (('scene', 'tint_mid'), ('wood', 'label_mid')):
-            for k in art.GROUPS[group]:   # lighter than the picked colour where the first scheme's is lighter
+        only = art.custom_palette({'buttons': '#802020'})            # Button Color: the buttons and nothing else
+        self.assertLessEqual({k for k in art.BASE if only[k] != art.BASE[k]}, set(slots['buttons'][1]))
+        for k in ('label_top', 'label_bottom', 'value', 'orange', 'orange_light'):   # the orange choices too
+            self.assertNotEqual(only[k], art.BASE[k], k)
+        for k in ('panel', 'desc', 'wood_1', 'window', 'tint_mid'):   # not the panels, the title band, the backdrop
+            self.assertEqual(only[k], art.BASE[k], k)
+        self.assertEqual(round(art.hls(only['orange'])[0] * 360), 0)   # the choices in the picked hue, lighter
+        self.assertGreater(art.hls(only['orange'])[1], art.hls(only['label_mid'])[1])
+        panel = art.custom_palette({'panel': '#203040'})
+        self.assertLessEqual({k for k in art.BASE if panel[k] != art.BASE[k]}, set(slots['panel'][1]))
+        self.assertEqual(panel['label_mid'], art.BASE['label_mid'])
+        for slot, (ref, keys, _) in slots.items():
+            for k in keys:   # lighter than the picked colour where the first scheme's is lighter
                 if art.hls(art.BASE[k])[1] > art.hls(art.BASE[ref])[1] + 0.02:
                     self.assertGreater(art.hls(pal[k])[1], art.hls(pal[ref])[1], k)
         self.assertGreater(art.luminance(pal['text']), 0.6)          # light text on dark buttons
         light = art.custom_palette({'buttons': '#f0e0a0'})
         self.assertLess(art.luminance(light['text']), 0.3)           # and dark text on light ones
+        self.assertGreater(art.luminance(light['desc_text']), 0.6)   # the description box's text stays as it was
+        light = art.custom_palette({'panel': '#f0e0a0'})
+        self.assertLess(art.luminance(light['desc_text']), 0.3)      # dark on a light panel
+        self.assertGreater(art.luminance(light['text']), 0.6)
         self.assertEqual(art.custom_palette({'buttons': 'red', 'background': None}), art.BASE)
         held = art.PALETTE
         try:
             self.assertEqual(art.set_theme('custom', {'buttons': '#802020', 'other': '#000000'}), 'custom')
             self.assertEqual(held['label_mid'], '#802020')
-            self.assertEqual(art.CUSTOM, {'background': art.BASE['tint_mid'], 'buttons': '#802020'})
+            self.assertEqual(art.CUSTOM, {'background': art.BASE['tint_mid'], 'panel': art.BASE['panel'],
+                                          'buttons': '#802020'})
             art.set_theme('custom', {})
             self.assertEqual(dict(held), art.BASE)
         finally:

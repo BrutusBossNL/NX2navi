@@ -7,9 +7,9 @@ shape is a picture; flat rectangles and text stay canvas items.
 
 Colours follow the game's options menu (docs/launcher.md, "Look"). Sizes are in logical pixels times the display
 scale s. PALETTE holds the colours of the colour scheme in use: set_theme fills it from THEMES, each scheme the
-first one with its woods, accents, backdrop and glow turned to other hues. The Custom scheme takes two colours the
-player picks on a colour square (color_square, hue_bar): one for the backdrop, one for the buttons, panels and title
-band.
+first one with its woods, accents, backdrop and glow turned to other hues. The Custom scheme takes three colours the
+player picks on a colour square (color_square, hue_bar): one for the backdrop, one for the panels and the title band,
+one for the buttons.
 """
 import base64
 import colorsys
@@ -81,11 +81,21 @@ THEMES = {
 }
 DEFAULT_THEME = 'forest'
 
-# The Custom scheme: each colour the player picks takes the place of one colour of the first scheme, and the rest of
-# that colour's group follows it, lighter and darker as in the first scheme (follow). Its two colours start as the
-# first scheme's.
-CUSTOM_SLOTS = {'background': ('scene', 'tint_mid'), 'buttons': ('wood', 'label_mid')}
-CUSTOM_DEFAULT = {slot: BASE[ref] for slot, (_, ref) in CUSTOM_SLOTS.items()}
+# The Custom scheme: each colour the player picks takes the place of one colour of the first scheme (ref), and the
+# rest of that colour's part of the window follows it, lighter and darker as in the first scheme (follow). Each part:
+# (ref, the colours that follow it, the text on it, which turns dark when the picked colour is light). The buttons are
+# the rows' label cells, their value cells and the orange choices in them; the panel is the list panel, the
+# description box, the dividers and the title band. The colours start as the first scheme's.
+CUSTOM_SLOTS = {
+    'background': ('tint_mid', GROUPS['scene'], ()),
+    'panel': ('panel', ('panel', 'desc', 'desc_border', 'line', 'dot', 'filigree', 'button_hover', 'wood_0', 'wood_1',
+                        'wood_2', 'wood_3', 'band_line_dark', 'band_line_light', 'band_shadow', 'frame'),
+              ('desc_text', 'muted', 'band_text', 'status', 'log_text')),
+    'buttons': ('label_mid', ('label_top', 'label_mid', 'label_bottom', 'label_border', 'ring', 'value', 'value_border',
+                              'text_shadow') + GROUPS['accent'],
+                ('text', 'text_bright', 'value_text', 'on_text', 'icon_frame', 'icon_fill', 'chevron_dim')),
+}
+CUSTOM_DEFAULT = {slot: BASE[ref] for slot, (ref, _, _) in CUSTOM_SLOTS.items()}
 CUSTOM = dict(CUSTOM_DEFAULT)
 HEX = re.compile(r'^#[0-9a-f]{6}$')
 
@@ -134,20 +144,22 @@ def luminance(hexcolor):
 
 def custom_palette(colors):
     """The Custom scheme's colours from {slot: '#rrggbb'} (CUSTOM_SLOTS); a slot left out or not a colour keeps the
-    first scheme's. Light buttons get dark text, so the labels stay readable on them."""
+    first scheme's. Text on a light button or panel turns dark, so it stays readable, and its shadow light."""
     pal = dict(BASE)
-    for slot, (group, ref) in CUSTOM_SLOTS.items():
+    for slot, (ref, keys, text) in CUSTOM_SLOTS.items():
         c = str((colors or {}).get(slot) or '').lower()
         if not HEX.match(c) or c == BASE[ref]:   # the first scheme's own colour: its colours as written
             continue
-        for k in GROUPS[group]:
+        for k in keys:
             pal[k] = follow(BASE[k], BASE[ref], c)
-        if slot == 'buttons' and luminance(c) > 0.5:
+        if text and luminance(c) > 0.5:
             h = hls(c)[0] * 360
-            for k in GROUPS['text']:
-                pal[k] = recolor(BASE[k], h, 0.5, 0.18)
-            pal['text_shadow'] = follow(BASE['label_top'], BASE[ref], c)
-            pal['chevron_dim'] = recolor(BASE['chevron_dim'], h, 0.5, 0.3)
+            for k in text:
+                pal[k] = recolor(BASE[k], h, 0.5, 0.3 if k == 'chevron_dim' else 0.18)
+            shadow = 'text_shadow' if slot == 'buttons' else 'band_shadow'
+            pal[shadow] = follow(BASE['label_top'], BASE[ref], c)
+        if slot == 'buttons' and luminance(pal['orange']) > 0.65:   # the choices come out lighter than the cells
+            pal['on_text'] = recolor(BASE['on_text'], hls(c)[0] * 360, 0.5, 0.18)
     return pal
 
 
