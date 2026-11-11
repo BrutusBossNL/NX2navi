@@ -1636,8 +1636,10 @@ static const op_hdr *walk(VkExec *ex, const op_hdr *h, int depth) {
 // scheduler prefers it over the guest's other cores (NX2NAVI_RECORDER_PRIO=0 leaves the guest's priorities alone) and
 // gets a core of its own (plat_cpu_reserve): every other thread of the process, the guest's cores, the audio, the
 // shader and pipeline workers, is kept off it, so nothing of this process preempts the recording. That core is then
-// lost to the rest, so NX2NAVI_RECORDER_CORE=auto (the default) reserves it only with 12 or more logical processors;
-// 1 always, 0 never. Linux reserves none with fewer than four fast cores.
+// lost to the rest, so NX2NAVI_RECORDER_CORE=auto (the default) reserves it only with 12 or more logical processors,
+// and not while the process runs on the die with the largest L3 alone (perf.c cpu_placement): on a two-die X3D part
+// the game's threads already have that die to themselves, and a core taken from them cost frames; 1 always, 0 never.
+// Linux reserves none with fewer than four fast cores.
 // The recording thread is not the first to call vk_exec_record: the game's main thread submits first and goes on
 // submitting a little at a time, while another guest thread does the work (Kokiri Forest: that thread spent 21.9 of
 // the 22.5 s the replay took in a minute and a half, the first one 0.5 s). The first thread to have spent
@@ -1658,7 +1660,10 @@ static void rec_claim(void) {
     }
     const char *rc = cfg_value("NX2NAVI_RECORDER_CORE");
     unsigned ncpu = plat_cpu_usable();
-    if (!strcmp(rc, "1") || (!strcmp(rc, "auto") && ncpu >= 12)) {
+    int cache_die = perf_cpu_on_cache_die();
+    if (!strcmp(rc, "auto") && cache_die) rt_log("vk: no core is reserved for the recording thread: the process runs on "
+                                                 "the die with the largest L3 cache (NX2NAVI_RECORDER_CORE=1 reserves one)");
+    if (!strcmp(rc, "1") || (!strcmp(rc, "auto") && ncpu >= 12 && !cache_die)) {
         char which[96];
         int n = plat_cpu_reserve(which, sizeof which);
         if (n) rt_log("vk: the recording thread has a core of its own: logical processor%s %s (%d of %u; "

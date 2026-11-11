@@ -74,7 +74,8 @@
 # timer_1ms = 1
 # The thread that records the GPU work (the first to spend half a second doing it, not the one that submits first) keeps
 # the highest scheduling priority (recorder_prio), and a core of its own that the process's other threads stay off
-# (recorder_core: auto = with 12 or more logical processors, 1 always, 0 never). That is a fast core, with both of its
+# (recorder_core: auto = with 12 or more logical processors, unless the game runs on the cache die below, 1 always,
+# 0 never). That is a fast core, with both of its
 # logical processors: on Windows the highest-numbered core of the fastest efficiency class; on Linux the performance
 # core that clocks highest on a hybrid CPU (else the core of the highest capacity or clock), and none when fewer than
 # four cores are that fast. The log names the thread and its logical processors.
@@ -96,7 +97,8 @@
 # dyn_res_target = 16.7
 # dyn_res_step = 45
 # Processors. On a processor whose dies have L3 caches of different sizes (AMD's two-die X3D processors, with 3D
-# V-Cache on one die) the game runs on the die with the larger cache: 1 = on, 0 = Windows places the threads.
+# V-Cache on one die) the game runs on the die with the larger cache when that die has 8 cores or more: 1 = on,
+# 0 = Windows places the threads.
 # cache_die = 1
 # One logical processor of each physical core, so no two busy threads share a core: 1 = on, 0 = all of them.
 # one_per_core = 0
