@@ -582,11 +582,30 @@ void fs_save_flush(void) {
     plat_mutex_unlock(&pend_lock);
 }
 
+// The process is about to end on a crash or a fatal error (main.c crash_handler, dispatch.c rt_fatal). The game's
+// Commit returns once its commit is queued, so the game may already have told the player the save is done while the
+// commit thread still copies (95-135 ms): ending now would leave an unfinished copy, which the next start rolls back.
+// The thread goes on while this one waits, for at most CRASH_WAIT_MS, without taking a lock (the failing thread may
+// hold one). Not when the failing thread is the one committing: its commit cannot finish.
+#define CRASH_WAIT_MS 2000
+static _Thread_local int committing;
+
+void fs_save_crash_wait(void) {
+    if (committing || !plat_cas32(&commit_pending, 0, 0)) return;
+    uint64_t t0 = plat_now_ms();
+    while (plat_cas32(&commit_pending, 0, 0) && plat_now_ms() - t0 < CRASH_WAIT_MS) plat_sleep_ms(5);
+    rt_log("fs: a save commit was under way when the process failed: %s after %llu ms",
+           plat_cas32(&commit_pending, 0, 0) ? "not finished; the next start keeps the save before it" : "finished",
+           (unsigned long long)(plat_now_ms() - t0));
+}
+
 static uint32_t commit_run(void) {
+    committing = 1;
     plat_mutex_lock(&tx_lock);
     uint32_t r = save_commit_locked();
     plat_dec32(&save_writers);
     plat_mutex_unlock(&tx_lock);
+    committing = 0;
     plat_mutex_lock(&pend_lock);
     plat_dec32(&commit_pending);
     plat_mutex_unlock(&pend_lock);

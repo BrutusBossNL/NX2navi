@@ -272,6 +272,7 @@ extern const char rt_port_version[];                       // VERSION at the bui
 // ---- kernel (kernel.c)
 typedef struct RtThread RtThread;
 Cpu *kern_cpu(void);                                       // current guest thread's Cpu, NULL on host threads
+void fs_save_crash_wait(void);                             // fs_host.c: the crash report's and rt_fatal's bounded wait for a save Commit under way
 void kern_free_cores_note(void);                           // for crash reports: logs that free_cores = 1 lifted the
                                                            // virtual core gate, nothing when the gate is on
 uint32_t kern_main_thread(Cpu **cpu);                      // main thread object and Cpu for the calling host thread
