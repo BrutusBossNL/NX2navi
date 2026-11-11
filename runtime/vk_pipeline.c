@@ -734,16 +734,19 @@ static VkResult pipe_create(int kind, void *ci, VkPipeline *pipe) {
 // read, so a file that is dropped never takes its size in memory. Sizes are 64-bit all the way
 // (vk_cache_file.h cache_file_read): a file past 2 GB is read with the limit raised or off, and refused by
 // its real size otherwise.
+static int cache_over_cap;   // the last file cache_data_read was asked for is over the limit
 static void *cache_data_read(VkCtx *c, const char *path, size_t *size) {
     *size = 0;
+    cache_over_cap = 0;
     if (!path[0]) return NULL;
     uint64_t cap = (uint64_t)strtoull(cfg_value("NX2NAVI_PIPELINE_CACHE_MAX_MB"), NULL, 10) << 20, len = 0;
     int why = CACHE_FILE_NONE;
     void *data = cache_file_read(path, sizeof(VkPipelineCacheHeaderVersionOne), cap, &len, &why);
     if (!data) {
         if (why == CACHE_FILE_OVER_CAP)
-            rt_log("vk_pipeline: %s holds %.0f MB, over NX2NAVI_PIPELINE_CACHE_MAX_MB %llu: starting empty; this run "
-                   "rewrites it", path, len / 1048576.0, (unsigned long long)(cap >> 20));
+            cache_over_cap = 1,
+            rt_log("vk_pipeline: %s holds %.0f MB, over NX2NAVI_PIPELINE_CACHE_MAX_MB %llu: starting empty; it is "
+                   "replaced when the play file is next folded in, at the next start that finds one", path, len / 1048576.0, (unsigned long long)(cap >> 20));
         else if (why != CACHE_FILE_NONE)
             rt_log("vk_pipeline: %s (%llu bytes, %.1f MB) is not read: %s; starting empty", path,
                    (unsigned long long)len, len / 1048576.0, cache_file_why(why));
@@ -787,6 +790,7 @@ static void cache_load(VkCtx *c) {
     }
     size_t size = 0, kept = 0;
     void *data = cache_data_read(c, P.cache_path, &size);
+    int base_over = cache_over_cap;   // an oversized file is never read again: the play file takes its place at once
     P.cache = cache_make(c, data, size, &kept);
     free(data);
     P.cache_loaded = kept;
@@ -808,7 +812,7 @@ static void cache_load(VkCtx *c) {
     VkPipelineCache play = psize || on ? cache_make(c, pdata, psize, &pkept) : VK_NULL_HANDLE;
     free(pdata);
     uint64_t fold_at = (uint64_t)strtoull(cfg_value("NX2NAVI_PIPELINE_CACHE_PLAY_MB"), NULL, 10) << 20;
-    int fold = play && psize && (!on || psize >= fold_at);
+    int fold = play && psize && (!on || psize >= fold_at || base_over);
     if (fold) {
         // Into P.cache now; the file is written by the first save, which then removes the play file. A run that ends
         // before that save finds both files as they were and merges again.

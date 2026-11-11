@@ -785,6 +785,11 @@ void vk_exec_inline_end(int reopen) {
     if (reopen) vk_exec_pass_begin(&X);
 }
 
+void vk_exec_probe_inline(VkCommandBuffer cb, uint64_t fence) {
+    X.cb = cb, X.fence = fence;
+    x_here = cb != VK_NULL_HANDLE;
+}
+
 typedef struct { VkBuffer b; VmaAllocation a; } InlineBuf;
 static void free_inline_buf(void *arg) {   // completion thread
     InlineBuf *t = arg;
