@@ -1,6 +1,6 @@
 // HDR output (NX2NAVI_HDR=1): an HDR10 swapchain (Rec. 2020 primaries, PQ) and a game picture tone mapped to the
 // display's range, one fixed look (shaders/hdr_tonemap.frag says which). Settings: NX2NAVI_HDR, on and off following
-// the menu during a run (vk_hdr_wanted), the game's own HDR (native, a value of the file only) from the start only; and
+// the menu during a run (vk_hdr_wanted), the game's own HDR (native, the menu's other HDR) from the start only; and
 // the nits NX2NAVI_HDR_PEAK_NITS (the display's peak), NX2NAVI_HDR_GAME_NITS (the picture's white, "paper white") and
 // NX2NAVI_HDR_UI_NITS (the HUD's and this menu's white), read when the settings change (vk_hdr_support). With
 // NX2NAVI_HDR=0 the swapchain is SDR, the spliced tonemap gives the game's own SDR picture (vk_hdr_support, p0.w = -1)

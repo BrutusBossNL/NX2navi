@@ -1003,14 +1003,13 @@ static const char *hdr_note(void) {
     return note;
 }
 
-// HDR (vk_hdr.c): off or on, switched at once; on is the game's picture tone mapped to the display, one fixed look. The
-// game's own HDR (native) is a value only the file sets: the row lists it only while the file does, so that it reads as
-// what runs. The three brightness rows follow while HDR is on.
+// HDR (vk_hdr.c), two kinds: the game's picture tone mapped to the display (1, one fixed look), switched on and off at
+// once, or the game's own HDR (native), which the game takes up at its start. The three brightness rows follow while
+// either is on.
 static void row_hdr(void) {
     static const char *const values[] = {"0", "1", "native"};
-    const char *names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), menu_text(UI_MENU_ON), menu_text(UI_MENU_HDR_NATIVE)};
-    const int n = !strcmp(cfg_value("NX2NAVI_HDR"), "native") ? 3 : 2;
-    opt_choice_list("NX2NAVI_HDR", UI_MENU_HDR, values, names, n, UI_MENU_HDR_DESC, -1, hdr_note());
+    const char *names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), menu_text(UI_MENU_HDR_TONEMAPPED), menu_text(UI_MENU_HDR_NATIVE)};
+    opt_choice_list("NX2NAVI_HDR", UI_MENU_HDR, values, names, 3, UI_MENU_HDR_DESC, -1, hdr_note());
     if (!cfg_bool("NX2NAVI_HDR")) return;
     opt_slider("NX2NAVI_HDR_PEAK_NITS", UI_MENU_HDR_PEAK, 400, 10000, UI_MENU_HDR_PEAK_DESC, 50, "%.0f nits");
     opt_slider("NX2NAVI_HDR_GAME_NITS", UI_MENU_HDR_GAME, 48, 500, UI_MENU_HDR_GAME_DESC, 1, "%.0f nits");
@@ -1861,7 +1860,7 @@ static void perf_picture(const MenuTarget *t, PerfPanel *p) {
         else snprintf(v[7], sizeof v[7], "%sp", r);
     }
     const char *hdr = cfg_value("NX2NAVI_HDR");
-    snprintf(v[8], sizeof v[8], "%s", menu_text(!strcmp(hdr, "native") ? UI_MENU_HDR_NATIVE : cfg_bool("NX2NAVI_HDR") ? UI_MENU_ON : UI_MENU_FRAMEGEN_OFF));
+    snprintf(v[8], sizeof v[8], "%s", menu_text(!strcmp(hdr, "native") ? UI_MENU_HDR_NATIVE : cfg_bool("NX2NAVI_HDR") ? UI_MENU_HDR_TONEMAPPED : UI_MENU_FRAMEGEN_OFF));
     const char *fg = cfg_value("NX2NAVI_FRAMEGEN");
     const bool fsr_fg = !strcmp(fg, "fsr3") && vk_ffx_framegen_available();   // set but not loadable: off
     snprintf(v[9], sizeof v[9], "%s", fsr_fg ? (vk_fg4_active() ? fg4_label() : "AMD FSR 3.1")

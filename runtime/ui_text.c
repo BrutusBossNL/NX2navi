@@ -667,7 +667,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FRAMEGEN] = "Frame generation",
     [UI_MENU_FRAMEGEN_DESC] = "Adds generated frames for smoother motion. Needs DLSS or FSR 3.1.",
     [UI_MENU_FRAMEGEN_OFF] = "Off",
-    [UI_MENU_HDR_NATIVE] = "Native (the game's)",
+    [UI_MENU_HDR_TONEMAPPED] = "RenoDX", [UI_MENU_HDR_NATIVE] = "Native (the game's)",
     [UI_MENU_FRAMEGEN_NOTE] = "needs DLSS or FSR 3.1",
     [UI_MENU_FRAMEGEN_NEEDS] = "choose a DLSS or FSR 3.1 mode under Upscaling first",
     [UI_MENU_FRAMEGEN_NEEDS_FSR] = "choose an FSR 3.1 mode under Upscaling first",

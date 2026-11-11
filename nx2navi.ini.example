@@ -513,11 +513,11 @@
 # take effect at once.
 # framegen_multiplier = 2
 
-# HDR output: hdr = 1 sends the picture as HDR10, the game's scene tone mapped to your display (needs HDR on in
-# Windows, "Use HDR", or a Wayland compositor with colour management; without it the picture stays SDR, the game's own).
-# The look is fixed; hdr_peak_nits is your display's peak, hdr_game_nits the picture's white (paper white, 203 is the
-# HDR reference) and hdr_ui_nits the HUD's and the menu's. Everything applies at once. hdr = native shows the game's
-# own HDR mode instead, which the game takes up at the next start. The settings of the look of earlier versions
+# HDR output, two kinds (both need HDR on in Windows, "Use HDR", or a Wayland compositor with colour management;
+# without it the picture stays SDR, the game's own): hdr = 1 sends the game's scene tone mapped to your display, one
+# fixed look, and applies at once; hdr = native shows the game's own HDR mode, which the game takes up at the next
+# start. hdr_peak_nits is your display's peak, hdr_game_nits the picture's white (paper white, 203 is the HDR
+# reference) and hdr_ui_nits the HUD's and the menu's. The settings of the look of earlier versions
 # (hdr_tonemap, hdr_exposure, hdr_gamma and the rest) are read by nothing now and do no harm.
 # hdr = 0
 # hdr_live = 0 leaves the HDR path out of a run that starts with hdr = 0, as before hdr followed the menu: switching

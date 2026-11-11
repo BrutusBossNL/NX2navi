@@ -187,8 +187,8 @@ static const CfgMeta metas[] = {
     {"COLOR_CONTRAST", "100", "70..150", LIVE}, {"COLOR_SATURATION", "100", "50..200", LIVE},
     {"COLOR_GAMMA", "1", "0.8..1.2", LIVE},
     // HDR output (vk_hdr.c): on and off apply at once (the HDR tonemap is spliced into the game's as shaders load
-    // whatever is set, vk_hdr_armed); native, a value only the file sets, is the game's own and is asked for once, at
-    // start (vk_hdr_needs_restart). HDR_LIVE = 0 leaves the HDR path out of a run that starts with HDR off. The look is
+    // whatever is set, vk_hdr_armed); native is the game's own and is asked for once, at start
+    // (vk_hdr_needs_restart). HDR_LIVE = 0 leaves the HDR path out of a run that starts with HDR off. The look is
     // fixed: only the three whites are settings.
     {"HDR", "0", "0|1|native", LIVE}, {"HDR_LIVE", "1", "0|1", RESTART},
     {"HDR_PEAK_NITS", "1000", "400..10000", LIVE}, {"HDR_GAME_NITS", "203", "48..500", LIVE},
