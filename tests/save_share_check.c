@@ -60,6 +60,8 @@ NEVER(fs_init) NEVER(hostfn_override) NEVER(hostfn_register) NEVER(mem_kernel_al
 NEVER(mem_thaw) NEVER(romfs_close) NEVER(romfs_entry) NEVER(romfs_entry_type) NEVER(romfs_file_count)
 NEVER(romfs_handle) NEVER(romfs_image_path) NEVER(romfs_list) NEVER(romfs_open) NEVER(romfs_overlay)
 NEVER(romfs_overlay_count) NEVER(romfs_read) NEVER(romfs_size) NEVER(rt_call)
+NEVER(perf_size)   // fs_host_sizes: only the perf trace's size lines call it
+int mem_probing(void) { return 0; }   // the write-back probe is off
 int romfs_owns(const char *path) { (void)path; return 0; }
 void fs_trace(const char *what, const char *path) { (void)what, (void)path; }
 
