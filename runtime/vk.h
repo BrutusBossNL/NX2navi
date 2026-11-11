@@ -234,11 +234,6 @@ int  vk_pool_map_virtual(pool_t *v, int n, const void *requests);   // nvn_mappi
 void vk_texture_register(int id, const tex_t *t, const view_t *v);  // texture descriptor slot (copied)
 void vk_sampler_register(int id, const samp_par *s);                // sampler descriptor slot (copied)
 void vk_texture_release(const tex_t *t);   // TextureFinalize: the image stays for slots that still name its storage
-// As vk_texture_release, for the slots registered up to mark (vk_texture_reg_mark when the game finalized the texture):
-// later registrations stay current.
-void vk_texture_release_at(const tex_t *t, uint32_t mark);
-uint32_t vk_texture_reg_mark(void);                     // the serial of the latest slot registration
-int vk_texture_same_key(const tex_t *a, const tex_t *b);   // the same storage, descriptor and layout: one image
 void vk_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row, uint64_t img);
 void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row, uint64_t img);
 void vk_guest_written(uint64_t addr, uint64_t size);   // a host write write-watch may miss: textures there re-upload

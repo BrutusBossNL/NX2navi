@@ -267,7 +267,6 @@ typedef struct {
     uint64_t value, submit_no, at, queued;
     uint64_t *h;
     const tex_t *tex;   // RI_RELEASE: a copy the item owns (the game may reuse the object's memory)
-    uint32_t reg_mark;  // RI_RELEASE: vk_texture_reg_mark when the game finalized it
 } ReplayItem;
 #define RQ_CAP 1024   // a frame queues 1 submit and 1 present, and up to a few hundred releases
 enum { DR_POOL_FINI, DR_MAP_VIRTUAL, DR_TEX_RELEASE, DR_PROG_RELEASE, DR_FINISH, DR_READ_TEXELS, DR_WRITE_TEXELS,
@@ -425,7 +424,7 @@ static void replay_main(void *arg) {
             free(it.h);
         } else if (it.kind == RI_RELEASE) {
             vk_present_drain();
-            vk_texture_release_at(it.tex, it.reg_mark);
+            vk_texture_release(it.tex);
             free((void *)it.tex);
         } else {
             uint64_t frame = __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
@@ -594,28 +593,18 @@ static void vk_be_sampler_register(int id, const samp_par *s) { vk_sync_start();
 // Asynchronous: the release is queued behind the submissions before it, so their replay still resolves the texture's
 // slots to its image (a released slot follows another live texture at the storage), and the ones after it see it
 // released, the order of the synchronous replay. vk_texture_release reads only the object's key fields: a copy.
-// Registrations are not queued: the release carries the registration serial of the finalize, and the slots registered
-// after it stay current (vk_texture_release_at).
 static void vk_be_texture_release(const tex_t *t) {
     vk_sync_start();
-    if (!t || !t->mem) return;
-    // Another texture object initialized at the storage with the same parameters is still live (the front end's live
-    // texture table, nvn_api_obj.c nvn_tex_live_at): the image and the slots naming that descriptor are its own, as an
-    // NVN descriptor refers to memory, and the release changes nothing. Ocarina streams terrain heightmaps (R32F
-    // 260x260) through a fixed set of storage and initializes and registers the next chunk's texture there before it
-    // finalizes the previous one: releasing left the slot stale, the draws sampled the zero stand-in, and the chunk was
-    // drawn at height zero, tens of metres below the ground around it.
-    tex_t live;
-    if (nvn_tex_live_at(t->mem, &live) && live.serial != t->serial && vk_texture_same_key(&live, t)) return;
     if (!gfx_replay_async()) {
         vk_present_drain();
         vk_texture_release(t);
         return;
     }
+    if (!t || !t->mem) return;
     tex_t *copy = malloc(sizeof *copy);
     if (!copy) rt_fatal("vk: out of memory (replay queue)");
     *copy = *t;
-    ReplayItem it = {.kind = RI_RELEASE, .tex = copy, .reg_mark = vk_texture_reg_mark()};
+    ReplayItem it = {.kind = RI_RELEASE, .tex = copy};
     plat_mutex_lock(&rl);
     dr_calls[DR_TEX_RELEASE]++, dr_tcalls[DR_TEX_RELEASE]++;
     plat_mutex_unlock(&rl);

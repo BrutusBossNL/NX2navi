@@ -149,8 +149,7 @@ NVN_API(nvnTextureBuilderGetStorageAlignment) {
 // ---------- Textures
 // The game re-initializes transient textures (G-buffer and the like) every frame at the same pool memory without
 // registering the descriptor again, as an NVN descriptor refers to memory and stays valid on hardware. The table maps
-// storage address -> a copy of the live texture, which tells the back end a finalize whose storage another texture with
-// the same parameters still holds (vk_backend.c vk_be_texture_release).
+// storage address -> a copy of the live texture so the back end can redirect a registration whose serial was finalized.
 static nvn_hmap live = {.klen = 8};
 static PlatMutex live_lock = PLAT_MUTEX_INIT;
 

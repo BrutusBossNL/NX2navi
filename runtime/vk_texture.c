@@ -2523,17 +2523,7 @@ void vk_texture_gpu_written(const tex_t *t) {
     unlock();
 }
 
-uint32_t vk_texture_reg_mark(void) { return __atomic_load_n(&reg_serial, __ATOMIC_ACQUIRE); }
-
-int vk_texture_same_key(const tex_t *a, const tex_t *b) {
-    TexKey ka, kb;
-    make_key(a, &ka), make_key(b, &kb);
-    return !memcmp(&ka, &kb, sizeof ka);
-}
-
-void vk_texture_release(const tex_t *t) { vk_texture_release_at(t, vk_texture_reg_mark()); }
-
-void vk_texture_release_at(const tex_t *t, uint32_t mark) {
+void vk_texture_release(const tex_t *t) {
     if (!t || !t->mem) return;
     TexKey k;
     make_key(t, &k);
@@ -2542,16 +2532,16 @@ void vk_texture_release_at(const tex_t *t, uint32_t mark) {
     // Staleness belongs to the registered descriptor, not the cached image: a released Tex can be destroyed before the
     // slot looks again (eviction, the released cap, start_at for a mirrored one). A registered texture may also be
     // finalized before its image is created.
-    // Only the slots registered before the game finalized the texture (mark): the asynchronous replay applies a
-    // release behind the submissions queued before it (vk_backend.c vk_be_texture_release), while a registration takes
-    // effect at once. A texture the game initializes at the same storage with the same parameters after the finalize,
-    // and registers before the replay reaches the release, keeps its slot.
+    // Only the slots this texture object registered (its initialization serial): a slot registered with another
+    // texture initialized at the same storage with the same parameters names that one, which is still live. Ocarina
+    // streams terrain heightmaps (R32F 260x260) through a fixed set of storage and initializes and registers the next
+    // chunk's texture there before it finalizes the previous one; finalizing the new registration left the slot stale,
+    // the draws sampled the zero stand-in, and the chunk was drawn at height zero, tens of metres below the ground.
     int changed = 0;
     if (sinfo)
         for (int id = bucket_head[agen_idx(k.addr)]; id >= 0; id = slot_next[id]) {
             TexSlot *s = &tslots[id];
-            if (s->finalized || (uintptr_t)s->t.mem != k.addr) continue;
-            if ((int32_t)((uint32_t)(sinfo[id] >> 16) - mark) > 0) continue;   // registered after the finalize
+            if (s->finalized || (uintptr_t)s->t.mem != k.addr || s->t.serial != t->serial) continue;
             TexKey sk;
             make_key(&s->t, &sk);
             if (!memcmp(&sk, &k, sizeof k)) s->finalized = 1, s->ce = NULL, changed = 1;
@@ -2620,7 +2610,7 @@ void vk_texture_register(int id, const tex_t *t, const view_t *v) {
     s->ce = NULL;
     s->cheld = 0;
     slots_gen++;
-    __atomic_store_n(&reg_serial, reg_serial + 1 ? reg_serial + 1 : 1, __ATOMIC_RELEASE);   // read by vk_texture_reg_mark
+    if (!++reg_serial) reg_serial = 1;
     __atomic_store_n(&sinfo[id], (uint64_t)reg_serial << 16 | agen_idx((uintptr_t)t->mem), __ATOMIC_RELEASE);
     slot_rebucket(id, agen_idx((uintptr_t)t->mem));
     dirty_push((uint32_t)id);
