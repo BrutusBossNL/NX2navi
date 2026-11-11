@@ -3545,11 +3545,16 @@ void vk_texture_release(const tex_t *t) {
     // Staleness belongs to the registered descriptor, not the cached image: a released Tex can be destroyed before the
     // slot looks again (eviction, the released cap, start_at for a mirrored one). A registered texture may also be
     // finalized before its image is created.
+    // Only the slots this texture object registered (its initialization serial): a slot registered with another
+    // texture initialized at the same storage with the same parameters names that one, which is still live. Ocarina
+    // streams terrain heightmaps (R32F 260x260) through a fixed set of storage and initializes and registers the next
+    // chunk's texture there before it finalizes the previous one; finalizing the new registration left the slot stale,
+    // the draws sampled the zero stand-in, and the chunk was drawn at height zero, tens of metres below the ground.
     int changed = 0;
     if (sinfo)
         for (int id = bucket_head[agen_idx(k.addr)]; id >= 0; id = slot_next[id]) {
             TexSlot *s = &tslots[id];
-            if (s->finalized || (uintptr_t)s->t.mem != k.addr) continue;
+            if (s->finalized || (uintptr_t)s->t.mem != k.addr || s->t.serial != t->serial) continue;
             TexKey sk;
             make_key(&s->t, &sk);
             if (!memcmp(&sk, &k, sizeof k)) s->finalized = 1, s->ce = NULL, changed = 1;
