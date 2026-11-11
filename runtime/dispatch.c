@@ -57,6 +57,8 @@ void rt_fatal_notes(void) {
     for (int i = 0; i < n_fatal_notes; i++) fatal_notes[i]();
 }
 
+__attribute__((weak)) void fs_save_crash_wait(void) {}   // fs_host.c; builds without it (the unit checks) have no saves
+
 void rt_fatal(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -72,6 +74,7 @@ void rt_fatal(const char *fmt, ...) {
     rt_log("fatal: memory commit: this process %.0f MB, the system %.0f of %.0f MB", proc, used, limit);
     rt_fatal_notes();
     kern_free_cores_note();
+    fs_save_crash_wait();   // a save the game already reported as done finishes first (bounded)
     prof_sampler_write();   // NX2NAVI_PROFILE: what was sampled until now, else a crash loses the whole profile
     // RivaTuner Statistics Server's profile as it was: left with the game's limit in it, the next run would take that
     // limit for the player's own (rtss_limit.c; it gives up after a second if the failing thread holds its lock)

@@ -48,6 +48,44 @@ enum { PERF_CNT_PIPE_ASYNC, PERF_CNT_PIPE_SKIP, PERF_CNT_TEX_UP, PERF_CNT_TEX_RE
        PERF_CNT_PIPE_WAIT, PERF_CNT_ONESHOT_WAIT, PERF_CNT_PIPE_BUILT, PERF_CNT_TEX_NEW, PERF_CNT_TEX_ALIAS,
        PERF_CNT_WB, PERF_CNT_WB_SKIP, PERF_CNT_N };
 void perf_count(int kind);
+// NX2NAVI_TRACE=perf: work on any thread that a frame can wait for besides the render thread's waits above, summed per
+// frame and per 60-frame window (perf.c perf_mark_add): RomFS reads, host zstd decodes, pipeline creates (vk_pipeline.c
+// pipe_create_in), guest memory maps (heap size, MapPhysicalMemory), NVN memory pool initialize and finalize
+// (vk_memory.c vk_pool_init, vk_pool_fini), device memory VMA allocates (blocks and dedicated memory: count and
+// bytes, no time), and DLSS and DLSS frame generation feature creates (vk_dlaa.c). perf_mark_begin returns 0 while the trace is off, so a normal run pays one branch per site.
+enum { PERF_M_FILE, PERF_M_ZSTD, PERF_M_PIPE, PERF_M_GMEM, PERF_M_POOL, PERF_M_DEVMEM, PERF_M_NGX, PERF_M_N };
+uint64_t perf_mark_begin(void);
+void perf_mark_end(int kind, uint64_t t0, uint64_t bytes);   // nothing when t0 is 0
+void perf_mark_add(int kind, uint64_t ns, uint64_t bytes);   // nothing while the trace is off
+// NX2NAVI_TRACE=perf segments and scenes (perf.c): perf_segment ends the running segment of presents at the next present
+// with a line of its frame times (mean, 1% low, worst), the work marks above, process memory and VRAM, then the memory
+// snapshot, and starts one named name (the input script's MARK lines, input.c). perf_scene notes an area's load
+// (romfs.c, the area's static placement file) and takes the memory snapshot once no area has loaded for 10 s.
+void perf_segment(const char *name);
+void perf_scene(const char *name);
+// NX2NAVI_TRACE=perf "mem: sizes" lines (perf.c sizes_log): the entries and bytes of the caches, pools and tables no
+// other line gives, every 600 presents and with each memory snapshot. Each subsystem's *_sizes function (weak no-ops
+// in perf.c) adds its own with perf_size, taking its locks briefly on the present thread. count or bytes UINT64_MAX:
+// not known; limit 0: none.
+typedef struct { char line[1800]; int n; uint64_t frame; const char *group; } PerfSizes;
+void perf_size(PerfSizes *s, const char *name, uint64_t count, uint64_t limit, uint64_t bytes);
+#define PERF_SIZE_NONE UINT64_MAX
+void mem_sizes(PerfSizes *s);         // memory.c
+void kern_sizes(PerfSizes *s);        // kernel.c
+void setjmp_sizes(PerfSizes *s);      // guest_setjmp.c
+void fs_host_sizes(PerfSizes *s);     // fs_host.c
+void romfs_sizes(PerfSizes *s);       // romfs.c
+void zstd_sizes(PerfSizes *s);        // ov_zstd.c
+void cfg_sizes(PerfSizes *s);         // cfg.c
+void vk_mem_sizes(PerfSizes *s);      // vk_memory.c
+void vk_gpa_sizes(PerfSizes *s);      // vk_gpa.c
+void vk_texture_sizes(PerfSizes *s);  // vk_texture.c
+void vk_exec_sizes(PerfSizes *s);     // vk_exec_draw.c
+void vk_sync_sizes(PerfSizes *s);     // vk_sync.c
+void vk_usnap_sizes(PerfSizes *s);    // vk_usnap.c
+void nvn_cmd_sizes(PerfSizes *s);     // nvn_api_cmd.c
+void vk_pipeline_sizes(PerfSizes *s); // vk_pipeline.c
+void gfx_shader_sizes(PerfSizes *s);  // gfx_shader.c
 // NX2NAVI_REPLAY_TIME=1: how long the replay spends in each kind of op (perf.c perf_replay_op reports it with the
 // frame-time summary). Draws and dispatches include their bindings and the vkCmd calls they record; binds are the state
 // and resource binds between them; xfer is copies and clears.
@@ -240,6 +278,7 @@ extern const char rt_port_version[];                       // VERSION at the bui
 // ---- kernel (kernel.c)
 typedef struct RtThread RtThread;
 Cpu *kern_cpu(void);                                       // current guest thread's Cpu, NULL on host threads
+void fs_save_crash_wait(void);                             // fs_host.c: the crash report's and rt_fatal's bounded wait for a save Commit under way
 void kern_free_cores_note(void);                           // for crash reports: logs that free_cores = 1 lifted the
                                                            // virtual core gate, nothing when the gate is on
 uint32_t kern_main_thread(Cpu **cpu);                      // main thread object and Cpu for the calling host thread

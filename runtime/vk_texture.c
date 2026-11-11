@@ -2313,7 +2313,15 @@ static void upload(Tex *e) {
         return;
     }
     e->chash_ok = e->t.L.size <= CHASH_MAX;   // the hash of what this upload copies (make_fresh_snap compares it)
-    if (e->chash_ok) e->chash = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
+    if (e->chash_ok) {
+        // read with the storage held mapped, as the copies below: the game unmaps a texture's memory on its own thread
+        if (mem_read_hold(e->pub.addr, e->t.L.size)) {
+            e->chash = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
+            mem_read_release();
+        } else {
+            e->chash_ok = 0;
+        }
+    }
     static __thread char ctx[160];   // what this thread copies, for a crash report
     snprintf(ctx, sizeof ctx, "texture upload %#llx (%llu bytes, fmt %#x %ux%u)", (unsigned long long)e->pub.addr,
              (unsigned long long)e->t.L.size, d->format, d->width, d->height);
@@ -2383,6 +2391,8 @@ static void upload(Tex *e) {
             static volatile int32_t n_gone;
             log_limited(&n_gone, "texture %#llx (%llu bytes): storage released during the upload; uploaded as zeros",
                         (unsigned long long)e->pub.addr, (unsigned long long)e->t.L.size);
+            // the image holds zeros, not the bytes hashed above: the same bytes mapped back there upload again
+            e->chash_ok = 0;
         }
         if (gdsw && !sk) {
             if (held) memcpy(stg, t->mem, size);
@@ -2452,9 +2462,11 @@ static void upload(Tex *e) {
                                      e->pub.image, e->pub.aspect, rbuf);
             perf_end(PERF_ASTC, a0);
             vk_texstat_time(VK_TS_ASTC, a0);
-            if (!checked)
+            if (!checked) {
                 log_limited(&n_undecoded, "ASTC texture %#llx (fmt %#x %ux%u) not decoded on the GPU: left as it was",
                             (unsigned long long)e->pub.addr, d->format, d->width, d->height);
+                e->chash_ok = 0;   // the image does not hold the bytes hashed above: the next write uploads, equal or not
+            }
         } else {
             for (k = k0; k < k1; k++) rg[k].bufferOffset += soff;
             vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, k1 - k0, rg + k0);
@@ -2534,7 +2546,10 @@ static int same_content(const Tex *e) {
     static int on = -1;   // NX2NAVI_TEX_SAME=0: every write to the pages uploads again (diagnosis)
     if (on < 0) { const char *v = cfg_get("NX2NAVI_TEX_SAME"); on = !(v && !strcmp(v, "0")); }
     if (!on || !e->chash_ok || e->wt_n || e->t.L.size > CHASH_MAX) return 0;
-    if (content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size) != e->chash) return 0;
+    if (!mem_read_hold(e->pub.addr, e->t.L.size)) return 0;   // unmapped since: not the same; the upload deals with it
+    uint64_t h = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
+    mem_read_release();
+    if (h != e->chash) return 0;
     ru_same_n++, ru_same_bytes += e->t.L.size;
     return 1;
 }
@@ -4309,4 +4324,24 @@ void vk_texture_shutdown(void) {
     rel_head = rel_tail = NULL, rel_bytes = 0;
     if (sinfo) memset(sinfo, 0, sizeof *sinfo << 20);   // no slot is registered: tokens 0
     unlock();
+}
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the texture cache's entries (the bytes are in the "mem: vram" line), the
+// released ones, those retired by disuse, the sampler cache, the image requirements cache, the disuse holds, the
+// reuse keys, and the pool's texture and sampler slots. Counters, and a walk of at most 4096 sampler slots.
+void vk_texture_sizes(PerfSizes *s) {
+    lock();
+    uint64_t imgs = by_key.n, rel = (uint64_t)nreleased, relb = rel_bytes, ret = (uint64_t)nretiring, retb = retiring_bytes,
+             smp = samplers.n, reqs = img_reqs.n, hold = holds.n, reuse_keys = reuse.n, tslot = pool_slots, sslot = 0;
+    for (int i = 0; i < nsslots; i++) sslot += sslots[i].used != 0;
+    unlock();
+    perf_size(s, "textures", imgs, 0, PERF_SIZE_NONE);
+    perf_size(s, "released textures", rel, 0, relb);
+    perf_size(s, "retiring textures", ret, 0, retb);
+    perf_size(s, "samplers", smp, 0, PERF_SIZE_NONE);
+    perf_size(s, "image requirements", reqs, 0, PERF_SIZE_NONE);
+    perf_size(s, "disuse holds", hold, HOLDS_MAX, PERF_SIZE_NONE);
+    perf_size(s, "reuse keys", reuse_keys, 0, PERF_SIZE_NONE);
+    perf_size(s, "texture pool slots", tslot, VK_POOL_TEX, PERF_SIZE_NONE);
+    perf_size(s, "sampler slots", sslot, VK_POOL_SAMP, PERF_SIZE_NONE);
 }

@@ -21,6 +21,7 @@
 #include "menu_assets.h"
 #include "sarc.h"
 #include "tex.h"
+#include "platform/platform.h"
 
 #define MAX_RAW (512u << 20)
 
@@ -33,7 +34,8 @@ static ZSTD_DDict *dicts[8];
 static unsigned dict_ids[8];
 static int ndicts = -1;
 
-static void dicts_load(void) {
+static void dicts_read(void *unused) {
+    (void)unused;
     ndicts = 0;
     size_t zn = 0;
     uint64_t zn64 = 0;
@@ -55,6 +57,14 @@ static void dicts_load(void) {
     free(z);
 }
 
+// Once, whichever thread asks first (the "menu-art" thread and the present path both do in the first frames); the
+// others wait for it. Checking ndicts < 0 instead let a second caller see the 0 set at the start of the read, take it
+// for "no dictionaries" and fail its asset: the menu then kept its fallback fonts for the whole run.
+static void dicts_load(void) {
+    static PlatOnce once = PLAT_ONCE_INIT;
+    plat_once(&once, dicts_read, NULL);
+}
+
 uint8_t *menu_asset_load(const char *rel, size_t *n_out) {
     uint64_t n = 0;
     uint8_t *b = romfs_load(rel, &n);
@@ -68,7 +78,7 @@ uint8_t *menu_asset_load(const char *rel, size_t *n_out) {
     if (rn == ZSTD_CONTENTSIZE_UNKNOWN) {   // a frame that does not say its size: streamed into a growing buffer
         ZSTD_DDict *d = NULL;
         if (id) {
-            if (ndicts < 0) dicts_load();
+            dicts_load();
             for (int i = 0; i < ndicts; i++)
                 if (dict_ids[i] == id) d = dicts[i];
             if (!d) { free(b); return NULL; }
@@ -101,7 +111,7 @@ uint8_t *menu_asset_load(const char *rel, size_t *n_out) {
     size_t got = 0;
     if (raw) {
         if (id) {
-            if (ndicts < 0) dicts_load();
+            dicts_load();
             ZSTD_DDict *d = NULL;
             for (int i = 0; i < ndicts; i++)
                 if (dict_ids[i] == id) d = dicts[i];

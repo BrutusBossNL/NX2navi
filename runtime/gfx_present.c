@@ -82,6 +82,9 @@ void gfx_window_closed(void) {
     int restart = plat_cas32(&g_restart, 0, 0) != 0;
     rt_log("gfx: window closed; %s", restart ? "restarting" : "exiting");
     cfg_save();   // a menu change saves 400 ms later on the render thread (option_rows.cpp); closing sooner kept the old file
+    // The window closed while the boot still built its pipelines: not the driver crash the marker is there to catch.
+    // Left in place, the next start took it for one and every later start skipped the prebuild (vk_pipeline.c pm_skipped).
+    vk_pipeline_prewarm_marker_clear();
     vk_pipeline_save();
     prof_write();   // plat_exit runs no atexit handlers
     rtss_limit_restore();   // RivaTuner Statistics Server's profile as it was

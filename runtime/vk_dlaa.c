@@ -1643,6 +1643,8 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         goto evaluated;
     }
     if (!e->feat) {
+        // NX2NAVI_TRACE=perf: the release of the kept features (a device idle wait) and the create, as one mark
+        uint64_t t0 = perf_mark_begin();
         if (idle_free() != 2) release_kept(e, feat_released);
         feat_released = 0;
         p_setu(p, "CreationNodeMask", 1);
@@ -1667,6 +1669,7 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         p_setu(p, "DLSS.Hint.Render.Preset.Performance", (unsigned)pm);
         p_setu(p, "DLSS.Hint.Render.Preset.UltraPerformance", (unsigned)pl);
         NgxResult r = N.create(cb, NGX_FEATURE_SUPERSAMPLING, p, &e->feat);
+        perf_mark_end(PERF_M_NGX, t0, 0);
         if (!NGX_OK(r) || !e->feat) return dl_fail("DLSS feature creation", r);
         D.reset = 1;
         int q = perf_quality(w, ow), pr = q == 0 ? pm : q == 3 ? pl : pk;
@@ -2162,7 +2165,9 @@ int vk_ngxfg_evaluate(VkCommandBuffer cb, const VkNgxImage *bb, const VkNgxImage
         p_setu(p, "Width", bb->w);
         p_setu(p, "Height", bb->h);
         p_setu(p, "DLSSG.BackbufferFormat", (unsigned)bb->fmt);
+        uint64_t t0 = perf_mark_begin();
         NgxResult r = N.create(cb, NGX_FEATURE_FRAME_GENERATION, p, &FG.feat);
+        perf_mark_end(PERF_M_NGX, t0, 0);
         if (!NGX_OK(r) || !FG.feat) {
             FG.failed = 1, FG.feat = NULL;
             rt_log("ngxfg: DLSS Frame Generation feature creation failed (%08x): frame generation off", (unsigned)r);

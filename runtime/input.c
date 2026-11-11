@@ -66,9 +66,10 @@ static const SDL_GamepadButton pad_sdl[PAD_COUNT] = {
 // and its hold are milliseconds of the world clock (frame_step_world_us, game time since the loaded save's first
 // frame), so it lands at the same game time at any frame rate and load length. A timed event shorter than a frame is
 // applied once. In a script with timed lines (a recording) the untimed ones belong before the world clock: they stop
-// when it starts, as the load ends at another tick in each run.
+// when it starts, as the load ends at another tick in each run. "<frame> MARK <name>" presses nothing: with
+// NX2NAVI_TRACE=perf it ends the running segment of frame times and starts one called <name> (perf.c perf_segment).
 // at, hold: ticks, or microseconds of the world clock when timed.
-typedef struct { uint64_t at, hold; int bit, stick, timed; int32_t x, y; int logged; char text[48]; } ScriptEv;
+typedef struct { uint64_t at, hold; int bit, stick, timed, mark; int32_t x, y; int logged; char text[48]; } ScriptEv;
 static const struct { const char *name; int bit; } script_buttons[] = {
     {"A", B_A}, {"B", B_B}, {"X", B_X}, {"Y", B_Y}, {"LCLICK", B_STICK_L}, {"RCLICK", B_STICK_R}, {"L", B_L}, {"R", B_R},
     {"ZL", B_ZL}, {"ZR", B_ZR}, {"PLUS", B_PLUS}, {"MINUS", B_MINUS}, {"LEFT", B_LEFT}, {"UP", B_UP}, {"RIGHT", B_RIGHT}, {"DOWN", B_DOWN},
@@ -99,7 +100,14 @@ static void script_load(void) {
         ScriptEv e = {.at = (uint64_t)(at * unit + 0.5), .hold = timed ? 66667 : 4, .bit = -1, .timed = timed};
         long a, b;
         double c;
-        if (!strcmp(name, "MOUSE") || !strcmp(name, "LSTICK") || !strcmp(name, "RSTICK")) {
+        if (!strcmp(name, "MARK")) {
+            const char *s = line + off;
+            while (*s == ' ' || *s == '\t') s++;
+            size_t len = strcspn(s, "\r\n");
+            while (len && (s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+            e.mark = 1, e.hold = 1;
+            snprintf(e.text, sizeof e.text, "%.*s", (int)len, s);
+        } else if (!strcmp(name, "MOUSE") || !strcmp(name, "LSTICK") || !strcmp(name, "RSTICK")) {
             int n = sscanf(line + off, "%ld %ld %lf", &a, &b, &c);
             if (n < 2) { rt_log("input: script line %d: %s needs x y [hold]", ln, name); continue; }
             e.stick = name[0] == 'M' ? 3 : name[0] == 'L' ? 1 : 2; e.x = (int32_t)a; e.y = (int32_t)b;
@@ -135,13 +143,14 @@ static void script_apply(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
         if (e->timed ? w < 0 : script_mixed && w >= 0) continue;
         uint64_t now = e->timed ? (uint64_t)w : tick;
         if (now < e->at || (now >= e->at + e->hold && (e->logged || !e->timed))) continue;
-        if (e->stick == 3 && e->logged) continue;
+        if ((e->stick == 3 || e->mark) && e->logged) continue;
         if (!e->logged) {
             e->logged = 1;
             if (e->timed) rt_log("input: script frame %llu at %.1f ms: %s", (unsigned long long)fr, w / 1000.0, e->text);
             else rt_log("input: script frame %llu tick %llu: %s", (unsigned long long)fr, (unsigned long long)tick, e->text);
         }
-        if (e->stick == 3) {
+        if (e->mark) perf_segment(e->text);
+        else if (e->stick == 3) {
             int64_t x = (int64_t)script_mouse[0] + e->x, y = (int64_t)script_mouse[1] + e->y;
             script_mouse[0] = (int32_t)(x < INT32_MIN ? INT32_MIN : x > INT32_MAX ? INT32_MAX : x);
             script_mouse[1] = (int32_t)(y < INT32_MIN ? INT32_MIN : y > INT32_MAX ? INT32_MAX : y);

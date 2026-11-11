@@ -313,6 +313,7 @@ static void crash_handler(const PlatCrash *x) {
     }
     rt_fatal_notes();   // the card, its driver and the memory settings in effect (vk_device.c fatal_note)
     kern_free_cores_note();
+    fs_save_crash_wait();   // a save the game already reported as done finishes first (bounded; fs_host.c)
     rtss_limit_restore();   // after the report: RivaTuner Statistics Server's profile as it was
     fflush(stderr);
     prof_sampler_write();   // NX2NAVI_PROFILE: what was sampled until the crash (it gives up after 2 s if the sampler hangs)

@@ -377,3 +377,14 @@ void vk_gpa_shutdown(void) {
     memset(&G, 0, sizeof G);
     G.state = -1;
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): device address table records and L2 blocks in use (those waiting for a
+// fence included), against their fixed sizes (when they run out, shaders read zeros).
+void vk_gpa_sizes(PerfSizes *s) {
+    plat_mutex_lock(&gpa_lock);
+    uint64_t recs = G.nrec > 1 + G.nfree ? G.nrec - 1 - G.nfree : 0;
+    uint64_t blks = G.nblocks > 1 + G.nfree_blk + G.blk_waiting ? G.nblocks - 1 - G.nfree_blk - G.blk_waiting : 0;
+    plat_mutex_unlock(&gpa_lock);
+    perf_size(s, "device address records", recs, RECS, PERF_SIZE_NONE);
+    perf_size(s, "device address blocks", blks, BLOCKS, PERF_SIZE_NONE);
+}

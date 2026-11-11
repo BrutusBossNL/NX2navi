@@ -558,7 +558,9 @@ static uint32_t save_commit_locked(void) {
     return 0;
 }
 
-// The background commit: commit_pending from the game's Commit until the thread has run save_commit_locked.
+// The background commit: commit_pending counts the game's Commits whose thread has not run save_commit_locked to its
+// end yet. A count, not a flag: with two Commits entered at once the first thread's end cleared the flag while the
+// second still waited for tx_lock, and a save write then went into the working copy the second was copying.
 static PlatMutex pend_lock = PLAT_MUTEX_INIT;
 static PlatCond pend_cv = PLAT_COND_INIT;
 static volatile int32_t commit_pending;
@@ -580,13 +582,32 @@ void fs_save_flush(void) {
     plat_mutex_unlock(&pend_lock);
 }
 
+// The process is about to end on a crash or a fatal error (main.c crash_handler, dispatch.c rt_fatal). The game's
+// Commit returns once its commit is queued, so the game may already have told the player the save is done while the
+// commit thread still copies (95-135 ms): ending now would leave an unfinished copy, which the next start rolls back.
+// The thread goes on while this one waits, for at most CRASH_WAIT_MS, without taking a lock (the failing thread may
+// hold one). Not when the failing thread is the one committing: its commit cannot finish.
+#define CRASH_WAIT_MS 2000
+static _Thread_local int committing;
+
+void fs_save_crash_wait(void) {
+    if (committing || !plat_cas32(&commit_pending, 0, 0)) return;
+    uint64_t t0 = plat_now_ms();
+    while (plat_cas32(&commit_pending, 0, 0) && plat_now_ms() - t0 < CRASH_WAIT_MS) plat_sleep_ms(5);
+    rt_log("fs: a save commit was under way when the process failed: %s after %llu ms",
+           plat_cas32(&commit_pending, 0, 0) ? "not finished; the next start keeps the save before it" : "finished",
+           (unsigned long long)(plat_now_ms() - t0));
+}
+
 static uint32_t commit_run(void) {
+    committing = 1;
     plat_mutex_lock(&tx_lock);
     uint32_t r = save_commit_locked();
     plat_dec32(&save_writers);
     plat_mutex_unlock(&tx_lock);
+    committing = 0;
     plat_mutex_lock(&pend_lock);
-    commit_pending = 0;
+    plat_dec32(&commit_pending);
     plat_mutex_unlock(&pend_lock);
     plat_cond_broadcast(&pend_cv);
     return r;
@@ -612,7 +633,7 @@ static uint32_t save_commit(void) {
         return 0;
     }
     plat_inc32(&save_writers);   // fs_save_busy until the thread is done
-    plat_xchg32(&commit_pending, 1);
+    plat_inc32(&commit_pending);
     plat_mutex_unlock(&pend_lock);
     if (plat_thread_spawn(commit_main, NULL, "save commit", 0)) {
         return 0;
@@ -1308,8 +1329,13 @@ static uint32_t open_directory(uint64_t *out, const char *path, int mode) {
 
 static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, int64_t max) {
     if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !count || max < 0 || (!out && max)) return FS_R_INVALID_ARGUMENT;
+    // lock held to the end: CloseDirectory on another guest thread frees the listing this copies from
+    plat_mutex_lock(&lock);
     Dir *d = &dirs[h - DIR_BASE];
-    if (!d->used) return FS_R_INVALID_ARGUMENT;
+    if (!d->used) {
+        plat_mutex_unlock(&lock);
+        return FS_R_INVALID_ARGUMENT;
+    }
     int64_t n = 0;
     while (n < max && d->next < d->n) {
         const Listed *e = &d->e[d->next++];
@@ -1323,6 +1349,7 @@ static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
         out[n].size = is_dir ? 0 : (int64_t)e->size;
         n++;
     }
+    plat_mutex_unlock(&lock);
     *count = n;
     return 0;
 }
@@ -1330,11 +1357,16 @@ static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
 // Result GetDirectoryEntryCount(int64_t *out, DirectoryHandle h): the entries ReadDirectory would still return
 static uint32_t directory_entry_count(int64_t *count, uint64_t h) {
     if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !count) return FS_R_INVALID_ARGUMENT;
+    plat_mutex_lock_shared(&lock);   // against a CloseDirectory on another guest thread
     Dir *d = &dirs[h - DIR_BASE];
-    if (!d->used) return FS_R_INVALID_ARGUMENT;
+    if (!d->used) {
+        plat_mutex_unlock_shared(&lock);
+        return FS_R_INVALID_ARGUMENT;
+    }
     int64_t n = 0;
     for (int i = d->next; i < d->n; i++)
         if (strlen(d->e[i].name) < 769 && (d->mode & (d->e[i].kind == PLAT_FS_DIR ? 1 : 2))) n++;
+    plat_mutex_unlock_shared(&lock);
     *count = n;
     return 0;
 }
@@ -2034,4 +2066,15 @@ int probe_fs(void) {
     }
     printf("probe-fs: passed (%llu files, %d sampled)\n", (unsigned long long)files, SAMPLES);
     return 0;
+}
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): open save-data files and directory listings against their tables.
+void fs_host_sizes(PerfSizes *s) {
+    uint64_t nf = 0, nd = 0;
+    plat_mutex_lock_shared(&lock);
+    for (int i = 0; i < NFILES; i++) nf += files[i].h != NULL;
+    for (int i = 0; i < NDIRS; i++) nd += dirs[i].used != 0;
+    plat_mutex_unlock_shared(&lock);
+    perf_size(s, "save files open", nf, NFILES, PERF_SIZE_NONE);
+    perf_size(s, "save listings open", nd, NDIRS, PERF_SIZE_NONE);
 }

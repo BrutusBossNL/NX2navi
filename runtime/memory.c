@@ -973,6 +973,7 @@ uint32_t mem_map_gen(void) { return __atomic_load_n(&map_gen, __ATOMIC_ACQUIRE);
 
 // ---- 0x01 SetHeapSize
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
+    uint64_t t0 = perf_mark_begin();   // NX2NAVI_TRACE=perf: the commit or decommit, the wait for the lock included
     plat_mutex_lock(&lock);
     if (size > HEAP_CAP || size % 0x200000 || size + image_bytes() > L.pool) {
         plat_mutex_unlock(&lock);
@@ -982,8 +983,10 @@ uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
     if (size > was && !heap_lazy) commit(L.heap.base + was, size - was, "heap");
     __atomic_store_n(&heap_size, size, __ATOMIC_RELEASE);   // before a shrink: no first-use commit past the new end
     if (size < was) decommit(L.heap.base + size, was - size, "heap");   // reserved pages in the range are fine
+    uint64_t moved = size > was ? size - was : was - size;
     __atomic_store_n(&map_gen, map_gen + 1, __ATOMIC_RELEASE);
     plat_mutex_unlock(&lock);
+    perf_mark_end(PERF_M_GMEM, t0, moved);
     if (addr) *addr = L.heap.base;
     return R_OK;
 }
@@ -1140,7 +1143,7 @@ static uint32_t alias_map(int unmap, uint64_t a, uint64_t n) {
     n = (n + PAGE - 1) & ~(uint64_t)(PAGE - 1);   // the SDK asks for byte ranges; a mapping is whole pages
     if ((a | n) & (PAGE - 1)) return R_INVALID_ADDRESS;
     if (!inside(a, n, L.alias)) return R_INVALID_REGION;
-    uint64_t first = (a - L.alias.base) / PAGE, count = n / PAGE;
+    uint64_t first = (a - L.alias.base) / PAGE, count = n / PAGE, t0 = perf_mark_begin();
     plat_mutex_lock(&lock);
     uint32_t r = R_OK;
     if (unmap) {
@@ -1166,6 +1169,7 @@ static uint32_t alias_map(int unmap, uint64_t a, uint64_t n) {
 out:
     __atomic_store_n(&map_gen, map_gen + 1, __ATOMIC_RELEASE);
     plat_mutex_unlock(&lock);
+    perf_mark_end(PERF_M_GMEM, t0, n);
     if (r) rt_log("%sMapPhysicalMemory %#llx+%#llx failed %#x (alias %#llx used, heap %#llx)", unmap ? "Un" : "",
                   (unsigned long long)a, (unsigned long long)n, r, (unsigned long long)alias_bytes,
                   (unsigned long long)heap_size);
@@ -1459,4 +1463,25 @@ void mem_guest_census(uint64_t frame) {
         rt_log("mem: lazy heap at frame %llu: %.0f of %.0f MiB committed, by %llu faults and the rest by kernel "
                "accesses and pointer checks", (unsigned long long)frame, heap_lazy_bytes / 1048576.0,
                __atomic_load_n(&heap_size, __ATOMIC_ACQUIRE) / 1048576.0, (unsigned long long)heap_lazy_faults);
+}
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the guest heap and physical maps, the kernel region's bump and commit, the
+// moved stacks, and the lazily written ranges with their array's room.
+void mem_sizes(PerfSizes *s) {
+    plat_mutex_lock_shared(&lock);
+    uint64_t heap = heap_size, alias = alias_bytes, stacks = nstack_maps;
+    plat_mutex_unlock_shared(&lock);
+    plat_mutex_lock_shared(&klock);
+    uint64_t kused = kbump ? kbump - RT_KERNEL_BASE : 0, kcom = kcommitted ? kcommitted - RT_KERNEL_BASE : 0;
+    plat_mutex_unlock_shared(&klock);
+    plat_mutex_lock_shared(&frz_lock);
+    uint64_t lz = (uint64_t)lz_n, lzc = (uint64_t)lz_cap;
+    plat_mutex_unlock_shared(&frz_lock);
+    perf_size(s, "guest heap", PERF_SIZE_NONE, 0, heap);
+    perf_size(s, "guest physical maps", PERF_SIZE_NONE, 0, alias);
+    perf_size(s, "kernel region used", PERF_SIZE_NONE, 0, kused);
+    perf_size(s, "kernel region committed", PERF_SIZE_NONE, 0, kcom);
+    perf_size(s, "moved stacks", stacks, sizeof stack_maps / sizeof *stack_maps, PERF_SIZE_NONE);
+    perf_size(s, "lazy write-back ranges", lz, 0, PERF_SIZE_NONE);
+    perf_size(s, "their array's room", lzc, 0, PERF_SIZE_NONE);
 }

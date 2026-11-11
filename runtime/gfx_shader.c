@@ -3304,3 +3304,31 @@ void gfx_shader_carry_start(void) {
     }
     if (!plat_thread_spawn(carry_main, NULL, "shader carry", 0)) rt_log("gfx_shader: carry: cannot start the background pass");
 }
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the shader memory cache's entries with their SPIR-V and reflection bytes
+// (kept for the life of the process), the remembered failures, the translation and load queues, and the translator
+// processes. cache_lock is held shared: lookups go on, a translator's insert waits for the walk.
+void gfx_shader_sizes(PerfSizes *s) {
+    uint64_t n = 0, spv = 0, refl = 0, failed = 0, xq = 0, lq = 0, procs = 0, busy = 0;
+    plat_mutex_lock_shared(&cache_lock);
+    for (int i = 0; i < BUCKETS; i++)
+        for (const GfxShader *g = buckets[i]; g; g = g->next) n++, spv += g->words * 4, refl += g->reflection_size;
+    plat_mutex_unlock_shared(&cache_lock);
+    plat_mutex_lock(&failed_lock);
+    for (int i = 0; i < FAILED_N; i++) failed += failed_used[i] != 0;
+    plat_mutex_unlock(&failed_lock);
+    plat_mutex_lock(&X.lock);
+    for (const XJob *j = X.head; j; j = j->next) xq++;
+    for (const XJob *j = X.lhead; j; j = j->next) lq++;
+    plat_mutex_unlock(&X.lock);
+    plat_mutex_lock(&S.lock);
+    for (int i = 0; i < MAX_SVC; i++) procs += S.s[i].child != NULL, busy += S.s[i].busy != 0;
+    plat_mutex_unlock(&S.lock);
+    perf_size(s, "shader memory cache", n, 0, spv + refl);
+    perf_size(s, "of it reflection", PERF_SIZE_NONE, 0, refl);
+    perf_size(s, "failed shader keys", failed, FAILED_N, PERF_SIZE_NONE);
+    perf_size(s, "translations queued", xq, 0, PERF_SIZE_NONE);
+    perf_size(s, "shader loads queued", lq, 0, PERF_SIZE_NONE);
+    perf_size(s, "translator processes", procs, MAX_SVC, PERF_SIZE_NONE);
+    perf_size(s, "busy", busy, 0, PERF_SIZE_NONE);
+}

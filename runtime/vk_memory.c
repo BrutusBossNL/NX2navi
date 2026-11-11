@@ -68,7 +68,9 @@ typedef struct PoolRec {
     uint8_t pm_cur, pm_prev;           // replay: the places in their frame (vk_sub_in_frame, 7 the rest) of the submissions
                                        // that synced it, in frame pm_frame and in the one before (NX2NAVI_PRESNAP_PLACE)
     uint32_t wb_sub;                   // replay: the last submission that wrote mirror bytes back to guest memory
-    uint32_t retry_sub;                // replay: a mirror refused for the VRAM budget is asked again from here, 0 never
+    uint32_t retry_sub;                // replay: a mirror refused for the VRAM budget or a failed allocation is asked
+                                       // again from here, 0 never
+    uint8_t refused_why;               // replay: the MR_* reason of its refusal, for the counts when it is asked again
     uint8_t asked_room;                // replay: its refusal already asked the textures for room (once until it gets one)
     uint8_t twin;                      // MS_ON: the table's writes reach guest memory too (twin_wanted); 0: the mirror only
     uint32_t vd_wrote_sub, vd_use_sub; // verify mode: the last submission that bound it written / used its mirror
@@ -281,7 +283,7 @@ static void destroy_rec(VkCtx *c, PoolRec *r) {
     free(r);
 }
 
-int vk_pool_init(pool_t *p) {
+static int pool_init(pool_t *p) {
     VkCtx *c = vk_ctx();
     if (!c) { rt_log("vk: MemoryPoolInitialize before vk_init"); return 0; }
     // The GPU never sees a GPU_NO_ACCESS pool, except a physical one (0x189; 1.4.3 also 0x18c, CPU-visible) through the
@@ -356,7 +358,7 @@ static uint32_t gpa_cover(uint64_t a) {
 
 static void gpa_retire(void *arg) { destroy_rec(vk_ctx(), arg); }
 
-void vk_pool_fini(pool_t *p) {
+static void pool_fini(pool_t *p) {
     VkCtx *c = vk_ctx();
     if (!c) return;
     pidx_ent e;
@@ -404,6 +406,21 @@ void vk_pool_fini(pool_t *p) {
     // mark it used): its buffer outlives the submission being recorded too
     else if (r->kind == POOL_PHYS && !r->used) vk_completion_add(vk_sync_issued() + 1, gpa_retire, r);
     else destroy_rec(c, r);
+}
+
+// NX2NAVI_TRACE=perf: a pool's initialize and finalize, with their imports, allocations, uploads and GPU waits, marked
+// as work a frame can wait for (perf.c perf_mark_add).
+int vk_pool_init(pool_t *p) {
+    uint64_t t0 = perf_mark_begin();
+    int r = pool_init(p);
+    perf_mark_end(PERF_M_POOL, t0, p->size);
+    return r;
+}
+
+void vk_pool_fini(pool_t *p) {
+    uint64_t t0 = perf_mark_begin(), size = p->size;
+    pool_fini(p);
+    perf_mark_end(PERF_M_POOL, t0, size);
 }
 
 // pool_lock held: the device address table follows a MapVirtual request on [lo, hi) of virtual pool v. Ranges it
@@ -609,6 +626,11 @@ static void vram_log(uint64_t frame);
 static void outside_watch(uint64_t frame);
 
 static volatile uint64_t mirror_frame;   // the frame vk_mem_census last saw, for mirror_sync's log lines
+
+// NX2NAVI_TRACE=perf: the 600-frame memory lines now, at a segment's end and once a scene has settled (perf.c).
+void vk_mem_snapshot(uint64_t frame) {
+    if (rt_trace & RT_TRACE_PERF) vram_log(frame);
+}
 
 void vk_mem_census(uint64_t frame) {
     mirror_frame = frame;
@@ -2034,10 +2056,15 @@ static void mbarrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags
 
 static void refuse(PoolRec *r, int why, const char *what) {
     r->mstate = MS_REFUSED;
-    r->retry_sub = why == MR_BUDGET ? (msub + RETRY_SUBS ? msub + RETRY_SUBS : 1) : 0;
+    // A failed device-local allocation is asked again as a budget refusal is: memory that was short at the pool's
+    // first use may be there 600 submissions later, and a pool never asked again was read over the bus until the game
+    // finalized it. Untracked and overlapping pools stay refused: nothing about them changes.
+    r->retry_sub = why == MR_BUDGET || why == MR_ALLOC ? (msub + RETRY_SUBS ? msub + RETRY_SUBS : 1) : 0;
+    r->refused_why = (uint8_t)why;
     uint64_t n = r->import_hi - r->import_lo;
-    static volatile int32_t logged;   // budget refusals are asked again (vk_mem_use): a few lines in all
-    if (plat_inc64(&m_refused_n[why]) <= 4 && plat_inc32(&logged) <= 12) {
+    static volatile int32_t logged[MR_N];   // four lines per reason: the refusals asked again would repeat theirs
+    plat_inc64(&m_refused_n[why]);
+    if (plat_inc32(&logged[why]) <= 4) {
         char f[160];
         flag_names(r->flags, f, sizeof f);
         rt_log("mem: pool %#llx+%#llx (%s) stays imported: %s", (unsigned long long)r->lo, (unsigned long long)r->size,
@@ -2457,8 +2484,8 @@ void vk_mem_gpa_sync(uint64_t fence) {
 void vk_mem_use(VkMemSpan *sp) {
     PoolRec *r = sp->pool;
     if (r->mstate == MS_REFUSED && r->retry_sub && (int32_t)(msub - r->retry_sub) >= 0 && evict_enabled()) {
-        plat_dec64(&m_refused_n[MR_BUDGET]);   // counted again if refused again
-        plat_add64(&m_refused_bytes[MR_BUDGET], -(int64_t)(r->import_hi - r->import_lo));
+        plat_dec64(&m_refused_n[r->refused_why]);   // counted again if refused again
+        plat_add64(&m_refused_bytes[r->refused_why], -(int64_t)(r->import_hi - r->import_lo));
         plat_inc64(&m_retries);
         r->mstate = MS_NONE, r->retry_sub = 0;   // refuse sets it again
     }
@@ -4255,4 +4282,36 @@ void vk_mem_shutdown(void) {
     plat_mutex_lock(&gen_lock);
     for (uint64_t i = 0; i < GEN_CHUNKS; i++) free(gen_chunk[i]), gen_chunk[i] = NULL, free(cgen_chunk[i]), cgen_chunk[i] = NULL;
     plat_mutex_unlock(&gen_lock);
+}
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): pool records, VRAM mirrors, the deferred destruction list, upload batches,
+// the staging cache and arena, the write-back merge snapshot pool and the shadow storage's base copies. Counters only:
+// cmd_lock is taken by every upload and release, so nothing is walked under it.
+void vk_mem_sizes(PerfSizes *s) {
+    plat_mutex_lock_shared(&pool_lock);
+    uint64_t pools = (uint64_t)pool_index.n, phys = (uint64_t)nphys;
+    plat_mutex_unlock_shared(&pool_lock);
+    plat_rmutex_lock(&cmd_lock);
+    uint64_t dead_n = (uint64_t)ndead, infl = (uint64_t)ninflight, spare_b = (uint64_t)nspare, stg_n = (uint64_t)stg_ncache,
+             stg_b = (uint64_t)stg_cache_bytes, arena_n = (uint64_t)narena_free;
+    plat_rmutex_unlock(&cmd_lock);
+    plat_mutex_lock(&snap_pool_lock);
+    uint64_t snap_n = (uint64_t)nsnap_pool, snap_b = snap_pool_bytes;
+    plat_mutex_unlock(&snap_pool_lock);
+    plat_mutex_lock(&shadow_lock);
+    uint64_t sb = s_sb_pages;
+    plat_mutex_unlock(&shadow_lock);
+    perf_size(s, "pool records", pools, 0, PERF_SIZE_NONE);
+    perf_size(s, "of them physical", phys, 0, PERF_SIZE_NONE);
+    perf_size(s, "VRAM mirrors", (uint64_t)__atomic_load_n(&m_live_n, __ATOMIC_RELAXED), 0,
+              (uint64_t)__atomic_load_n(&m_live_bytes, __ATOMIC_RELAXED));
+    perf_size(s, "deferred destructions", dead_n, 0, PERF_SIZE_NONE);
+    perf_size(s, "upload batches in flight", infl, 0, PERF_SIZE_NONE);
+    perf_size(s, "spare upload batches", spare_b, 0, PERF_SIZE_NONE);
+    perf_size(s, "staging cache", stg_n, STG_CACHE, stg_b);
+    perf_size(s, "free staging arena chunks", arena_n, ARENA_KEEP, arena_n * ARENA_CHUNK);
+    perf_size(s, "write-back snapshot pool", snap_n, SNAP_POOL_N, snap_b);
+    perf_size(s, "shadow base copies", sb, 0, sb * SB_PAGE);
+    // the page generations handed out so far (gen_now, 32 bits, no wrap handling): how fast a session uses them up
+    perf_size(s, "page generations handed out", (uint64_t)__atomic_load_n(&gen_now, __ATOMIC_RELAXED), 0, PERF_SIZE_NONE);
 }

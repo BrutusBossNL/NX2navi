@@ -2105,8 +2105,14 @@ void kern_bind_system_event(Cpu *c, uint64_t ev, int autoclear) {
     plat_mutex_lock(&g_se_lock);
     int i = 0;
     while (i < g_nse && g_se[i].ev != ev) i++;
-    if (i == g_nse) {
-        if (g_nse == (int)(sizeof g_se / sizeof *g_se)) rt_fatal("kern_bind_system_event: table full");
+    if (i == g_nse && g_nse == (int)(sizeof g_se / sizeof *g_se)) {
+        // Full: entries are never removed, and a long session binds events at new addresses (two per reload of a
+        // save). An entry whose event the guest destroyed (its state byte is 0, or its memory is gone) gives its slot.
+        i = 0;
+        while (i < g_nse && mem_readable(g_se[i].ev + SE_STATE, 1) && se_live(g_se[i].ev)) i++;
+        if (i == g_nse) rt_fatal("kern_bind_system_event: table full (%d live system events)", g_nse);
+        g_se[i].ev = ev;
+    } else if (i == g_nse) {
         g_se[g_nse++].ev = ev;
     }
     g_se[i].wh = wh;
@@ -2320,4 +2326,24 @@ int kern_svc(Cpu *c, uint32_t imm) {
                tid == prof_replay_tid ? " (the replay thread)" : "");
     }
     return r;
+}
+
+// NX2NAVI_TRACE=perf "mem: sizes" (perf.c): guest threads, the handle table, the system-event table and fibers, each
+// against its fixed size (the tables are fatal when full).
+void kern_sizes(PerfSizes *s) {
+    uint64_t threads = 0, handles = 0, fibers = 0, ses;
+    plat_mutex_lock_shared(&G);
+    for (RtThread *t = g_all; t; t = t->all) threads++;
+    for (int i = 0; i < MAX_H; i++) handles += g_h[i].type != 0;
+    plat_mutex_unlock_shared(&G);
+    plat_mutex_lock_shared(&g_se_lock);
+    ses = (uint64_t)g_nse;
+    plat_mutex_unlock_shared(&g_se_lock);
+    plat_mutex_lock_shared(&g_fiber_lock);
+    for (int i = 0; i < FIBER_MAX; i++) fibers += g_fibers[i] != NULL;
+    plat_mutex_unlock_shared(&g_fiber_lock);
+    perf_size(s, "guest threads", threads, 0, PERF_SIZE_NONE);
+    perf_size(s, "handles", handles, MAX_H, PERF_SIZE_NONE);
+    perf_size(s, "system events", ses, sizeof g_se / sizeof *g_se, PERF_SIZE_NONE);
+    perf_size(s, "fibers", fibers, FIBER_MAX, PERF_SIZE_NONE);
 }
