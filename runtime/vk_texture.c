@@ -1617,8 +1617,70 @@ static uint64_t key_hash(const TexKey *k) {   // FNV-1a; make_key zeroes the key
     return h;
 }
 
+// Drops for a low commit that come back (tex_lock held throughout). A texture dropped because the system's commit ran
+// low frees its memory only for as long as the game does not ask for it again; when it does, it is made and uploaded
+// again and holds the same memory as before. With other programs holding 49 of an 84 GB limit, the commit sat at the
+// low line for whole sessions: 340 to 590 released textures a second went, most were made again within seconds (178
+// re-uploads a second against 21 without the drops), and the uploads inside the draws held the texture lock and the
+// game's threads behind it, a 35-45 ms frame several times a second, while the commit stayed where it was.
+// So each drop under the commit rule notes its texture (by its key, CB_SLOTS slots, the newest wins), and a texture
+// made again within CB_WITHIN presents counts as come back. Over each CB_PERIOD, when at least CB_MIN_DROPS went and
+// half or more came back, the commit drops (released entries and idle live ones) pause for CB_HOLD_MIN presents,
+// doubled at each such period up to CB_HOLD_MAX; a period in which fewer came back ends the doubling. Below half the
+// low line (commit_critical) nothing pauses: there the commit running out ends the game.
+#define CB_SLOTS 8192
+#define CB_WITHIN PRESENTS(600)
+#define CB_PERIOD PRESENTS(240)
+#define CB_MIN_DROPS 64
+#define CB_HOLD_MIN PRESENTS(600)
+#define CB_HOLD_MAX PRESENTS(7200)
+static struct { uint64_t kh, frame; } cb_slot[CB_SLOTS];
+static uint64_t cb_drops, cb_backs, cb_t0, cb_hold, cb_hold_until;
+static uint64_t n_commit_back, n_commit_held;   // since the last perf line
+static int commit_critical, cb_logs;
+
+static uint64_t cb_key(const Tex *e) { return key_hash(&e->key) ^ (e->key.addr * 0x9e3779b97f4a7c15ull); }
+
+static void commit_drop_note(const Tex *e) {
+    uint64_t kh = cb_key(e);
+    cb_slot[kh & (CB_SLOTS - 1)].kh = kh, cb_slot[kh & (CB_SLOTS - 1)].frame = frames_now() | 1;
+    cb_drops++;
+}
+
+static void commit_back_note(const Tex *e) {   // a new entry
+    uint64_t kh = cb_key(e), now = frames_now();
+    typeof(cb_slot[0]) *s = &cb_slot[kh & (CB_SLOTS - 1)];
+    if (s->kh != kh || !s->frame || now - s->frame > CB_WITHIN) return;
+    s->frame = 0;
+    cb_backs++, n_commit_back++;
+}
+
+// 1 while the commit drops pause (above); judges the period that ended.
+static int commit_drops_held(void) {
+    uint64_t now = frames_now();
+    if (now - cb_t0 >= CB_PERIOD) {
+        if (cb_drops >= CB_MIN_DROPS && cb_backs * 2 >= cb_drops) {
+            cb_hold = cb_hold ? (cb_hold * 2 < CB_HOLD_MAX ? cb_hold * 2 : CB_HOLD_MAX) : CB_HOLD_MIN;
+            cb_hold_until = now + cb_hold;
+            if (cb_logs < 12) {
+                cb_logs++;
+                rt_log("vk: commit low, but %llu of the %llu textures dropped for it were made again within %llu presents: "
+                       "the commit drops pause for %llu presents", (unsigned long long)cb_backs,
+                       (unsigned long long)cb_drops, (unsigned long long)CB_WITHIN, (unsigned long long)cb_hold);
+            }
+        } else if (cb_drops >= CB_MIN_DROPS) {
+            cb_hold = 0;
+        }
+        cb_t0 = now, cb_drops = cb_backs = 0;
+    }
+    if (commit_critical || now >= cb_hold_until) return 0;
+    n_commit_held++;
+    return 1;
+}
+
 // destroy_tex with the reason, which every caller gives.
 static void drop_tex(Tex *e, int why) {
+    if (why == DROP_COMMIT || why == DROP_IDLE_COMMIT) commit_drop_note(e);
     n_drop_by[why]++;
     if (rt_trace & RT_TRACE_PERF)
         drops[ndrops++ % DROPS_N] = (DropRec){key_hash(&e->key), e->key.addr, frames_now(), (uint32_t)e->t.d.format,
@@ -1630,6 +1692,7 @@ static void drop_tex(Tex *e, int why) {
 // A new entry: the frame, and the drop of its descriptor's last entry when the ring still holds it.
 static void origin_made(Tex *e) {
     e->og_frame = frames_now();
+    commit_back_note(e);
     if (!(rt_trace & RT_TRACE_PERF)) return;
     uint64_t kh = key_hash(&e->key), n = ndrops < DROPS_N ? ndrops : DROPS_N;
     for (uint64_t i = 1; i <= n; i++) {   // newest first
@@ -1953,9 +2016,11 @@ static int commit_is_low(void) {
     double proc, used, limit;
     plat_commit_info(&proc, &used, &limit);
     int low = 0;
+    commit_critical = 0;
     if (commit_free_mb && used >= 0 && limit > 0) {
         double want = commit_free_mb > 0 ? (double)commit_free_mb : limit / 10 > 4096 ? limit / 10 : 4096;
         low = limit - used < want;
+        commit_critical = limit - used < want / 2;   // the pause for drops that come back ends here
     }
     double dev = 0;   // device-local memory in use, MB: in the commit (plat_commit_counts_vram), not in RAM (see above)
     VkCtx *c = vk_ctx();
@@ -2573,13 +2638,15 @@ static void sweep_pressure(void) {   // tex_lock held
         if (tex_evict && freed < over) evict_disused(over - freed);
     }
     int low = commit_is_low(), more = 0;   // more: the released entries have stale ones left for the next check
+    int held = low && commit_drops_held();   // the commit drops came back (commit_back_note)
     if (rel_head) {
         drop_overwritten();
         uint64_t cap = released_cap_bytes();
         if (rel_bytes > cap) drop_stale(cap, &n_cap_drops, DROP_CAP);
-        if (rel_bytes > COMMIT_LOW_KEEP && low) more = drop_stale(COMMIT_LOW_KEEP, &n_commit_drops, DROP_COMMIT) == PRESSURE_STEP;
+        if (rel_bytes > COMMIT_LOW_KEEP && low && !held)
+            more = drop_stale(COMMIT_LOW_KEEP, &n_commit_drops, DROP_COMMIT) == PRESSURE_STEP;
     }
-    if (low && !more) commit_evict();
+    if (low && !more && !held) commit_evict();
 }
 
 // ---------------------------------------------------------------- per-frame texture work (vk.h VK_TS_*)
@@ -4003,13 +4070,14 @@ void vk_texture_new_submit(void) {
                (unsigned long long)untr);
         n_checks = 0;
         rt_log("perf: frame %llu: released textures kept %d (%.0f MiB of own memory), dropped past the size limit %llu, "
-               "under VRAM pressure %llu, under commit pressure %llu (%llu checks went on to live textures with the "
-               "released ones still above their bound); idle live textures evicted %llu (%.1f MiB); "
+               "under VRAM pressure %llu, under commit pressure %llu (made again soon after %llu, checks pausing those drops %llu; "
+               "%llu checks went on to live textures with the released ones still above their bound); idle live textures evicted %llu (%.1f MiB); "
                "unsampled ones evicted %llu (%.1f MiB), retiring %d (%.1f MiB), freed %llu, taken back while retiring "
                "%llu, back %llu, held %u (marks read %u); images reused %llu, made %llu, pool bindings not tried %llu, "
                "superseded taken back %llu; render targets overwritten at another address %llu, dropped unused %llu",
                (unsigned long long)f * 60, nreleased, rel_bytes / 1048576.0, (unsigned long long)n_cap_drops,
                (unsigned long long)n_pressure_drops, (unsigned long long)n_commit_drops,
+               (unsigned long long)n_commit_back, (unsigned long long)n_commit_held,
                (unsigned long long)n_commit_past, (unsigned long long)n_evict, n_evict_bytes / 1048576.0,
                (unsigned long long)n_disuse, n_disuse_bytes / 1048576.0, nretiring, retiring_bytes / 1048576.0,
                (unsigned long long)n_retire_freed, (unsigned long long)n_retire_cancel,
@@ -4017,6 +4085,7 @@ void vk_texture_new_submit(void) {
                (unsigned long long)n_reuse_new, (unsigned long long)n_bind_skips, (unsigned long long)n_restarts,
                (unsigned long long)n_overwritten, (unsigned long long)n_over_drops);
         n_cap_drops = n_pressure_drops = n_commit_drops = n_commit_past = n_evict = n_evict_bytes = 0;
+        n_commit_back = n_commit_held = 0;
         n_disuse = n_disuse_bytes = n_disuse_back = n_retire_freed = n_retire_cancel = 0;
         n_reused = n_reuse_new = n_bind_skips = n_restarts = n_overwritten = n_over_drops = 0;
         rt_log("perf: frame %llu: texture origins: released entries dropped past RELEASED_MAX %llu, replaced by another "
