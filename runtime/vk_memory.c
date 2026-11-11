@@ -1152,7 +1152,8 @@ static int query_stamp(uint64_t lo, uint64_t hi, uint32_t g) {
 // copy-ins that overwrote a store through the table, per pool; the write-backs that moved bytes into a page the CPU
 // had written since its copy-in (cpu_wrote_since); the bytes both sides changed since their base copy (taken from the
 // CPU at a copy-in, from the GPU at a fence); what the copy-ins cost by kind.
-// NX2NAVI_SHADOW=1/0 forces the mode on or off; the default is on for Linux and Wine.
+// NX2NAVI_SHADOW=1/0 forces the mode on or off; the default is on for Linux and Wine, except for NVIDIA's own driver on
+// Linux, where imports ran about twice as fast on 0.7.1 (mirror_mode).
 #define SB_PAGE 4096ull
 static PlatMutex shadow_lock = PLAT_MUTEX_INIT;   // after pool_lock; before gen_lock
 static PoolRec **stouch;                          // shadow_lock: pools resolved since the last sync
@@ -2003,7 +2004,7 @@ static PlatMutex mirror_stat_lock = PLAT_MUTEX_INIT;
 static volatile int64_t m_live_n, m_live_bytes, m_refused_n[MR_N], m_refused_bytes[MR_N];
 static volatile int64_t m_flush_calls, m_flush_bytes, v_pages, v_skipped, v_mismatch;
 
-static void mirror_mode(int discrete) {
+static void mirror_mode(int discrete, int nvidia_own) {
     const char *e = cfg_value("NX2NAVI_MEMORY");
     int mode = discrete ? 1 : 0;   // 0 import, 1 mirror, 2 verify
     const char *why = discrete ? "auto, discrete gpu" : "auto, uma";
@@ -2033,7 +2034,13 @@ static void mirror_mode(int discrete) {
 #ifdef _WIN32
     shadow_on = sh && *sh ? strcmp(sh, "0") != 0 : plat_is_wine();
 #else
-    shadow_on = !sh || !*sh || strcmp(sh, "0");
+    // NVIDIA's own driver imports guest memory without the cost shadow storage avoids on amdgpu (re-protecting imported
+    // pages), so there the copies are only the slower path: in Kokiri Forest on 0.7.1 (RTX 4090, driver 615.78) imports
+    // with VRAM mirrors ran at 51.9 frames a second and the copies at 27.4, and the copies hold about 5 GB. What a
+    // shader stores through the device address table into a pool with a shadow copy also does not come back to guest
+    // memory (vk_gpa.c). The pools stay imports unless NX2NAVI_SHADOW asks for the copies. The open driver for the same
+    // cards keeps the copies: it is not measured. The AppImage's play.sh has set the same for this driver since 0.6.0.
+    shadow_on = sh && *sh ? strcmp(sh, "0") != 0 : !nvidia_own;
 #endif
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
                           sh && *sh ? " (NX2NAVI_SHADOW)" : "");
@@ -3899,7 +3906,7 @@ void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDevic
                               f & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT ? " LAZY" : "");
     }
     rt_log("%s", line);
-    mirror_mode(discrete);
+    mirror_mode(discrete, vk_caps.driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY);
 }
 
 // ---------------------------------------------------------------- upload batches and deferred destruction

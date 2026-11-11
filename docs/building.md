@@ -282,7 +282,11 @@ Forest (1.1.1, RTX 4090) that costs about 1 ms a frame (copy-in 0.5 ms, write-ba
 after a frame's first submission covers the write-backs there (`runtime/vk_sync.c`, "the executed timeline"): the game
 rewrites what those passes wrote without a fence, and a write-back that landed after the rewrite left the GPU adding
 light onto its own last output, the whole scene brighter for a frame. `NX2NAVI_SHADOW=1` turns it on under Windows too. The Steam Deck's RADV has `VK_EXT_external_memory_host` as
-well: the shadow copies are chosen for the measured cost above, not for a missing extension.
+well: the shadow copies are chosen for the measured cost above, not for a missing extension. NVIDIA's own driver on Linux
+imports instead (`NX2NAVI_SHADOW=1` brings the copies back): it imports guest memory without that cost, so there the
+copies are only the slower path. In Kokiri Forest on 0.7.1 (RTX 4090, driver 615.78), imports with VRAM mirrors ran at
+51.9 frames a second and the copies at 27.4; on that version the copies also flickered between two looks almost every
+frame, which the wait for the write-backs under shadow storage (`vk_sync_exec_wait`) has since addressed.
 
 The device address table (`runtime/vk_gpa.c`) names a pool's shadow copy as it names an import, so shaders follow guest
 pointers into either. A shader that reads through the table resolves nothing, so the pool it reaches is not queued for
