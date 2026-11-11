@@ -942,6 +942,10 @@ class App:
         def scheme(d):
             self.settings['theme'] = names[(names.index(art.theme) + d) % len(names)]
             self.settings.save()
+            # the rows again: Background Color and Button Color are there only while the scheme is Custom; the
+            # cursor stays on Color Scheme, the first row
+            art.set_theme(self.settings['theme'], self.custom_colors())
+            self.rows = self.rows_customize()
             self.apply_look()
 
         def dim(d):
