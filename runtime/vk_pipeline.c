@@ -2653,15 +2653,19 @@ static int is_src1(unsigned f) { return f >= NVN_BLEND_FUNC_SRC1_COLOR && f <= N
 // Runs per draw (gkey_fill, target_wmask): only the blend factors of blend-enabled targets are read until one is SRC1,
 // which NX2navi never sets (0 of 876 pipelines in the field and fight saves).
 // NX2NAVI_VK_NOOPT=1: pipelines built without the driver's optimiser, for a driver whose shader compiler crashes on
-// one (the test switch for such a report); slower shaders, the same picture.
-static VkPipelineCreateFlags noopt_flag(void) {
+// one (the test switch for such a report); slower shaders, the same picture. mesh: only pipelines with task and mesh
+// stages, the foliage's, whose optimiser is the suspect in device losses some minutes into a forest on AMD GPUs.
+static VkPipelineCreateFlags noopt_flag_for(int mesh) {
     static int on = -1;
     if (on < 0) {
-        on = cfg_int("NX2NAVI_VK_NOOPT") != 0;
-        if (on) rt_log("vk_pipeline: pipelines built without the driver's optimiser (NX2NAVI_VK_NOOPT)");
+        const char *v = cfg_value("NX2NAVI_VK_NOOPT");
+        on = !strcmp(v, "mesh") ? 2 : strcmp(v, "0") != 0;
+        if (on) rt_log("vk_pipeline: %s built without the driver's optimiser (NX2NAVI_VK_NOOPT)",
+                       on == 2 ? "pipelines with task and mesh stages" : "pipelines");
     }
-    return on ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT : 0;
+    return on == 1 || (on == 2 && mesh) ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT : 0;
 }
+static VkPipelineCreateFlags noopt_flag(void) { return noopt_flag_for(0); }
 
 // ---- pipeline creation feedback (NX2NAVI_PIPE_FEEDBACK, default 1; 0 off)
 // Each pipeline, library and compute build asks the driver whether pipeline-cache.bin (P.cache) held it
@@ -2957,7 +2961,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
                                        .stageCount = n_stages, .pStages = stages, .pVertexInputState = mesh ? NULL : &vi,
                                        .pInputAssemblyState = mesh ? NULL : &ia, .pViewportState = &vp, .pRasterizationState = &rs,
                                        .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &cb,
-                                       .pDynamicState = &dy, .layout = l->layout, .flags = noopt_flag()};
+                                       .pDynamicState = &dy, .layout = l->layout, .flags = noopt_flag_for(mesh)};
     if (k->fbl & 1) pi.flags |= VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
     if (k->fbl & 2) pi.flags |= VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
     VkPipelineCreationFeedbackCreateInfo fci;
@@ -2966,6 +2970,15 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     uint64_t p0 = perf_begin();
     crash_note("a graphics pipeline", s->vs, s->fs, s->ts);
     VkResult r = pipe_create(0, &pi, &pipe);
+    if (r == VK_ERROR_UNKNOWN && !(pi.flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT)) {
+        // A compiler that gives up on a pipeline (AMD's Windows driver answers VK_ERROR_UNKNOWN) may still build it
+        // without its optimiser: one more try that way, slower shaders for that pipeline instead of a draw left out.
+        static int told;
+        if (!told++) rt_log("vk_pipeline: the driver could not build a graphics pipeline (VK_ERROR_UNKNOWN): built again "
+                            "without its optimiser (logged once)");
+        pi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+        r = pipe_create(0, &pi, &pipe);
+    }
     plat_crash_context(NULL);
     perf_end(PERF_PIPE, p0);   // counts on the render thread only, so background builds stay out of it
     if (r != VK_SUCCESS) {
