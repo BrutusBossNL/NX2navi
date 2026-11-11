@@ -19,7 +19,8 @@ Run: python tests/launcher_test.py   (Python 3.14 for the zstd tests; the window
   step with the system's C compiler, and its windres call under folders with spaces (a script in windres's place)
 - jobs: an install driven by a fake make_game.py, with and without the prompts row
 - Add to Steam: the binary shortcuts file read and written back unchanged, a shortcut added and updated in place
-- the look: the colour schemes, the background picture's fitting and kept copy, the sound effects (low by default,
+- the look: the colour schemes with the Custom one, its colour square and a typed hex code, the background picture's
+  fitting below the title band and kept copy, the sound effects (low by default,
   only the game's own select and back sounds, decoded from a made-up .bwav)
 - the window: --selftest draws every screen (skipped without a display)
 """
@@ -2708,6 +2709,71 @@ class LookTest(Tmp):
             pic.keep(text, store)
         with self.assertRaises(pic.PictureError):
             pic.load(self.tmp / 'gone.png')
+
+    def test_the_custom_scheme(self):
+        art = self.art
+        self.assertEqual(art.custom_palette({}), art.BASE)          # nothing picked yet: the first scheme's colours
+        pal = art.custom_palette({'background': '#3A7BD5', 'buttons': '#802020'})
+        self.assertEqual(pal['tint_mid'], '#3a7bd5')                 # the picked colours exactly where they stand in
+        self.assertEqual(pal['label_mid'], '#802020')
+        self.assertEqual(pal['orange'], art.BASE['orange'])          # the other groups stay
+        for group, ref in (('scene', 'tint_mid'), ('wood', 'label_mid')):
+            for k in art.GROUPS[group]:   # lighter than the picked colour where the first scheme's is lighter
+                if art.hls(art.BASE[k])[1] > art.hls(art.BASE[ref])[1] + 0.02:
+                    self.assertGreater(art.hls(pal[k])[1], art.hls(pal[ref])[1], k)
+        self.assertGreater(art.luminance(pal['text']), 0.6)          # light text on dark buttons
+        light = art.custom_palette({'buttons': '#f0e0a0'})
+        self.assertLess(art.luminance(light['text']), 0.3)           # and dark text on light ones
+        self.assertEqual(art.custom_palette({'buttons': 'red', 'background': None}), art.BASE)
+        held = art.PALETTE
+        try:
+            self.assertEqual(art.set_theme('custom', {'buttons': '#802020', 'other': '#000000'}), 'custom')
+            self.assertEqual(held['label_mid'], '#802020')
+            self.assertEqual(art.CUSTOM, {'background': art.BASE['tint_mid'], 'buttons': '#802020'})
+            art.set_theme('custom', {})
+            self.assertEqual(dict(held), art.BASE)
+        finally:
+            art.set_theme('forest', {})
+
+    def test_the_colour_square(self):
+        import numpy as np
+        art = self.art
+        sq = art.color_square(40, 30, 0.0)                          # red
+        self.assertEqual(sq.shape, (30, 40, 4))
+        self.assertTrue(np.allclose(sq[0, -1, :3], [1, 0, 0], atol=0.05))   # top right: the full colour
+        self.assertLess(sq[-1, :, :3].max(), 0.05)                   # the bottom row: black
+        self.assertLess(np.ptp(sq[0, 0, :3]), 0.05)                  # left: grey
+        bar = art.hue_bar(60, 4)
+        self.assertTrue(np.allclose(bar[0, 20, :3], [0, 1, 0], atol=0.1))     # a third of the way: green
+        self.assertTrue(np.allclose(bar[0, 40, :3], [0, 0, 1], atol=0.1))     # two thirds: blue
+
+    def test_a_typed_hex_code(self):
+        try:
+            from launcher.ui.app import App
+        except ImportError:
+            self.skipTest('needs tkinter')
+        parse = App.parse_hex
+        self.assertEqual(parse('#3A7BD5'), (58, 123, 213))
+        self.assertEqual(parse(' 3a7bd5 '), (58, 123, 213))
+        self.assertEqual(parse('#37d'), (0x33, 0x77, 0xdd))
+        self.assertIsNone(parse('#3A7BD'))
+        self.assertIsNone(parse('blue'))
+
+    def test_the_picture_starts_below_the_band_and_is_never_stretched(self):
+        import numpy as np
+        art, pic = self.art, self.picture
+        store = self.tmp / 'background.npy'
+        old = np.zeros((1024, 1600, 3), dtype=np.uint8)              # a copy an older launcher kept for the window
+        old[:, :800, 0] = 255                                         # left half red: a circle stays a circle
+        np.save(store, old)
+        self.assertEqual(pic.kept_shape(store), (1024, 1600))
+        back = pic.kept(store, 1000, 580)                             # cut to the new shape, not squeezed
+        self.assertEqual(back.shape, (580, 1000, 3))
+        self.assertGreater(back[:, 490, 0].min(), 0.95)
+        self.assertLess(back[:, 510, 0].max(), 0.05)
+        img = art.backdrop(200, 128, 1.0, np.ones((116, 200, 3), dtype=np.float32), 0.0, top=12)
+        self.assertLess(img[6, 100, :3].max(), 0.2)                   # under the band: the scheme's colour
+        self.assertGreater(img[20, 100, :3].min(), 0.7)               # from the band's end on: the picture
 
     def test_ppm(self):
         import numpy as np
