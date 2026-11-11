@@ -158,7 +158,6 @@ static void top_up(const VkCtx *c, uint32_t type) {
 static void headroom_main(void *arg) {
     (void)arg;
     __atomic_store_n(&H.tid, plat_thread_id(), __ATOMIC_RELEASE);
-    if (vk_vaddr_wanted()) rt_log("vk: headroom: thread %u", H.tid);   // names this thread in the address history (vk_vaddr.c)
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
     uint64_t watch = 0;   // memory types seen so far
     for (;;) {

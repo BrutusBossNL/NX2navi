@@ -73,7 +73,7 @@ static const char *const known[] = {
     "ZSTD_CHECK", "ZSTD_NATIVE",
     "BIND_REUSE", "DYN_DELTA", "STG_ARENA", "SUBMIT_BATCH", "ASTC_GPU_DESWIZZLE", "ASTC_SCRATCH_KEEP", "ASTC_ARENA",
     "TEXUP_LOG_MS", "DYN_RES", "DYN_RES_TARGET", "DYN_RES_STEP", "TEXTURE_DETAIL",
-    "RECORDER_CORE", "RECORDER_PRIO", "REPLAY_TIME", "LOCK_TIME", "POOL_CREATE_BUDGET", "POOL_CREATE_MS", "POOL_FINI_IDLE", "POOL_LOAD_BACKLOG", "POOL_LOAD_MS", "VA_REPORT",
+    "RECORDER_CORE", "RECORDER_PRIO", "REPLAY_TIME", "LOCK_TIME", "POOL_CREATE_BUDGET", "POOL_CREATE_MS", "POOL_FINI_IDLE", "POOL_LOAD_BACKLOG", "POOL_LOAD_MS",
     "VMA_BLOCK_MB", "ASTC_BC_PROBE", "SYNC_WAKE_ALL", "LOG_ASYNC", "DEVICE_LOST_AT",
     "COOP", "COOP_NAME", "COOP_SERVER", "COOP_PORT", "COOP_ROOM", "COOP_AUTO", "COOP_DROP",   // co-op (coop.c); the last three have no menu row
     "COOP_PROGRESS", "COOP_ITEMS", "COOP_SONGS", "COOP_QUEST", "COOP_KEYS", "COOP_RUPEES", "COOP_AMMO",   // the room's rules (coop_game.c)
@@ -142,7 +142,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"VK_NAN_PRESERVE", "performance"}, {"VK_NAN_BITS", "performance"},
     {"TRACE", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"PASS_CRUMBS", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"},
     {"WB_FENCE_LIMIT", "diagnostics"}, {"WB_MERGE", "diagnostics"}, {"WB_EXACT", "diagnostics"}, {"MEM_CENSUS", "diagnostics"}, {"WB_NO_REUP", "diagnostics"}, {"WB_PROBE", "diagnostics"}, {"WB_SPLIT", "performance"}, {"SHADOW_BULK_WRITE", "performance"}, {"WB_LAZY", "performance"}, {"HEAP_LAZY", "performance"}, {"BARRIER_GAME", "performance"}, {"MESH_AHEAD", "performance"}, {"MESH_FALLBACK", "performance"}, {"MESH_FALLBACK_MB", "performance"}, {"WB_LAZY_TOUCH", "diagnostics"}, {"WB_LAZY_CHUNK", "performance"}, {"FLUSH_UPLOAD", "diagnostics"}, {"GPA_TWIN_MAX_KB", "diagnostics"},
-    {"WB_MERGE_MAX", "diagnostics"}, {"MV_SURVEY", "diagnostics"}, {"TEXUP_LOG_MS", "diagnostics"}, {"VA_REPORT", "diagnostics"},
+    {"WB_MERGE_MAX", "diagnostics"}, {"MV_SURVEY", "diagnostics"}, {"TEXUP_LOG_MS", "diagnostics"},
     {"VMA_BLOCK_MB", "diagnostics"}, {"ASTC_BC_PROBE", "diagnostics"}, {"DEVICE_LOST_AT", "diagnostics"},
 };
 
@@ -322,7 +322,6 @@ static const CfgMeta metas[] = {
     {"VMA_BLOCK_MB", "64", "16..256", RESTART},   // vk_headroom.c vk_vma_block_size
     {"ASTC_BC_PROBE", "0", "0|1", RESTART},       // vk_texture.c astc_probe_alpha
     {"PASS_CRUMBS", "", "0|1", RESTART},   // vk_crumbs.c pass marks; unset: VK_AMD_buffer_marker only
-    {"VA_REPORT", "0", "0|1|2", RESTART},   // vk_vaddr.c GPU address history for a lost device's report; 2: call stacks
     {"DEVICE_LOST_AT", "0", "0..1000000000", RESTART},   // vk_sync.c lost_at_due: a test of the lost device's end
     {"INPUT_RECORD", "", NULL, RESTART},
 };

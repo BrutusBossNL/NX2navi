@@ -791,12 +791,6 @@
 # 1: samples each new ASTC texture's blocks on the CPU and logs how many are opaque ("ASTC alpha probe" lines), which
 # could be stored at half the video memory. Slows area loads. Default: 0.
 # astc_bc_probe = 0
-# GPU address history for the report of a lost graphics device, on drivers with
-# VK_EXT_device_address_binding_report. 1: the game keeps every address range the driver binds to a buffer or image and
-# every range it unbinds; after a lost device the log names what held each faulting address, and vaddr-history.txt
-# beside the log holds the whole history. 2: also the call stack that made each range of 1 MiB or more, which slows
-# area loads enough to hide a fault that depends on timing. Default: 0.
-# va_report = 0
 # Flight recorder: keeps the last frames and saves them to a flight folder next to the folder of nx2navi.exe when a frame
 # takes longer than flight_spike_ms (0 to 60000).
 # flight = 0
