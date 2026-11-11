@@ -173,11 +173,30 @@ void vk_sync_cb_stats(char *out, size_t n) {
     plat_mutex_unlock(&st_lock);
 }
 
+// NX2NAVI_DEVICE_LOST_AT=n (a test of the lost device's end, vk_device.c vk_device_lost_check): the n-th hand-over to
+// the queue is not made and counts as one the driver answered with a lost device. 0 or unset: never.
+static int lost_at_due(void) {
+    static int at = -1;
+    static int32_t calls;
+    if (at < 0) {
+        const char *e = cfg_get("NX2NAVI_DEVICE_LOST_AT");
+        at = e && *e ? atoi(e) : 0;
+        if (at < 0) at = 0;
+        if (at) rt_log("vk: queue hand-over %d will be taken as a lost device (NX2NAVI_DEVICE_LOST_AT)", at);
+    }
+    return at && ++calls == at;   // queue lock held
+}
+
 static void hold_flush_locked(VkCtx *c) {
     if (!H.n) return;
-    VkResult r = vkQueueSubmit2(c->gfx_queue, (uint32_t)H.n, H.si, VK_NULL_HANDLE);
+    if (vk_device_is_lost()) {   // the run is ending: the held submissions are dropped, nothing reaches the queue
+        H.n = 0, H.last = 0;
+        __atomic_store_n(&held_n, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    VkResult r = lost_at_due() ? VK_ERROR_DEVICE_LOST : vkQueueSubmit2(c->gfx_queue, (uint32_t)H.n, H.si, VK_NULL_HANDLE);
     if (r != VK_SUCCESS) {
-        vk_device_fault_report(r);
+        vk_device_lost_check(r, "the submit of the replay's command buffers");
         rt_fatal("vk: vkQueueSubmit2 of %d held submissions up to value %llu failed (%d)", H.n,
                  (unsigned long long)H.last, (int)r);
     }
@@ -480,7 +499,7 @@ static void completion_main(void *arg) {
                                       .pSemaphores = &c->timeline, .pValues = &want};
             VkResult r = vkWaitSemaphores(c->device, &wi, tmo);   // 100 ms: stop is checked between waits
             if (r != VK_SUCCESS && r != VK_TIMEOUT) {
-                vk_device_fault_report(r);
+                vk_device_lost_check(r, "the completion thread's wait for a submission");
                 rt_fatal("vk: vkWaitSemaphores failed (%d; device lost?)", (int)r);
             }
             // A lost device is reported here, where it is first seen. Unchecked, the value was taken as it came: the
@@ -489,12 +508,20 @@ static void completion_main(void *arg) {
             // checked queue call failed, an upload's, which then read as the cause.
             r = vkGetSemaphoreCounterValue(c->device, c->timeline, &reached);
             if (r != VK_SUCCESS) {
-                vk_device_fault_report(r);
+                vk_device_lost_check(r, "the completion thread's read of the submissions' timeline");
                 rt_fatal("vk: the submissions' timeline could not be read (%d; device lost?)", (int)r);
             }
+            // Both calls may succeed on a lost device and give a value its submissions never reached. So before a
+            // new value counts, the device is asked once more with a call of its own (vk_device.c
+            // vk_device_lost_poll, which ends the run when it is lost).
+            if (reached > __atomic_load_n(&done, __ATOMIC_ACQUIRE)) vk_device_lost_poll();
             plat_mutex_lock(&st_lock);
             if (reached > issued) reached = issued;
         }
+        // Another thread saw the device lost (vk_lost): no value counts from here on and no callback runs. Theirs is
+        // work that never finished: frees of what the GPU may still hold, records handed out again, counter reports.
+        // done stays where it is, the waiters stay asleep, and the thread that saw the loss ends the process.
+        if (vk_device_is_lost()) break;
         while (qn && queue[qhead].fence <= reached) {
             Pending p = queue[qhead++];
             qn--;
@@ -511,7 +538,9 @@ static void completion_main(void *arg) {
                 if (k == cbt_n && cbt_n < CBT_N) cbt[cbt_n++].fn = p.fn;
                 if (k < cbt_n) cbt[k].ns += c1 - c0, cbt[k].calls++;
             }
+            if (vk_device_is_lost()) break;
         }
+        if (vk_device_is_lost()) break;
         if (reached > done) {
             uint64_t ev = __atomic_load_n(&exw_value, __ATOMIC_ACQUIRE);
             if (ev && reached >= ev) {   // the side effects a waiter on exec_tl went ahead of are through
@@ -671,6 +700,9 @@ uint64_t vk_sync_reserve(void) {
 
 static uint64_t submit(const uint64_t *handles, int n, void (*probe_record)(VkCommandBuffer, void *), void *arg) {
     vk_sync_start();
+    // The run is ending (vk_device.c vk_device_lost_check): nothing is recorded or submitted and no value is issued.
+    // The value returned is the last one issued; a wait for it sleeps until the process ends.
+    if (vk_device_is_lost()) return __atomic_load_n(&issued, __ATOMIC_ACQUIRE);
     VkCtx *c = vk_ctx();
     plat_mutex_lock(&sub_lock);
     vk_mem_dirty_submit();   // NX2NAVI_TRACE=perf: what a mirror would upload before this submit
@@ -808,6 +840,9 @@ int vk_sync_exec_wait(uint64_t value, uint64_t timeout_ns) {
     // in such a callback too: a wait that returned before it let the game rewrite a pool that an older write-back
     // then overwrote (Kokiri Forest: a sky coefficient the game had reset came back, and the world flickered washed
     // out).
+    // The run is ending (vk_device.c vk_device_lost_check): no wait on the lost device, and none for a value that
+    // will not be reached.
+    if (vk_device_is_lost()) return __atomic_load_n(&done, __ATOMIC_ACQUIRE) >= value;
     if (!vk_sync_wb_split()) return vk_sync_fence_wait(value, timeout_ns);
     if (__atomic_load_n(&done, __ATOMIC_ACQUIRE) >= value) return 1;
     uint64_t p0 = perf_begin();
@@ -817,7 +852,7 @@ int vk_sync_exec_wait(uint64_t value, uint64_t timeout_ns) {
                               .pSemaphores = &exec_tl, .pValues = &value};
     VkResult r = vkWaitSemaphores(c->device, &wi, timeout_ns);
     if (r != VK_SUCCESS && r != VK_TIMEOUT) {
-        vk_device_fault_report(r);
+        vk_device_lost_check(r, "the wait for a submission's commands");
         rt_fatal("vk: the wait for a submission's commands failed (%d; device lost?)", (int)r);
     }
     perf_end(PERF_FENCE, p0);
@@ -875,6 +910,84 @@ void vk_sync_shutdown(void) {
         __atomic_store_n(&started, 0, __ATOMIC_RELEASE);
     }
     plat_mutex_unlock(&start_lock);
+}
+
+// ---- --probe-devlost (host.h): the end of a run whose device is lost, without a lost device and without a window.
+// The device itself stays healthy, so what the driver answers after a real loss is not covered here.
+// 1. A callback queued for the next value runs when the timeline reaches it (the check that step 2 can fail).
+// 2. With vk_lost set, as after another thread saw the loss: a callback queued for the next value does not run although
+//    the timeline reaches it, done stays, and a submit, an upload flush and a wait for a submission's commands return
+//    at once without issuing a value.
+// 3. With vk_lost clear again, four threads report a lost device at the same moment: the process must end with
+//    RT_LOST_EXIT, one report and one FATAL line in the output (tests/device_lost_check.py counts them). Reaching the
+//    end of this function is the failure.
+static volatile int32_t probe_ran[2];
+static void probe_lost_cb(void *arg) { plat_xchg32((volatile int32_t *)arg, 1); }
+static void probe_lost_record(VkCommandBuffer cb, void *arg) { (void)cb; plat_xchg32((volatile int32_t *)arg, 1); }
+static volatile int32_t probe_go;
+static void probe_lost_thread(void *arg) {
+    static const char *const where[4] = {"probe thread 0", "probe thread 1", "probe thread 2", "probe thread 3"};
+    while (!__atomic_load_n(&probe_go, __ATOMIC_ACQUIRE)) {}
+    vk_device_lost_check(VK_ERROR_DEVICE_LOST, where[(intptr_t)arg & 3]);
+}
+
+// Makes the timeline reach the next value as a finished submission would: issued moves on, the semaphore is signalled
+// from the host, and the completion thread is woken. Returns the value.
+static uint64_t probe_lost_advance(VkCtx *c, volatile int32_t *ran) {
+    plat_mutex_lock(&st_lock);
+    uint64_t v = issued + 1;
+    plat_mutex_unlock(&st_lock);
+    vk_completion_add(v, probe_lost_cb, (void *)ran);
+    VkSemaphoreSignalInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = c->timeline, .value = v};
+    if (vkSignalSemaphore(c->device, &si) != VK_SUCCESS) return 0;
+    plat_mutex_lock(&st_lock);
+    __atomic_store_n(&issued, v, __ATOMIC_RELEASE);
+    plat_cond_broadcast(&cv_work);
+    plat_mutex_unlock(&st_lock);
+    return v;
+}
+
+int vk_sync_probe_devlost(void) {
+    if (!vk_init()) {
+        printf("probe-devlost: SKIP (no Vulkan device on this machine)\n");
+        return 0;
+    }
+    vk_sync_start();
+    VkCtx *c = vk_ctx();
+    uint64_t v1 = probe_lost_advance(c, &probe_ran[0]);
+    for (int i = 0; i < 200 && !plat_cas32(&probe_ran[0], 1, 1); i++) plat_sleep_ms(10);
+    if (!v1 || !plat_cas32(&probe_ran[0], 1, 1) || !vk_sync_fence_wait(v1, 2000000000ull)) {
+        printf("probe-devlost: FAILED: a callback did not run on a healthy device (value %llu)\n", (unsigned long long)v1);
+        return 1;
+    }
+    printf("probe-devlost: healthy device: the callback of value %llu ran\n", (unsigned long long)v1);
+
+    plat_xchg32(&vk_lost, 1);
+    uint64_t v2 = probe_lost_advance(c, &probe_ran[1]);
+    plat_sleep_ms(500);   // five of the completion thread's 100 ms waits
+    int ran = plat_cas32(&probe_ran[1], 1, 1), reached = vk_sync_fence_done() >= v2;
+    volatile int32_t recorded = 0;
+    uint64_t before = vk_sync_issued(), t0 = plat_now_ms();
+    uint64_t got = vk_sync_probe_submit(probe_lost_record, (void *)&recorded);
+    vk_upload_flush(1);
+    int waited = vk_sync_exec_wait(v2, 5000000000ull);
+    uint64_t ms = plat_now_ms() - t0;
+    int ok = v2 && !ran && !reached && !recorded && got == before && vk_sync_issued() == before && !waited && ms < 1000;
+    printf("probe-devlost: device marked lost: callback of value %llu %s, done %s, submit %s (issued %llu -> %llu), "
+           "the paths returned in %llu ms\n", (unsigned long long)v2, ran ? "RAN" : "not run", reached ? "ADVANCED" : "stayed",
+           recorded ? "RECORDED" : "not recorded", (unsigned long long)before, (unsigned long long)vk_sync_issued(),
+           (unsigned long long)ms);
+    if (!ok) { printf("probe-devlost: FAILED\n"); return 1; }
+
+    printf("probe-devlost: four threads report the loss now; the process must end with exit code %d\n", RT_LOST_EXIT);
+    fflush(stdout);
+    plat_xchg32(&vk_lost, 0);
+    for (intptr_t i = 0; i < 4; i++) plat_thread_spawn(probe_lost_thread, (void *)i, "probe lost", 0);
+    plat_sleep_ms(50);
+    __atomic_store_n(&probe_go, 1, __ATOMIC_RELEASE);
+    plat_sleep_ms(20000);
+    printf("probe-devlost: FAILED: still running 20 s after the loss was reported\n");
+    return 1;
 }
 
 // NX2NAVI_TRACE=perf "mem: sizes" (perf.c): command buffer slots (read without sub_lock, which a whole replay holds),

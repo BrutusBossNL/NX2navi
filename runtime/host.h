@@ -191,6 +191,8 @@ typedef struct { uint64_t base, size; uint32_t state, attr, perm, ipc, device, p
 void mem_init(void);                                       // reserve every region; on a collision re-run the process
                                                            // (up to 20 times, NX2NAVI_REEXEC), then fatal
 const RtGuestLayout *mem_layout(void);
+int mem_start_note(int probe);                             // a game's start: a warning line when the free commit is
+                                                           // below the game's need (mem_need.h); 1 when it is
 void mem_guest_census(uint64_t frame);   // NX2NAVI_TRACE=perf: committed bytes per guest region
 void mem_lazy_heap_report(uint64_t frame);   // NX2NAVI_TRACE=perf: the lazy heap's faults since the last line
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr);                      // 0x01
@@ -428,6 +430,7 @@ int probe_discord(void);                                   // discord_rpc.c
 int probe_loader(void), probe_kernel(void), probe_ipc(void), probe_services(void), probe_fs(void);
 int probe_gfx_abi(void);                                   // gfx_abi_probe.c
 int probe_vkdevice(void);                                 // vk_device.c
+int vk_sync_probe_devlost(void);                          // vk_sync.c: --probe-devlost
 int probe_nvn(void), probe_nvn_tex(void);                  // nvn_probe.c, nvn_tex_probe.c
 int probe_window(void);                                    // gfx_window_probe.c
 int probe_shader(void);                                    // gfx_shader.c
@@ -440,6 +443,7 @@ int vk_pipeline_prepare_shaders(void);                     // vk_pipeline.c: --p
 int vk_pipeline_warm_shaders(void);                        // vk_pipeline.c: --warm-shaders (tools/build_game.py)
 int vk_pipeline_prepare_pipelines(void);                   // vk_pipeline.c: --prepare-pipelines (the shared pipeline list)
 int vk_pipeline_probe_prewarm(void);                       // vk_pipeline.c: --probe-prewarm
+int vk_pipeline_probe_buildgate(void);                     // vk_pipeline.c: --probe-buildgate
 // vk_device.c: the drivers' own shader caches beside the exe (MESA_SHADER_CACHE_DIR, on NVIDIA's Linux driver
 // __GL_SHADER_DISK_CACHE_PATH and _SIZE) in the environment, once; before any thread can load a Vulkan driver
 void vk_driver_cache_env(void);

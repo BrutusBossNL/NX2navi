@@ -57,6 +57,7 @@ typedef struct Tex {
     uint64_t retire_frame;        // gfx_counters.frames when it was retired
     uint64_t retire_due;          // vk_sync_issued once every pool set was taken since (0: not yet); destroyed after it
     int uploaded, released;
+    uint64_t up_retry;            // gfx_counters.frames from which an upload that had no memory is tried again (upload)
     uint64_t uid;                 // names the entry in its bucket's released set (tex_gen_flip); 0 until its first release
     uint64_t rel_frame;           // gfx_counters.frames when it was released (drop_stale)
     uint32_t back_gap;            // most presents between a release and its taking back so far (stale_after)
@@ -2361,8 +2362,20 @@ static int astc_arena(void) {
 // Copies the whole storage into the image (every level and layer the image has). An image made without its top levels
 // (texture detail, VkTexImage.skip) has the game's level lv + skip at its level lv: the loops below run over the image's
 // levels and read the storage at the game's.
+// How long an upload whose decode had no memory waits for its next try (upload, up_wait): half a second of frames. A
+// try costs the copy of the texture's blocks into staging memory, so not every frame.
+#define UP_RETRY_FRAMES 30
+static uint64_t n_up_retry;
+uint64_t vk_texture_upload_retries(void) { return __atomic_load_n(&n_up_retry, __ATOMIC_RELAXED); }
+
+// 1 while a texture that is not uploaded waits for its next try (e->up_retry; 0 for one never tried).
+static int up_wait(const Tex *e) {
+    return e->up_retry && __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) < e->up_retry;
+}
+
 static void upload(Tex *e) {
     static volatile int32_t n_bad, n_undecoded, n_split;
+    int no_mem = 0;   // a part's ASTC decode had no memory: the texture is uploaded again later
     const tex_t *t = &e->t;
     const nvn_texdesc *d = &t->d;
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
@@ -2526,10 +2539,12 @@ static void upload(Tex *e) {
                                      e->pub.image, e->pub.aspect, rbuf);
             perf_end(PERF_ASTC, a0);
             vk_texstat_time(VK_TS_ASTC, a0);
-            if (!checked) {
-                log_limited(&n_undecoded, "ASTC texture %#llx (fmt %#x %ux%u) not decoded on the GPU: left as it was",
-                            (unsigned long long)e->pub.addr, d->format, d->width, d->height);
+            if (checked <= 0) {
+                log_limited(&n_undecoded, "ASTC texture %#llx (fmt %#x %ux%u) not decoded on the GPU: left as it was%s",
+                            (unsigned long long)e->pub.addr, d->format, d->width, d->height,
+                            checked < 0 ? " and tried again later (no memory for the decode)" : "");
                 e->chash_ok = 0;   // the image does not hold the bytes hashed above: the next write uploads, equal or not
+                no_mem |= checked < 0;
             }
         } else {
             for (k = k0; k < k1; k++) rg[k].bufferOffset += soff;
@@ -2544,7 +2559,7 @@ static void upload(Tex *e) {
                     parts);
     if (acheck) {   // waits for the GPU
         vk_upload_flush(1);
-        if (checked) {
+        if (checked > 0) {
             vmaInvalidateAllocation(vk_ctx()->vma, ralloc, 0, VK_WHOLE_SIZE);
             astc_check(e, raw_copy, ar, (int)n, rmap);
         }
@@ -2570,6 +2585,18 @@ static void upload(Tex *e) {
     e->wt_n = 0;
     e->uploaded = 1;
     e->n_up++;
+    // The decode had no memory (vk_astc_record: its scratch buffer failed while the video memory was used up), so the
+    // image does not hold this content: a new image holds nothing, an older one what it held before. Counted as
+    // uploaded, it stayed that way until the game next wrote the storage, which for most textures is never. It counts
+    // as not uploaded instead, and make_fresh and make_fresh_snap upload it again UP_RETRY_FRAMES frames on, when
+    // the evictions under memory pressure have had time to make room; again and again until one succeeds.
+    if (no_mem) {
+        e->uploaded = 0;
+        e->up_retry = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + UP_RETRY_FRAMES;
+        __atomic_add_fetch(&n_up_retry, 1, __ATOMIC_RELAXED);
+    } else {
+        e->up_retry = 0;
+    }
     perf_end(PERF_TEX, p0);
     vk_texstat_time(VK_TS_UPLOAD, u0);
     vk_texstat_add(VK_TS_UPLOAD, 0, src_bytes);
@@ -2623,6 +2650,7 @@ static void make_fresh(Tex *e) {
     if (!e->pub.mirrored || e->pub.gpu_owned) return;
     uint64_t size = e->t.L.size;
     if (!e->uploaded) {
+        if (up_wait(e)) return;
         vk_mem_changed(e->pub.addr, size, 0, &e->wgen);   // resets the write bits before the storage is read
         upload(e);
         return;
@@ -2639,6 +2667,7 @@ static void make_fresh(Tex *e) {
 // after it, during this replay) keeps its write-watch bit and is caught by the next submission's snapshot.
 static void make_fresh_snap(Tex *e) {
     if (!e->pub.mirrored || e->pub.gpu_owned) return;
+    if (!e->uploaded && up_wait(e)) return;
     uint32_t now;
     n_checks++;
     int ch = vk_mem_changed_snap(e->pub.addr, e->t.L.size, e->uploaded ? e->wgen : 0, submit_epoch, &now);
@@ -3634,7 +3663,7 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
         free(ar);
     }
     if (!agpu) vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)g->nz, rg);
-    else if (!done) log_limited(&n_astc, "WriteTexels of ASTC texture %#llx not decoded on the GPU: left as it was",
+    else if (done <= 0) log_limited(&n_astc, "WriteTexels of ASTC texture %#llx not decoded on the GPU: left as it was",
                                 (unsigned long long)e->pub.addr);
     barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
     vk_upload_end();

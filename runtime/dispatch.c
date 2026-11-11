@@ -59,14 +59,13 @@ void rt_fatal_notes(void) {
 
 __attribute__((weak)) void fs_save_crash_wait(void) {}   // fs_host.c; builds without it (the unit checks) have no saves
 
-void rt_fatal(const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
+// The fatal line, the report's notes and what has to be flushed, then the exit with `code`.
+static void fatal_end(int code, const char *fmt, va_list ap) __attribute__((noreturn));
+static void fatal_end(int code, const char *fmt, va_list ap) {
     rt_log_sync();   // main.c: the lines queued for the log thread, then these, written here
     rt_log_raw("FATAL: ", 7);
     rt_vlogf(fmt, ap);
     rt_log_raw("\n", 1);
-    va_end(ap);
     // A failed allocation (malloc, realloc, VirtualAlloc) means the commit limit was reached: this line tells a leak of
     // ours (process private bytes near the limit) from a machine short of page file.
     double proc, used, limit;
@@ -81,7 +80,19 @@ void rt_fatal(const char *fmt, ...) {
     rtss_limit_restore();
     fflush(stdout);
     fflush(stderr);
-    _Exit(70);
+    _Exit(code);
+}
+
+void rt_fatal(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fatal_end(RT_FATAL_EXIT, fmt, ap);
+}
+
+void rt_fatal_code(int code, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fatal_end(code, fmt, ap);
 }
 
 static const RtModule *module_at(uint64_t pc) {

@@ -161,6 +161,15 @@
 # (0: no limit). Each large shader costs the driver 1-4 GB; on a 31 GB machine four of them took the process from 15 to
 # 29 GB and the game stuttered, so raise this only on a machine with room to spare.
 # big_build_max_mb = 4096
+# Memory kept free of pipelines built ahead of their first use (at the start and in the background during play), in MB
+# of commit headroom: RAM plus page file not yet promised to a program. Such a build starts only while this much stays
+# free beyond what the builds already running are counted for; otherwise it waits or is left to the moment the game
+# first needs the pipeline, which can hold a frame once but does not push a full machine into paging. A pipeline a
+# draw is waiting for is always built. 0: no check. Default: 4096.
+# build_free_mb = 4096
+# What each such build is counted for while it runs, in MB: the working memory of the video driver's shader compiler.
+# A very large compute shader is counted for 4096. Default: 64.
+# build_reserve_mb = 64
 # 1: the log says how many pipelines came from pipeline-cache.bin; 2 also logs every compute pipeline built. 0: off.
 # pipe_feedback = 1
 # pipeline-cache.bin larger than this (MB) starts empty and is rewritten (0: no limit).
@@ -729,6 +738,11 @@
 # Each walk holds the address-space lock for 100-240 ms and delays the next frame by as much, so they are off unless
 # asked for.
 # mem_census = 0
+# The memory the game is taken to need, in MB of commit (RAM plus page file not yet promised to a program). When less
+# is free at the start, the log gets a warning line: short of memory the game stutters, loses textures or stops with
+# an out-of-memory or lost-device error. The default is what the game took in play at 3840x2160 on an RTX 5090; the
+# video card's memory counts on Windows. 0: no warning. Default: 24576.
+# mem_need_mb = 24576
 # The size in MiB (16 to 256) of the blocks the renderer takes video memory in. A block goes back to the driver only once
 # everything in it is freed, so smaller blocks hold less free space after area changes; larger ones need fewer
 # allocations while an area loads. Default: 64.
@@ -750,6 +764,10 @@
 # last one it finished. Unset: on AMD GPUs (VK_AMD_buffer_marker). 1: also on NVIDIA GPUs
 # (VK_NV_device_diagnostic_checkpoints), which NVIDIA says costs a little. 0: off.
 # pass_crumbs = 1
+# A test of how the game ends when the video card stops answering (device lost): the hand-over to the GPU queue with
+# this number is not made and is taken as one the driver refused with a lost device. The log then holds one report and
+# one FATAL line, and the game ends with exit code 72. 0: never. Default: 0.
+# device_lost_at = 0
 # Once a second, puts the crash report's exception filter back if a GPU driver or an overlay loaded after the start set
 # its own in its place, and says so in the log. Without it, a crash in such a DLL can end the game with no FATAL line in
 # the log. 0: off.

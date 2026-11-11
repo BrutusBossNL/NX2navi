@@ -389,6 +389,27 @@ A change to what the library warm logs when the driver's cache of stage librarie
 `runtime/vk_pipeline.c` `lw_main`) passes `python tests\warm_hint_check.py`, which builds the header alone and checks
 the added text by GPU vendor and by why the cache was cold. No game files.
 
+A change to how a run ends when the GPU device is lost (`runtime/vk_device.c` `vk_device_lost_check`, the checks of
+`vk_lost` in the replay, upload and present paths, `runtime/vk_sync.c` `completion_main`) passes
+`python tests\device_lost_check.py <game exe>`, which runs the executable's `--probe-devlost`: with the device marked
+lost no completion callback runs and the submit, upload and wait paths return at once, and four threads that report a
+loss at the same moment end the process with exit code 72, one device report and one FATAL line. It needs a Vulkan
+device and opens no window; the device is not really lost, so what a driver answers after a loss is not covered.
+`device_lost_at = <n>` in `nx2navi.ini` ends a real run the same way at its n-th hand-over to the GPU queue.
+
+A change to the memory gate of the background pipeline builds (`runtime/vk_build_gate.h`, `runtime/vk_pipeline.c`
+`gate_enter`) passes `python tests\build_gate_check.py [<game exe>]`, which builds the header alone and checks what it
+admits and refuses and that builds under way count through their reservations. With the executable it also runs
+`--probe-buildgate` (no device, no window, no build) with the settings in effect, with `build_free_mb = 0` and with a
+value no machine has free. What the builders do when they are refused (`warm_builder`, `pipe_worker`, `lb_worker`,
+`lw_worker`) shows in a run's log: start the game with `build_free_mb` set above the machine's free commit and read the
+`vk_pipeline:` lines that name the commit headroom.
+
+A change to the start's memory warning (`runtime/mem_need.h`, `runtime/memory.c` `mem_start_note`) passes
+`python tests\mem_need_check.py [<game exe>]`, which builds the header alone and checks when the game's need counts
+as short. With the executable it also runs `--probe-memneed` (it prints the machine's commit and the answer and
+starts nothing) with `mem_need_mb` at 0, at 1 and at a value no machine has, and reads the warning line of the last.
+
 A change to where the lazy write-back is on by default (`runtime/wb_lazy_choice.h`, `runtime/vk_memory.c`
 `vk_mem_lazy_decide`) passes `python tests\wb_lazy_check.py`, which builds the header alone and checks the choice and
 its reason by platform, by GPU driver and by what the player set. No game files, no GPU.

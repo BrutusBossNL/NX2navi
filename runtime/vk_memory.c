@@ -2932,6 +2932,7 @@ static void mbarrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags
 // memory.c's fetch (frz_lock held there, so one at a time): [off, off + size) of the mirror h0 into the imported
 // buffer h1, after all the GPU work handed over so far.
 static void lazy_fetch(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size) {
+    if (vk_device_is_lost()) return;   // the run is ending (vk_device.c vk_device_lost_check): the bytes stay as they are
     VkCtx *c = vk_ctx();
     VkBufferCopy reg = {off, off, size};
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -2952,7 +2953,7 @@ static void lazy_fetch(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size) {
     vk_queue_unlock();
     if (r == VK_SUCCESS) r = vkWaitForFences(c->device, 1, &lz_fence, VK_TRUE, 10000000000ull);
     if (r != VK_SUCCESS) {
-        vk_device_fault_report(r);
+        vk_device_lost_check(r, "the submit or the wait that brings GPU writes down to guest memory");
         rt_fatal("vk: bringing %llu bytes the GPU wrote down to guest memory failed (%d)", (unsigned long long)size, (int)r);
     }
     vkResetFences(c->device, 1, &lz_fence);
@@ -4109,6 +4110,7 @@ void *vk_staging_at(VkDeviceSize size, VkBuffer *buf, VkDeviceSize *off) {
 }
 
 uint64_t vk_upload_flush(int wait) {
+    if (vk_device_is_lost()) return 0;   // the run is ending (vk_device.c vk_device_lost_check): no submit, no wait
     uint64_t f0 = kern_now_ns();
     plat_once(&cmd_once, cmd_init, NULL);
     plat_rmutex_lock(&cmd_lock);
@@ -4125,7 +4127,7 @@ uint64_t vk_upload_flush(int wait) {
         VkResult r = vkQueueSubmit(c->gfx_queue, 1, &si, open_b.fence);
         vk_queue_unlock();
         if (r != VK_SUCCESS) {
-            vk_device_fault_report(r);
+            vk_device_lost_check(r, "the submit of an upload batch");
             rt_fatal("vk: upload submit failed (%d)", (int)r);
         }
         if (ninflight == cap_inflight) grow((void **)&inflight, &cap_inflight, sizeof *inflight);
@@ -4138,7 +4140,7 @@ uint64_t vk_upload_flush(int wait) {
             // loop would spin for good, holding the upload lock, instead of the run ending with the device's report
             VkResult w = vkWaitForFences(c->device, 1, &inflight[0].fence, VK_TRUE, UINT64_MAX);
             if (w != VK_SUCCESS) {
-                vk_device_fault_report(w);
+                vk_device_lost_check(w, "the wait for an upload batch");
                 rt_fatal("vk: the wait for an upload failed (%d)", (int)w);
             }
             retire(c, 0);

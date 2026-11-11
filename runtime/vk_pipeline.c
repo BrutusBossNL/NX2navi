@@ -48,6 +48,7 @@
 #include "nvn_hmap.h"
 #include "platform/platform.h"
 #include "tex.h"
+#include "vk_build_gate.h"
 #include "vk_gpa.h"
 #include "vk_warm_hint.h"
 
@@ -3208,6 +3209,7 @@ static struct {
     Job *low, *low_tail;               // prebuild
     uint32_t inflight;                 // queued or running, both queues
     int low_running;                   // pool workers running a job taken from the low queue
+    int gate_shut;                     // pool workers the memory gate has refused a low job since it last admitted one
     PlatCond idle;           // with P.lock: no job queued or running
 } A = {.idle = PLAT_COND_INIT};
 
@@ -3250,6 +3252,7 @@ static struct {
     int warm;                          // vk_pipeline_prewarm owns the file (prebuild_start leaves it)
     uint32_t left;                     // prebuild jobs queued or running
     uint32_t built, failed, promoted;
+    uint32_t gate_ended;               // boot builders the memory gate ended (warm_builder)
     double t0;                         // now_ms() when the prebuild started
     double until;                      // now_ms() after which the boot builders stop (comment at prewarm_run); 0 none
 } K = {.io = PLAT_MUTEX_INIT};
@@ -3533,6 +3536,132 @@ static void lib_worker(void *arg) {
     }
 }
 
+// ---- the memory gate of the background builds (vk_build_gate.h)
+// Every pipeline built ahead of its first use passes here before it starts: the recorded pipelines the boot builds
+// (warm_builder), the pool's low queue during play (pipe_worker: the rest of the recorded pipelines and the optimised
+// builds behind a fast link), the compute pipelines and stage libraries of the boot (lb_worker), the library warm
+// (lw_worker) and the large compute shaders (bg_main). A build a draw or a dispatch waits for never does: it is needed
+// now.
+// NX2NAVI_BUILD_FREE_MB (default 4096; 0 no check): the system commit headroom that stays free of them.
+// NX2NAVI_BUILD_RESERVE_MB (default 64): what one build under way is taken to cost the driver's compiler while it
+// runs; a large compute shader reserves GATE_BIG_MB. A build starts only when the headroom holds the part kept free,
+// the reservations of the builds under way and its own.
+// Measured on the machine this was written on (RTX 5090, 73,154 MB commit limit, warm driver cache): the boot's 3,898
+// recorded pipelines on 16 threads raised the process commit by 3,054 MB in 2.2 s, and the 4,066 compute pipelines and
+// libraries after them, together with the game's own start, by another 9,824 MB. A device was lost on that machine
+// at 56,673 of 65,531 MB system commit right after such a prebuild.
+// The commit is read at most every GATE_SAMPLE_MS: sixteen builders finishing a cached pipeline every half millisecond
+// would otherwise ask the system thousands of times a second. What the builds took since the last reading is covered
+// by their reservations.
+#define GATE_BIG_MB 4096.0
+#define GATE_SAMPLE_MS 100.0
+#define GATE_WAIT_MS 30000.0   // how long a boot or warm builder waits for room before it leaves the rest to their first use
+static struct {
+    PlatMutex lock;
+    BuildGate g;
+    double est, used, limit, at;
+    int init;
+    int off;   // a preparation run (seed_pipelines): nothing is refused, there is no game to keep room for
+    uint64_t refused;
+} GATE = {.lock = PLAT_MUTEX_INIT};
+
+// 1 when a build estimated at est MB may start, and then est is reserved until gate_leave. est 0: an ordinary build
+// (NX2NAVI_BUILD_RESERVE_MB), whose estimate *took returns for gate_leave.
+static int gate_enter(double est, double *took) {
+    plat_mutex_lock(&GATE.lock);
+    if (!GATE.init) {
+        GATE.init = 1;
+        GATE.g.free_mb = strtod(cfg_value("NX2NAVI_BUILD_FREE_MB"), NULL);
+        GATE.est = strtod(cfg_value("NX2NAVI_BUILD_RESERVE_MB"), NULL);
+        if (GATE.est < 0) GATE.est = 0;
+        GATE.at = -GATE_SAMPLE_MS;
+    }
+    if (GATE.off) GATE.g.free_mb = 0;
+    double now = now_ms();
+    if (now - GATE.at >= GATE_SAMPLE_MS) {
+        double proc;
+        plat_commit_info(&proc, &GATE.used, &GATE.limit);
+        GATE.at = now;
+    }
+    if (est <= 0) est = GATE.est;
+    int ok = build_gate_enter(&GATE.g, GATE.used, GATE.limit, est);
+    if (!ok) GATE.refused++;
+    plat_mutex_unlock(&GATE.lock);
+    if (took) *took = est;
+    return ok;
+}
+
+static void gate_leave(double est) {
+    plat_mutex_lock(&GATE.lock);
+    build_gate_leave(&GATE.g, est);
+    plat_mutex_unlock(&GATE.lock);
+}
+
+// The gate's numbers for a log line that says why a builder stopped or waits.
+static const char *gate_text(char *buf, size_t n) {
+    plat_mutex_lock(&GATE.lock);
+    snprintf(buf, n, "system commit %.0f of %.0f MB, %.0f MB reserved for builds under way, %.0f MB kept free "
+                     "(NX2NAVI_BUILD_FREE_MB), %.0f MB a build (NX2NAVI_BUILD_RESERVE_MB)", GATE.used, GATE.limit,
+             GATE.g.reserved_mb, GATE.g.free_mb, GATE.est);
+    plat_mutex_unlock(&GATE.lock);
+    return buf;
+}
+
+// A boot or warm builder's wait for room: 1 with est reserved (*took), 0 when *stop was set or GATE_WAIT_MS passed
+// without room, which the caller takes as the end of its work. who names the builder for the log's one line a wait.
+static int gate_wait(const char *who, volatile int32_t *stop, double *took) {
+    double w0 = now_ms();
+    int waited = 0;
+    while (!gate_enter(0, took)) {
+        char g[256];
+        if (*stop) return 0;
+        if (!waited++) rt_log("vk_pipeline: %s: waiting for commit headroom (%s)", who, gate_text(g, sizeof g));
+        if (now_ms() - w0 > GATE_WAIT_MS) return 0;
+        for (int i = 0; i < 20 && !*stop; i++) plat_sleep_ms(100);
+    }
+    return 1;
+}
+
+// --probe-buildgate (host.h): the gate with this machine's commit and the settings in effect, without a device and
+// without a build. It prints what the settings and the system give, asks for sixteen ordinary builds and one large
+// one, and checks the answers against the same numbers: the builds admitted are those that fit with the earlier
+// ones' reservations, a refused one reserves nothing, and a builder's wait ends at once when its stop flag is set.
+// tests/build_gate_check.py runs it with build_free_mb at 0 (everything admitted) and at a value no machine has free
+// (everything refused).
+int vk_pipeline_probe_buildgate(void) {
+    double took = 0, big = 0;
+    int fails = 0, in = 0, want = 0;
+    int first = gate_enter(0, &took);
+    double free_mb = GATE.g.free_mb, used = GATE.used, limit = GATE.limit, est = took;
+    if (first) gate_leave(took);
+    printf("probe-buildgate: system commit %.0f of %.0f MB, %.0f MB kept free (NX2NAVI_BUILD_FREE_MB), %.0f MB a build "
+           "(NX2NAVI_BUILD_RESERVE_MB)\n", used, limit, free_mb, est);
+    double room = limit - used - free_mb;
+    for (int i = 0; i < 16; i++) {
+        want += free_mb <= 0 || limit < 0 || room - i * est >= est;   // the commit sample stays for GATE_SAMPLE_MS
+        in += gate_enter(0, &took);
+    }
+    double reserved = GATE.g.reserved_mb;
+    int big_in = gate_enter(GATE_BIG_MB, &big);
+    int big_want = free_mb <= 0 || limit < 0 || room - reserved >= GATE_BIG_MB;
+    printf("probe-buildgate: %d of 16 ordinary builds admitted (%d fit), %.0f MB reserved; a large compute build beside "
+           "them %s\n", in, want, reserved, big_in ? "admitted" : "refused");
+    if (in != want) fails++, printf("probe-buildgate: FAIL: %d admitted, %d fit\n", in, want);
+    if (reserved != in * est) fails++, printf("probe-buildgate: FAIL: %.0f MB reserved for %d builds\n", reserved, in);
+    if (big_in != big_want) fails++, printf("probe-buildgate: FAIL: the large build was %s\n", big_in ? "admitted" : "refused");
+    if (big_in) gate_leave(big);
+    for (int i = 0; i < in; i++) gate_leave(est);
+    if (GATE.g.reserved_mb != 0) fails++, printf("probe-buildgate: FAIL: %.0f MB still reserved\n", GATE.g.reserved_mb);
+    volatile int32_t stop = 1;
+    double t0 = now_ms();
+    int got = gate_wait("probe", &stop, &took);
+    if (got) gate_leave(took);
+    if (got != first || now_ms() - t0 > 1000)
+        fails++, printf("probe-buildgate: FAIL: a stopped builder's wait gave %d after %.0f ms\n", got, now_ms() - t0);
+    printf("probe-buildgate: an ordinary build is %s now; %s\n", first ? "admitted" : "refused", fails ? "FAILED" : "passed");
+    return fails ? 1 : 0;
+}
+
 static void pipe_worker(void *arg) {
     int me = (int)(intptr_t)arg;
     plat_mutex_lock(&P.lock);
@@ -3554,6 +3683,22 @@ static void pipe_worker(void *arg) {
         }
         Job *j = A.head;
         int lowrun = !j;
+        double held = 0;   // the low job's reservation at the memory gate
+        if (!j && !gate_enter(0, &held)) {
+            // No room for a background build now (gate_enter). The job stays queued: a draw that needs its pipeline
+            // moves it to the draw queue (promote), which wakes this wait; otherwise the gate is asked again in 2 s.
+            if (!A.gate_shut++) {
+                char g[256];
+                rt_log("vk_pipeline: background pipeline builds wait for commit headroom (%s); a pipeline a draw needs "
+                       "is still built at once", gate_text(g, sizeof g));
+            }
+            plat_cond_wait_ns(&work_cv, &P.lock, 2000000000ull);
+            continue;
+        }
+        if (!j && A.gate_shut) {
+            A.gate_shut = 0;
+            rt_log("vk_pipeline: background pipeline builds go on: the commit headroom is back");
+        }
         if (j) {
             if (!(A.head = j->next)) A.tail = NULL;
         } else {
@@ -3585,6 +3730,7 @@ static void pipe_worker(void *arg) {
                 else A.low_tail = j;
                 A.low = j;
                 A.low_running -= lowrun;
+                if (lowrun) gate_leave(held);
                 continue;
             } else if (f) {
                 vkDestroyPipeline(P.device, f, NULL);
@@ -3612,6 +3758,7 @@ static void pipe_worker(void *arg) {
             if (!--K.left && !K.loading) prebuild_report();
         }
         A.low_running -= lowrun;
+        if (lowrun) gate_leave(held);
         if (!--A.inflight) plat_cond_broadcast(&A.idle);
         plat_cond_broadcast(&done_cv);
         if (pipe && (!j->prebuild || j->demanded)) perf_count(PERF_CNT_PIPE_ASYNC);   // a draw waited for it
@@ -4014,11 +4161,23 @@ double vk_pipeline_building_ms(const VkPipeState *s) {
 static int id_cmp(const void *x, const void *y) { return memcmp(x, y, 32); }
 
 // Builds queued prebuild jobs until the low queue is empty or K.until passes, beside the pipe_worker pool (same
-// bookkeeping). Jobs left queued at K.until stay for the pool.
+// bookkeeping). Jobs left queued at K.until stay for the pool. So do those the memory gate refuses (gate_enter): a
+// builder it refuses ends, which leaves fewer builders compiling side by side while the others' reservations stand,
+// and none when the machine has no room; the pool builds what is left during play, when the gate lets it.
 static void warm_builder(void *arg) {
     (void)arg;
     plat_mutex_lock(&P.lock);
     while (A.low && !(K.until && now_ms() >= K.until)) {
+        double held;
+        if (!gate_enter(0, &held)) {
+            if (!K.gate_ended++) {
+                char g[256];
+                rt_log("vk_pipeline: prewarm: the boot builds fewer recorded pipelines side by side, or none: the commit "
+                       "headroom is short (%s). The rest are built in the background when there is room, or at their "
+                       "first draw", gate_text(g, sizeof g));
+            }
+            break;
+        }
         Job *j = A.low;
         if ((A.low = j->next)) A.low->prev = NULL;
         else A.low_tail = NULL;
@@ -4043,6 +4202,7 @@ static void warm_builder(void *arg) {
         if (!--A.inflight) plat_cond_broadcast(&A.idle);
         plat_cond_broadcast(&done_cv);
         free(j);
+        gate_leave(held);
     }
     plat_mutex_unlock(&P.lock);
     return;
@@ -4500,6 +4660,7 @@ static struct {
     size_t n_keep;                                     // e[0..n_keep): compute shaders whose pipeline stays (cu_keep)
     volatile int64_t next;
     volatile int32_t stop, running;
+    volatile int32_t short_mem;                        // the memory gate refused a build for GATE_WAIT_MS: the workers ended
     int threads;
     PlatThread *th[LB_MAX_THREADS];
     uint8_t clamp, poly, minus_w, samples;             // library state (GKey fields)
@@ -5103,12 +5264,15 @@ static void bg_queue(const GfxShader *cs, const uint8_t iid[32], uint64_t words)
 // A build of one of these shaders took the process up by 1-3 GB on an RTX 5090 and four at once by 16-19 GB on an
 // RTX 4090; started on a machine near its commit limit it can end the game. While the headroom is short the shader
 // waits, and if the game dispatches it first it is built there, as without the background builder.
-static int bg_room(double *used, double *limit) {
+// The builds under way elsewhere count through their reservations at the memory gate (gate_enter), where this build
+// then reserves GATE_BIG_MB of its own for as long as it runs, so the other background builds leave it its room.
+static int bg_room(double *used, double *limit, double *held) {
     static double need = -1;
     if (need < 0) need = strtod(cfg_value("NX2NAVI_BIG_BUILD_FREE_MB"), NULL);
     double proc;
     plat_commit_info(&proc, used, limit);
-    return need <= 0 || *limit < 0 || *limit - *used >= need;
+    if (!(need <= 0 || *limit < 0 || *limit - *used >= need)) return 0;
+    return gate_enter(GATE_BIG_MB, held);
 }
 
 // NX2NAVI_BIG_BUILD_MAX_MB (default 4096; 0 no cap): how far the builder may raise the process commit before it stops
@@ -5188,8 +5352,9 @@ static void bg_main(void *arg) {
             break;
         }
         int waited = 0, no_room = 0;
-        double w0 = now_ms();
-        while (!LB.stop && !bg_room(&used, &limit)) {   // not under P.lock: a dispatch builds it meanwhile
+        double w0 = now_ms(), held = -1;   // held: this build's reservation at the memory gate, -1 none
+        while (!LB.stop && !bg_room(&used, &limit, &held)) {   // not under P.lock: a dispatch builds it meanwhile
+            held = -1;
             if (!waited++)
                 rt_log("vk_pipeline: background compute build: waiting for commit headroom (system %.0f of %.0f MB, "
                        "NX2NAVI_BIG_BUILD_FREE_MB %s)", used, limit, cfg_value("NX2NAVI_BIG_BUILD_FREE_MB"));
@@ -5201,7 +5366,10 @@ static void bg_main(void *arg) {
             }
             plat_sleep_ms(2000);
         }
-        if (LB.stop || no_room) break;
+        if (LB.stop || no_room) {
+            if (held >= 0 && !no_room) gate_leave(held);   // stopped right after the gate let it in
+            break;
+        }
         plat_mutex_lock(&P.lock);
         int there = cs_flight_has(cs) || pipe_find(&k, sizeof k, h);   // a dispatch got to it first
         Layout *l = there ? NULL : compute_layout(cs, &B, &why);
@@ -5209,6 +5377,7 @@ static void bg_main(void *arg) {
         if (l) BG.building = cs;
         plat_mutex_unlock(&P.lock);
         if (!l) {
+            if (held >= 0) gate_leave(held);
             if (there) BG.there++;
             else BG.failed++, rt_log("vk_pipeline: background compute build: %s", why ? why : "no layout");
             continue;
@@ -5221,6 +5390,7 @@ static void bg_main(void *arg) {
         VkPipeline pipe = compute_create(cs, l, 0);
         own_cache = VK_NULL_HANDLE;
         double ms = now_ms() - t0;
+        if (held >= 0) gate_leave(held);
         // The pipeline stays: only a shader a run dispatched is queued here (lb_compute), and it is entered before
         // the merge below, so a dispatch that comes meanwhile finds it.
         plat_mutex_lock(&P.lock);
@@ -5432,6 +5602,18 @@ static void lb_worker(void *arg) {
             plat_mutex_unlock(&LB.stat);
             continue;
         }
+        // The memory gate (gate_wait): without room for another build the worker waits, and after GATE_WAIT_MS it and
+        // the other workers end. What they leave is built at its first dispatch or draw, as what a run never recorded.
+        double held;
+        if (LB.short_mem || !gate_wait("stage library prebuild", &LB.stop, &held)) {
+            if (!LB.stop && !plat_xchg32(&LB.short_mem, 1)) {
+                char g[256];
+                rt_log("vk_pipeline: stage library prebuild: ends here, at %zu of %zu variants: no commit headroom for "
+                       "another build (%s). The others are built when the game first uses them", i, LB.n,
+                       gate_text(g, sizeof g));
+            }
+            break;
+        }
         // A compute shader whose pipeline does not stay is read as a copy of this thread's own and released after its
         // build: kept in the shader cache's memory, the 3,900 of an installed copy's list were 240 MB of the process's
         // commit for shaders most runs never dispatch. A dispatch that does come reads its shader then (0.05 to
@@ -5453,12 +5635,13 @@ static void lb_worker(void *arg) {
             else lb_skip_lib();
         }
         if (owned) gfx_shader_release_private(sh);
+        gate_leave(held);
         plat_mutex_lock(&LB.stat);
         LB.done++;
         plat_mutex_unlock(&LB.stat);
     }
     if (!plat_dec32(&LB.running)) {
-        lb_report(LB.stop ? "stopped" : "done");
+        lb_report(LB.stop ? "stopped" : LB.short_mem ? "ended for want of commit headroom" : "done");
         fb_log("after the stage library prebuild");
         vk_mem_stage_log("the compute pipeline prebuild");
         bg_start();
@@ -5504,6 +5687,7 @@ static struct {
     size_t n;
     volatile int64_t next, done;
     volatile int32_t running, stop, started;
+    volatile int32_t short_mem;   // the memory gate refused a build for GATE_WAIT_MS: the warm ended for this run
     PlatThread *th[LW_MAX_THREADS + 1];
     int threads, strikes;
     uint32_t vendor;   // the GPU's vendor id, for what a cold cache's log line adds (vk_warm_hint.h)
@@ -5539,13 +5723,26 @@ static void lw_worker(void *arg) {
     for (;;) {
         size_t i = (size_t)plat_inc64(&LW.next) - 1;
         if (i >= LW.n || LW.stop) break;
+        // The memory gate (gate_wait): without room the warm waits, and after GATE_WAIT_MS it ends for this run.
+        // shader-warm.txt keeps saying "warming", so the next start goes on with it.
+        double held;
+        if (LW.short_mem || !gate_wait("library warm", &LW.stop, &held)) {
+            if (!LW.stop && !plat_xchg32(&LW.short_mem, 1)) {
+                char g[256];
+                rt_log("vk_pipeline: library warm: ends for this run at %lld of %zu prepared variants: no commit headroom "
+                       "for another build (%s). The next start goes on with it", (long long)LW.done, LW.n,
+                       gate_text(g, sizeof g));
+            }
+            break;
+        }
         lw_build(&LW.e[i]);
+        gate_leave(held);
         int64_t d = plat_inc64(&LW.done);
         if (d % 8000 == 0)
             rt_log("vk_pipeline: library warm: %lld of %zu prepared variants in %.0f s", (long long)d, LW.n,
                    (now_ms() - LW.t0) / 1000);
     }
-    if (!plat_dec32(&LW.running) && !LW.stop) {
+    if (!plat_dec32(&LW.running) && !LW.stop && !LW.short_mem) {
         lw_stamp("done", LW.strikes);
         rt_log("vk_pipeline: library warm: done, %zu prepared variants in %.0f s on %d idle threads; new pipelines "
                "link from the driver's cache from here on", LW.n, (now_ms() - LW.t0) / 1000, LW.threads);
@@ -5938,6 +6135,7 @@ static int seed_pipelines(const char *dir) {
     }
     K.loading = 0;
     K.until = 0;   // every one of them: no boot waits for this
+    GATE.off = 1;  // and no game runs beside it: the memory gate (gate_enter) refuses nothing
     plat_mutex_unlock(&P.lock);
     free(ids), free(sh), free(r);
     PlatThread *th[64];
