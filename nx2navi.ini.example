@@ -738,6 +738,11 @@
 # Each walk holds the address-space lock for 100-240 ms and delays the next frame by as much, so they are off unless
 # asked for.
 # mem_census = 0
+# The memory the game is taken to need, in MB of commit (RAM plus page file not yet promised to a program). When less
+# is free at the start, the log gets a warning line: short of memory the game stutters, loses textures or stops with
+# an out-of-memory or lost-device error. The default is what the game took in play at 3840x2160 on an RTX 5090; the
+# video card's memory counts on Windows. 0: no warning. Default: 24576.
+# mem_need_mb = 24576
 # The size in MiB (16 to 256) of the blocks the renderer takes video memory in. A block goes back to the driver only once
 # everything in it is freed, so smaller blocks hold less free space after area changes; larger ones need fewer
 # allocations while an area loads. Default: 64.

@@ -191,6 +191,8 @@ typedef struct { uint64_t base, size; uint32_t state, attr, perm, ipc, device, p
 void mem_init(void);                                       // reserve every region; on a collision re-run the process
                                                            // (up to 20 times, NX2NAVI_REEXEC), then fatal
 const RtGuestLayout *mem_layout(void);
+int mem_start_note(int probe);                             // a game's start: a warning line when the free commit is
+                                                           // below the game's need (mem_need.h); 1 when it is
 void mem_guest_census(uint64_t frame);   // NX2NAVI_TRACE=perf: committed bytes per guest region
 void mem_lazy_heap_report(uint64_t frame);   // NX2NAVI_TRACE=perf: the lazy heap's faults since the last line
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr);                      // 0x01

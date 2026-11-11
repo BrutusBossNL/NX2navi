@@ -405,6 +405,11 @@ value no machine has free. What the builders do when they are refused (`warm_bui
 `lw_worker`) shows in a run's log: start the game with `build_free_mb` set above the machine's free commit and read the
 `vk_pipeline:` lines that name the commit headroom.
 
+A change to the start's memory warning (`runtime/mem_need.h`, `runtime/memory.c` `mem_start_note`) passes
+`python tests\mem_need_check.py [<game exe>]`, which builds the header alone and checks when the game's need counts
+as short. With the executable it also runs `--probe-memneed` (it prints the machine's commit and the answer and
+starts nothing) with `mem_need_mb` at 0, at 1 and at a value no machine has, and reads the warning line of the last.
+
 A change to where the lazy write-back is on by default (`runtime/wb_lazy_choice.h`, `runtime/vk_memory.c`
 `vk_mem_lazy_decide`) passes `python tests\wb_lazy_check.py`, which builds the header alone and checks the choice and
 its reason by platform, by GPU driver and by what the player set. No game files, no GPU.

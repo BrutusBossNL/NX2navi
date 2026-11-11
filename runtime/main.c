@@ -534,7 +534,7 @@ static int usage(const char *argv0) {
                     "--probe-cfg | --probe-dpi | --probe-mods | --probe-kernel | --probe-ipc | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-shader | --probe-vkmem | "
                     "--probe-vkexec | --probe-astc | --probe-zstd | --probe-input | --probe-movie | --probe-crash-call | --probe-crash-null | --probe-discord | --probe-coop | "
-                    "--prepare-shaders | --warm-shaders | --prepare-pipelines | --probe-prewarm | --probe-buildgate | --probe-devlost | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--prepare-shaders | --warm-shaders | --prepare-pipelines | --probe-prewarm | --probe-buildgate | --probe-memneed | --probe-devlost | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
@@ -649,6 +649,7 @@ int main(int argc, char **argv) {
     if (cfg.seconds && mode) return usage(argv[0]);
     log_open(!mode);
     if (!mode) {
+        mem_start_note(0);   // memory.c: a warning when the machine has less memory free than the game takes
         cfg.boot = cfg.seconds > 0;   // --seconds starts the game like --boot, with its checkpoints
         vk_driver_cache_env();   // before the threads below and rt_boot's, any of which may load the Vulkan driver
         discord_init();   // the Rich Presence thread (discord_rpc.c); it reads nx2navi.ini itself and idles while off
@@ -695,6 +696,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--prepare-pipelines")) return vk_pipeline_prepare_pipelines();
     if (!strcmp(mode, "--probe-prewarm")) return vk_pipeline_probe_prewarm();
     if (!strcmp(mode, "--probe-buildgate")) return vk_pipeline_probe_buildgate();
-    if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
+    if (!strcmp(mode, "--probe-memneed")) { mem_start_note(1); return 0; }
+    if (!strcmp(mode, "--boot")) { mem_start_note(0); cfg.boot = 1; rt_boot(); return 0; }
     return usage(argv[0]);
 }

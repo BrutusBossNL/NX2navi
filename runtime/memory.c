@@ -14,6 +14,7 @@
 #include "cfg.h"
 #include "host.h"
 #include "layout.h"
+#include "mem_need.h"
 #include "platform/platform.h"
 
 #define PAGE 0x1000ull
@@ -950,6 +951,29 @@ void mem_init(void) {
 }
 
 const RtGuestLayout *mem_layout(void) { return &L; }
+
+// The start of a game (main.c, before the boot): one line when the machine's free commit is below what the game takes
+// in play (mem_need.h; NX2NAVI_MEM_NEED_MB, 0 no check), so a log that ends in a failed allocation, dropped textures
+// or a lost device says at its top that the machine was short before the game took anything. 1 when it was.
+// probe: --probe-memneed, which prints the numbers either way.
+int mem_start_note(int probe) {
+    double proc, used, limit, need = strtod(cfg_value("NX2NAVI_MEM_NEED_MB"), NULL);
+    plat_commit_info(&proc, &used, &limit);
+    int is_short = mem_need_short(proc, used, limit, need);
+    if (probe)
+        printf("probe-memneed: system commit %.0f of %.0f MB in use, this process %.0f MB, the game needs %.0f MB "
+               "(NX2NAVI_MEM_NEED_MB): %s\n", used, limit, proc, need,
+               need <= 0 ? "not checked" : limit < 0 ? "no limit known" : is_short ? "short" : "enough");
+    if (!is_short) return 0;
+    char note[400] = "";
+    plat_commit_note(note, sizeof note);
+    rt_log("mem: WARNING: this machine has %.0f MB of memory left for the game and the game takes about %.0f MB in play "
+           "(system commit: %.0f of %.0f MB in use; the limit is RAM plus page file%s%s). Short of memory the game "
+           "stutters, loses textures or stops with an out-of-memory or lost-device error. Closing other programs or a "
+           "larger page file gives it room (mem_need_mb = 0 in nx2navi.ini turns this warning off)",
+           mem_need_room(proc, used, limit), need, used, limit, note[0] ? "; " : "", note);
+    return 1;
+}
 
 // A range inside one watched reservation (stack and heap block, or alias region) only.
 static uint64_t written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset) {
