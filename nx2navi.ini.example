@@ -754,11 +754,13 @@
 # "mem: lazy write-back" line says which is in effect and why). 0 elsewhere. With shadow storage (Linux, Wine) it
 # stays off whatever is set.
 # wb_lazy = 1
-# With wb_lazy: 1: when the game's CPU code touches such memory, only the 64 KiB around the place it touched are copied
+# With wb_lazy, off by default: with it on the graphics device was lost shortly after some save loads (about one load
+# in three of a save in Hyrule Field at night on one card), and not once in 15 loads with it off; the cause is open.
+# 1: when the game's CPU code touches such memory, only the 64 KiB around the place it touched are copied
 # back and kept up to date from then on; the rest of that buffer stays on the video card. The game reads a few words
 # at the start of buffers of several MiB about twice a second. 0: the whole buffer comes back and everything near it
 # is copied back every frame for up to 32 seconds, as before (a tenth fewer frames a second in a village).
-# wb_lazy_chunk = 1
+# wb_lazy_chunk = 0
 # Barriers between the game's draw passes and compute dispatches. 1: only where the game itself asks for one, or where
 # the work changes between drawing and compute; this takes about a tenth off the graphics card's time for a frame.
 # 0: a full barrier before every pass and every dispatch. Default: 1 on NVIDIA graphics cards, 0 on all others, where it

@@ -155,7 +155,9 @@ static uint64_t lz_unclean;             // frz_lock: arms refused since the last
 // in the partial pages at a range's ends. They are written back at every submission that writes them.
 enum { LZ_NO_FROZEN, LZ_NO_HOT, LZ_NO_THAW, LZ_NO_PAGES, LZ_NO_EDGE, LZ_NO_N };
 static uint64_t lz_no[LZ_NO_N], lz_no_small, lz_arm_calls;   // ranges without a whole page; ranges written back
-// NX2NAVI_WB_LAZY_CHUNK (default 1; 0 = a touch releases its whole range and holds its regions, as before): the
+// NX2NAVI_WB_LAZY_CHUNK (default 0 = a touch releases its whole range and holds its regions; off because with it on
+// the graphics device was lost about 2 s after a save load in Hyrule Field at night, in 7 of about 22 loads on an
+// RTX 5090, a GPU read fault at the start of a large buffer, and in 0 of 15 with it off; why is not known yet): the
 // first touch of an armed range gives back only the LZ_CHUNK bytes around the address, fetched alone, and only that
 // piece is held (lz_hots, 1 s doubling to 32 s like a region's hold); the rest of the range stays armed. More than
 // LZ_HEAVY_N touches in one region within LZ_HEAVY_MS are a reader going through the range: its range goes whole
