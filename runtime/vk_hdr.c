@@ -301,7 +301,7 @@ static int is_const_op(uint32_t op) { return op >= SPV_OP_CONSTANT_TRUE && op <=
 // What tonemap_splice knows of the game's module while it looks for the exposure: where each result is defined
 // (def), the class of each variable (cls: 1 output, 2 uniform, 3 function), and for a function variable the value
 // its stores gave it and how many there were (sval, scnt).
-typedef struct { const uint32_t *w, *def, *sval; const uint8_t *cls, *scnt; uint32_t bound; } SpvView;
+typedef struct { const uint32_t *w, *def, *sval; const uint8_t *cls, *scnt; uint32_t bound, glsl; } SpvView;
 
 // The value behind id when id loads a function variable that is stored once (the translator keeps every value in
 // one); id itself otherwise.
@@ -320,31 +320,122 @@ static int spv_uniform_load(const SpvView *v, uint32_t id) {   // id loads a mem
     return (c[0] & 0xffff) == SPV_OP_ACCESS_CHAIN && c[3] < v->bound && v->cls[c[3]] == 2;
 }
 
-static int spv_mul_by_uniform(const SpvView *v, uint32_t id, uint32_t *other, uint32_t *uniform) {
-    if (id >= v->bound || !v->def[id]) return 0;
-    const uint32_t *m = v->w + v->def[id];
-    if ((m[0] & 0xffff) != SPV_OP_FMUL) return 0;
-    if (spv_uniform_load(v, m[4])) { *other = m[3], *uniform = m[4]; return 1; }
-    if (spv_uniform_load(v, m[3])) { *other = m[4], *uniform = m[3]; return 1; }
+// a and b are the same value read twice: one id, two loads of one variable, or two loads through access chains of
+// one base and the same indices (the translator loads a uniform anew at each use).
+static int spv_same_source(const SpvView *v, uint32_t a, uint32_t b) {
+    if (a == b) return 1;
+    if (a >= v->bound || b >= v->bound || !v->def[a] || !v->def[b]) return 0;
+    const uint32_t *la = v->w + v->def[a], *lb = v->w + v->def[b];
+    if ((la[0] & 0xffff) != SPV_OP_LOAD || (lb[0] & 0xffff) != SPV_OP_LOAD) return 0;
+    if (la[3] == lb[3]) return 1;
+    if (la[3] >= v->bound || lb[3] >= v->bound || !v->def[la[3]] || !v->def[lb[3]]) return 0;
+    const uint32_t *ca = v->w + v->def[la[3]], *cb = v->w + v->def[lb[3]];
+    return (ca[0] & 0xffff) == SPV_OP_ACCESS_CHAIN && ca[0] == cb[0] && !memcmp(ca + 3, cb + 3, ((ca[0] >> 16) - 3) * 4);
+}
+
+// The three values are products with one factor in common: 1 with the factor (the first value's operand) and what
+// each is multiplied with.
+static int spv_common_factor(const SpvView *v, const uint32_t val[3], uint32_t rest[3], uint32_t *factor) {
+    const uint32_t *m[3];
+    for (int c = 0; c < 3; c++) {
+        if (val[c] >= v->bound || !v->def[val[c]]) return 0;
+        m[c] = v->w + v->def[val[c]];
+        if ((m[c][0] & 0xffff) != SPV_OP_FMUL) return 0;
+    }
+    for (int pos = 4; pos >= 3; pos--) {
+        uint32_t f = m[0][pos];
+        int ok = 1;
+        rest[0] = m[0][7 - pos];
+        for (int c = 1; c < 3 && ok; c++) {
+            if (spv_same_source(v, f, m[c][4])) rest[c] = m[c][3];
+            else if (spv_same_source(v, f, m[c][3])) rest[c] = m[c][4];
+            else ok = 0;
+        }
+        if (ok) { *factor = f; return 1; }
+    }
     return 0;
 }
 
-// The game's exposure in x, a value it feeds its curve: x = scene * gain, the gain a uniform (the tonemap's constants,
-// element 3 .z), or in the gameplay shader x = (scene * gain) * local exposure, the local exposure computed from a
-// grid. 1 with the scene before the gain and the gain's load.
-static int spv_exposure(const SpvView *v, uint32_t x, uint32_t *scene, uint32_t *gain) {
-    uint32_t val = spv_stored(v, x);
-    if (spv_mul_by_uniform(v, val, scene, gain)) return 1;
-    if (val >= v->bound || !v->def[val] || (v->w[v->def[val]] & 0xffff) != SPV_OP_FMUL) return 0;
-    const uint32_t *m = v->w + v->def[val];
-    return spv_mul_by_uniform(v, spv_stored(v, m[3]), scene, gain) || spv_mul_by_uniform(v, spv_stored(v, m[4]), scene, gain);
+// The three values are fma(a, f, t) with one f for the three: 1 with f, and each value's a and t.
+static int spv_common_fma(const SpvView *v, const uint32_t val[3], uint32_t a[3], uint32_t t[3], uint32_t *factor) {
+    const uint32_t *m[3];
+    for (int c = 0; c < 3; c++) {
+        if (val[c] >= v->bound || !v->def[val[c]]) return 0;
+        m[c] = v->w + v->def[val[c]];
+        if ((m[c][0] & 0xffff) != SPV_OP_EXT_INST || (m[c][0] >> 16) != 8 || m[c][3] != v->glsl || m[c][4] != GLSL_FMA) return 0;
+        t[c] = m[c][7];
+    }
+    for (int pos = 6; pos >= 5; pos--) {
+        uint32_t f = m[0][pos];
+        int ok = 1;
+        a[0] = m[0][11 - pos];
+        for (int c = 1; c < 3 && ok; c++) {
+            if (spv_same_source(v, f, m[c][6])) a[c] = m[c][5];
+            else if (spv_same_source(v, f, m[c][5])) a[c] = m[c][6];
+            else ok = 0;
+        }
+        if (ok) { *factor = f; return 1; }
+    }
+    return 0;
+}
+
+// The game's exposure in the three x it feeds its curve, and those values without local exposure ("exposed"; each
+// plus add where add is set). The shapes:
+// - x = scene * gain, one gain for the three: a uniform in the scene's tonemap (its constants, element 3 .z), a value
+//   the vertex shader passes in the shaders that draw into the tonemapped picture with the curve of their own. The
+//   exposed values are x.
+// - x = (scene * gain) * local exposure, the gameplay shader: the local exposure computed from a grid, the gain a
+//   uniform under it. The exposed values are the inner products.
+// - x = fma(scene, gain, colour), a colour added per channel after the exposure, the gain a uniform: x again.
+// - x = fma(scene * gain, local exposure, colour): the inner products, plus the colours.
+// 1 when one of them is found.
+static int spv_exposure(const SpvView *v, const uint32_t x[3], uint32_t exposed[3], uint32_t add[3], uint32_t *gain) {
+    uint32_t val[3], inner[3], rest[3], a[3], t[3], f;
+    for (int c = 0; c < 3; c++) val[c] = spv_stored(v, x[c]), exposed[c] = x[c], add[c] = 0;
+    if (spv_common_factor(v, val, rest, gain)) {
+        if (spv_uniform_load(v, *gain)) return 1;
+        for (int c = 0; c < 3; c++) inner[c] = spv_stored(v, rest[c]);
+        if (spv_common_factor(v, inner, rest, &f) && spv_uniform_load(v, f)) {
+            memcpy(exposed, inner, sizeof inner);
+            *gain = f;
+        }
+        return 1;
+    }
+    if (!spv_common_fma(v, val, a, t, gain)) return 0;
+    if (spv_uniform_load(v, *gain)) return 1;
+    for (int c = 0; c < 3; c++) inner[c] = spv_stored(v, a[c]);
+    if (!spv_common_factor(v, inner, rest, &f) || !spv_uniform_load(v, f)) return 0;
+    memcpy(exposed, inner, sizeof inner);
+    memcpy(add, t, sizeof t);
+    *gain = f;
+    return 1;
+}
+
+// The instruction at pos, between the function's first label and end, is in a block outside every selection and
+// loop: such a block runs on every path and before the blocks after it. Constructs nest between the instruction that
+// names their merge block and that block's label.
+static int spv_top_level(const uint32_t *w, uint64_t first_label, uint64_t end, uint64_t pos) {
+    enum { DEPTH = 64 };
+    uint32_t merge[DEPTH];
+    int depth = 0;
+    for (uint64_t i = first_label; i < end; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff;
+        if (op == SPV_OP_LABEL)
+            while (depth && merge[depth - 1] == w[i + 1]) depth--;
+        if (i == pos) return !depth;
+        if (op == SPV_OP_SELECTION_MERGE || op == SPV_OP_LOOP_MERGE) {
+            if (depth == DEPTH) return 0;
+            merge[depth++] = w[i + 1];
+        }
+    }
+    return 0;
 }
 
 // The fitted ACES curve the game ends its tonemap with: FClamp/NClamp(FMul(FMul(x, Fma(x, 2.51, 0.03)), rcp), 0, 1)
 // per channel, each result stored to a function variable that the output store of its channel loads. tonemap_splice
 // keeps everything the game computes and only changes what the three colour channels store: nx_tonemap
-// (shaders/hdr_tonemap.frag), called just before the first of those stores, of the three x, of the scene they come
-// from before the exposure gain with that gain (spv_exposure; x and a gain of 1 when the shape is another), and of the
+// (shaders/hdr_tonemap.frag), called just before the first of those stores, of the three x, of those values without
+// local exposure with the exposure gain in them (spv_exposure; x and a gain of 1 when it finds none), and of the
 // settings from the HDR_SETS vec4 the support buffer gains at 1440 (vk_exec_draw.c support_fill writes them; the
 // translator's SupportBuffer ends there). The library's types are matched to the game's where the same (SPIR-V allows
 // one declaration of each), its constants and functions appended with new ids. Gives up (0) on any shape it does not
@@ -391,8 +482,14 @@ static int tonemap_splice(uint32_t **spirv, uint64_t *words) {
             cls[a[1]] = a[2] == SPV_SC_OUTPUT ? 1 : a[2] == SPV_SC_UNIFORM ? 2 : a[2] == SPV_SC_FUNCTION ? 3 : 0;
         }
         if (op == SPV_OP_STORE && len >= 3 && a[0] < bound) sval[a[0]] = a[1], scnt[a[0]] += scnt[a[0]] < 2;
-        if (len >= 3 && a[1] < bound && (op == SPV_OP_FMUL || op == SPV_OP_FDIV || op == SPV_OP_FADD || op == SPV_OP_EXT_INST ||
-                                         op == SPV_OP_LOAD || op == SPV_OP_ACCESS_CHAIN || op == SPV_OP_VARIABLE))
+        // where each result is defined: the globals the checks below look at, and inside the function every instruction
+        // that has a result (its second word; the first definition stands, so a word of an instruction without one,
+        // taken for a result here, cannot replace a real one)
+        if (op == SPV_OP_VARIABLE && len >= 4 && a[1] < bound) def[a[1]] = (uint32_t)i;
+        else if (first_fn && len >= 3 && a[1] < bound && !def[a[1]] && op != SPV_OP_STORE && op != SPV_OP_LABEL &&
+                 op != SPV_OP_SELECTION_MERGE && op != SPV_OP_LOOP_MERGE && op != SPV_OP_BRANCH_CONDITIONAL &&
+                 op != SPV_OP_SWITCH && op != 63 /* OpCopyMemory */ && op != 99 /* OpImageWrite */ &&
+                 op != 228 /* OpAtomicStore */ && op != 254 /* OpReturnValue */)
             def[a[1]] = (uint32_t)i;
         i += len;
     }
@@ -466,27 +563,23 @@ static int tonemap_splice(uint32_t **spirv, uint64_t *words) {
         if (site[chan_site[c]] >= at || def[site_x[chan_site[c]]] >= at) goto fail;
     for (uint64_t i = lo; i < hi; i += w[i] >> 16)
         if ((w[i] & 0xffff) == SPV_OP_LABEL) goto fail;
-    // the scene before the exposure gain, and the gain: usable at the call when defined in the function's first block
-    // (it comes before every other) or in the call's own
-    const SpvView view = {w, def, sval, cls, scnt, bound};
-    uint32_t scene[3], gain = 0;
-    uint64_t at_block = first_label, second_label = n;
+    // the exposed values and the gain: usable at the call when defined in a block outside every selection and loop
+    // before it, or in the call's own
+    const SpvView view = {w, def, sval, cls, scnt, bound, glsl};
+    uint32_t exposed[3], add[3], gain = 0;
+    uint64_t at_block = first_label;
     for (uint64_t i = first_label + (w[first_label] >> 16); i < at; i += w[i] >> 16)
-        if ((w[i] & 0xffff) == SPV_OP_LABEL) {
-            at_block = i;
-            if (second_label == n) second_label = i;
-        }
-    int exposure_found = 1;
-    for (int c = 0; c < 3 && exposure_found; c++) {
-        uint32_t g = 0;
-        exposure_found = spv_exposure(&view, site_x[chan_site[c]], &scene[c], &g);
-        uint64_t ds = exposure_found && scene[c] < bound ? def[scene[c]] : 0, dg = exposure_found && g < bound ? def[g] : 0;
-        if (!ds || !dg || !(ds < second_label || ds > at_block) || !(dg < second_label || dg > at_block) || ds >= at || dg >= at)
-            exposure_found = 0;
-        if (c == 0) gain = g;
+        if ((w[i] & 0xffff) == SPV_OP_LABEL) at_block = i;
+    const uint32_t xs[3] = {site_x[chan_site[0]], site_x[chan_site[1]], site_x[chan_site[2]]};
+    int exposure_found = spv_exposure(&view, xs, exposed, add, &gain);
+    for (int c = 0; c < 7 && exposure_found; c++) {
+        uint32_t idc = c < 3 ? exposed[c] : c < 6 ? add[c - 3] : gain;
+        if (c >= 3 && c < 6 && !idc) continue;   // nothing added
+        uint64_t d = idc < bound ? def[idc] : 0;
+        if (!d || d >= at || !(d > at_block || spv_top_level(w, first_label, at, d))) exposure_found = 0;
     }
     if (!exposure_found) {
-        for (int c = 0; c < 3; c++) scene[c] = site_x[chan_site[c]];
+        for (int c = 0; c < 3; c++) exposed[c] = site_x[chan_site[c]], add[c] = 0;
         gain = c1;
     }
 
@@ -587,10 +680,10 @@ static int tonemap_splice(uint32_t **spirv, uint64_t *words) {
     // the result: the game's module with the support block grown, the library's globals before the first function,
     // the call in main, the three stores changed, and the library's functions at the end
     uint32_t idx[HDR_SETS], ptr_v4 = ptr_v4u ? ptr_v4u : id++, var[HDR_PARAMS], pv[HDR_SETS], pl[HDR_SETS], xv = id++,
-             sv = id++, res = id++, e[3];
+             sv = id++, res = id++, e[3], sum[3];
     for (int m = 0; m < HDR_SETS; m++) idx[m] = id++, pv[m] = id++, pl[m] = id++;
     for (int p = 0; p < HDR_PARAMS; p++) var[p] = id++;
-    for (int c = 0; c < 3; c++) e[c] = id++;
+    for (int c = 0; c < 3; c++) e[c] = id++, sum[c] = id++;
     put(&o, w, 5);
     for (uint64_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
@@ -621,7 +714,12 @@ static int tonemap_splice(uint32_t **spirv, uint64_t *words) {
                 }
                 PUT(&o, SPV_OP_COMPOSITE_CONSTRUCT, v3, xv, site_x[chan_site[0]], site_x[chan_site[1]],
                     site_x[chan_site[2]]);
-                PUT(&o, SPV_OP_COMPOSITE_CONSTRUCT, st_v4, sv, scene[0], scene[1], scene[2], gain);
+                for (int c = 0; c < 3; c++)
+                    if (add[c]) {
+                        PUT(&o, SPV_OP_FADD, ft, sum[c], exposed[c], add[c]);
+                        exposed[c] = sum[c];
+                    }
+                PUT(&o, SPV_OP_COMPOSITE_CONSTRUCT, st_v4, sv, exposed[0], exposed[1], exposed[2], gain);
                 PUT(&o, SPV_OP_STORE, var[0], xv);
                 PUT(&o, SPV_OP_STORE, var[1], sv);
                 for (int m = 0; m < HDR_SETS; m++) PUT(&o, SPV_OP_STORE, var[m + 2], pl[m]);

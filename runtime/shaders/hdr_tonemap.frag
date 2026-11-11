@@ -20,8 +20,8 @@
 //
 // The HDR tonemap, as a function that runtime/vk_hdr.c (vk_hdr_shader_swap) splices into the game's own tonemap
 // shader. nx_tonemap takes x, the three values the game feeds its fitted ACES curve (its scene light after its colour
-// matrix, bloom, exposure and, in the gameplay shader, local exposure), and scene, the same light before the exposure
-// gain and local exposure (rgb) with that gain (a). It returns the colour the shader then stores, linear Rec. 709
+// matrix, bloom, exposure and, in the gameplay shader, local exposure), and scene, the same values without local
+// exposure (rgb) with the exposure gain in them (a; 1 where the splice found none). It returns the colour the shader then stores, linear Rec. 709
 // relative to the HUD's white, which the present encodes to PQ (shaders/hdr_encode.comp). main only exists so the
 // compiler keeps the functions; vk_hdr.c drops it. build_shaders.py compiles this file without optimisation ("keep
 // functions" above), as inlining would leave no function to splice.
@@ -421,7 +421,8 @@ vec3 nx_tonemap(vec3 x, vec4 scene, vec4 p0, vec4 p1, vec4 p2, vec4 p3, vec4 p4)
     if (p0.w < 0.0) return vanilla;
     vec3 color = vanilla;
     if (p0.w == 9.0) {
-        color = scene_tonemap(scene.rgb, scene.a, p0, p1, p2, p3, p4);
+        // the mapper takes the light before the gain; without a gain there is no light
+        color = scene.a > 0.0 ? scene_tonemap(scene.rgb / scene.a, scene.a, p0, p1, p2, p3, p4) : vec3(0.0);
     } else if (p0.w > 0.0) {
         vec3 graded = p3.y == 0.0 ? x : upgrade(x, neutral_sdr(x), vanilla, p3.y);
         float peak = p0.x / p0.y;   // the display's peak in picture whites; corrected for the present's gamma
