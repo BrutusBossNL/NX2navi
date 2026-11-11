@@ -334,7 +334,7 @@ static VkPassMark *dispatch_mark(VkExec *ex, const GfxShader *cs, uint32_t x, ui
 }
 
 static CbRes *cb_res(VkExec *ex) {
-    DrawCtx *d = dc;
+    DrawCtx *d = ex->dc;
     if (d->res && d->res_fence == ex->fence) return d->res;
     CbRes *r = calloc(1, sizeof *r);
     if (!r) rt_fatal("vk: out of memory");
@@ -924,9 +924,9 @@ static int find_stage_scan(const prog_t *p, int nvn_stage, const uint8_t **ctl, 
 // Which shader of a program serves each NVN stage, and its code length, per program serial (new at every
 // nvnProgramSetShaders): the scan reads two words of every stage's control block, cold guest cache lines, and runs
 // several times a draw. Direct-mapped (DrawCtx.stagem); a collision only scans again.
-static int find_stage(const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len) {
+static int find_stage(DrawCtx *cx, const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len) {
     if (!p->serial || (unsigned)nvn_stage >= 6) return find_stage_scan(p, nvn_stage, ctl, code, len);
-    StageMemo *m = &dc->stagem[p->serial * 0x9E3779B97F4A7C15ull >> 55];
+    StageMemo *m = &cx->stagem[p->serial * 0x9E3779B97F4A7C15ull >> 55];
     if (m->serial != p->serial) {
         m->serial = p->serial;
         memset(m->idx, -1, sizeof m->idx);
@@ -968,14 +968,14 @@ static int shader_memo_on(void);
 // of looking up all 64 handles. Direct-mapped by serial and stage (DrawCtx.slotm); a collision only relearns.
 static uint32_t slotm_idx(uint64_t serial, int st) { return (uint32_t)((serial * 8 + (uint64_t)st) * 0x9E3779B97F4A7C15ull >> 52); }
 
-static uint32_t slot_mask_of(uint64_t serial, int st) {
-    const SlotMask *e = &dc->slotm[slotm_idx(serial, st)];
+static uint32_t slot_mask_of(DrawCtx *cx, uint64_t serial, int st) {
+    const SlotMask *e = &cx->slotm[slotm_idx(serial, st)];
     return serial && e->serial == serial && e->st == st ? e->m : ~0u;
 }
 
-static void slot_mask_learn(uint64_t serial, int st, const GfxShader *s) {
-    if (!serial || slot_mask_of(serial, st) != ~0u) return;
-    dc->slotm[slotm_idx(serial, st)] = (SlotMask){serial, st, gfx_shader_slot_mask(s)};
+static void slot_mask_learn(DrawCtx *cx, uint64_t serial, int st, const GfxShader *s) {
+    if (!serial || slot_mask_of(cx, serial, st) != ~0u) return;
+    cx->slotm[slotm_idx(serial, st)] = (SlotMask){serial, st, gfx_shader_slot_mask(s)};
 }
 
 static uint8_t type_of_handle(uint64_t h) {   // texture lock held
@@ -1012,7 +1012,7 @@ static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, G
             memcpy(&l, ctl_local(ctl) + 4 * k, 4);
             a->local[k] = (uint16_t)(l ? l : 1);
         }
-    AcSlots *c = &dc->AC[st];
+    AcSlots *c = &ex->dc->AC[st];
     // The generation and tokens are read before the lookups (one that creates an entry changes them) and unlocked: a
     // registration racing with them is ordered after this draw, and a slot stored under older ones is only looked up
     // again.
@@ -1054,14 +1054,14 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     uint32_t len;
     *present = 0;
     if (pending) *pending = 0;
-    if (!ex->prog || !find_stage(ex->prog, st, &ctl, &code, &len)) return NULL;
+    if (!ex->prog || !find_stage(ex->dc, ex->prog, st, &ctl, &code, &len)) return NULL;
     *present = 1;
     for (int i = 0; i < n_probe_sh; i++)
         if (probe_sh[i].ctl == ctl) return probe_sh[i].s;
     GfxShaderAnswers a;
     uint64_t serial = ex->prog->serial;
-    answers_for(ex, st, ctl, slot_mask_of(serial, st), &a);
-    a.mvprev = (uint8_t)(dc->sf_mvprev && st == NVN_STAGE_VS);
+    answers_for(ex, st, ctl, slot_mask_of(ex->dc, serial, st), &a);
+    a.mvprev = (uint8_t)(ex->dc->sf_mvprev && st == NVN_STAGE_VS);
     ShaderEnt *set = NULL;
     if (serial) {
         uint64_t h = (serial * 0x9E3779B97F4A7C15ull ^ (uint64_t)st) ^ nvn_hm_hash(&a, sizeof a);   // a is zero-padded
@@ -1085,7 +1085,7 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
                        : pending && (vk_pipeline_async_on() || a.mvprev) ? gfx_shader_get_async(gs, ctl, code, len, &a, pending)
                                                            : gfx_shader_get(gs, ctl, code, len, NULL, &a);
     if (pending && *pending) return NULL;
-    if (s) slot_mask_learn(serial, st, s);
+    if (s) slot_mask_learn(ex->dc, serial, st, s);
     if (!s) warn_once(W_SHADER, "a stage %d shader of program %llu failed to translate: draws with it are skipped", st,
                       (unsigned long long)serial);
     else if (set) {   // in front, the least recently used way drops out
@@ -1116,8 +1116,7 @@ static VkDescriptorBufferInfo zero_info(uint64_t max) {
 // bytes into transient memory or counted more than once, and such a descriptor is not kept (both in DrawCtx).
 
 // vk_mem_count, also kept per (class, use) while a graphics build runs (RS).
-static void count_use(int cls, int use, uint64_t n) {
-    DrawCtx *const cx = dc;
+static void count_use(DrawCtx *cx, int cls, int use, uint64_t n) {
     vk_mem_count(cls, use, n);
     if (cx->pb_cap) {
         if (cx->pb_cap->has) cx->pb_spoiled = 1;
@@ -1147,15 +1146,15 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
         VK_MEM_USE(sp);
         *out = (VkDescriptorBufferInfo){sp.buffer, sp.offset, n};
         if (written) vk_mem_gpu_wrote_shader(&sp, n), vk_usnap_drop(addr, n);
-        count_use(sp.cls, use, n);
+        count_use(ex->dc, sp.cls, use, n);
         VK_MEM_BOUND(sp);
         return 1;
     }
     if (sp.alloc) return 0;
     VkBuffer b;
     VkDeviceSize o;
-    dc->RS.volatile_ = 1;
-    dc->pb_spoiled = 1;
+    ex->dc->RS.volatile_ = 1;
+    ex->dc->pb_spoiled = 1;
     memcpy(scratch(ex, n, &b, &o), (const void *)(uintptr_t)addr, n);
     vk_mem_count(sp.cls, VK_MUSE_CPU_READ, n);
     vk_mem_count(VK_MCLS_SCRATCH, use, n);
@@ -1217,7 +1216,7 @@ static void nvn2_cs_tables(const uint8_t *ctl, uint32_t *ubos, uint32_t *ssbos);
 static uint32_t nvn2_cs_tables_at(const uint8_t *ctl);
 
 static VkDescriptorBufferInfo c0_info(VkExec *ex, int st) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     int k = st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : 2;
     // vk_c0_fill reads the storage slots, and the uniform slots and dispatch size for compute or the base instance for
     // graphics: equal inputs give the same bank, so neither the fill nor the 2 KiB compare is needed.
@@ -1235,7 +1234,7 @@ static VkDescriptorBufferInfo c0_info(VkExec *ex, int st) {
     // host does not read: textures and images are bound by slot).
     const uint8_t *pctl, *pcode;
     uint32_t plen;
-    int nvn2_push = st == NVN_STAGE_CS && ex->prog && find_stage(ex->prog, st, &pctl, &pcode, &plen) && ctl_nvn2(pctl);
+    int nvn2_push = st == NVN_STAGE_CS && ex->prog && find_stage(ex->dc, ex->prog, st, &pctl, &pcode, &plen) && ctl_nvn2(pctl);
     if (nvn2_push) memcpy(in.push, ex->cs_push, sizeof in.push);
     if (cx->B.c0_valid[k] && !memcmp(&in, &cx->B.c0_in[k], sizeof in))
         return (VkDescriptorBufferInfo){cx->B.c0_buf[k], cx->B.c0_off[k], VK_C0_BYTES};
@@ -1282,7 +1281,7 @@ static void limits_init(void) {
 // (DrawCtx.mo_ovr).
 
 static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     if (cx->mo_ovr_on && (st == NVN_STAGE_VS || st == NVN_STAGE_FS) && slot >= 0 && slot < 32 &&
         cx->mo_ovr[st][slot].buffer)
         return cx->mo_ovr[st][slot];
@@ -1293,7 +1292,7 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
     if (slot == 1 && ex->prog) {   // compiler constants stored after the shader code
         const uint8_t *ctl, *code;
         uint32_t len, c1;
-        if (find_stage(ex->prog, st, &ctl, &code, &len)) {
+        if (find_stage(ex->dc, ex->prog, st, &ctl, &code, &len)) {
             c1 = ctl_c1(ctl, len);
             if (ctl_nvn2(ctl)) memcpy(&len, ctl + 0x44, 4);   // NVN2: c1 is [+0x40, +0x44) after the code
             if (c1 < len && bind_range(ex, (uint64_t)(uintptr_t)code + c1, len - c1, align, max, VK_MUSE_UBO, 0, &bi))
@@ -1302,7 +1301,7 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
     } else if (slot >= 3 && slot - 3 < 18) {
         const p_bind_buf *b = &ex->ubo[st][slot - 3];
         if (b->size && vk_usnap_find(b->addr, b->size < max ? b->size : max, align, &bi)) {   // as of the submit call
-            count_use(VK_MCLS_SCRATCH, VK_MUSE_UBO, bi.range);
+            count_use(ex->dc, VK_MCLS_SCRATCH, VK_MUSE_UBO, bi.range);
             return bi;
         }
         if (bind_range(ex, b->addr, b->size, align, max, VK_MUSE_UBO, 0, &bi)) return bi;
@@ -1403,7 +1402,7 @@ static int push_ptr(const VkExec *ex, int st, const GfxShaderRes *r, p_bind_buf 
     const uint8_t *pctl, *pcode;
     uint32_t plen;
     uint32_t o = (uint32_t)r->handle * 4;   // c0 byte offset
-    if (st != NVN_STAGE_CS || r->cbuf_slot != 0 || o < 0x10 || !ex->prog || !find_stage(ex->prog, st, &pctl, &pcode, &plen) ||
+    if (st != NVN_STAGE_CS || r->cbuf_slot != 0 || o < 0x10 || !ex->prog || !find_stage(ex->dc, ex->prog, st, &pctl, &pcode, &plen) ||
         !ctl_nvn2(pctl))
         return 0;
     uint32_t nu, ns, ta = nvn2_cs_tables_at(pctl);
@@ -1510,7 +1509,7 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
         static int logged;   // diagnosis: what c1 of an NVN2 compute program is (its control section's c1 range, the
         const uint8_t *ctl, *code;   // uniform slots the game bound)
         uint32_t len;
-        if (logged < 4 && r->cbuf_slot == 1 && ex->prog && find_stage(ex->prog, st, &ctl, &code, &len)) {
+        if (logged < 4 && r->cbuf_slot == 1 && ex->prog && find_stage(ex->dc, ex->prog, st, &ctl, &code, &len)) {
             uint32_t c1s, c1e, size;
             memcpy(&size, ctl + 0x38, 4), memcpy(&c1s, ctl + 0x40, 4), memcpy(&c1e, ctl + 0x44, 4);
             char line[512];
@@ -3065,7 +3064,7 @@ static void rs_add(RsRange *r, uint32_t *n, const VkExec *ex, const void *at, si
 }
 
 static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     if (info == cx->rs_last) return cx->rs_last_l;
     if (!rs_lists.klen) nvn_hm_init(&rs_lists, sizeof info);
     RsList *l = nvn_hm_get(&rs_lists, &info);
@@ -3124,7 +3123,7 @@ static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
 // are compared only when a bind op ran since they were stored or the pipeline changed: otherwise they are the same.
 // Check mode compares them anyway and stops when the bind op generation said they could not differ but they do.
 static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     const RsList *l = rs_list(ex, info);
     if (!l->ok) return cx->RS.hn = 0, cx->RS.info = NULL, 0;
     uint64_t *h = cx->RS.h, diff = 0;
@@ -3216,9 +3215,9 @@ static void pb_globals(const VkExec *ex, uint64_t g[PB_G]) {
 }
 
 // info's entry, emptied when it held another pipeline's results or the globals moved.
-static PbEntry *pb_entry(const VkPipeInfo *info, const uint64_t g[PB_G]) {
+static PbEntry *pb_entry(DrawCtx *cx, const VkPipeInfo *info, const uint64_t g[PB_G]) {
     uintptr_t p = (uintptr_t)info;
-    PbEntry *e = &dc->PB[(p >> 6 ^ p >> 13) % PB_N];
+    PbEntry *e = &cx->PB[(p >> 6 ^ p >> 13) % PB_N];
     if (e->info != info || memcmp(e->g, g, sizeof e->g)) {
         e->info = info;
         memcpy(e->g, g, sizeof e->g);
@@ -3259,14 +3258,14 @@ static int pb_key(const VkExec *ex, const VkPipeBinding *b, uint32_t k, uint64_t
 // Before descriptor j (descriptor k of binding b) resolves: 1 when its kept result serves, *o filled and its census
 // counted again. 0: resolve it, then pb_keep.
 static int pb_take(const VkExec *ex, const VkPipeBinding *b, uint32_t j, uint32_t k, VkDescSlot *o) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     cx->pb_key_ok = 0;
     if (!cx->pb_e || j >= PB_DESC || !pb_key(ex, b, k, cx->pb_key_cur)) return 0;
     cx->pb_key_ok = 1;
     if (pb_mode != 2 && cx->pb_e->ok[j] && !memcmp(cx->pb_e->in[j], cx->pb_key_cur, sizeof cx->pb_key_cur)) {
         const PbCount *c = &cx->pb_e->cnt[j];
         *o = cx->pb_e->d[j];
-        if (c->has) count_use(c->cls, c->use, c->n);
+        if (c->has) count_use(cx, c->cls, c->use, c->n);
         vk_exec_frame.bind_reused++;
         return 1;
     }
@@ -3276,8 +3275,7 @@ static int pb_take(const VkExec *ex, const VkPipeBinding *b, uint32_t j, uint32_
 }
 
 // After descriptor j resolved to *o.
-static void pb_keep(uint32_t j, const VkDescSlot *o) {
-    DrawCtx *const cx = dc;
+static void pb_keep(DrawCtx *cx, uint32_t j, const VkDescSlot *o) {
     cx->pb_cap = NULL;
     if (!cx->pb_e || j >= PB_DESC) return;
     vk_exec_frame.bind_resolved++;
@@ -3316,7 +3314,7 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // The descriptors go into one packed array d, a VkDescSlot per descriptor in binding order, which a set's update
 // template reads directly (VkPipeInfo.tpl); write structs are filled only when a set has no template.
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     VkWriteDescriptorSet *w = cx->bind_w;
     VkDescSlot *d = cx->bind_d;
     VkBufferView *bv = cx->bind_bv;
@@ -3342,7 +3340,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     if (gfx && !cx->mo_ovr_on && pb_on()) {
         uint64_t g[PB_G];
         pb_globals(ex, g);
-        cx->pb_e = pb_entry(info, g);
+        cx->pb_e = pb_entry(cx, info, g);
     }
     uint32_t n_sets = info->n_sets ? info->n_sets : 1;
     uint32_t lo[2] = {0, 0}, hi[2] = {0, 0}, d0[2] = {0, 0};   // bindings [lo, hi) and first descriptor per set
@@ -3384,7 +3382,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             for (uint32_t k = 0; k < cnt; k++) {
                 if (pb_take(ex, b, nd + k, k, &o[k])) continue;
                 o[k].buffer = ubo_info(ex, st, r->slot + (int)k);
-                pb_keep(nd + k, &o[k]);
+                pb_keep(cx, nd + k, &o[k]);
             }
             vk_exec_frame.bind_buf_ns += (uint64_t)(bt_now() - bt);
         } else if (b->kind == GFX_RES_SSBO) {
@@ -3392,7 +3390,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             for (uint32_t k = 0; k < cnt; k++) {
                 if (pb_take(ex, b, nd + k, k, &o[k])) continue;
                 o[k].buffer = ssbo_info(ex, st, r, r->flags & 1);
-                pb_keep(nd + k, &o[k]);
+                pb_keep(cx, nd + k, &o[k]);
             }
             vk_exec_frame.bind_buf_ns += (uint64_t)(bt_now() - bt);
         } else if (b->kind == GFX_RES_TEX || b->kind == GFX_RES_IMG) {
@@ -3418,7 +3416,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                     tex_info(ex, r, h, img, r->separate, &o[k].image);
                     vk_exec_frame.bind_tex_ns += (uint64_t)(bt_now() - tt);
                     o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
-                    pb_keep(nd + k, &o[k]);
+                    pb_keep(cx, nd + k, &o[k]);
                 }
                 if (locked) vk_texture_unlock();
             }
@@ -3536,7 +3534,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
 // ---- draws
 
 static void bind_pipeline(VkExec *ex, VkPipelineBindPoint bp, VkPipeline p) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     int k = bp == VK_PIPELINE_BIND_POINT_COMPUTE;
     if (cx->B.pipe[k] == p) return;
     vkCmdBindPipeline(ex->cb, bp, p);
@@ -3600,7 +3598,7 @@ static void record_fixed(VkExec *ex) {
 }
 
 static void bind_vertex_buffers(VkExec *ex) {
-    CbState *held = &dc->B;
+    CbState *held = &ex->dc->B;
     VkBuffer vb[17];
     VkDeviceSize vo[17], vsz[17], vstr[17];
     int vcls[17] = {0};
@@ -3986,7 +3984,7 @@ static void prog_lead(const prog_t *p, int mesh) {
 // the mesh fallback (mfb_draw): the vertex stage is DrawCtx.mfb_cur_vs, in an ordinary pipeline without vertex input.
 
 static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     int fb = mesh == 2;   // from here on mesh says what the draw is, and !fb that its pipeline is a mesh pipeline
     mesh = mesh != 0;
     if (ex->render_disabled) return vk_cond_draws_skip += ex->has_render_cond, draw_skipped(ex, mesh, SK_DISABLED);
@@ -4243,6 +4241,7 @@ static void ahead_draw(VkExec *sx) {
 }
 
 void vk_exec_ahead_op(VkExec *sx, uint32_t op, const void *payload) {
+    if (!sx->dc) sx->dc = dc;
     switch (op) {
     case OP_BIND_PROGRAM: {
         const p_bind_program *b = payload;
@@ -4597,7 +4596,7 @@ static void mo_emit(VkCommandBuffer cb) {
 
 static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSize ib_off, uint64_t t0);
 static void mvobj_draw(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSize ib_off) {
-    if (MO.failed || !vk_mvprev_on() || !dc->B.st_valid) return;
+    if (MO.failed || !vk_mvprev_on() || !ex->dc->B.st_valid) return;
     static int timed = -1;
     if (timed < 0) timed = rt_knob("MVOBJ_TIMES", "0");   // NX2NAVI_MVOBJ_TIMES=1: the summary's times (the clock reads cost)
     if (!timed) return mvobj_draw_(ex, d, ib, ib_off, 0);
@@ -4609,7 +4608,7 @@ static void mvobj_draw(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSiz
 // NX2NAVI_MVOBJ_BANKS=1 (test): for scene draws, the words of each other uniform bank (c3, c6, c8-c16) that changed
 // since the same shader's draw last frame, logged at frame 3000: where the time that moves wind and water lives
 static void mvobj_banks(VkExec *ex) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     static int on = -1;
     if (on < 0) on = rt_knob("MVOBJ_BANKS", "0");
     if (!on || !cx->B.st_valid) return;
@@ -4729,7 +4728,7 @@ static int mo_prev_cached(int index, const p_bind_buf *u, VkDescriptorBufferInfo
 }
 
 static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSize ib_off, uint64_t t0) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     mvobj_banks(ex);
     const VkExecTarget *z = &ex->depth;
     if (!z->image || z->width < DLAA_SCENE_MIN_W || z->format != VK_FORMAT_D32_SFLOAT || cx->B.st.samples > 1 ||
@@ -5283,9 +5282,9 @@ static int mfb_dispatch(VkExec *ex, const GfxShader *cs, int stage, VkBuffer rec
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info || (info->pool && !pool_on())) return 0;
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
-    dc->mfb_stage = stage;
+    ex->dc->mfb_stage = stage;
     bind_resources(ex, info);
-    dc->mfb_stage = 0;
+    ex->dc->mfb_stage = 0;
     VkPassMark *m = dispatch_mark(ex, cs, 0, 0, 0);
     vkCmdDispatchIndirect(ex->cb, rec, at);
     vk_pass_mark_end(ex->cb, m);
@@ -5295,7 +5294,7 @@ static int mfb_dispatch(VkExec *ex, const GfxShader *cs, int stage, VkBuffer rec
 
 // A mesh draw of `count` workgroups, or of the count in the game's record at ind (4 bytes, GPU-written).
 static void mfb_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     if (ex->render_disabled) {
         vk_cond_draws_skip += ex->has_render_cond;
         draw_skipped(ex, 1, SK_DISABLED);
@@ -5371,7 +5370,7 @@ static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
     }
     PFN_vkCmdDrawMeshTasksEXT fn = draw_mesh_fn();
     if (!fn) return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader: skipped");
-    dc->c0_binst = 0;
+    ex->dc->c0_binst = 0;
     if (!prepare_draw_ex(ex, NVN_DRAW_PRIMITIVE_TRIANGLES, 0x7fffffff, 0, 1)) return;
     if (d->first) warn_once(W_MESH, "a mesh draw from workgroup %u: drawn from workgroup 0", d->first);
     vk_exec_frame.draws++;
@@ -5536,7 +5535,7 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
     if (!vk_mem_resolve(d->ind, 12, &ip) || ip.offset % 4)
         return warn_once(W_INDIRECT, "indirect mesh draw arguments at %#llx are not backed or not aligned: skipped",
                          (unsigned long long)d->ind);
-    dc->c0_binst = 0;
+    ex->dc->c0_binst = 0;
     VK_MEM_USE(ip);
     if (fallback) {
         mfb_draw(ex, 0, &ip);
@@ -5572,7 +5571,7 @@ static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType
 }
 
 static void op_draw(VkExec *ex, const p_draw *d) {
-    dc->c0_binst = (uint32_t)d->base_instance;
+    ex->dc->c0_binst = (uint32_t)d->base_instance;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, 0)) return;
     vk_exec_frame.draws++;
     uint32_t inst = d->instances > 0 ? (uint32_t)d->instances : 1, first = (uint32_t)d->first, n = (uint32_t)d->count;
@@ -5621,7 +5620,7 @@ static int restart_for(const VkExec *ex, int prim, int itype) {
 }
 
 static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
-    dc->c0_binst = (uint32_t)d->base_instance;
+    ex->dc->c0_binst = (uint32_t)d->base_instance;
     static const uint32_t isize[3] = {1, 2, 4};
     if (d->itype < 0 || d->itype > 2) return warn_once(W_INDEX, "index type %d is unknown: draw skipped", d->itype);
     int restart = restart_for(ex, d->prim, d->itype);
@@ -5661,7 +5660,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
 // dispatch). The base instance stays out of c0 (0x644): c0 cannot be patched by a transfer
 // inside a pass; gl_BaseInstance of the Vulkan draw is the argument's. Byte indices need the count to be widened: skipped.
 static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
-    dc->c0_binst = 0;
+    ex->dc->c0_binst = 0;
     if (d->itype != NVN_INDEX_TYPE_UNSIGNED_SHORT && d->itype != NVN_INDEX_TYPE_UNSIGNED_INT)
         return warn_once(W_INDEX, "indirect draw with index type %d: skipped", d->itype);
     VkMemSpan ib, ip;
@@ -5734,7 +5733,7 @@ static int uses_tensor_ops(const VkExec *ex) {
     static struct { uint64_t serial; int8_t v; } memo[256];
     const uint8_t *ctl, *code;
     uint32_t len;
-    if (!ex->prog || !find_stage(ex->prog, NVN_STAGE_CS, &ctl, &code, &len)) return 0;
+    if (!ex->prog || !find_stage(ex->dc, ex->prog, NVN_STAGE_CS, &ctl, &code, &len)) return 0;
     uint64_t sr = ex->prog->serial;
     typeof(memo[0]) *m = &memo[(sr * 0x9E3779B97F4A7C15ull) >> 56];
     if (sr && m->serial == sr) return m->v;
@@ -6043,7 +6042,7 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
     // push did not go through the recorder (vk_rec.h rec_push; PORT-HANDOFF 7.12 item 11), which it now does.
     VkImage tm = e5 && dst_view ? vk_tonemap_record(ex->cb, e5, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, dw, dh) : VK_NULL_HANDLE;
     if (tm) {   // the tonemapped picture, already at the target's size, then the same blit as below
-        dc->B.pipe[1] = VK_NULL_HANDLE;   // the replay must bind its compute pipeline again
+        ex->dc->B.pipe[1] = VK_NULL_HANDLE;   // the replay must bind its compute pipeline again
         si = tm, sw = dw, sh = dh;
         bl.srcOffsets[1] = (VkOffset3D){(int32_t)sw, (int32_t)sh, 1};
     }
@@ -6095,7 +6094,7 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
 }
 
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     if (d->x <= 0 || d->y <= 0 || d->z <= 0) return;
     if (!ex->prog) return warn_once(W_PROGRAM, "a dispatch without a bound program is skipped");
     if (prog_lead_on()) prog_lead(ex->prog, 2);
@@ -6152,7 +6151,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
 // DispatchComputeIndirect: vkCmdDispatchIndirect from the pool buffer. The shader reads the group counts from c0 0x200,
 // so they are copied there on the GPU, into a c0 range no other dispatch uses, before the dispatch.
 static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     if (!ex->prog) return warn_once(W_PROGRAM, "a dispatch without a bound program is skipped");
     VkMemSpan ip;
     if (!vk_mem_resolve(d->ind, sizeof(VkDispatchIndirectCommand), &ip) || ip.offset % 4)
@@ -6186,7 +6185,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
         // or the driver's tables, which the copy would overwrite
         const uint8_t *pctl, *pcode;
         uint32_t plen;
-        int nvn2 = find_stage(ex->prog, NVN_STAGE_CS, &pctl, &pcode, &plen) && ctl_nvn2(pctl);
+        int nvn2 = find_stage(ex->dc, ex->prog, NVN_STAGE_CS, &pctl, &pcode, &plen) && ctl_nvn2(pctl);
         VkBufferCopy cp = {ip.offset, cx->B.c0_off[2] + (nvn2 ? 0 : 0x200), sizeof(VkDispatchIndirectCommand)};
         vkCmdCopyBuffer(ex->cb, ip.buffer, cx->B.c0_buf[2], 1, &cp);
         ex->recorded++;
@@ -6235,7 +6234,7 @@ static void bind_handles(uint64_t *dst, int cap, const p_bind_handles *b) {
 }
 
 static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
-    DrawCtx *const cx = dc;
+    DrawCtx *const cx = ex->dc;
     switch (op) {
     case OP_BIND_PROGRAM: {
         const p_bind_program *b = payload;
@@ -6361,6 +6360,7 @@ static int op_is_draw(uint32_t op) {
 }
 
 void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
+    if (!ex->dc) ex->dc = dc;
     static int on = -1;
     if (on < 0) on = cfg_bool("NX2NAVI_REPLAY_TIME");
     if (!on) { op_draw_impl(ex, op, payload); return; }

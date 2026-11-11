@@ -45,6 +45,8 @@ void vk_exec_cond_why(const p_render_cond *c, char *buf, size_t cap);   // NX2NA
 // the next. The "per command buffer" fields are reset by vk_exec_record.
 typedef struct VkExec {
     // ---- per command buffer
+    struct DrawCtx *dc;                  // vk_exec_draw.c: the draw context this state records with (NULL until a
+                                         // draw op names it: the calling thread's, vk_exec_draw_ctx_use)
     VkCommandBuffer cb;                  // being recorded
     uint64_t fence;                      // timeline value the submission signals (vk_completion_add)
     int recorded;                        // Vulkan commands recorded so far; every handler adds the ones it records

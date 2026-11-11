@@ -1805,6 +1805,7 @@ static uint32_t run_peek(const op_hdr *h, const op_hdr **end) {
 static void rw_walk(RwWorker *w) {
     VkExec *ex = &w->ex;
     x_cur = ex;
+    ex->dc = w->dc;
     ex->cb = vk_sync_worker_begin(w->idx);
     // the replay's command buffer before the run ended behind a full barrier, with every image in GENERAL
     ex->recorded = 0, ex->barrier_at = 0, ex->in_pass = 0, ex->nfbl = 0, ex->mark = NULL;
@@ -1851,7 +1852,9 @@ static const op_hdr *run_start(VkExec *ex, const op_hdr *h, int depth) {
     // the state the run left goes on in a new command buffer of the replay's, after the worker's in the part
     int recorded = ex->recorded + w->ex.recorded;
     VkCommandBuffer wcb = w->ex.cb;
+    struct DrawCtx *own = ex->dc;
     memcpy(ex, &w->ex, sizeof *ex);
+    ex->dc = own;
     ex->cb = vk_sync_append(&wcb, 1);
     ex->recorded = ex->barrier_at = recorded;   // the worker's command buffer ended with a full barrier
     ex->in_pass = 0, ex->nfbl = 0, ex->mark = NULL, ex->dirty = VK_EXEC_DIRTY_ALL, ex->rt_resolved = 0;
