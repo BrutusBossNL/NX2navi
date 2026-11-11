@@ -5,6 +5,9 @@
 #ifndef __cplusplus
 #include "cpu.h"
 void dbg_tick(Cpu *c);                 // the game's thread, at its pad read (ov_input.c): does what the menu asked for
+// ... and the pad's state before the game gets it: the free camera takes the sticks and four buttons while it flies
+void dbg_pad(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+void dbg_freecam_host(Cpu *c);         // the free camera's patch site (recomp/patches-v111.txt, set freecam)
 #endif
 
 #ifdef __cplusplus
@@ -38,6 +41,13 @@ const char *dbg_event_name(int i);
 void dbg_event_start(const char *name);
 int dbg_busy(void);
 void dbg_status(char out[160]);
+
+// The free camera: the game draws from a camera of the menu's instead of its own. With sticks on, the pad flies it and
+// Link stands; with sticks off it stays where it is and the pad plays the game. speed in metres a second.
+int dbg_freecam_available(void);       // the build has the camera's patch set
+void dbg_freecam_set(int on, int sticks, float speed);
+void dbg_freecam_reset(void);          // back to the game's view, free again from there
+int dbg_freecam(int *sticks, float *speed, double pos[3]);   // on or off
 
 // Memory: values of 1, 2 or 4 bytes in the game's heap.
 int dbg_search_new(uint32_t value, int size);       // returns the number of places

@@ -2,7 +2,7 @@
 // open, so its input, its sounds and the game's blocked pad are the menu's own): on the left edge, in the performance
 // overlay's look, with the game in view beside it. What it does to the game is in
 // debug_tools.c: the game's on/off flags by name, teleporting to the game's own start positions, starting its events,
-// the game's speed, Link's position, and a search of the game's memory with values to set and to hold. Plain Dear ImGui with English text: a tool for testing, not part of the game's
+// the game's speed, Link's position, a free camera, and a search of the game's memory with values to set and to hold. Plain Dear ImGui with English text: a tool for testing, not part of the game's
 // interface. Present thread only.
 #include <algorithm>
 #include <ctype.h>
@@ -288,7 +288,30 @@ void tab_world(void) {
     ImGui::TextWrapped("The whole game runs at this speed, its interface and its music's timing included. It goes back to 1x when "
                        "the game is closed.");
     ImGui::Separator();
-    ImGui::TextWrapped("Not in this menu yet: the free camera.");
+    ImGui::TextColored(ImVec4(236 / 255.0f, 196 / 255.0f, 104 / 255.0f, 1), "Free camera");
+    if (!dbg_freecam_available()) {
+        ImGui::TextWrapped("The free camera needs the game's code built by this version: the launcher's update or its rebuild "
+                           "makes it.");
+        return;
+    }
+    int sticks = 1;
+    float cam_speed = 8;
+    double at[3] = {0, 0, 0};
+    bool on = dbg_freecam(&sticks, &cam_speed, at) != 0;
+    bool changed = ImGui::Checkbox("The game draws from a camera of your own", &on);
+    if (on) {
+        if (ImGui::RadioButton("The sticks fly the camera, Link stands", sticks != 0)) sticks = 1, changed = true;
+        if (ImGui::RadioButton("The camera stays where it is, the pad plays the game", sticks == 0)) sticks = 0, changed = true;
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##camspeed", &cam_speed, 1.0f, 100.0f, "%.0f metres a second", ImGuiSliderFlags_Logarithmic)) changed = true;
+        if (ImGui::Button("Back to the game's view")) dbg_freecam_reset();
+        ImGui::SameLine();
+        ImGui::TextDisabled("x %.1f   y %.1f   z %.1f", at[0], at[1], at[2]);
+    }
+    if (changed) dbg_freecam_set(on, sticks, cam_speed);
+    ImGui::TextWrapped("Close this menu to fly: the left stick moves along the view and sideways, the right stick turns, ZR and ZL "
+                       "go up and down, R is four times as fast and L four times as slow. The game goes on meanwhile and "
+                       "draws what the camera sees; the game speed above slows it down. The camera does not stop at walls.");
 }
 
 // ---- memory

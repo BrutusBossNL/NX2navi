@@ -28,6 +28,9 @@
 //
 // An event (a cutscene, a conversation, a scripted moment) is started by its file's name through the game's event
 // manager, as the game's own actors start them.
+//
+// The free camera stands in for the game's camera inside the game's own camera update (dbg_freecam_host), so the game
+// itself draws from it.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -544,6 +547,7 @@ static void warp_tick(Cpu *c, uint64_t tick) {
             status_set(there ? "Arrived in %s, %s." : "The teleport to %s, %s was asked for; no arrival was seen.", warp.area,
                        warp.pos[0] ? warp.pos : "its default start");
             warp.state = W_IDLE;
+            dbg_freecam_reset();   // a free camera left behind in the old area's place starts again from the game's view
         }
     }
 }
@@ -626,10 +630,127 @@ int dbg_search_next(int mode, uint32_t value) {
     return kept;
 }
 
+// ---- the free camera. The game's camera update (main+0x4c48c0) chooses the frame's position and target (doubles) and
+// up vector between the camera's own and an override, and at main+0x4c4e50 has them in d0-d2, d3-d5 and s7, s16, s6,
+// before it stores them into the look-at camera and makes its matrix. The patch set freecam (recomp/patches-v111.txt)
+// sends that instruction here while the free camera is on: the registers get the free camera's vectors, so the game
+// draws, culls and loads detail for the view it is given, in play and in cutscenes, and Link, the world and the
+// game's own camera work go on as they were. The pad's sticks fly it (dbg_pad, from ov_input.c before the game gets the pad's state).
+#include "input_map.h"
+
+static struct {
+    volatile int on, capture, sticks;   // the menu's: on; take the game's view at the next update; the sticks fly it
+    volatile float speed;               // metres a second
+    double pos[3], reach;               // the game thread's: where it is, and the game's distance to its target
+    float yaw, pitch;
+    uint64_t last_ns, updates;
+} fc = {.sticks = 1, .speed = 8.0f, .reach = 5.0};
+
+static double reg_d(Cpu *c, int r) {
+    uint64_t b = (uint64_t)c->v[r];
+    double v;
+    memcpy(&v, &b, 8);
+    return v;
+}
+static void set_d(Cpu *c, int r, double v) {
+    uint64_t b;
+    memcpy(&b, &v, 8);
+    c->v[r] = b;
+}
+static void set_s(Cpu *c, int r, float v) {
+    uint32_t b;
+    memcpy(&b, &v, 4);
+    c->v[r] = b;
+}
+
+// The update runs for each of the game's cameras, every frame: the one that follows Link and the one its events
+// direct are the scene's, and the free camera stands in for both; the camera of the interface's 3D models and the
+// one the sound follows stay the game's. A camera's state (x19) has its actor at +0x10, the actor its name at +0x20.
+static int scene_camera(uint64_t state) {
+    char name[16] = "";
+    uint64_t actor = rd_ptr(state + 0x10), np = actor ? rd_ptr(actor + 0x20) : 0;
+    if (!np || !rd(np, name, 13)) return 0;
+    return !memcmp(name, "PlayerCamera", 13) || !memcmp(name, "EventCamera", 12);
+}
+
+// The patch site's host function, on the patch page at +0xf70. patches.c registers it: that file is compiled with
+// the game version's patches.h, which has the page's address.
+void dbg_freecam_host(Cpu *c) {
+    fc.updates++;
+    if (fc.on && scene_camera(c->x[19])) {
+        if (fc.capture) {   // start where the game's camera is, looking where it looks
+            double d[3] = {reg_d(c, 3) - reg_d(c, 0), reg_d(c, 4) - reg_d(c, 1), reg_d(c, 5) - reg_d(c, 2)};
+            double len = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (isfinite(len) && len > 1e-3) {
+                for (int i = 0; i < 3; i++) fc.pos[i] = reg_d(c, i);
+                fc.yaw = (float)atan2(d[0], d[2]), fc.pitch = (float)asin(d[1] / len);
+                fc.reach = len < 1 ? 1 : len > 50 ? 50 : len;
+                fc.capture = 0;
+            }
+        }
+        if (!fc.capture) {
+            double cp = cos(fc.pitch), dir[3] = {cp * sin(fc.yaw), sin(fc.pitch), cp * cos(fc.yaw)};
+            for (int i = 0; i < 3; i++) set_d(c, i, fc.pos[i]), set_d(c, 3 + i, fc.pos[i] + dir[i] * fc.reach);
+            set_s(c, 7, 0), set_s(c, 16, 1), set_s(c, 6, 0);   // up
+        }
+    }
+    set_s(c, 17, (float)reg_d(c, 0));   // the instruction this call stands in for: fcvt s17, d0
+}
+
+int dbg_freecam_available(void) { return dbg_supported() && rt_patch_set("freecam") >= 0; }
+
+void dbg_freecam_set(int on, int sticks, float speed) {
+    if (!dbg_freecam_available()) return;
+    fc.sticks = sticks != 0;
+    fc.speed = speed >= 0.5f && speed <= 200.0f ? speed : 8.0f;
+    if (on && !fc.on) fc.capture = 1;
+    if ((on != 0) != fc.on) rt_log("debug: free camera %s", on ? "on" : "off");   // what a tester changed, for the log
+    fc.on = on != 0;
+    rt_patch_switch(rt_patch_set("freecam"), on != 0);
+}
+
+void dbg_freecam_reset(void) { fc.capture = 1; }   // back to the game's view, and free from there
+
+int dbg_freecam(int *sticks, float *speed, double pos[3]) {
+    if (sticks) *sticks = fc.sticks;
+    if (speed) *speed = fc.speed;
+    if (pos) memcpy(pos, fc.pos, sizeof fc.pos);
+    return fc.on;
+}
+
+// The game's thread, with the pad's state before the game gets it: while the free camera has the sticks, the left one
+// moves it along its view and sideways, the right one turns it, ZR and ZL raise and lower it, R makes it four times
+// as fast and L four times as slow, and the game is told that none of those is touched, so Link stays where he is.
+void dbg_pad(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
+    if (!fc.on || !fc.sticks || fc.capture) {
+        fc.last_ns = 0;
+        return;
+    }
+    uint64_t now = plat_now_ns();
+    double dt = fc.last_ns ? (double)(now - fc.last_ns) / 1e9 : 0;
+    fc.last_ns = now;
+    if (dt > 0.1) dt = 0.1;
+    double in[4] = {*lx / 32767.0, *ly / 32767.0, *rx / 32767.0, *ry / 32767.0};
+    for (int i = 0; i < 4; i++) in[i] = fabs(in[i]) < 0.15 ? 0 : in[i];
+    const uint64_t zl = 1ull << B_ZL, zr = 1ull << B_ZR, l = 1ull << B_L, r = 1ull << B_R;
+    double rise = (*buttons & zr ? 1 : 0) - (*buttons & zl ? 1 : 0);
+    double step = fc.speed * (*buttons & r ? 4 : 1) * (*buttons & l ? 0.25 : 1) * dt;
+    fc.yaw -= (float)(in[2] * 2.4 * dt);
+    fc.pitch += (float)(in[3] * 1.8 * dt);
+    fc.pitch = fc.pitch > 1.5f ? 1.5f : fc.pitch < -1.5f ? -1.5f : fc.pitch;
+    double cp = cos(fc.pitch), dir[3] = {cp * sin(fc.yaw), sin(fc.pitch), cp * cos(fc.yaw)};
+    double right[3] = {-cos(fc.yaw), 0, sin(fc.yaw)};   // the view's direction crossed with up
+    for (int i = 0; i < 3; i++) fc.pos[i] += (dir[i] * in[1] + right[i] * in[0]) * step;
+    fc.pos[1] += rise * step;
+    *lx = *ly = *rx = *ry = 0;
+    *buttons &= ~(zl | zr | l | r);
+}
+
 // ---- NX2NAVI_DBG_TEST="<tick>:flag <hash hex> <0|1>;<tick>:speed <factor>;<tick>:find <value> <size>;
 // <tick>:next <mode> <value>;<tick>:setfirst <value>;<tick>:holdfirst <value>;<tick>:show [<hash hex>];
-// <tick>:warp <area> [<start position>];<tick>:event <name>;<tick>:text <game data text's name>": the menu's requests
-// without the menu, for test runs. Ticks count the game's pad reads from the player's first appearance.
+// <tick>:warp <area> [<start position>];<tick>:event <name>;<tick>:text <game data text's name>;
+// <tick>:freecam <0|1> <sticks 0|1> <speed>;<tick>:camgo <dx> <dy> <dz> [<yaw> <pitch>];<tick>:camreset;<tick>:campos":
+// the menu's requests without the menu, for test runs. Ticks count the game's pad reads from the player's first appearance.
 static void test_script(uint64_t tick) {
     static char buf[2048];
     static const char *next;
@@ -649,6 +770,23 @@ static void test_script(uint64_t tick) {
             dbg_flag_set(hash, (int)on);
         } else if (sscanf(colon + 1, "speed %f", &f) == 1) {
             dbg_speed_set(f);
+        } else if (!strncmp(colon + 1, "campos", 6)) {
+            rt_log("debug: tick %llu: free camera %s at %.3f %.3f %.3f, yaw %.3f, pitch %.3f; %llu camera updates through it",
+                   (unsigned long long)tick, fc.on ? "on" : "off", fc.pos[0], fc.pos[1], fc.pos[2], fc.yaw, fc.pitch,
+                   (unsigned long long)fc.updates);
+        } else if (!strncmp(colon + 1, "freecam ", 8)) {   // freecam <on> <sticks> <speed>
+            int cam_on = 0, sticks = 1;
+            float speed = 8;
+            if (sscanf(colon + 9, "%d %d %f", &cam_on, &sticks, &speed) >= 1) dbg_freecam_set(cam_on, sticks, speed);
+        } else if (!strncmp(colon + 1, "camreset", 8)) {
+            dbg_freecam_reset();
+        } else if (!strncmp(colon + 1, "camgo ", 6)) {      // camgo <dx> <dy> <dz> <yaw> <pitch>: the free camera moved by hand
+            double d[3] = {0, 0, 0};
+            float yaw = 0, pitch = 0;
+            if (sscanf(colon + 7, "%lf %lf %lf %f %f", &d[0], &d[1], &d[2], &yaw, &pitch) >= 3) {
+                for (int i = 0; i < 3; i++) fc.pos[i] += d[i];
+                fc.yaw += yaw, fc.pitch += pitch;
+            }
         } else if (!strncmp(colon + 1, "warp ", 5)) {
             char area[64] = "", pos[64] = "";
             if (sscanf(colon + 6, "%63[^ ;] %63[^ ;]", area, pos) >= 1) dbg_warp(area, pos);
