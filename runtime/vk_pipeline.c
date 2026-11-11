@@ -6328,7 +6328,10 @@ static void lb_warm_prepared(const char *dir) {
 // NX2NAVI_PREPARE_PIPELINES: mesh (default) builds the list's mesh pipelines only; all, every record; 0, none. A
 // vertex pipeline is linked from its prepared stage libraries in 2 to 6 ms when a draw misses it, and its module
 // depends on the vertex output union of the pairs this install has recorded (vs_outs), so one built here is not
-// certain to be the one a draw asks for.
+// certain to be the one a draw asks for. Without the graphics pipeline library (vk_caps_gpl: AMD's Windows driver for
+// RDNA 2 and older) neither holds: a vertex pipeline a draw misses is compiled whole while that draw is left out, and
+// its vertex outputs come from its own pair (no independent layouts), so a listed one is the one the draw asks for.
+// There mesh builds every record too.
 // A driver whose compiler crashes on one of these would crash at every preparation: seed-pipelines-running.txt marks
 // the step, and a run that finds the marker of a run that died skips the step for good on this folder (the pipelines
 // are then built at their first draw, as without a list) until the marker is deleted.
@@ -6336,7 +6339,7 @@ static int cache_save(uint32_t wait_ms, int exiting);
 
 static int seed_pipelines(const char *dir) {
     const char *mode = cfg_value("NX2NAVI_PREPARE_PIPELINES");
-    int all = !strcmp(mode, "all");
+    int all = !strcmp(mode, "all") || (!strcmp(mode, "mesh") && !P.gpl);
     char path[PLAT_PATH_MAX * 2 + 48], mark[PLAT_PATH_MAX * 2 + 48];
     snprintf(path, sizeof path, "%s/seed-pipeline-keys.bin", dir);
     snprintf(mark, sizeof mark, "%s/seed-pipelines-running.txt", dir);
@@ -6452,7 +6455,8 @@ static int seed_pipelines(const char *dir) {
     snprintf(msg, sizeof msg, "prepare-pipelines: %zu listed pipelines: %u built (%u mesh), %u failed, %u the same as one "
              "built before, %u without a shader this game version or its shader cache has, %u vertex pipelines left to "
              "their first draw (NX2NAVI_PREPARE_PIPELINES=%s), %u mesh pipelines this GPU cannot draw; on %d threads in "
-             "%.0f ms; pipeline cache %s", n, built, mesh, failed, known, dropped, other, all ? "all" : "mesh", no_mesh,
+             "%.0f ms; pipeline cache %s", n, built, mesh, failed, known, dropped, other,
+             !strcmp(mode, "all") ? "all" : all ? "mesh, every record without the graphics pipeline library" : "mesh", no_mesh,
              nt ? nt : 1, now_ms() - t0,
              saved ? "saved" : "not saved (builds kept running, or its file could not be written)");
     printf("%s\n", msg);
