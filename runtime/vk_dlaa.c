@@ -1609,14 +1609,20 @@ void vk_dlaa_draw(VkExec *ex) {
     }
 }
 
+// NX2NAVI_DLAA_JITTER=0 (test): no jitter. Read once.
+static int jitter_on(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("DLAA_JITTER", "1");
+    return on;
+}
+
 // The jitter moves on right after DLAA ran, not at the present: the replay can record the next frame's scene before
 // the present of this one is handled, and a step taken there landed in the middle of a frame (worse after an off/on
 // switch, which shifted that order). Jitter needs a frame DLSS ran on; a frame without the DLAA point stops it.
 // The sequence is as long as NVIDIA's DLSS guide asks for the upscaling ratio, 8 x (output / scene)^2 phases (18 in
 // Quality, 24 in Balanced, 32 in Performance, 72 in Ultra Performance), and 16 at least, the length DLAA has used from the start.
 static void next_jitter(uint32_t w, uint32_t ow) {
-    static int nj = -1;
-    if (nj < 0) nj = !rt_knob("DLAA_JITTER", "1");   // NX2NAVI_DLAA_JITTER=0: no jitter (test)
+    int nj = !jitter_on();
     double r = w ? (double)ow / w : 1.0;
     uint32_t phases = (uint32_t)ceil(8.0 * r * r - 1e-6);
     if (phases < 16) phases = 16;
@@ -2131,7 +2137,13 @@ void vk_dlaa_pass(VkExec *ex) {
 }
 
 // NX2NAVI_DLSS, read at each present (the menu switches it live): the scene size of the mode (resolution.c) and the
-// texture bias that goes with it while DLSS runs.
+// texture bias that goes with it while DLSS or FSR 3.1 runs. NVIDIA's DLSS guide asks for log2(render / output) - 1 on
+// top of the game's own bias: the render scale's part (res_dlss_lod_bias) samples textures for the output's resolution,
+// and the -1 sharper still, since the jittered frames DLSS accumulates resolve the detail one level finer: -1 at DLAA,
+// -1.58 in Quality (67 %), -2 in Performance. The -1 comes only with the jitter (jitter_on): without it the same pixel
+// samples the same spot every frame, and a sharper level would shimmer instead. The sampler clamps the sum to the
+// device's limit (vk_texture.c make_sampler).
+#define JITTER_LOD_BIAS (-1.0f)
 static void dlss_mode(void) {
     static char mode[32];
     static int bias_on = -1;
@@ -2143,7 +2155,8 @@ static void dlss_mode(void) {
         bias_on = -1;
     }
     int b = dl_active();
-    if (b != bias_on) bias_on = b, vk_sampler_dlss_bias(b ? res_dlss_lod_bias() : 0.0f);
+    if (b != bias_on)
+        bias_on = b, vk_sampler_dlss_bias(b ? res_dlss_lod_bias() + (jitter_on() ? JITTER_LOD_BIAS : 0.0f) : 0.0f);
 }
 
 
