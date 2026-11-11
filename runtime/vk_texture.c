@@ -1537,6 +1537,15 @@ int vk_texture_pool_fresh_locked(void) {
 // slot_resolve's last answer was none because of its stale rule (vk_texture_slot_retry_locked)
 static int resolve_stale;
 
+// NX2NAVI_TRACE=perf, since the last perf line: slots a finalize marked (its own texture object's), slots at the storage
+// with the same parameters registered with another texture object, which a finalize leaves current
+// (vk_texture_release), and lookups the stale rule answered with the stand-in (slot_resolve). _hm: of them, the
+// terrain's streamed heightmaps (R32F 260x260), whose stand-in draws a chunk of ground at height zero.
+static uint64_t n_fin_own, n_fin_other, n_fin_other_hm, n_stale, n_stale_hm;
+static int terrain_heightmap(const tex_t *t) {
+    return t->d.format == NVN_FORMAT_R32F && t->d.width == 260 && t->d.height == 260;
+}
+
 int vk_texture_slot_retry_locked(int id) {
     if (id < 0 || id >= ntslots || !tslots[id].used || !tslots[id].t.mem) return -1;
     resolve_stale = 0;
@@ -3545,6 +3554,11 @@ void vk_texture_release(const tex_t *t) {
     // Staleness belongs to the registered descriptor, not the cached image: a released Tex can be destroyed before the
     // slot looks again (eviction, the released cap, start_at for a mirrored one). A registered texture may also be
     // finalized before its image is created.
+    // Only the slots this texture object registered (its initialization serial): a slot registered with another
+    // texture initialized at the same storage with the same parameters names that one, which is still live. Ocarina
+    // streams terrain heightmaps (R32F 260x260) through a fixed set of storage and initializes and registers the next
+    // chunk's texture there before it finalizes the previous one; finalizing the new registration left the slot stale,
+    // the draws sampled the zero stand-in, and the chunk was drawn at height zero, tens of metres below the ground.
     int changed = 0;
     if (sinfo)
         for (int id = bucket_head[agen_idx(k.addr)]; id >= 0; id = slot_next[id]) {
@@ -3552,7 +3566,13 @@ void vk_texture_release(const tex_t *t) {
             if (s->finalized || (uintptr_t)s->t.mem != k.addr) continue;
             TexKey sk;
             make_key(&s->t, &sk);
-            if (!memcmp(&sk, &k, sizeof k)) s->finalized = 1, s->ce = NULL, changed = 1;
+            if (memcmp(&sk, &k, sizeof k)) continue;
+            if (s->t.serial != t->serial) {   // another texture object's registration: it stays current
+                n_fin_other++, n_fin_other_hm += terrain_heightmap(&s->t);
+                continue;
+            }
+            s->finalized = 1, s->ce = NULL, changed = 1;
+            n_fin_own++;
         }
     if (e && !e->released) {
         mark_released(e);
@@ -3701,7 +3721,7 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         // after its released image was evicted; registering the descriptor again makes it current.
         if (!e && any) e = any;
         else if (!e && !cpu_slot) e = own && own->superseded ? NULL : own;   // a superseded one: entry_of takes it back
-        else if (!e && cpu_slot && s->finalized) stale = 1;
+        else if (!e && cpu_slot && s->finalized) stale = 1, n_stale++, n_stale_hm += terrain_heightmap(&s->t);
     }
     resolve_stale = stale;
     if (!e && s->t.mem && !stale) {
@@ -3957,6 +3977,12 @@ void vk_texture_new_submit(void) {
                (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none);
         memset(n_drop_by, 0, sizeof n_drop_by), memset(n_cpu_empty, 0, sizeof n_cpu_empty);
         n_mark_empty = n_mark_none = 0;
+        rt_log("perf: frame %llu: texture finalizes: slots marked %llu; slots of another live texture with the same "
+               "parameters at the storage, left current %llu (terrain heightmaps %llu); lookups the stale rule gave the "
+               "stand-in %llu (terrain heightmaps %llu)", (unsigned long long)f * 60, (unsigned long long)n_fin_own,
+               (unsigned long long)n_fin_other, (unsigned long long)n_fin_other_hm, (unsigned long long)n_stale,
+               (unsigned long long)n_stale_hm);
+        n_fin_own = n_fin_other = n_fin_other_hm = n_stale = n_stale_hm = 0;
         if (split_mode > 0)
             rt_log("perf: frame %llu: split fill: entries the CPU does not write started with their storage's bytes: "
                    "copied from the released entry they replaced %llu, filled from storage %llu (%.1f MiB, %.2f ms), "
