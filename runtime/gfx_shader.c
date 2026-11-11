@@ -2424,6 +2424,8 @@ const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words) {
     return s->spirv;
 }
 
+const char *gfx_shader_res_json(const GfxShader *s) { return s->reflection; }
+
 // The guest program a shader was translated from, as its stored inputs hold it (the whole program: NVN2 code from its
 // first byte), written to path for a disassembler (NX2NAVI_DUMP's sh_<hash>.code), and next to it <path>.job, the
 // translator request that translates it (one line for nx2navi_xlate --serve; its "out" names the shader cache, and

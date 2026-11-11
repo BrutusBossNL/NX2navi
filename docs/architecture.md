@@ -133,6 +133,28 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   ring of Vulkan `{x, y, z}` records filled on the GPU. The copy cannot be recorded inside a pass, so the first such
   draw of a pass fills the records of the mesh draws that follow it too, and the pass is not cut at each of them
   (`runtime/vk_exec_draw.c` `mesh_ring_entry`).
+- Mesh fallback (`mesh_fallback`: `auto` on a device without the extension, `1` on any device for testing): the task
+  and mesh stages run as compute dispatches and the result is drawn as ordinary triangles.
+  - The modules come from the translations the shader cache already holds, not from the translator
+    (`runtime/mesh_fb.c`): a translated task or mesh module is the program as a compute function over shared memory
+    plus an entry function that hands that memory to the mesh pipeline, and the fallback replaces the entry function
+    by one that copies the memory into a storage buffer. The translator, its identity and every cache key stay as
+    they are, so a device with mesh shaders keeps its shaders and never sees these modules, and a device without
+    needs no other cache or prepared shader list.
+  - A draw is: its record (the workgroup count, copied on the GPU when the game's record holds it); the task
+    dispatch, which writes each task workgroup's payload into the task buffer; a scan (`shaders/meshfb_scan.comp`)
+    that lists the mesh workgroups the tasks started, in task order, and writes their number into the record; the
+    mesh dispatch, which writes each workgroup's vertex lines and primitive bytes into its slot of the mesh buffer;
+    and an instanced indirect draw, one instance per slot, whose generated vertex stage looks the vertex of each
+    primitive corner up in the slot (`runtime/vk_exec_draw.c` `mfb_draw`, `runtime/vk_mesh_fb.c`).
+  - Each step reads what the one before wrote, so full barriers stand between them and every such draw ends its pass:
+    a village frame's 45 mesh draws are 45 passes cut, 90 to 135 dispatches and about 270 barriers more than with mesh
+    shaders. The buffers (`mesh_fallback_mb`, 128 MiB) are reused by every draw, so they hold the largest draw, not
+    a frame; a draw that emits more loses what does not fit, and the log says how much it needed.
+  - A program's modules and compute pipelines are made on a thread of their own at its first draw, which is skipped
+    until they are ready; they are not recorded for the next start, where the pipeline cache makes them quick.
+    Not carried: the far shadow cascades' coarser shading rate, a draw's first workgroup other than 0, and more
+    workgroups in one draw than one compute dispatch may have.
 - Pipelines: `VK_EXT_graphics_pipeline_library` where the driver has it: stage libraries compiled ahead, a fast link
   at a new state, an optimised pipeline replacing it from a background thread. A draw whose pipeline is not ready is
   skipped when its pass is one the game renders frame after frame: one of its targets was rendered in the last few

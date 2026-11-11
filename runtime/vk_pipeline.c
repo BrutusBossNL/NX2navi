@@ -3508,6 +3508,7 @@ static void keys_note(const VkPipeState *s) {
     static const uint8_t none[32];
     if (s->fs && !memcmp(gfx_shader_input_id(s->fs), none, 32)) return;   // the runtime's own shader (gfx_shader_own)
     if (s->ts && !memcmp(gfx_shader_input_id(s->ts), none, 32)) return;
+    if (!memcmp(gfx_shader_input_id(s->vs), none, 32)) return;   // the mesh fallback's vertex stage (vk_exec_draw.c mfb_vs_get)
     KeyRec r;
     rec_fill(&r, s);
     if (!seen_add(rec_hash(&r))) return;

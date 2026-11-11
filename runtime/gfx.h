@@ -100,6 +100,7 @@ size_t gfx_shader_warm_list(GfxWarmEnt **out);              // malloc'd; recorde
 const GfxShader *gfx_shader_load_private(const uint8_t iid[32], int *owned);
 void gfx_shader_release_private(const GfxShader *s);
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words);
+const char *gfx_shader_res_json(const GfxShader *s);        // the translator's .res.json text
 int gfx_shader_write_code(const GfxShader *s, const char *path);   // the guest program, from the stored inputs
 // A shader of the runtime's own (SPIR-V and a .res.json text as the translator writes them), outside the cache and
 // never freed; its key is the sha256 of both. NULL when the SPIR-V is malformed.

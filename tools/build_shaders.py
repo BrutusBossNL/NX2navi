@@ -5,6 +5,7 @@ The repository holds the shaders as source only. Each becomes runtime/<name>_spv
 missing and the stale ones before it compiles the runtime. Three kinds of source:
 
     runtime/shaders/<name>.comp, .vert, .frag   GLSL, compiled with glslc (one name per shader) and checked with spirv-val
+    runtime/shaders/<name>.mesh, .task          the same for the mesh fallback probe's mesh and task shaders (SPIR-V 1.5)
     runtime/shaders/<name>.spvasm               SPIR-V assembly, assembled with spirv-as and checked with spirv-val
     tools/make_dlaa_mask.py, make_mvobj_fs.py   shaders assembled in Python (ASSEMBLED); they need no other tool
 
@@ -34,7 +35,8 @@ TOOLS = Path(__file__).resolve().parent
 ROOT = TOOLS.parent
 BIN = Path(r'C:\msys64\ucrt64\bin')   # Windows; elsewhere, and without MSYS2 there, the tools come from PATH
 TARGET = 'vulkan1.1'
-STAGES = {'.comp': 'compute', '.vert': 'vertex', '.frag': 'fragment'}
+STAGES = {'.comp': 'compute', '.vert': 'vertex', '.frag': 'fragment', '.mesh': 'mesh', '.task': 'task'}
+MESH_TARGET = 'vulkan1.2'   # mesh and task shaders need SPIR-V 1.4 or later
 ASM = '.spvasm'
 ASM_TARGET = 'vulkan1.3'
 # header name -> the script beside this one that assembles it; the script's HEADER is the header's text
@@ -138,7 +140,7 @@ def words_of(src):
         else:
             # "// build_shaders: keep functions" in a source: no optimisation, so its functions stay functions (the HDR
             # tonemap, which runtime/vk_hdr.c splices into the game's shader by function)
-            target = TARGET
+            target = MESH_TARGET if src.suffix in ('.mesh', '.task') else TARGET
             opt = [] if '// build_shaders: keep functions' in src.read_text(encoding='utf-8') else ['-O']
             subprocess.run([tool('glslc'), *opt, f'--target-env={target}', f'-fshader-stage={STAGES[src.suffix]}',
                             '-o', str(spv), str(src)], check=True)

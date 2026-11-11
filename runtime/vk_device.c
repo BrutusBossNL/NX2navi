@@ -469,8 +469,17 @@ static int create_device(void) {
         g_vk.has_mesh_queries = want && c->mesh.meshShaderQueries && h->pipelineStatisticsQuery && c->f12.hostQueryReset;
         c->mesh.meshShaderQueries = g_vk.has_mesh_queries ? VK_TRUE : VK_FALSE;
         if (!c->mesh.meshShader || !c->mesh.taskShader) g_vk.has_mesh_shader = 0;
-        rt_log("vk: mesh shaders: %s", g_vk.has_mesh_shader ? "VK_EXT_mesh_shader" : "not supported (task/mesh draws are skipped)");
+        rt_log("vk: mesh shaders: %s", g_vk.has_mesh_shader ? "VK_EXT_mesh_shader" : "the extension is there, its task or mesh feature is not");
     }   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension
+    {   // mesh_fallback: auto (on a device without mesh shaders), 1 (on every device, for testing) or 0
+        const char *mf = cfg_value("NX2NAVI_MESH_FALLBACK");
+        g_vk.mesh_fallback = !strcmp(mf, "1") || (strcmp(mf, "0") && !g_vk.has_mesh_shader);
+        if (g_vk.mesh_fallback)
+            rt_log("vk: mesh fallback: task and mesh programs run as compute passes and are drawn from their buffers (%s)",
+                   g_vk.has_mesh_shader ? "mesh_fallback = 1" : "this device has no mesh shaders");
+        else if (!g_vk.has_mesh_shader)
+            rt_log("vk: mesh shaders: not supported and mesh_fallback = 0 (task/mesh draws are skipped)");
+    }
     if (g_vk.has_maximal_reconvergence && !c->mrc.shaderMaximalReconvergence) g_vk.has_maximal_reconvergence = 0;
     if (g_vk.has_pipeline_binary && !(c->pbin.pipelineBinaries && c->m5.maintenance5)) g_vk.has_pipeline_binary = 0;
     g_vk.has_buffer_device_address = c->f12.bufferDeviceAddress;
