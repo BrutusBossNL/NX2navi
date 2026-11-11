@@ -3215,16 +3215,54 @@ void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
 
 // gen_lock exclusive: freezes up to FREEZE_PER_SUB candidate regions still idle. The query after the
 // protection collects the writes made before it took effect.
+// A freeze is a VirtualQuery and a VirtualProtect of 2 MiB, some microseconds as a rule; in the second after an area
+// load, while the loaders write and the driver imports and locks new memory, each took 8 to 17 ms. The newly loaded
+// regions all go idle together, so 32 of them came up in one submission: its mirror begin took 70.5 ms and the frame
+// 78 ms, and one freeze of 9 ms followed in each of the next 20 frames. A freeze only saves later write-watch queries
+// (about a microsecond per MiB per submission), so it can wait: a pass stops once it has spent freeze_budget_ns, and a
+// freeze over FREEZE_SLOW_NS holds the passes for FREEZE_BACKOFF_NS, doubled for each slow one in a row up to 2 s.
+// NX2NAVI_FREEZE_BUDGET_US (default 1000; 0: no budget and no backoff, as before).
+#define FREEZE_SLOW_NS 2000000ull
+#define FREEZE_BACKOFF_NS 250000000ull
+#define FREEZE_BACKOFF_MAX_NS 2000000000ull
+static uint64_t freeze_budget_ns = ~0ull;   // ~0: not read yet
+static uint64_t frz_hold_until, frz_backoff, frz_held_passes, frz_slow;   // gen_lock
+
 static void freeze_pass(void) {
+    if (freeze_budget_ns == ~0ull) {
+        long long us = cfg_int("NX2NAVI_FREEZE_BUDGET_US");
+        freeze_budget_ns = us > 0 ? (uint64_t)us * 1000 : 0;
+    }
+    uint64_t start = qpc();
+    if (freeze_budget_ns && start < frz_hold_until) {
+        if (nfcand) frz_held_passes++;
+        return;
+    }
     for (int done = 0; nfcand && done < FREEZE_PER_SUB;) {
         uint64_t j = fcand[--nfcand], a = j << REG_SHIFT;
         if (ww_ep - reg_last[j] < (uint32_t)freeze_idle || mem_frozen(a)) continue;
         done++;
         uint64_t t0 = qpc();
         int ok = mem_freeze(a);
-        slow_mem_call("freeze", a, 1ull << REG_SHIFT, 0, qpc() - t0);
-        if (!ok) { n_frz_refused++; continue; }
-        query_stamp(a, a + (1ull << REG_SHIFT), ++gen_now);
+        uint64_t t1 = qpc();
+        slow_mem_call("freeze", a, 1ull << REG_SHIFT, 0, t1 - t0);
+        if (ok) query_stamp(a, a + (1ull << REG_SHIFT), ++gen_now);
+        else n_frz_refused++;
+        if (!freeze_budget_ns) continue;
+        if (t1 - t0 >= FREEZE_SLOW_NS) {
+            frz_slow++;
+            frz_backoff = frz_backoff ? frz_backoff * 2 : FREEZE_BACKOFF_NS;
+            if (frz_backoff > FREEZE_BACKOFF_MAX_NS) frz_backoff = FREEZE_BACKOFF_MAX_NS;
+            frz_hold_until = t1 + frz_backoff;
+            static uint32_t logged;
+            if (++logged <= 40)
+                rt_log("mem: freezing an idle region took %.1f ms: no freezes for %.0f ms (%llu slow freezes so far, %llu "
+                       "passes held, %d regions waiting)", (t1 - t0) / 1e6, frz_backoff / 1e6, (unsigned long long)frz_slow,
+                       (unsigned long long)frz_held_passes, nfcand);
+            break;
+        }
+        frz_backoff = 0;
+        if (qpc() - start >= freeze_budget_ns) break;
     }
 }
 
