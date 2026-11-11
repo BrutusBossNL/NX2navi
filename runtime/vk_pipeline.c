@@ -4431,8 +4431,11 @@ static int id_cmp(const void *x, const void *y) { return memcmp(x, y, 32); }
 // bookkeeping). Jobs left queued at K.until stay for the pool. So do those the memory gate refuses (gate_enter): a
 // builder it refuses ends, which leaves fewer builders compiling side by side while the others' reservations stand,
 // and none when the machine has no room; the pool builds what is left during play, when the gate lets it.
+// arg non-NULL: one job at most. The builders start with one pipeline built alone on the starting thread:
+// a driver's first graphics pipeline sets up its compiler, and NVIDIA's 621.14 was reported to fault in a sizable
+// share of starts when every builder began its first pipeline at the same moment.
 static void warm_builder(void *arg) {
-    (void)arg;
+    int one = arg != NULL;
     plat_mutex_lock(&P.lock);
     while (A.low && !(K.until && now_ms() >= K.until)) {
         double held;
@@ -4470,6 +4473,7 @@ static void warm_builder(void *arg) {
         plat_cond_broadcast(&done_cv);
         free(j);
         gate_leave(held);
+        if (one) break;
     }
     plat_mutex_unlock(&P.lock);
     return;
@@ -4612,6 +4616,7 @@ static void prewarm_run(void) {
     K.until = P.gpl && !(full && !strcmp(full, "1")) ? now_ms() + PREWARM_PIPE_MS : 0;   // before the builders start
     PlatThread *t[64];
     int nt = 0;
+    if (queued) warm_builder((void *)1);   // the first alone (warm_builder)
     for (int i = 0; i < cpus && i < 64 && queued; i++)
         if ((t[nt] = plat_thread_new(warm_builder, NULL, "pipe prewarm"))) nt++;
     if (!nt) warm_builder(NULL);
@@ -6435,6 +6440,7 @@ static int seed_pipelines(const char *dir) {
     free(ids), free(sh), free(r);
     PlatThread *th[64];
     int nt = 0;
+    if (queued) warm_builder((void *)1);   // the first alone (warm_builder)
     for (int i = 0; i < cpus && i < 64 && queued; i++)
         if ((th[nt] = plat_thread_new(warm_builder, NULL, "pipe list"))) nt++;
     if (!nt && queued) warm_builder(NULL);
