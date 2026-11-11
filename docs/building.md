@@ -174,6 +174,12 @@ of them.
    `make_release.py`). A list belongs to the record layout of the runtime that wrote it; another runtime says so and
    builds nothing from it. `python tests\pipeline_list_test.py` checks the tool on made-up folders.
 
+   What a game folder's shader cache holds can be checked without the game:
+   `python tools\validate_shader_cache.py <game folder>\shader-cache` reads every translated shader from the pack and
+   the loose files, applies the checks the game makes when it loads one (those that fail are translated again at
+   their next use) and runs `spirv-val` on the rest; `--every N` samples, `--out FILE` lists the failed ones. It writes
+   nothing to the cache. `python tests\validate_shader_cache_test.py` checks the tool on a made-up cache.
+
 7. Run. The game keeps running when its window loses the focus (`assume_focus = 1` in `nx2navi.ini`, the default; the
    Game tab switches it). With 0 it pauses, as it does on the Switch when Home is pressed.
 
