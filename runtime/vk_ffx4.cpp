@@ -24,7 +24,7 @@ extern "C" {
 extern "C" int vk_ffx4_available(void) { return 0; }
 extern "C" const char *vk_ffx4_name(void) { return "AMD FSR 4"; }
 extern "C" int vk_ffx4_upscale(VkCommandBuffer, const VkFfxImage *, const VkFfxImage *, const VkFfxImage *, const VkFfxImage *,
-                               float, float, int, float, float) {
+                               float, float, int, float, const VkFfxCamera *) {
     return 0;
 }
 extern "C" void vk_ffx4_release(void) {}
@@ -232,7 +232,7 @@ Up *create(Up *slot, uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh) {
     slot->desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     slot->desc.header.pNext = &slot->backend.header;
     slot->desc.flags =
-        FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INFINITE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+        FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;   // a finite far plane, as FSR 3.1's
     slot->desc.maxRenderSize = {mw, mh};
     slot->desc.maxUpscaleSize = {ow, oh};
     slot->desc.fpMessage = message;
@@ -354,7 +354,7 @@ extern "C" void vk_ffx4_trim(uint64_t now_ns) {
 }
 
 extern "C" int vk_ffx4_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage *depth, const VkFfxImage *mv,
-                               const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y) {
+                               const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, const VkFfxCamera *cam) {
     if (!vk_ffx4_available() || g_off.load(std::memory_order_acquire)) return 0;
     uint64_t now = plat_now_ns();
     if (g_failures && now < g_retry_ns) return 0;   // FSR 3.1 serves until the next try
@@ -382,10 +382,11 @@ extern "C" int vk_ffx4_upscale(VkCommandBuffer cb, const VkFfxImage *color, cons
     d.frameTimeDelta = dt_ms;
     d.preExposure = 1.0f;
     d.reset = reset != 0;
-    d.cameraNear = 0.1f;   // Ocarina's projection (vk_dlaa.c ocam_vp): near 0.1, far at infinity
-    d.cameraFar = 1e8f;
-    d.cameraFovAngleVertical = fov_y > 0 ? fov_y : 1.0f;
-    d.viewSpaceToMetersFactor = 0.01f;   // the game's units are centimetres
+    // the frame's camera (vk_dlaa.c proj_planes), as FSR 3.1 gets it (vk_ffx.cpp)
+    d.cameraNear = cam && cam->znear > 0 ? cam->znear : 0.1f;
+    d.cameraFar = cam && cam->zfar > 0 ? cam->zfar : 1e8f;
+    d.cameraFovAngleVertical = cam && cam->fov_y > 0 ? cam->fov_y : 1.0f;
+    d.viewSpaceToMetersFactor = cam && cam->meters > 0 ? cam->meters : 1.0f;
     ffxReturnCode_t r = A.dispatch(&u->ctx, &d.header);
     if (r != FFX_API_RETURN_OK) {
         static int told;

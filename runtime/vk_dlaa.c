@@ -25,6 +25,7 @@
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "platform/platform.h"
 #include "vk.h"
 #include "vk_dlaa.h"
@@ -597,6 +598,17 @@ int vk_dlaa_fg_camera(VkDlaaCamera *c) {
     return 1;
 }
 
+// Metres in one unit of Ocarina's view space, for FSR's distance heuristics: one. Measured in Hyrule Field, the camera
+// orbits Link about 4 units behind him (the nearest scene depth, 0.975, is 1 - 0.1 / 4) at about 3 units a second, and
+// travels about 4.7 units a second while he runs; in centimetres (the 0.01 FSR had) he would be 4 cm from the camera.
+#define VIEW_METERS 1.0f
+
+int vk_dlaa_ffx_camera(VkFfxCamera *c) {
+    if (!D.fg_cam_ok) return 0;
+    *c = (VkFfxCamera){D.fg_cam.fov_y, D.fg_cam.znear, D.fg_cam.zfar, VIEW_METERS};
+    return 1;
+}
+
 int vk_dlaa_fg_inputs(VkFfxImage *depth, VkFfxImage *mv, float *jx, float *jy, int *reset) {
     if (!D.fg_fresh || D.failed) return 0;
     D.fg_fresh = 0;
@@ -936,6 +948,49 @@ static void fg_store(float out[16], const double m[16]) {
     for (int r = 0; r < 4; r++)
         for (int k = 0; k < 4; k++) out[r * 4 + k] = (float)m[k * 4 + r];
 }
+// The view distance in front of the camera at which the projection P (row-major, column vectors, looking down -z) gives
+// clip depth z_ndc = k: (P[10] z + P[11]) / (P[14] z + P[15]) = k, solved for z. INFINITY where no distance gives it.
+static double plane_dist(const double P[16], double k) {
+    double den = P[10] - k * P[14];
+    if (fabs(den) <= 1e-9 * (fabs(P[10]) + fabs(P[14]))) return INFINITY;
+    return -(k * P[15] - P[11]) / den;
+}
+
+// What the depth buffer's 0 and 1 stand for, from the frame's projection and the device's depth mode. With NVN's
+// NEAR_IS_MINUS_W (clip depth -w..w, which the pipelines keep through negativeOneToOne, vk_pipeline.c) a fragment
+// stores z_ndc * 0.5 + 0.5, so 0 is z_ndc = -1; with NEAR_IS_ZERO it stores z_ndc. Both are 0..1 in the D32F target
+// (the viewport's depth range, vk_exec_draw.c), and the -w..w mapping stores exactly what a 0..w projection with the
+// same planes would: (f / (f - n)) (1 - n / distance), the convention DLSS, Streamline and FSR take. Ocarina's planes
+// are not fixed: in Hyrule Field its z row is (-1.00001, -0.200001), near 0.1 and far about 25,000 (the view's units
+// are metres), and the camera before it had far about 1,000. Taken as 0.1 and 1e8 (no far plane), a distance d reads
+// as (f - n) d / (f - d): 1,000 as 1,042, 10,000 as 16,650, and the far plane's neighbourhood without bound. So the
+// planes come from the projection every frame; a projection whose stored 0 is not in front of the camera keeps the last
+// frame's planes.
+static void proj_planes(const double P[16], VkDlaaCamera *c) {
+    int minus_w = nvn_depth_minus_w();
+    double at0 = plane_dist(P, minus_w ? -1.0 : 0.0), at1 = plane_dist(P, 1.0);   // the distances stored as 0 and 1
+    int inverted = !(at0 < at1);   // reversed depth: the near plane is stored as 1
+    double n = inverted ? at1 : at0, f = inverted ? at0 : at1;
+    if (!(n > 0) || !isfinite(n)) return;
+    c->inverted = inverted;
+    c->znear = (float)n;
+    c->infinite = !(f < VK_DLAA_FAR_INFINITE);
+    c->zfar = c->infinite ? VK_DLAA_FAR_INFINITE : (float)f;
+    // one line at the start and whenever the planes change (the first 20 times)
+    static float logged_n, logged_f;
+    static int logged_inv = -1, lines;
+    if (lines < 20 && (inverted != logged_inv || fabsf(c->znear - logged_n) > 1e-4f * logged_n ||
+                       fabsf(c->zfar - logged_f) > 1e-4f * logged_f)) {
+        lines++, logged_inv = inverted, logged_n = c->znear, logged_f = c->zfar;
+        char fz[32];
+        if (c->infinite) snprintf(fz, sizeof fz, "infinite");
+        else snprintf(fz, sizeof fz, "%.6g", c->zfar);
+        rt_log("dlaa: the scene's projection: near %.6g, far %s, depth %s, clip depth %s (z row %.6g %.6g %.6g %.6g, "
+               "w row %.6g %.6g %.6g %.6g)", c->znear, fz, inverted ? "inverted (1 near)" : "0 near, 1 far",
+               minus_w ? "-w..w" : "0..w", P[8], P[9], P[10], P[11], P[12], P[13], P[14], P[15]);
+    }
+}
+
 static void fg_camera(const float *v, const double m[16]) {
     double P[16], Pi[16], mi[16];
     for (int i = 0; i < 16; i++) P[i] = v[28 + i];
@@ -950,6 +1005,8 @@ static void fg_camera(const float *v, const double m[16]) {
     }
     c->fov_y = P[5] != 0 ? 2.0f * (float)atan(1.0 / fabs(P[5])) : 1.0f;
     c->aspect = P[0] != 0 ? (float)fabs(P[5] / P[0]) : 1.777f;
+    if (!(c->znear > 0)) c->znear = 0.1f, c->zfar = VK_DLAA_FAR_INFINITE, c->infinite = 1;   // until a projection gives them
+    proj_planes(P, c);
     D.fg_cam_ok = 1;
     // NX2NAVI_MOUSE_TRACE=1 (test runs, mouse_direct.c): the camera's direction each frame
     static int trace = -1;
@@ -1725,7 +1782,9 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         D.last_eval_ns = now;
         VkFfxImage fc = {t->image, t->format, w, h, 0}, fz = {z->image, z->format, w, h, 0},
                    fm = {e->mv, VK_FORMAT_R16G16_SFLOAT, w, h, 1}, fo = {e->out, VK_FORMAT_R16G16B16A16_SFLOAT, ow, oh, 1};
-        if (!vk_ffx_upscale(cb, &fc, &fz, &fm, &fo, jx, jy, D.reset, dt > 0 && dt < 100 ? (float)dt : 16.67f, 0))
+        VkFfxCamera fcam;
+        if (!vk_dlaa_ffx_camera(&fcam)) memset(&fcam, 0, sizeof fcam);   // no camera this frame: FSR's fixed values
+        if (!vk_ffx_upscale(cb, &fc, &fz, &fm, &fo, jx, jy, D.reset, dt > 0 && dt < 100 ? (float)dt : 16.67f, &fcam))
             return dl_fail("FSR 3.1", 0);
         static int told;
         if (!told++) rt_log("dlaa: FSR 3.1 at %ux%u -> %ux%u (scene format %d, depth format %d)", w, h, ow, oh,
@@ -2301,12 +2360,12 @@ int vk_ngxfg_evaluate(VkCommandBuffer cb, const VkNgxImage *bb, const VkNgxImage
     static const char *const fw[] = {"DLSSG.CameraFwdX", "DLSSG.CameraFwdY", "DLSSG.CameraFwdZ"};
     for (int i = 0; i < 3; i++)
         p_setf(p, pos[i], c.pos[i]), p_setf(p, up[i], c.up[i]), p_setf(p, rt[i], c.right[i]), p_setf(p, fw[i], c.fwd[i]);
-    p_setf(p, "DLSSG.CameraNear", 0.1f);   // Ocarina's projection, as vk_dlssg.c gives it
-    p_setf(p, "DLSSG.CameraFar", 1e8f);
+    p_setf(p, "DLSSG.CameraNear", c.znear);   // the frame's own planes (proj_planes), as vk_dlssg.c gives them
+    p_setf(p, "DLSSG.CameraFar", c.zfar);
     p_setf(p, "DLSSG.CameraFOV", c.fov_y);
     p_setf(p, "DLSSG.CameraAspectRatio", c.aspect);
     p_setu(p, "DLSSG.ColorBuffersHDR", 0);
-    p_setu(p, "DLSSG.DepthInverted", 0);
+    p_setu(p, "DLSSG.DepthInverted", (unsigned)c.inverted);
     p_setu(p, "DLSSG.CameraMotionIncluded", 1);
     p_setu(p, "DLSSG.Reset", (unsigned)(reset || FG.reset));
     p_setu(p, "DLSSG.AutomodeOverrideReset", 0);

@@ -3,9 +3,10 @@
 // headers are in third_party/ffx_api (MIT); they are C++ in places, hence this file. Nothing of it runs unless the
 // upscaler or frame generation asks for FSR 3.1.
 //
-// FSR 3.1 takes the same inputs vk_dlaa.c makes for DLSS: the scene's light target (linear HDR), its D32F depth
-// (OpenGL-style, an infinite far plane, not inverted) and the camera motion vectors in render pixels from the current
-// frame to the previous one, the convention both share, so the vectors go in unscaled.
+// FSR 3.1 takes the same inputs vk_dlaa.c makes for DLSS: the scene's light target (linear HDR), its D32F depth (0
+// near, 1 far, with the near and far planes of the frame's own projection, vk_dlaa.c proj_planes) and the camera
+// motion vectors in render pixels from the current frame to the previous one, the convention both share, so the
+// vectors go in unscaled.
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -191,7 +192,8 @@ Up *context_for(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
     ffxCreateContextDescUpscale d = {};
     d.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     d.header.pNext = &be.header;
-    d.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INFINITE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+    // no infinite-depth flag: the game's far plane is finite (vk_dlaa.c proj_planes) and each dispatch gives it
+    d.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
     d.maxRenderSize = {mw, mh};
     d.maxUpscaleSize = {ow, oh};
     d.fpMessage = message;
@@ -271,7 +273,7 @@ extern "C" int vk_ffx_trim_idle(uint64_t recent) {
 }
 
 extern "C" int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage *depth, const VkFfxImage *mv,
-                              const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y) {
+                              const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, const VkFfxCamera *cam) {
     if (!vk_ffx_load()) return 0;
     uint64_t now = plat_now_ns();
     trim(now);
@@ -280,7 +282,7 @@ extern "C" int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const
     // would blend this picture with whatever that upscaler last saw.
     static int last;   // 3 or 4: which one made the frame before
     if (vk_ffx_fsr4()) {
-        if (vk_ffx4_upscale(cb, color, depth, mv, out, jx, jy, reset || last != 4, dt_ms, fov_y)) {
+        if (vk_ffx4_upscale(cb, color, depth, mv, out, jx, jy, reset || last != 4, dt_ms, cam)) {
             if (last != 4) rt_log("ffx: the upscaler is %s", vk_ffx4_name());
             last = 4;
             return 1;
@@ -312,10 +314,11 @@ extern "C" int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const
     d.frameTimeDelta = dt_ms;
     d.preExposure = 1.0f;
     d.reset = reset != 0;
-    d.cameraNear = 0.1f;   // Ocarina's projection (vk_dlaa.c ocam_vp): near 0.1, far at infinity
-    d.cameraFar = 1e8f;
-    d.cameraFovAngleVertical = fov_y > 0 ? fov_y : 1.0f;
-    d.viewSpaceToMetersFactor = 0.01f;   // the game's units are centimetres
+    // the frame's camera (vk_dlaa.c proj_planes)
+    d.cameraNear = cam && cam->znear > 0 ? cam->znear : 0.1f;
+    d.cameraFar = cam && cam->zfar > 0 ? cam->zfar : 1e8f;
+    d.cameraFovAngleVertical = cam && cam->fov_y > 0 ? cam->fov_y : 1.0f;
+    d.viewSpaceToMetersFactor = cam && cam->meters > 0 ? cam->meters : 1.0f;
     ffxReturnCode_t r = A.dispatch(&u->ctx, &d.header);
     if (r != FFX_API_RETURN_OK) {
         static int told;
