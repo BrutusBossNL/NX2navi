@@ -76,6 +76,7 @@ int vk_ffx_available(void);             // vk_ffx.cpp: FSR 3.1 upscaling can run
 int vk_ffx_framegen_available(void);    // ... and FSR 3.1 frame generation
 int vk_ffx4_available(void);            // vk_ffx4.cpp: AMD's FSR 4 runs on this device (its libraries, card and driver)
 int vk_ffx_fsr4(void);                  // vk_ffx.cpp: ... and the setting asks for it (NX2NAVI_FSR4)
+void vk_ffx4_retry(void);               // vk_ffx4.cpp: FSR 4 chosen again after failures that turned it off
 int vk_fg4_available(void);             // vk_fg4.cpp: the frame generation of AMD's FSR 4 library runs on this device
 int vk_fg4_failed(void);                // ... it failed in this run, FSR 3.1's generates the frames
 int vk_fg4_active(void);                // ... its swapchain is in place
@@ -974,6 +975,9 @@ static void row_upscaling(void) {
     if (e.kind >= DLSS) opt_apply("NX2NAVI_DLSS", modes[e.mode]);
     if (e.kind >= DLSS) opt_apply("NX2NAVI_TAA", e.kind >= FSR3 ? "fsr3" : "dlss");
     if (e.kind >= FSR3) opt_apply("NX2NAVI_FSR4", e.kind == FSR4 ? "1" : "0");
+    // FSR 4 that failed in a row stays listed (it runs on this device) while FSR 3.1 serves: the row shows FSR 3.1, and
+    // choosing FSR 4 again tries it anew
+    if (e.kind == FSR4) vk_ffx4_retry();
 }
 
 // Under the HDR value: "after restart" when what is set waits for one (the game's own HDR, to or from it:
@@ -1157,7 +1161,7 @@ static void row_framegen(void) {
         opt_apply("NX2NAVI_FRAMEGEN", k == OFF ? "off" : k == DLSS ? "dlss" : "fsr3");
         if (k == FSR4LIB) {
             opt_apply("NX2NAVI_FSR4_FG", "1");
-            if (!vk_ffx_fsr4()) opt_apply("NX2NAVI_TAA", "fsr3"), opt_apply("NX2NAVI_FSR4", "1");
+            if (!vk_ffx_fsr4()) opt_apply("NX2NAVI_TAA", "fsr3"), opt_apply("NX2NAVI_FSR4", "1"), vk_ffx4_retry();
         } else if (k == FSR3 && cfg_bool("NX2NAVI_FSR4_FG")) {
             opt_apply("NX2NAVI_FSR4_FG", "0");
         }
