@@ -1003,48 +1003,18 @@ static const char *hdr_note(void) {
     return note;
 }
 
-// HDR (vk_hdr.c): off or the HDR tone mapper over the game's picture, switched at once, or the game's native HDR,
-// which the game takes up at its start. The brightness rows follow while it is on; the tone mapper row only with the
-// first (native HDR is the game's picture as it is), then the rows of the tone mapper chosen: none for the game's
-// curve, the grading rows of both others between the rows each has alone.
+// HDR (vk_hdr.c): off or on, switched at once; on is the game's picture tone mapped to the display, one fixed look. The
+// game's own HDR (native) is a value only the file sets: the row lists it only while the file does, so that it reads as
+// what runs. The three brightness rows follow while HDR is on.
 static void row_hdr(void) {
     static const char *const values[] = {"0", "1", "native"};
-    const char *names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), menu_text(UI_MENU_HDR_TONEMAPPED), menu_text(UI_MENU_HDR_NATIVE)};
-    opt_choice_list("NX2NAVI_HDR", UI_MENU_HDR, values, names, 3, UI_MENU_HDR_DESC, -1, hdr_note());
+    const char *names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), menu_text(UI_MENU_ON), menu_text(UI_MENU_HDR_NATIVE)};
+    const int n = !strcmp(cfg_value("NX2NAVI_HDR"), "native") ? 3 : 2;
+    opt_choice_list("NX2NAVI_HDR", UI_MENU_HDR, values, names, n, UI_MENU_HDR_DESC, -1, hdr_note());
     if (!cfg_bool("NX2NAVI_HDR")) return;
     opt_slider("NX2NAVI_HDR_PEAK_NITS", UI_MENU_HDR_PEAK, 400, 10000, UI_MENU_HDR_PEAK_DESC, 50, "%.0f nits");
     opt_slider("NX2NAVI_HDR_GAME_NITS", UI_MENU_HDR_GAME, 48, 500, UI_MENU_HDR_GAME_DESC, 1, "%.0f nits");
     opt_slider("NX2NAVI_HDR_UI_NITS", UI_MENU_HDR_UI, 48, 500, UI_MENU_HDR_UI_DESC, 1, "%.0f nits");
-    if (!strcmp(cfg_value("NX2NAVI_HDR"), "native")) return;
-    static const char *const curves[] = {"vanilla", "psychov35", "renodrt"};
-    static const char *const curve_names[] = {"Vanilla", "PsychoV35", "RenoDRT"};
-    opt_choice_list("NX2NAVI_HDR_TONEMAP", UI_MENU_HDR_TONEMAP, curves, curve_names, 3, UI_MENU_HDR_TONEMAP_DESC);
-    const char *curve = cfg_value("NX2NAVI_HDR_TONEMAP");
-    if (!strcmp(curve, "vanilla")) return;
-    const bool luminance = !strcmp(curve, "renodrt");   // else the observer-response mapper, as vk_hdr.c reads the setting
-    if (luminance) {
-        static const char *const gammas[] = {"off", "2.2", "2.4"};
-        const char *gamma_names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), "2.2", "BT.1886 (2.4)"};
-        opt_choice_list("NX2NAVI_HDR_GAMMA", UI_MENU_HDR_GAMMA, gammas, gamma_names, 3, UI_MENU_HDR_GAMMA_DESC);
-    } else {
-        static const char *const greys[] = {"render", "vanilla"};
-        static const char *const grey_names[] = {"Render", "Vanilla"};
-        opt_choice_list("NX2NAVI_HDR_MIDGRAY", UI_MENU_HDR_MIDGRAY, greys, grey_names, 2, UI_MENU_HDR_MIDGRAY_DESC);
-        opt_toggle("NX2NAVI_HDR_MATCH_SLOPE", UI_MENU_HDR_MATCH_SLOPE, UI_MENU_HDR_MATCH_SLOPE_DESC);
-        opt_slider("NX2NAVI_HDR_TONE_SLOPE", UI_MENU_HDR_TONE_SLOPE, 0, 100, UI_MENU_HDR_TONE_SLOPE_DESC, 1, "%.0f");
-        opt_slider("NX2NAVI_HDR_HUE_CLIP", UI_MENU_HDR_HUE_CLIP, 0, 100, UI_MENU_HDR_HUE_CLIP_DESC, 5, "%.0f %%");
-    }
-    opt_slider("NX2NAVI_HDR_EXPOSURE", UI_MENU_HDR_EXPOSURE, 0, 200, UI_MENU_HDR_EXPOSURE_DESC, 5, "%.0f %%");
-    opt_slider("NX2NAVI_HDR_HIGHLIGHTS", UI_MENU_HDR_HIGHLIGHTS, 0, 100, UI_MENU_HDR_HIGHLIGHTS_DESC, 1, "%.0f");
-    opt_slider("NX2NAVI_HDR_SHADOWS", UI_MENU_HDR_SHADOWS, 0, 100, UI_MENU_HDR_SHADOWS_DESC, 1, "%.0f");
-    opt_slider("NX2NAVI_HDR_CONTRAST", UI_MENU_HDR_CONTRAST, 0, 100, UI_MENU_HDR_CONTRAST_DESC, 1, "%.0f");
-    opt_slider("NX2NAVI_HDR_SATURATION", UI_MENU_HDR_SATURATION, 0, 100, UI_MENU_HDR_SATURATION_DESC, 1, "%.0f");
-    if (!luminance) return;
-    opt_slider("NX2NAVI_HDR_HIGHLIGHT_SAT", UI_MENU_HDR_HIGHLIGHT_SAT, 0, 100, UI_MENU_HDR_HIGHLIGHT_SAT_DESC, 1, "%.0f");
-    opt_slider("NX2NAVI_HDR_BLOWOUT", UI_MENU_HDR_BLOWOUT, 0, 100, UI_MENU_HDR_BLOWOUT_DESC, 1, "%.0f");
-    opt_slider("NX2NAVI_HDR_FLARE", UI_MENU_HDR_FLARE, 0, 100, UI_MENU_HDR_FLARE_DESC, 1, "%.0f");
-    opt_slider("NX2NAVI_HDR_HUE", UI_MENU_HDR_HUE, 0, 100, UI_MENU_HDR_HUE_DESC, 5, "%.0f %%");
-    opt_slider("NX2NAVI_HDR_GRADE", UI_MENU_HDR_GRADE, 0, 100, UI_MENU_HDR_GRADE_DESC, 5, "%.0f %%");
 }
 
 // DLSS frame generation's multiplier (NX2NAVI_FRAMEGEN_MULTIPLIER, vk_dlssg.c, at once): 2x, 3x or 4x as far as this
@@ -1891,7 +1861,7 @@ static void perf_picture(const MenuTarget *t, PerfPanel *p) {
         else snprintf(v[7], sizeof v[7], "%sp", r);
     }
     const char *hdr = cfg_value("NX2NAVI_HDR");
-    snprintf(v[8], sizeof v[8], "%s", menu_text(!strcmp(hdr, "native") ? UI_MENU_HDR_NATIVE : cfg_bool("NX2NAVI_HDR") ? UI_MENU_HDR_TONEMAPPED : UI_MENU_FRAMEGEN_OFF));
+    snprintf(v[8], sizeof v[8], "%s", menu_text(!strcmp(hdr, "native") ? UI_MENU_HDR_NATIVE : cfg_bool("NX2NAVI_HDR") ? UI_MENU_ON : UI_MENU_FRAMEGEN_OFF));
     const char *fg = cfg_value("NX2NAVI_FRAMEGEN");
     const bool fsr_fg = !strcmp(fg, "fsr3") && vk_ffx_framegen_available();   // set but not loadable: off
     snprintf(v[9], sizeof v[9], "%s", fsr_fg ? (vk_fg4_active() ? fg4_label() : "AMD FSR 3.1")

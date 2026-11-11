@@ -263,7 +263,7 @@ static void scene_overlay(float w, float h, float scale) {
     snprintf(p.picture[5], 64, "%s", menu_text(UI_MENU_ON));
     snprintf(p.picture[6], 64, "21:9");
     snprintf(p.picture[7], 64, "1440p");
-    snprintf(p.picture[8], 64, "%s", menu_text(UI_MENU_HDR_TONEMAPPED));
+    snprintf(p.picture[8], 64, "%s", menu_text(UI_MENU_ON));
     snprintf(p.picture[9], 64, "%s", menu_text(UI_MENU_FRAMEGEN_OFF));
     p.scene_known = false, p.fg_fps = 60, p.under_menu = false;
     perf_panel_draw(&p, w, scale);

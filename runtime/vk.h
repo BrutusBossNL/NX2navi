@@ -211,9 +211,9 @@ void vk_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r);
 // percentiles and the brightest pixel in nits, and the share of pixels under 0.01 nits (vk_hdr.c).
 void vk_hdr_luminance_stats(const uint8_t *in, int stride, const int rect[4], int a2r, float out[7]);
 void vk_hdr_release(void);   // before the device goes away
-// The support buffer's HDR settings, five vec4 at 1440 (vk_exec_draw.c support_fill; read by the game's tonemap with
+// The support buffer's HDR settings, a vec4 at 1440 (vk_exec_draw.c support_fill; read by the game's tonemap with
 // shaders/hdr_tonemap.frag spliced in, vk_hdr.c tonemap_splice).
-void vk_hdr_support(float out[20]);
+void vk_hdr_support(float out[4]);
 // vk_contact.c: screen-space contact shadows on the game's composed scene colour (NX2NAVI_CONTACT_SHADOWS)
 int vk_contact_strength(void);   // percent, 0 = off
 void vk_contact_release(void);   // before the device goes away
