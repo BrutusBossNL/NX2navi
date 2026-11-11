@@ -661,6 +661,13 @@ int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns);   // 1 when done; 0
 // The executed timeline (vk_sync.c): a submission's own commands are through the GPU, its write-backs maybe not yet.
 int vk_sync_exec_wait(uint64_t value, uint64_t timeout_ns);
 int vk_sync_wb_split(void);                 // NX2NAVI_WB_SPLIT: the write-backs go into a part of their own
+// NX2NAVI_TRACE=perf (vk_sync.c "the executed timeline"): what a wait on that timeline left behind since the last call,
+// whether the completion thread's callback running now belongs to a value whose waiter went on already, and the
+// completion thread's time by callback.
+void vk_sync_exec_stats(uint64_t *waits, uint64_t *early, uint64_t *lag_ns, uint64_t *lag_max_ns);
+int vk_sync_effect_late(void);
+void vk_sync_cb_stats(char *out, size_t n);
+void vk_exec_late_stats(uint64_t *events, uint64_t *counters, uint64_t *counts);   // vk_exec_xfer.c: such callbacks since the last call
 VkCommandBuffer vk_sync_split_exec(void);   // vk_sync_split for the part before a submission's write-backs
 int vk_mem_mirror_wb_pending(void);         // vk_memory.c: vk_mem_mirror_end has write-backs to record
 uint64_t vk_sync_fence_done(void);         // highest done value

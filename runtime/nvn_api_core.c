@@ -699,11 +699,10 @@ NVN_API(nvnQueueSubmitCommands) {
     // point). Copies of the data at submit made it worse, a mix of two frames' versions.
     // NX2NAVI_SUBMIT_FINISH=<mask>: bit i waits after the i-th submission of a frame (default 0x1); a plain 1 waits
     // after every submission, 0 never.
-    // The wait is for the submission's passes, which is what the rewrite races with: exec_wait leaves out the
-    // write-backs of what they wrote (vk_sync.c exec_tl), which nothing here needs before the game goes on where the
-    // pools are imports or mirrors. With shadow storage the write-backs reach guest memory later and the game must
-    // not rewrite a pool before them, so there the wait covers them (vk_sync_exec_wait). The fences the game itself
-    // waits on cover them as before.
+    // The wait is the fence's (exec_wait, vk_sync.c vk_sync_exec_wait): besides the submission's passes it covers the
+    // completion thread's side effects for it and for the submissions before it, the last frame's occlusion counts
+    // among them, which the game reads once it goes on. NX2NAVI_WB_SPLIT=1 ends it when the GPU has run the passes
+    // (vk_sync.c "the executed timeline" has what that left out and what it cost).
     static long long finish_mask = -2;
     if (finish_mask == -2) {
         const char *e = cfg_get("NX2NAVI_SUBMIT_FINISH");

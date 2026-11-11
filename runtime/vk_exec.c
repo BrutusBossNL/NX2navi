@@ -1737,8 +1737,9 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     x_here = 0;
     vk_exec_event_sync(0);
     if (ex->recorded) vk_exec_barrier(ex), vk_exec_pool_marks(ex);   // later submissions see this one's writes
-    // The write-backs in a part of their own, after one that signals the executed timeline (vk_sync.c exec_tl): the
-    // wait after a frame's first submission then ends when the submission's passes are through, not its write-backs.
+    // NX2NAVI_WB_SPLIT: the write-backs in a part of their own, after one that signals the executed timeline
+    // (vk_sync.c exec_tl): the wait after a frame's first submission then ends when the submission's passes are
+    // through, not its write-backs. Off by default: vk_sync.c says what else that wait then leaves out.
     if (synced && ex->recorded && vk_sync_wb_split() && vk_mem_mirror_wb_pending() && vk_exec_pool_split(ex->fence)) {
         ex->cb = vk_sync_split_exec();
         ex->dirty = VK_EXEC_DIRTY_ALL;
@@ -1763,6 +1764,19 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
                (double)n_pass_splits / (double)n_subs, (unsigned long long)evo_held, (unsigned long long)evo_resumed,
                (unsigned long long)evo_forced, (unsigned long long)evo_switches, evo_pending,
                (unsigned long long)vk_exec_event_late_take());
+        uint64_t xw, xe, xl, xm, le, lc, lo;
+        vk_sync_exec_stats(&xw, &xe, &xl, &xm);
+        vk_exec_late_stats(&le, &lc, &lo);
+        if (xw)   // NX2NAVI_WB_SPLIT: what the wait on the executed timeline left behind
+            rt_log("perf: waits after a submit on the executed timeline: %llu, %llu of them back before the completion "
+                   "thread had run the side effects of the submissions up to theirs (through %.3f ms later on average, "
+                   "%.3f at most); written into guest memory in that time: %llu event values, %llu counter reports, "
+                   "%llu occlusion counts",
+                   (unsigned long long)xw, (unsigned long long)xe, xe ? xl / 1e6 / (double)xe : 0.0, xm / 1e6,
+                   (unsigned long long)le, (unsigned long long)lc, (unsigned long long)lo);
+        char cbs[1600];
+        vk_sync_cb_stats(cbs, sizeof cbs);
+        rt_log("perf: completion thread since the last line, by callback (distance from vk_completion_add):%s", cbs);
         evo_held = evo_resumed = evo_forced = evo_switches = 0;
         n_subs = n_parts = n_idle_parts = n_pass_splits = 0;
     }

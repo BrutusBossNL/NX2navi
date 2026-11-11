@@ -8,6 +8,7 @@
 // One timeline value per submission, signalled at ALL_COMMANDS; waits use vkWaitSemaphores, and a failed wait is
 // treated as a lost device.
 // Contains code Copyright (c) 2026 Peiikai, Copyright (c) 2026 jhaizhou (MIT; see THIRD_PARTY_NOTICES.md).
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,17 +73,37 @@ static volatile uint64_t queued_v;    // the newest timeline value handed to the
 static int hold_max = -1;
 
 // ---- the executed timeline
-// A submission's write-backs (vk_memory.c vk_mem_mirror_end: what its shaders wrote into VRAM mirrors goes back to guest
-// memory) are the last thing in it, 3 to 4 ms of GPU time a frame in Ocarina, 60 MiB merged. The wait after a frame's
-// first submission (nvn_api_core.c nvnQueueSubmitCommands) is there so that the GPU has run that submission's passes
-// before the game rewrites what they read; it does not need the write-backs, and waited for them too: 5 ms of every
-// frame with the render thread idle.
-// exec_tl is a second timeline that reaches a submission's value when the GPU has executed its own commands: the
-// replay ends the part before the write-backs (vk_exec.c, vk_sync_split_exec), that part signals exec_tl, and the
-// write-backs follow in a part of their own, which signals the timeline as before. A submission without that split
-// signals both at its end. vk_sync_exec_wait waits on exec_tl; every other wait, the fences the game asks for among
-// them, still covers the write-backs. NX2NAVI_WB_SPLIT=0: no split, and the wait is the fence's.
-// Not with shadow storage (vk_memory.c): there the game does need the write-backs before it goes on. With an import a
+// The wait after a frame's first submission (nvn_api_core.c nvnQueueSubmitCommands) is there so that the GPU has run
+// that submission's passes before the game rewrites what they read. It is the fence's wait (NX2NAVI_WB_SPLIT=0, the
+// default). NX2NAVI_WB_SPLIT=1 makes it a wait on exec_tl, a second timeline that reaches a submission's value when
+// the GPU has executed its own commands: the replay ends the part before the write-backs (vk_exec.c,
+// vk_sync_split_exec; vk_memory.c vk_mem_mirror_end: what the shaders wrote into VRAM mirrors goes back to guest
+// memory), that part signals exec_tl, and the write-backs follow in a part of their own, which signals the timeline
+// as before. A submission without that split signals both at its end. Every other wait, the fences the game asks for
+// among them, is the fence's either way.
+// That was the default for a day, on the thought that the wait covered 3 to 4 ms of write-backs a frame that nothing
+// needed before the game went on. It left out more than GPU work. A value counts as done only when the completion
+// thread has run its side effects and those of every value before it, and among them is what the game's CPU reads
+// next: the occlusion counts, counter reports and event values (vk_exec_xfer.c oq_cb, counter_cb, event_cb), and
+// the stamps that tell the texture checks which pages the GPU wrote (vk_gpu_written). A frame's first submission is
+// small and runs right behind the last frame's large one, so its signal on exec_tl comes while the completion thread
+// is still at that one's callbacks. One frame with the wait on exec_tl:
+//   1. the GPU finishes the last frame's main submission; the completion thread wakes and starts on its callbacks,
+//      800 to 1,000 occlusion counts among them in Hyrule Field;
+//   2. the GPU finishes this frame's first submission and signals exec_tl: the wait returns and the game goes on;
+//   3. the game reads its occlusion counts (a 0 culls what the query tested) while some still hold the frame
+//      before's; half a millisecond later, more when the CPUs are busy, the callbacks are through.
+// Measured in Hyrule Field with the camera turning (RTX 5090, lazy write-back on, 2026-11-11; NX2NAVI_TRACE=perf, "waits
+// after a submit on the executed timeline"): 2,267 of 2,320 such waits returned before those side effects had run,
+// which were through 0.45 to 0.8 ms later on average and 12.6 ms at most; in that time 770 to 1,015 occlusion counts,
+// 21 to 28 counter reports and 17 event values a frame were written into guest memory. The submission the game
+// waits for wrote nothing back in any window of those runs, so its own write-backs were never what the wait left
+// out. A player saw a patch of grass near the camera change from frame to frame there, and less of it with the
+// fence's wait; no scripted run showed such a frame with either wait, so that the late counts are what the player
+// saw is not shown. The fence's wait takes 0.65 to 0.7 ms more of a frame there: 85.5 against 86 and 92 frames a
+// second in the field, 80.7 against 85.8, and 98 against 105 in a village, in single runs beside other work.
+// With shadow storage (vk_memory.c) NX2NAVI_WB_SPLIT=1 keeps the fence's wait as well: there the write-backs
+// themselves reach guest memory in a completion callback. With an import a
 // write-back stores into guest memory on the GPU, right behind the passes. With a shadow copy it stores into the copy,
 // and the bytes reach guest memory in the fence's completion callback (shadow_wb_cb), after the write-back part, the
 // fence and the callbacks queued before it, while the game is already rewriting for its next frame what those passes
@@ -105,13 +126,51 @@ static int wb_split = -1;
 int vk_sync_wb_split(void) {
     if (wb_split < 0) {
         const char *e = cfg_get("NX2NAVI_WB_SPLIT");
-        int forced = e && !strcmp(e, "2");
-        wb_split = cfg_bool("NX2NAVI_WB_SPLIT") && (forced || !vk_mem_shadow_storage());
-        if (vk_mem_shadow_storage())
-            rt_log("vk: the wait after a frame's first submission %s (shadow storage; NX2NAVI_WB_SPLIT=2 leaves them out)",
-                   wb_split ? "leaves out its write-backs" : "covers its write-backs and their copies into guest memory");
+        int forced = e && !strcmp(e, "2"), shadow = vk_mem_shadow_storage();
+        wb_split = cfg_bool("NX2NAVI_WB_SPLIT") && (forced || !shadow);
+        rt_log("vk: the wait after a frame's first submission %s (NX2NAVI_WB_SPLIT%s)",
+               wb_split ? "ends when the GPU has run the submission's own commands: its write-backs and the completion "
+                          "thread's side effects are left out"
+                        : "is the fence's: it covers the write-backs and the completion thread's side effects",
+               shadow && !forced ? "; shadow storage keeps the fence's wait unless it is 2" : "");
     }
     return wb_split && exec_tl != VK_NULL_HANDLE;
+}
+
+// What a wait on exec_tl leaves behind: the completion thread's side effects for the values up to the waiter's.
+// Counted for NX2NAVI_TRACE=perf (vk_exec.c logs them): the waits that returned with such side effects still to
+// run, how long after the return they were through, and (vk_sync_effect_late, asked by the callbacks that write
+// into guest memory) how many of those ran in that time.
+static volatile uint64_t exw_n, exw_early, exw_lag_ns, exw_lag_max;   // since the last vk_sync_exec_stats
+static volatile uint64_t exw_value, exw_t0;   // the newest wait that returned early: its value and when; 0 none
+static volatile int32_t cb_late;              // the callback being run belongs to a value such a waiter is past
+
+int vk_sync_effect_late(void) { return __atomic_load_n(&cb_late, __ATOMIC_RELAXED); }
+
+void vk_sync_exec_stats(uint64_t *waits, uint64_t *early, uint64_t *lag_ns, uint64_t *lag_max_ns) {
+    *waits = __atomic_exchange_n(&exw_n, 0, __ATOMIC_RELAXED), *early = __atomic_exchange_n(&exw_early, 0, __ATOMIC_RELAXED);
+    *lag_ns = __atomic_exchange_n(&exw_lag_ns, 0, __ATOMIC_RELAXED);
+    *lag_max_ns = __atomic_exchange_n(&exw_lag_max, 0, __ATOMIC_RELAXED);
+}
+
+// NX2NAVI_TRACE=perf: the completion thread's time by callback (st_lock), since the last vk_sync_cb_stats. A callback
+// is named by its distance from vk_completion_add, which the build's link map turns into its function.
+#define CBT_N 32
+static struct { void (*fn)(void *); uint64_t ns, calls; } cbt[CBT_N];
+static int cbt_n;
+
+void vk_sync_cb_stats(char *out, size_t n) {
+    int k = 0;
+    *out = 0;
+    plat_mutex_lock(&st_lock);
+    for (int i = 0; i < cbt_n && k < (int)n - 64; i++) {
+        if (!cbt[i].calls) continue;
+        k += snprintf(out + k, n - (size_t)k, " %+lld %.3f ms %llu calls;",
+                      (long long)((intptr_t)cbt[i].fn - (intptr_t)vk_completion_add), cbt[i].ns / 1e6,
+                      (unsigned long long)cbt[i].calls);
+        cbt[i].ns = cbt[i].calls = 0;
+    }
+    plat_mutex_unlock(&st_lock);
 }
 
 static void hold_flush_locked(VkCtx *c) {
@@ -440,10 +499,27 @@ static void completion_main(void *arg) {
             Pending p = queue[qhead++];
             qn--;
             plat_mutex_unlock(&st_lock);
+            __atomic_store_n(&cb_late, p.fence <= __atomic_load_n(&exw_value, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
+            uint64_t c0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
             p.fn(p.arg);
+            uint64_t c1 = c0 ? kern_now_ns() : 0;
+            __atomic_store_n(&cb_late, 0, __ATOMIC_RELAXED);
             plat_mutex_lock(&st_lock);
+            if (c0) {
+                int k = 0;
+                while (k < cbt_n && cbt[k].fn != p.fn) k++;
+                if (k == cbt_n && cbt_n < CBT_N) cbt[cbt_n++].fn = p.fn;
+                if (k < cbt_n) cbt[k].ns += c1 - c0, cbt[k].calls++;
+            }
         }
         if (reached > done) {
+            uint64_t ev = __atomic_load_n(&exw_value, __ATOMIC_ACQUIRE);
+            if (ev && reached >= ev) {   // the side effects a waiter on exec_tl went ahead of are through
+                uint64_t lag = kern_now_ns() - __atomic_load_n(&exw_t0, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&exw_lag_ns, lag, __ATOMIC_RELAXED);
+                if (lag > __atomic_load_n(&exw_lag_max, __ATOMIC_RELAXED)) __atomic_store_n(&exw_lag_max, lag, __ATOMIC_RELAXED);
+                __atomic_compare_exchange_n(&exw_value, &ev, 0, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+            }
             // The waiters go first (a fence wait, the frame's first submission, the acquire): freeing what the
             // finished submissions held (vk_mem_collect: upload batches, destroyed images, views and buffers, each
             // checked against the timeline itself) is nothing they read, and it takes cmd_lock, which the upload
@@ -722,14 +798,16 @@ static int fence_wait_impl(uint64_t value, uint64_t timeout_ns) {
     return ok;
 }
 
-// Waits until the GPU has executed submission value's own commands (the executed timeline); its write-backs and the
-// CPU side effects of its fence may still be to come. 1 when reached.
+// The wait after a submit: the fence's (vk_sync_fence_wait), or with NX2NAVI_WB_SPLIT until the GPU has executed
+// submission value's own commands (the executed timeline), its write-backs and the completion thread's side effects
+// for it and for the submissions before it still to come. 1 when reached.
 int vk_sync_exec_wait(uint64_t value, uint64_t timeout_ns) {
     vk_sync_start();
-    // With shadow storage (vk_mem_shadow_storage) what the GPU wrote reaches guest memory in the completion thread's
-    // fence callback, after the executed timeline: a wait that returned there let the game rewrite a pool that an
-    // older write-back then overwrote (Kokiri Forest: a sky coefficient the game had reset came back, and the world
-    // flickered washed out). So the wait covers the write-backs there, as without the split.
+    // The fence's wait unless the split is asked for ("the executed timeline" above says what the game reads that a
+    // wait on exec_tl leaves out). With shadow storage (vk_mem_shadow_storage) what the GPU wrote reaches guest memory
+    // in such a callback too: a wait that returned before it let the game rewrite a pool that an older write-back
+    // then overwrote (Kokiri Forest: a sky coefficient the game had reset came back, and the world flickered washed
+    // out).
     if (!vk_sync_wb_split()) return vk_sync_fence_wait(value, timeout_ns);
     if (__atomic_load_n(&done, __ATOMIC_ACQUIRE) >= value) return 1;
     uint64_t p0 = perf_begin();
@@ -744,6 +822,14 @@ int vk_sync_exec_wait(uint64_t value, uint64_t timeout_ns) {
     }
     perf_end(PERF_FENCE, p0);
     perf_gpu_wait(p0);
+    if (r == VK_SUCCESS) {
+        __atomic_fetch_add(&exw_n, 1, __ATOMIC_RELAXED);
+        if (__atomic_load_n(&done, __ATOMIC_ACQUIRE) < value) {
+            __atomic_fetch_add(&exw_early, 1, __ATOMIC_RELAXED);
+            __atomic_store_n(&exw_t0, kern_now_ns(), __ATOMIC_RELAXED);
+            __atomic_store_n(&exw_value, value, __ATOMIC_RELEASE);
+        }
+    }
     return r == VK_SUCCESS;
 }
 
