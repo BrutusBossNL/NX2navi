@@ -681,6 +681,7 @@ int vk_sync_wb_split(void);                 // NX2NAVI_WB_SPLIT: the write-backs
 // completion thread's time by callback.
 void vk_sync_exec_stats(uint64_t *waits, uint64_t *early, uint64_t *lag_ns, uint64_t *lag_max_ns);
 int vk_sync_effect_late(void);
+uint64_t vk_sync_cb_value(void);            // the value whose side effect the calling thread is running; 0: not in one
 void vk_sync_cb_stats(char *out, size_t n);
 void vk_exec_late_stats(uint64_t *events, uint64_t *counters, uint64_t *counts);   // vk_exec_xfer.c: such callbacks since the last call
 VkCommandBuffer vk_sync_split_exec(void);   // vk_sync_split for the part before a submission's write-backs

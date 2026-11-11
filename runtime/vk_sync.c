@@ -147,6 +147,14 @@ static volatile int32_t cb_late;              // the callback being run belongs 
 
 int vk_sync_effect_late(void) { return __atomic_load_n(&cb_late, __ATOMIC_RELAXED); }
 
+// The value whose side effect the calling thread is running, 0 when it is not the completion thread inside one.
+static volatile uint64_t cb_value;
+static volatile uint32_t cb_tid;
+
+uint64_t vk_sync_cb_value(void) {
+    return __atomic_load_n(&cb_tid, __ATOMIC_ACQUIRE) == plat_thread_id() ? __atomic_load_n(&cb_value, __ATOMIC_RELAXED) : 0;
+}
+
 void vk_sync_exec_stats(uint64_t *waits, uint64_t *early, uint64_t *lag_ns, uint64_t *lag_max_ns) {
     *waits = __atomic_exchange_n(&exw_n, 0, __ATOMIC_RELAXED), *early = __atomic_exchange_n(&exw_early, 0, __ATOMIC_RELAXED);
     *lag_ns = __atomic_exchange_n(&exw_lag_ns, 0, __ATOMIC_RELAXED);
@@ -482,6 +490,7 @@ WEAK int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint
 
 static void completion_main(void *arg) {
     VkCtx *c = arg;
+    __atomic_store_n(&cb_tid, plat_thread_id(), __ATOMIC_RELEASE);
     plat_mutex_lock(&st_lock);
     for (;;) {
         while (!stop && done == issued && !(qn && queue[qhead].fence <= done))
@@ -528,7 +537,9 @@ static void completion_main(void *arg) {
             plat_mutex_unlock(&st_lock);
             __atomic_store_n(&cb_late, p.fence <= __atomic_load_n(&exw_value, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
             uint64_t c0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
+            __atomic_store_n(&cb_value, p.fence, __ATOMIC_RELAXED);
             p.fn(p.arg);
+            __atomic_store_n(&cb_value, 0, __ATOMIC_RELAXED);
             uint64_t c1 = c0 ? kern_now_ns() : 0;
             __atomic_store_n(&cb_late, 0, __ATOMIC_RELAXED);
             plat_mutex_lock(&st_lock);

@@ -396,6 +396,33 @@ static int test_import(pool_t *pool) {
     return 0;
 }
 
+// A GPU write is noted on a pool, and the pool is finalized and made again at its address before the write is
+// reported: the report must leave alone what the CPU has written to the new pool since. With shadow storage the new
+// pool's shadow is a copy of guest memory from before those writes and holds no byte of the old write
+// (vk_memory.c shadow_write_back); with an import the report copies nothing.
+static int test_remade(uint8_t *guest) {
+    pool_t pool = {.magic = NVN_POOL_MAGIC, .flags = 0x24, .mem = guest + 0xc00000, .size = 0x10000,
+                   .game_mem = guest + 0xc00000};
+    uint8_t *m = pool.mem;
+    uint64_t a = (uintptr_t)m;
+    memset(m, 0x11, pool.size);
+    GCHECK(vk_pool_init(&pool), "vk_pool_init of the pool to be made again");
+    VkMemSpan sp;
+    GCHECK(vk_mem_resolve(a, 0x2000, &sp) && sp.buffer, "resolve inside the pool to be made again");
+    vk_mem_gpu_pending(a, 0x2000);   // the submission being recorded writes its first two pages
+    vk_pool_fini(&pool);
+    GCHECK(vk_pool_init(&pool), "vk_pool_init of the pool made again");
+    memset(m, 0x22, 0x1000);         // the CPU writes the first page of the new pool
+    vk_gpu_written(a, 0x2000);       // the old submission's fence
+    GCHECK(m[0] == 0x22 && m[0xfff] == 0x22, "the report of a write noted on a finalized pool put %#x over the CPU's "
+           "bytes in the pool made at its address", m[0]);
+    GCHECK(m[0x1000] == 0x11 && m[0x1fff] == 0x11, "the page the CPU left alone changed (%#x)", m[0x1000]);
+    vk_pool_fini(&pool);
+    printf("probe-vkmem: a write reported for a pool that was made again leaves the CPU's newer bytes alone\n");
+    g_gpu_checks += 2;
+    return 0;
+}
+
 // test_gpa_read's shader (runtime/shaders/gpa_read.spvasm): one invocation follows the device address table from a
 // guest address (the push constant) to the buffer that holds it and stores the 32-bit word found there in the result
 // buffer. Storage bindings: 0 the table itself, 1 the result. The pool that holds the word is never a descriptor, a
@@ -1053,7 +1080,7 @@ static int test_gpu(void) {
     vk_mem_stats(&st);
     GCHECK(!st.imported_pools && !st.physical_pools && !st.virtual_pools, "pools left after fini");
     g_gpu_checks += 2;
-    return test_gpa_read(h) || test_table_store(h);
+    return test_gpa_read(h) || test_table_store(h) || test_remade(h);
 }
 
 int probe_vkmem(void) {

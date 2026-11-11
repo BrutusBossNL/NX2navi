@@ -84,6 +84,7 @@ typedef struct PoolRec {
     VmaAllocation salloc;
     uint8_t *smap;                     // its mapping; offsets as in buf (from import_lo)
     uint32_t sgen;                     // gen_lock: every page write stamped up to this generation is in the shadow
+    uint64_t sborn;                    // the value of the first submission that can have used the shadow (shadow_pool)
     volatile uint8_t stouched;         // on the touched list: the GPU may use it in the submission being recorded
     // shadow_lock: base copies of the pages a noted GPU write covers (merge_page), open addressing by page address;
     // csb a power of two, page 0 an empty slot
@@ -1134,6 +1135,7 @@ static uint64_t s_in_merge, s_in_nomirror;        // check: bytes copied in by m
 static uint64_t s_gpa_ticks, s_gpa_syncs;         // vk_mem_gpa_sync: its time (part of s_ticks) and its runs
 static uint64_t s_t_over_all;                     // shadow_lock: s_tab_over since the start
 static uint64_t s_late_pages, s_late_bytes;       // shadow_lock, check: write-backs into pages the CPU wrote since their copy-in
+static uint64_t s_stale_pages;                    // shadow_lock: write-backs left out, the shadow could not hold them (shadow_write_back)
 
 static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     r->import_lo = addr & ~0xfffull;
@@ -1154,6 +1156,7 @@ static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
         return 0;
     }
     r->smap = info.pMappedData;
+    r->sborn = vk_sync_issued() + 1;   // the submission being recorded now, or the next one
     plat_mutex_lock(&gen_lock);
     r->sgen = gen_now;   // the copy below holds every write stamped so far; later stamps are copied again
     plat_mutex_unlock(&gen_lock);
@@ -1533,9 +1536,19 @@ static int cpu_wrote_since(uint64_t pg, uint32_t sgen) {
 
 // Completion thread: the GPU's bytes of [addr, addr+size) from the shadow into guest memory (merge_page against the
 // base copies; a page without one whole). Returns the bytes moved.
+// A page without a base copy is one no write was noted on in this record (vk_mem_gpu_pending notes every write the
+// replay records). It gets here when the pool the write was noted on was finalized before the write's fence and
+// another was made at its address: shadow_forget dropped the base copies, and the new record's shadow is a copy of
+// guest memory from its own start that holds no byte of that write. Copied whole, it put those older bytes over
+// everything the CPU had written to the page since, for no gain. So the page is left alone when the record is younger
+// than the submission whose fence this is (sborn), or when the CPU has written the page since the shadow's last
+// copy-in (cpu_wrote_since: a pool made again while that submission was still being recorded has the same value).
+// Any other such page goes whole as before: a write nothing noted, into a shadow that holds it.
 static uint64_t shadow_write_back(uint64_t addr, uint64_t size) {
     uint64_t moved = 0;
     int bulk = shadow_bulk_write();   // before the locks: its first call logs
+    uint64_t value = vk_sync_cb_value();   // the fence being completed; a call from elsewhere reports submitted work
+    if (!value) value = vk_sync_issued();
     plat_mutex_lock_shared(&pool_lock);
     const pidx_ent *e = pidx_find(&pool_index, addr, size);
     PoolRec *r = e ? e->buf : NULL;
@@ -1551,6 +1564,7 @@ static uint64_t shadow_write_back(uint64_t addr, uint64_t size) {
             int late = base && s_check && cpu_wrote_since(pg, r->sgen);   // before the merge's own stores into the page
             uint64_t n = 0;
             if (base) moved += n = merge_page((uint8_t *)(uintptr_t)a, s, base + (a - pg), pe - a);
+            else if (r->sborn > value || cpu_wrote_since(pg, r->sgen)) s_stale_pages++;   // the shadow cannot hold the write
             else memcpy((void *)(uintptr_t)a, s, pe - a), moved += pe - a;   // a write never noted as pending
             if (late && n) s_late_pages++, s_late_bytes += n;
             a = pe;
@@ -1729,11 +1743,14 @@ static void shadow_log(uint64_t frame) {
     plat_mutex_lock(&shadow_lock);
     rt_log("mem: shadow at frame %llu: %lld pools %.1f MiB; since the last: %llu pool syncs, %llu queries, %.1f MiB "
            "copied in (%llu untracked), %.2f ms (queries %.2f); %.1f MiB written back of %.1f MiB the GPU may have written, %.2f ms; %llu "
-           "pages the GPU writes keep a base copy",
+           "pages the GPU writes keep a base copy; %llu pages not written back, their pool was made again or the CPU "
+           "wrote them since",
            (unsigned long long)frame, (long long)s_live_n, s_live_bytes / 1048576.0, (unsigned long long)s_syncs,
            (unsigned long long)s_queries, s_copied / 1048576.0, (unsigned long long)s_untracked, qpc_ms(s_ticks),
-           qpc_ms(s_q_ticks), s_wb_bytes / 1048576.0, s_wb_seen / 1048576.0, qpc_ms(s_wb_ticks), (unsigned long long)s_sb_pages);
+           qpc_ms(s_q_ticks), s_wb_bytes / 1048576.0, s_wb_seen / 1048576.0, qpc_ms(s_wb_ticks), (unsigned long long)s_sb_pages,
+           (unsigned long long)s_stale_pages);
     s_syncs = s_queries = s_copied = s_untracked = s_wb_bytes = s_ticks = s_wb_seen = s_wb_ticks = s_q_ticks = 0;
+    s_stale_pages = 0;
     if (s_learn || s_check) shadow_table_log(frame);
     plat_mutex_unlock(&shadow_lock);
     if (s_check) plat_mutex_unlock_shared(&pool_lock);
