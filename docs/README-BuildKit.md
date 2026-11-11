@@ -165,7 +165,8 @@ beside the game.
   `py -I tools\make_game.py --rebuild --out "C:\Games\Ocarina"` to draw them again (it skips everything else).
 - The build copies NVIDIA's DLSS library `nvngx_dlss.dll` (with `nvngx_dlss-NOTICE.txt`, which names its licence)
   and FSR 3.1's `amd_fidelityfx_vk.dll` beside `ocarina.exe` from the kit's `bin\`, and FSR 4's
-  `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` when the kit has both. To use another DLSS version, put
+  `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` when the kit has both (and
+  `amd_fidelityfx_framegeneration_vk.dll` for `fsr4_fg`). To use another DLSS version, put
   your own `nvngx_dlss.dll` there: later builds keep it. On Linux the library is `libnvidia-ngx-dlss.so.<version>`
   (see "Linux").
 - A kit with `bin\dlssg\` (made with `tools/make_kit.py --dlssg`) also brings DLSS Frame Generation on GeForce RTX 40

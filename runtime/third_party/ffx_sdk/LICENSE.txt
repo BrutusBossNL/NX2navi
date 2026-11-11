@@ -1,5 +1,6 @@
 AMD FSR SDK 2.4.0 (https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, tag v2.4.0), the files of
-Kits/FidelityFX/api/include and Kits/FidelityFX/upscalers/include kept here at the same relative paths, unmodified.
+Kits/FidelityFX/api/include, Kits/FidelityFX/upscalers/include and Kits/FidelityFX/framegeneration/include kept here at
+the same relative paths, unmodified.
 docs/license.md of that tag lists them among the files under this licence:
 
 Copyright (C) Advanced Micro Devices, Inc.

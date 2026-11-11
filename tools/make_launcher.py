@@ -203,6 +203,8 @@ def build_app(app, ver, xlate, feed_repo, lock, ffx=None, dlss=None, art=None, d
     if ffx4:   # FSR 4 loads them from beside the game (runtime/vk_ffx4.cpp); make_game.py copies them there
         for n in ('amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll'):
             shutil.copy2(ffx4 / n, app / 'bin' / n)
+        if (ffx4 / 'amd_fidelityfx_framegeneration_vk.dll').is_file():   # its frame generation (runtime/vk_fg4.cpp)
+            shutil.copy2(ffx4 / 'amd_fidelityfx_framegeneration_vk.dll', app / 'bin' / 'amd_fidelityfx_framegeneration_vk.dll')
     if dlss:   # DLSS: NGX loads it from beside the game (runtime/vk_dlaa.c); make_game.py copies it there
         dlss_pin.place(dlss, app / 'bin')
     if dlssg:   # DLSS Frame Generation (runtime/vk_dlssg.c): make_game.py place_dlssg copies it beside the game
@@ -320,7 +322,8 @@ def main():
     ap.add_argument('--xlate', type=Path, required=True, help='folder with nx2navi_xlate.exe and nx2navi_xlate.id')
     ap.add_argument('--ffx', type=Path, help="AMD's signed amd_fidelityfx_vk.dll (FidelityFX SDK 1.1.4, MIT) for FSR 3.1")
     ap.add_argument('--ffx4', type=Path, help="the folder with AMD's signed amd_fidelityfx_loader_vk.dll and "
-                                              'amd_fidelityfx_upscaler_vk.dll (FSR SDK 2.4.0, MIT) for FSR 4')
+                                              'amd_fidelityfx_upscaler_vk.dll (FSR SDK 2.4.0, MIT) for FSR 4, and its '
+                                              'amd_fidelityfx_framegeneration_vk.dll when it is there')
     ap.add_argument('--dlss', type=Path, help=f"NVIDIA's nvngx_dlss.dll (DLSS {dlss_pin.VERSION}) from disk instead of "
                                                "downloading it from NVIDIA's DLSS SDK repository")
     ap.add_argument('--no-dlss', action='store_true', help='leave NVIDIA DLSS out of the release')

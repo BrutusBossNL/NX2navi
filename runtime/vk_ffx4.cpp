@@ -38,9 +38,8 @@ extern "C" void vk_ffx4_release(void) {}
 #include <string.h>
 #include <wchar.h>
 
-#include "third_party/ffx_sdk/api/include/ffx_api.h"
-#include "third_party/ffx_sdk/api/include/vk/ffx_api_vk.h"
 #include "third_party/ffx_sdk/upscalers/include/ffx_upscale.h"
+#include "vk_ffx4_api.h"
 
 extern "C" {
 #include "cfg.h"
@@ -88,19 +87,20 @@ int file_there(const char *path) {
     return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-// Loads the loader and asks it for the device's upscaler versions. Under g_lock, once the device exists.
-int probe(void) {
+int g_loader = -1;   // under g_lock: -1 not tried, 0 the loader is not there or does not load, 1 its entry points are in A
+
+// Loads the SDK's loader from beside the executable. Under g_lock, once the device exists (-1 before).
+int load(void) {
+    if (g_loader >= 0) return g_loader;
     const VkCtx *c = vk_ctx();
     if (!c || !c->device) return -1;   // asked before the device: again later
-    char loader[MAX_PATH], upscaler[MAX_PATH];
-    if (!beside_exe("amd_fidelityfx_loader_vk.dll", loader, sizeof loader) ||
-        !beside_exe("amd_fidelityfx_upscaler_vk.dll", upscaler, sizeof upscaler) || !file_there(loader) ||
-        !file_there(upscaler))
-        return 0;   // not shipped beside this build: nothing is said, FSR 3.1 is what the menu offers
+    char loader[MAX_PATH];
+    if (!beside_exe("amd_fidelityfx_loader_vk.dll", loader, sizeof loader) || !file_there(loader))
+        return g_loader = 0;   // not shipped beside this build: nothing is said, FSR 3.1 is what the menu offers
     HMODULE m = LoadLibraryA(loader);
     if (!m) {
         rt_log("ffx4: %s does not load (error %lu): FSR 4 off", loader, (unsigned long)GetLastError());
-        return 0;
+        return g_loader = 0;
     }
     A.create = (PfnFfxCreateContext)(void *)GetProcAddress(m, "ffxCreateContext");
     A.destroy = (PfnFfxDestroyContext)(void *)GetProcAddress(m, "ffxDestroyContext");
@@ -109,36 +109,52 @@ int probe(void) {
     A.dispatch = (PfnFfxDispatch)(void *)GetProcAddress(m, "ffxDispatch");
     if (!A.create || !A.destroy || !A.configure || !A.query || !A.dispatch) {
         rt_log("ffx4: amd_fidelityfx_loader_vk.dll lacks the API entry points: FSR 4 off");
-        return 0;
+        return g_loader = 0;
     }
+    return g_loader = 1;
+}
+
+// The versions the loader lists for one kind of context on this device, in its order: their count, at most cap.
+// Under g_lock, the loader loaded.
+int versions(uint64_t type, uint64_t *ids, const char **names, int cap) {
+    const VkCtx *c = vk_ctx();
     VkDeviceContext dc = {c->device, c->phys, vkGetDeviceProcAddr};
-    uint64_t ids[16] = {}, n = 0;
-    const char *names[16] = {};
+    uint64_t n = 0;
     ffxQueryDescGetVersions q = {};
     q.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
-    q.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    q.createDescType = type;
     q.device = &dc;
     q.outputCount = &n;
-    ffxReturnCode_t r = A.query(nullptr, &q.header);   // the count
-    if (r == FFX_API_RETURN_OK && n) {
-        if (n > 16) n = 16;
-        q.versionIds = ids;
-        q.versionNames = names;
-        r = A.query(nullptr, &q.header);
-    }
-    if (r != FFX_API_RETURN_OK || !n) {
-        rt_log("ffx4: the FSR SDK's loader lists no upscaler for this device (%u): FSR 4 off", (unsigned)r);
+    if (A.query(nullptr, &q.header) != FFX_API_RETURN_OK || !n) return 0;   // the count
+    if (n > (uint64_t)cap) n = (uint64_t)cap;
+    q.versionIds = ids;
+    q.versionNames = names;
+    if (A.query(nullptr, &q.header) != FFX_API_RETURN_OK) return 0;
+    return (int)n;
+}
+
+// Asks the loader for the device's upscaler versions. Under g_lock; -1 before the device exists.
+int probe(void) {
+    int loaded = load();
+    if (loaded <= 0) return loaded;
+    char upscaler[MAX_PATH];
+    if (!beside_exe("amd_fidelityfx_upscaler_vk.dll", upscaler, sizeof upscaler) || !file_there(upscaler)) return 0;
+    uint64_t ids[16] = {};
+    const char *names[16] = {};
+    int n = versions(FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE, ids, names, 16);
+    if (!n) {
+        rt_log("ffx4: the FSR SDK's loader lists no upscaler for this device: FSR 4 off");
         return 0;
     }
     char list[200] = "";
     size_t len = 0;
     int best = -1, best_major = 0;
-    for (uint64_t i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
         const char *nm = names[i] ? names[i] : "?";
         len += (size_t)snprintf(list + len, sizeof list - len, "%s%s", i ? ", " : "", nm);
         if (len >= sizeof list) len = sizeof list - 1;
         int major = atoi(nm);   // "4.1.2", and "4.1.2 *" for a version the driver brings
-        if (major >= 4 && major > best_major) best = (int)i, best_major = major;
+        if (major >= 4 && major > best_major) best = i, best_major = major;
     }
     if (best < 0) {
         rt_log("ffx4: upscaler versions for this device: %s; none is FSR 4 (it needs a Radeon RX 6000, 7000 or 9000 card "
@@ -308,6 +324,31 @@ extern "C" int vk_ffx4_upscale(VkCommandBuffer cb, const VkFfxImage *color, cons
         return 0;
     }
     return 1;
+}
+
+// The loader's calls for vk_fg4.cpp (vk_ffx4_api.h).
+extern "C" int vk_ffx4_api_file(const char *name) {
+    char path[MAX_PATH];
+    return beside_exe(name, path, sizeof path) && file_there(path);
+}
+extern "C" int vk_ffx4_api_versions(uint64_t create_type, uint64_t *ids, const char **names, int cap) {
+    std::lock_guard<std::mutex> hold(g_lock);
+    return load() > 0 ? versions(create_type, ids, names, cap) : 0;
+}
+extern "C" ffxReturnCode_t vk_ffx4_api_create(ffxContext *ctx, ffxCreateContextDescHeader *desc) {
+    return A.create ? A.create(ctx, desc, nullptr) : FFX_API_RETURN_ERROR;
+}
+extern "C" ffxReturnCode_t vk_ffx4_api_destroy(ffxContext *ctx) {
+    return A.destroy ? A.destroy(ctx, nullptr) : FFX_API_RETURN_ERROR;
+}
+extern "C" ffxReturnCode_t vk_ffx4_api_configure(ffxContext *ctx, const ffxConfigureDescHeader *desc) {
+    return A.configure ? A.configure(ctx, desc) : FFX_API_RETURN_ERROR;
+}
+extern "C" ffxReturnCode_t vk_ffx4_api_query(ffxContext *ctx, ffxQueryDescHeader *desc) {
+    return A.query ? A.query(ctx, desc) : FFX_API_RETURN_ERROR;
+}
+extern "C" ffxReturnCode_t vk_ffx4_api_dispatch(ffxContext *ctx, const ffxDispatchDescHeader *desc) {
+    return A.dispatch ? A.dispatch(ctx, desc) : FFX_API_RETURN_ERROR;
 }
 
 extern "C" void vk_ffx4_release(void) {

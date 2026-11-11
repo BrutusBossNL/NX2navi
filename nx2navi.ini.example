@@ -404,6 +404,12 @@
 # cards with AMD's driver 26.10.1 or newer. Elsewhere, or when it fails, FSR 3.1 runs and the log says why. Changes
 # while the game runs take effect at once.
 # fsr4 = 0
+# With fsr4 = 1 and framegen = fsr3: 1 takes the frame generation of the same AMD library
+# (amd_fidelityfx_framegeneration_vk.dll next to the executable) instead of the FSR 3.1 library's. The library picks
+# the version for the GPU: the machine-learned FSR Frame Generation 4 on Radeon RX 9000 cards with Windows 11, which
+# has not been tested, and 3.1.6 on every other, where it runs at the same frame rate as the FSR 3.1 library's. When
+# it fails, the FSR 3.1 library takes over and the log says why (fg4:). Changes while the game runs take effect at once.
+# fsr4_fg = 0
 # The DLSS model: default (NVIDIA's advice per mode: K for dlaa, quality and balanced, M for performance, L for
 # ultra_performance), k (K in every mode) or j (the other transformer model: slightly less ghosting behind moving
 # characters, a little more flicker). Any other model by its letter, a to m: on slower RTX cards the older model e is
