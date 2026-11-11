@@ -467,20 +467,30 @@
 # hdr_peak_nits = 1000
 # hdr_game_nits = 203
 # hdr_ui_nits = 203
-# With hdr = 1: gamma correction (off, 2.2 or 2.4) shows the picture as a display of that power would, as the game was
-# made to be seen; off keeps the sRGB curve. The tone mapper: vanilla is the game's own curve at SDR brightness,
-# renodrt carries the game's look up to the peak.
-# hdr_gamma = 2.2
-# hdr_tonemap = renodrt
-# With renodrt: exposure in percent (100 unchanged); highlights, shadows, contrast, saturation and highlight saturation
-# from 0 to 100 (50 unchanged); blowout (bright parts towards white) and flare (lifted blacks) from 0 to 100 (0 none);
-# hue correction in percent (how much bright colours keep their hue); grade, the percentage of the game's own colour
-# grading the picture keeps.
+# With hdr = 1, the tone mapper: vanilla is the game's own curve at SDR brightness; psychov35 sends the scene through a
+# model of the eye's response, matched to the game's mid grey and tone, up to the peak; renodrt carries the game's SDR
+# look up to the peak by brightness.
+# hdr_tonemap = psychov35
+# With psychov35: where the scene's mid grey lands (vanilla: where the game's curve puts it; render: at the scene's
+# value); whether the mid tones get the contrast of the game's curve; the tone curve's steepness through mid grey from
+# 0 to 100 (50 unchanged); and in percent how much bright colours turn as where the game's SDR picture clips (fire
+# towards yellow and white).
+# hdr_midgray = vanilla
+# hdr_match_slope = 1
+# hdr_tone_slope = 50
+# hdr_hue_clip = 50
+# With psychov35 and renodrt: exposure in percent (100 unchanged); highlights, shadows, contrast and saturation from 0
+# to 100 (50 unchanged).
 # hdr_exposure = 100
 # hdr_highlights = 50
 # hdr_shadows = 50
 # hdr_contrast = 50
 # hdr_saturation = 50
+# With renodrt: gamma correction (off, 2.2 or 2.4) shows the picture as a display of that power would, off keeps the
+# sRGB curve; highlight saturation from 0 to 100 (50 unchanged); blowout (bright parts towards white) and flare (lifted
+# blacks) from 0 to 100 (0 none); hue correction in percent (how much bright colours keep their hue); grade, the
+# percentage of the game's own colour grading the picture keeps.
+# hdr_gamma = 2.2
 # hdr_highlight_sat = 50
 # hdr_blowout = 0
 # hdr_flare = 0

@@ -158,7 +158,8 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
 - HDR (`vk_hdr.c`): the game tonemaps its scene into a float target, upscales it, draws the HUD into a second float
   target and copies that into the 8-bit sRGB window texture it presents. With `NX2NAVI_HDR=1` the tonemap shader gets
   the function of `shaders/hdr_tonemap.frag` spliced in where its SDR curve clamps each channel, so the float picture
-  holds the HDR picture relative to the HUD's white; the game's FSR 1 pass loses its output clamp; the present reads
+  holds the HDR picture relative to the HUD's white (the function gets the values the curve takes, and the scene
+  before the game's exposure gain with that gain, which its default tone mapper anchors mid grey on); the game's FSR 1 pass loses its output clamp; the present reads
   the float picture in place of the window texture and `shaders/hdr_encode.comp` writes PQ for an HDR10 swapchain.
   `NX2NAVI_HDR=native` reports an HDR10 display to the game, which then renders and presents its own PQ picture.
   The menu switches between off and `1` during a run: the splice, the HDR extensions and the settings in the support

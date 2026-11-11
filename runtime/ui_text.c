@@ -123,8 +123,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_GAMMA_DESC] = "Shows the picture as a 2.2 or BT.1886 (2.4) display would, as the game was made to be "
                                "seen; Off keeps the sRGB curve, with lighter shadows.",
     [UI_MENU_HDR_TONEMAP] = "Tone mapper",
-    [UI_MENU_HDR_TONEMAP_DESC] = "Vanilla: the game's own curve at SDR brightness. RenoDRT: the game's look carried up "
-                                 "to your display's peak.",
+    [UI_MENU_HDR_TONEMAP_DESC] = "Vanilla: the game's own curve at SDR brightness. PsychoV35: the scene through a model "
+                                 "of the eye's response, matched to the game's mid grey and tone, up to your display's "
+                                 "peak. RenoDRT: the game's SDR look carried up to the peak by brightness.",
     [UI_MENU_HDR_EXPOSURE] = "Exposure",
     [UI_MENU_HDR_EXPOSURE_DESC] = "Brightness of the whole picture before the tone mapper; 100 % leaves it unchanged.",
     [UI_MENU_HDR_HIGHLIGHTS] = "Highlights",
@@ -143,6 +144,16 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_FLARE_DESC] = "Lifts the darkest parts as a little stray light would; 0 keeps black black.",
     [UI_MENU_HDR_GRADE] = "Colour grading",
     [UI_MENU_HDR_GRADE_DESC] = "How much of the game's own colour grading the HDR picture keeps; 0 is the scene without it.",
+    [UI_MENU_HDR_MIDGRAY] = "Mid grey",
+    [UI_MENU_HDR_MIDGRAY_DESC] = "Where the scene's mid grey lands. Vanilla: where the game's own curve puts it. Render: "
+                                 "at the scene's value, a little darker.",
+    [UI_MENU_HDR_MATCH_SLOPE] = "Match tone slope",
+    [UI_MENU_HDR_MATCH_SLOPE_DESC] = "Gives the mid tones the contrast of the game's own curve.",
+    [UI_MENU_HDR_TONE_SLOPE] = "Tone slope",
+    [UI_MENU_HDR_TONE_SLOPE_DESC] = "Steepness of the tone curve through mid grey; 50 leaves it unchanged.",
+    [UI_MENU_HDR_HUE_CLIP] = "Hue clip emulation",
+    [UI_MENU_HDR_HUE_CLIP_DESC] = "How much bright colours turn as they do where the game's SDR picture clips: fire "
+                                  "towards yellow and white. 0 keeps their hue.",
     [UI_MENU_SHADOW_SCALE] = "Shadow resolution",
     [UI_MENU_SHADOW_SCALE_DESC] = "Sharper shadows. Higher costs more GPU power.",
     [UI_MENU_PCSS] = "Soft shadows",
@@ -688,8 +699,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_GAMMA_DESC] = "Показывает картинку так, как её показал бы экран с гаммой 2.2 или BT.1886 (2.4), для "
                                "которого игра делалась; «Выкл.» оставляет кривую sRGB с более светлыми тенями.",
     [UI_MENU_HDR_TONEMAP] = "Тональная кривая",
-    [UI_MENU_HDR_TONEMAP_DESC] = "Vanilla: собственная кривая игры с яркостью SDR. RenoDRT: вид игры, доведённый до "
-                                 "пиковой яркости экрана.",
+    [UI_MENU_HDR_TONEMAP_DESC] = "Vanilla: собственная кривая игры с яркостью SDR. PsychoV35: сцена через модель отклика "
+                                 "глаза, согласованная со средним серым и тоном игры, до пиковой яркости экрана. RenoDRT: "
+                                 "SDR-вид игры, доведённый до пика по яркости.",
     [UI_MENU_HDR_EXPOSURE] = "Экспозиция",
     [UI_MENU_HDR_EXPOSURE_DESC] = "Яркость всей картинки до тональной кривой; 100 % оставляет её без изменений.",
     [UI_MENU_HDR_HIGHLIGHTS] = "Света",
@@ -708,6 +720,16 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_FLARE_DESC] = "Приподнимает самые тёмные участки, как немного рассеянного света; 0 оставляет чёрное чёрным.",
     [UI_MENU_HDR_GRADE] = "Цветокоррекция игры",
     [UI_MENU_HDR_GRADE_DESC] = "Сколько собственной цветокоррекции игры сохраняет HDR-картинка; 0 — сцена без неё.",
+    [UI_MENU_HDR_MIDGRAY] = "Средний серый",
+    [UI_MENU_HDR_MIDGRAY_DESC] = "Куда попадает средний серый сцены. Vanilla: туда же, куда его ставит кривая игры. "
+                                 "Render: на значение сцены, чуть темнее.",
+    [UI_MENU_HDR_MATCH_SLOPE] = "Наклон тона как в игре",
+    [UI_MENU_HDR_MATCH_SLOPE_DESC] = "Даёт средним тонам контраст собственной кривой игры.",
+    [UI_MENU_HDR_TONE_SLOPE] = "Наклон тона",
+    [UI_MENU_HDR_TONE_SLOPE_DESC] = "Крутизна тональной кривой у среднего серого; 50 оставляет её без изменений.",
+    [UI_MENU_HDR_HUE_CLIP] = "Имитация сдвига оттенка",
+    [UI_MENU_HDR_HUE_CLIP_DESC] = "Насколько яркие цвета сдвигаются так, как при обрезке в SDR-картинке игры: огонь к "
+                                  "жёлтому и белому. 0 сохраняет их оттенок.",
     [UI_MENU_SHADOW_SCALE] = "Разрешение теней",
     [UI_MENU_SHADOW_SCALE_DESC] = "Более чёткие тени. Выше — больше нагрузка на видеокарту.",
     [UI_MENU_PCSS] = "Мягкие тени",
@@ -1549,8 +1571,9 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_GAMMA_DESC] = "Mostra a imagem como uma tela de gama 2.2 ou BT.1886 (2.4) mostraria, como o jogo foi "
                                "feito para ser visto; Desligado mantém a curva sRGB, com sombras mais claras.",
     [UI_MENU_HDR_TONEMAP] = "Curva de tons",
-    [UI_MENU_HDR_TONEMAP_DESC] = "Vanilla: a curva do próprio jogo, com brilho SDR. RenoDRT: o visual do jogo levado até "
-                                 "o pico da sua tela.",
+    [UI_MENU_HDR_TONEMAP_DESC] = "Vanilla: a curva do próprio jogo, com brilho SDR. PsychoV35: a cena por um modelo da "
+                                 "resposta do olho, ajustada ao cinza médio e ao tom do jogo, até o pico da sua tela. "
+                                 "RenoDRT: o visual SDR do jogo levado até o pico pelo brilho.",
     [UI_MENU_HDR_EXPOSURE] = "Exposição",
     [UI_MENU_HDR_EXPOSURE_DESC] = "Brilho de toda a imagem antes da curva de tons; 100 % a deixa como está.",
     [UI_MENU_HDR_HIGHLIGHTS] = "Realces",
@@ -1569,6 +1592,16 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_FLARE_DESC] = "Ergue as partes mais escuras como um pouco de luz difusa faria; 0 mantém o preto preto.",
     [UI_MENU_HDR_GRADE] = "Gradação de cor",
     [UI_MENU_HDR_GRADE_DESC] = "Quanto da gradação de cor do próprio jogo a imagem HDR mantém; 0 é a cena sem ela.",
+    [UI_MENU_HDR_MIDGRAY] = "Cinza médio",
+    [UI_MENU_HDR_MIDGRAY_DESC] = "Onde fica o cinza médio da cena. Vanilla: onde a curva do próprio jogo o coloca. "
+                                 "Render: no valor da cena, um pouco mais escuro.",
+    [UI_MENU_HDR_MATCH_SLOPE] = "Igualar inclinação do tom",
+    [UI_MENU_HDR_MATCH_SLOPE_DESC] = "Dá aos tons médios o contraste da curva do próprio jogo.",
+    [UI_MENU_HDR_TONE_SLOPE] = "Inclinação do tom",
+    [UI_MENU_HDR_TONE_SLOPE_DESC] = "Inclinação da curva de tons no cinza médio; 50 a deixa como está.",
+    [UI_MENU_HDR_HUE_CLIP] = "Emulação do corte de matiz",
+    [UI_MENU_HDR_HUE_CLIP_DESC] = "Quanto as cores brilhantes viram como onde a imagem SDR do jogo estoura: o fogo "
+                                  "para o amarelo e o branco. 0 mantém o matiz delas.",
     [UI_MENU_SHADOW_SCALE] = "Resolução das sombras",
     [UI_MENU_SHADOW_SCALE_DESC] = "Sombras mais nítidas. Mais alto exige mais da placa de vídeo.",
     [UI_MENU_SHADOW_RANGE] = "Alcance das cascatas de sombra",
@@ -2206,7 +2239,7 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_GAMMA] = "伽马校正",
     [UI_MENU_HDR_GAMMA_DESC] = "按游戏设计时的观看方式，以 2.2 或 BT.1886（2.4）显示器的效果呈现画面；关闭则保留 sRGB 曲线，暗部更亮。",
     [UI_MENU_HDR_TONEMAP] = "色调映射",
-    [UI_MENU_HDR_TONEMAP_DESC] = "Vanilla：游戏自身的曲线，SDR 亮度。RenoDRT：把游戏的观感延伸到显示器的峰值亮度。",
+    [UI_MENU_HDR_TONEMAP_DESC] = "Vanilla：游戏自身的曲线，SDR 亮度。PsychoV35：场景经过人眼响应模型，与游戏的中灰和影调对齐，直到显示器的峰值亮度。RenoDRT：按亮度把游戏的 SDR 观感延伸到峰值。",
     [UI_MENU_HDR_EXPOSURE] = "曝光",
     [UI_MENU_HDR_EXPOSURE_DESC] = "色调映射前整个画面的亮度；100 % 保持不变。",
     [UI_MENU_HDR_HIGHLIGHTS] = "高光",
@@ -2225,6 +2258,14 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_HDR_FLARE_DESC] = "像少量杂散光一样提亮最暗的部分；0 保持纯黑。",
     [UI_MENU_HDR_GRADE] = "调色",
     [UI_MENU_HDR_GRADE_DESC] = "HDR 画面保留游戏自身调色的程度；0 为不含调色的场景。",
+    [UI_MENU_HDR_MIDGRAY] = "中灰",
+    [UI_MENU_HDR_MIDGRAY_DESC] = "场景中灰落在哪里。Vanilla：游戏自身曲线给出的位置。Render：场景的原值，稍暗。",
+    [UI_MENU_HDR_MATCH_SLOPE] = "匹配影调斜率",
+    [UI_MENU_HDR_MATCH_SLOPE_DESC] = "让中间调具有游戏自身曲线的对比度。",
+    [UI_MENU_HDR_TONE_SLOPE] = "影调斜率",
+    [UI_MENU_HDR_TONE_SLOPE_DESC] = "影调曲线在中灰处的陡峭程度；50 保持不变。",
+    [UI_MENU_HDR_HUE_CLIP] = "色调裁切模拟",
+    [UI_MENU_HDR_HUE_CLIP_DESC] = "明亮色彩像游戏 SDR 画面裁切处那样偏转的程度：火焰偏向黄色和白色。0 保持其色调。",
     [UI_MENU_SHADOW_SCALE] = "阴影分辨率",
     [UI_MENU_SHADOW_SCALE_DESC] = "让阴影更清晰。越高越吃显卡。",
     [UI_MENU_SHADOW_RANGE] = "阴影级联范围",
