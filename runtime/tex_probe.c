@@ -13,6 +13,7 @@
 #include "nvn_api.h"
 #include "tex.h"
 #include "vk.h"
+#include "vk_exec.h"
 #include "vk_gpa.h"
 #include "gpa_read_spv.h"
 #include "platform/platform.h"
@@ -1068,6 +1069,165 @@ static int test_textures(pool_t *tpool, pool_t *phys) {
     return 0;
 }
 
+// Level 0 of image (w x h RGBA8) read into out through a staging buffer after everything recorded so far has run.
+static void image_bytes(VkImage image, uint32_t w, uint32_t h, uint8_t *out) {
+    VkCtx *c = vk_ctx();
+    VkBuffer rb;
+    VmaAllocation ra;
+    size_t n = (size_t)w * h * 4;
+    uint8_t *r = vk_staging(n, &rb, &ra);
+    VkCommandBuffer cb = vk_upload_begin();
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                           .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    VkBufferImageCopy rg = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
+    vkCmdCopyImageToBuffer(cb, image, VK_IMAGE_LAYOUT_GENERAL, rb, 1, &rg);
+    mb = (VkMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                            .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    vkCmdPipelineBarrier2(cb, &di);
+    vk_upload_end();
+    vk_upload_flush(1);
+    vmaInvalidateAllocation(c->vma, ra, 0, VK_WHOLE_SIZE);
+    memcpy(out, r, n);
+    vmaDestroyBuffer(c->vma, rb, ra);
+}
+
+// ---- two descriptors on one CPU-written storage (vk_texture.c "split fill", start_at)
+// D1 is a texture the CPU writes. D2 names the same storage with a texture flag for which the cache does not take the
+// content from the CPU (COMPRESSIBLE here), so a slot of D2 shows D1's image for as long as D1 has a live entry.
+// What the slot shows once D1's entry is gone, in the two orders a game can let go of them:
+//  - keep: D2's slot stays registered while D1 is released and registered again (a texture made again in place);
+//  - both: D1 and D2 are released, the slot of D2 is looked up all the same (the texture pool refresh looks at every
+//    registered slot), then the storage gets new bytes and both are registered again (the next texture in that memory).
+// recorded: the lookup that makes D2's entry runs while a submission is recorded, as a draw of a replay makes it, so a
+// copy from D1's image can be recorded there; otherwise outside any recording, where only the storage can fill it.
+// *what: 0 the slot's image is all zero, 1 it holds the storage's bytes as they are at the end, 2 the bytes the storage
+// held when D2's entry was made (the same as 1 in "keep", where the storage is not rewritten), 3 none of these.
+enum { SPLIT_W = 32, SPLIT_H = 32, SPLIT_N = SPLIT_W * SPLIT_H * 4 };
+
+static int split_what(const uint8_t *got, const uint8_t *first, const uint8_t *last) {
+    static const uint8_t zero[SPLIT_N];
+    return !memcmp(got, zero, SPLIT_N) ? 0 : !memcmp(got, last, SPLIT_N) ? 1 : !memcmp(got, first, SPLIT_N) ? 2 : 3;
+}
+
+typedef struct { int id; const VkTexImage *got; } SplitRec;
+
+static void split_record(VkCommandBuffer cb, void *arg) {   // as gpa_read_record: the frame of a recorded submission
+    SplitRec *r = arg;
+    vk_texture_new_submit();
+    vk_mem_mirror_begin();
+    vk_exec_probe_inline(cb, vk_sync_issued() + 1);
+    r->got = vk_texture_by_id(r->id, NULL, NULL);
+    vk_exec_probe_inline(VK_NULL_HANDLE, 0);
+    vk_mem_mirror_end(cb, vk_sync_issued() + 1);
+}
+
+static int split_case(pool_t *pool, uint64_t off, uint64_t serial, int both, int recorded, int *what) {
+    uint8_t *lin[1] = {0}, first[SPLIT_N], got[SPLIT_N];
+    tex_t d1 = make_tex(pool, off, 0x25, SPLIT_W, SPLIT_H, 1, serial);
+    tex_t d2 = d1;
+    d2.d.flags |= NVN_TEXTURE_FLAGS_COMPRESSIBLE, d2.serial = serial + 1;
+    GCHECK(off + d1.L.size <= pool->size, "the two-descriptor case's storage does not fit the probe's pool");
+    if (fill_storage(&d1, lin)) return 1;
+    memcpy(first, lin[0], SPLIT_N);
+    const VkTexImage *e1 = vk_texture_get(&d1);
+    GCHECK(e1 && e1->mirrored, "the CPU-written texture of the two-descriptor case");
+    VkImage img1 = e1->image;
+    vk_texture_register(6, &d2, NULL);
+    const VkTexImage *s2 = vk_texture_by_id(6, NULL, NULL);
+    GCHECK(s2 && s2->image == img1, "the slot of the second descriptor does not show the CPU-written texture's image");
+    vk_texture_release(&d1);
+    if (both) vk_texture_release(&d2);
+    if (recorded) {
+        SplitRec r = {6, NULL};
+        uint64_t fence = vk_sync_probe_submit(split_record, &r);
+        GCHECK(vk_sync_fence_wait(fence, 5000000000ull), "the submission that looks the second descriptor's slot up timed out");
+        s2 = r.got;
+    } else {
+        vk_texture_new_submit();
+        s2 = vk_texture_by_id(6, NULL, NULL);   // the texture pool refresh looks the slot up
+    }
+    GCHECK(s2 && s2->image != img1 && !s2->mirrored, "after the release of the CPU-written texture the slot of the second "
+           "descriptor has no image of its own (%s)", s2 ? "it still shows the released one" : "none at all");
+    VkImage img2 = s2->image;
+    if (both) {   // the next texture in that memory
+        if (fill_storage(&d1, lin)) return 1;
+        vk_texture_register(6, &d2, NULL);
+    }
+    vk_texture_register(7, &d1, NULL);
+    vk_texture_new_submit();
+    const VkTexImage *s1 = vk_texture_by_id(7, NULL, NULL);
+    GCHECK(s1 && s1->mirrored && s1->image != img2, "the CPU-written texture registered again has no image of its own");
+    image_bytes(s1->image, SPLIT_W, SPLIT_H, got);
+    GCHECK(!memcmp(got, lin[0], SPLIT_N), "the CPU-written texture registered again does not hold its storage's bytes");
+    s2 = vk_texture_by_id(6, NULL, NULL);
+    GCHECK(s2 && s2->image == img2, "the slot of the second descriptor left its own image when the first came back");
+    image_bytes(s2->image, SPLIT_W, SPLIT_H, got);
+    *what = split_what(got, first, lin[0]);
+    // a shader sampled the slot: with NX2NAVI_TRACE=perf the log names an entry that never had content
+    uint32_t marks[8] = {0};
+    marks[6] = 1;
+    vk_pool_marks_read(marks, 8);
+    g_gpu_checks += 6;
+    vk_texture_release(&d1), vk_texture_release(&d2);
+    free(lin[0]);
+    return 0;
+}
+
+// The three cases with split fill off (tex_split_fill = 0), on (1) and filling once (2). Off, the slot shows an image
+// nothing filled, which is what the setting is for; on, the storage's bytes, copied from D1's image where a submission
+// was being recorded and uploaded from the storage elsewhere; filling once, the bytes of the texture that was in the
+// memory before when both descriptors were let go of.
+static int test_split(pool_t *pool) {
+    static const char *const names[4] = {"zeros", "the storage's bytes", "the bytes the storage held before", "other bytes"};
+    int what[3][3];
+    uint64_t made[3][3][2];
+    for (int mode = 0; mode < 3; mode++) {
+        vk_texture_split_fill_set(mode);
+        for (int k = 0; k < 3; k++) {   // keep, both, keep with the lookup recorded
+            uint64_t c0, f0, c1, f1;
+            vk_texture_split_counts(&c0, &f0);
+            if (split_case(pool, 0x80000 + (uint64_t)(mode * 3 + k) * 0x4000, 30 + (uint64_t)(mode * 3 + k) * 2, k == 1, k == 2,
+                           &what[mode][k]))
+                return 1;
+            vk_texture_split_counts(&c1, &f1);
+            made[mode][k][0] = c1 - c0, made[mode][k][1] = f1 - f0;
+        }
+    }
+    vk_texture_split_fill_set(-1);   // the setting decides again
+    vk_sync_finish();
+    printf("probe-vkmem: a second descriptor on a CPU-written storage, not CPU-written itself, once the first one's entry "
+           "is gone. Its slot shows, with tex_split_fill 0 / 1 / 2: when it stayed registered %s / %s / %s; when both were "
+           "released and registered again over new bytes %s / %s / %s; when its entry was made in a recorded submission "
+           "%s / %s / %s (copies from the first one's image %llu / %llu / %llu, fills from storage %llu / %llu / %llu)\n",
+           names[what[0][0]], names[what[1][0]], names[what[2][0]], names[what[0][1]], names[what[1][1]], names[what[2][1]],
+           names[what[0][2]], names[what[1][2]], names[what[2][2]], (unsigned long long)made[0][2][0],
+           (unsigned long long)made[1][2][0], (unsigned long long)made[2][2][0], (unsigned long long)made[0][2][1],
+           (unsigned long long)made[1][2][1], (unsigned long long)made[2][2][1]);
+    for (int k = 0; k < 3; k++) {
+        // off: an image nothing filled (zeros with NX2NAVI_FIX_ZERO, the default; else whatever the memory held)
+        GCHECK(vk_fix_zero() ? what[0][k] == 0 : what[0][k] != 1, "with split fill off the slot shows %s in case %d: the "
+               "sequence no longer leaves the second descriptor an empty image", names[what[0][k]], k);
+        GCHECK(!made[0][k][0] && !made[0][k][1], "with split fill off an entry was filled in case %d", k);
+        GCHECK(what[1][k] == 1, "with split fill on the slot shows %s in case %d, not the storage's bytes", names[what[1][k]], k);
+        GCHECK(what[2][k] == (k == 1 ? 2 : 1), "filling once, the slot shows %s in case %d", names[what[2][k]], k);
+        for (int mode = 1; mode < 3; mode++)
+            GCHECK(made[mode][k][0] + made[mode][k][1] == 1, "split fill %d made %llu copies and %llu fills in case %d, not "
+                   "one of them", mode, (unsigned long long)made[mode][k][0], (unsigned long long)made[mode][k][1], k);
+    }
+    for (int mode = 1; mode < 3; mode++) {
+        GCHECK(made[mode][0][1] == 1 && made[mode][1][1] == 1, "outside a recording split fill %d did not fill from storage", mode);
+#ifdef _WIN32   // elsewhere an import's pinning can mark pages written without a CPU write, and the storage is uploaded
+        GCHECK(made[mode][2][0] == 1, "in a recorded submission split fill %d did not copy from the first one's image", mode);
+#endif
+    }
+    g_gpu_checks += 9;
+    return 0;
+}
+
 static int test_gpu(void) {
     uint64_t heap = 0;
     GCHECK(mem_set_heap_size(16ull << 20, &heap) == 0 && heap, "SetHeapSize 16 MiB");
@@ -1086,6 +1246,7 @@ static int test_gpu(void) {
     int detail_bad = test_detail(&dpool);
     vk_pool_fini(&dpool);
     if (detail_bad) return 1;
+    if (test_split(&tpool)) return 1;
     VkMemStats st;
     vk_mem_stats(&st);
     GCHECK(st.imported_pools == 2 && st.physical_pools == 1 && st.virtual_pools == 1 && !st.import_failures,

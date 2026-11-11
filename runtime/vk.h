@@ -466,6 +466,10 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
                    uint32_t bh, int srgb, int bc, VkImage img, VkImageAspectFlags aspect, VkBuffer readback);
 void vk_astc_scratch_fail(int n);   // a test's hook: the next n scratch buffer requests fail (tex_probe.c)
 uint64_t vk_texture_upload_retries(void);   // uploads left to be tried again: their decode had no memory (vk_texture.c upload)
+// vk_texture.c "split fill", a test's hooks (tex_probe.c): the mode from here on (tex_split_fill: 0, 1 or 2), and how
+// many entries started with a copy of the released entry they replaced and how many were filled from their storage.
+void vk_texture_split_fill_set(int mode);
+void vk_texture_split_counts(uint64_t *copies, uint64_t *fills);
 VkDeviceSize vk_astc_region_bytes(const VkAstcRegion *r, uint32_t bw, uint32_t bh);   // source bytes the region reads
 void vk_astc_stats(uint64_t *dispatches, uint64_t *texels);   // since start
 uint64_t vk_astc_scratch_bytes(void);                          // the decoder's shared scratch now

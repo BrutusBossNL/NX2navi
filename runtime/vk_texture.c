@@ -99,6 +99,8 @@ typedef struct Tex {
     uint8_t og_drop;              // DROP_*: the drop of this descriptor's last entry, when the ring still knew it
     uint8_t og_reimg;             // made with the image of a released entry (create_tex, reuse)
     uint8_t said;                 // marks_check wrote its line for this entry
+    uint8_t sfill;                // split fill: the CPU does not write it, and its image is the storage's bytes: 1 as a
+                                  // CPU-written one's until the GPU writes it, 2 once (from_storage)
     uint32_t og_backs;            // times it was taken back after a release (entry_of)
     uint64_t og_frame;            // gfx_counters.frames when it was made
     uint64_t og_drop_frame;       // gfx_counters.frames of the drop og_drop names
@@ -649,9 +651,78 @@ enum { DROP_NONE, DROP_MAX, DROP_CAP, DROP_COMMIT, DROP_VRAM, DROP_IDLE_VRAM, DR
 static void drop_tex(Tex *e, int why);
 // How an entry's content started (start_at; Tex.og_start), in the order of start_names.
 enum { START_NEW, START_UPLOAD_LIVE, START_COPY_LIVE, START_COPY_RELEASED, START_EMPTY_LIVE, START_EMPTY_RELEASED,
-       START_N };
+       START_COPY_GONE, START_FILL, START_N };
 // What put content into the image of an entry the CPU does not write (Tex.had); a GPU write is pub.gpu_owned.
-enum { HAD_COPY = 1, HAD_TEXELS = 2 };
+enum { HAD_COPY = 1, HAD_TEXELS = 2, HAD_FILL = 4 };
+
+// ---- split fill (NX2NAVI_TEX_SPLIT_FILL, tex_split_fill in nx2navi.ini: 1 the default, 0 off, 2 filled once)
+// Two descriptors can name one storage the CPU writes: a texture whose content the cache takes from the CPU
+// (tex_mirrored), and a second one with a texture flag for which tex_mirrored refuses. The second has no upload of its
+// own: its slot shows the first one's image for as long as that entry is live (slot_resolve). Once the first is
+// released, a lookup of the second's slot makes the second an entry of its own (entry_of), start_at destroys the
+// released first one, and the new image has nothing to start from: cleared, never uploaded, and from then on what
+// the slot shows, also after the first descriptor is registered again and gets a new entry beside it. On the console
+// both descriptors read the same bytes. tex_probe.c test_split makes the sequence and reads the image back: zeros.
+//
+// With split fill, a new entry the CPU does not write, at storage the CPU can see, starts with those bytes:
+//  - by a copy on the GPU from the released CPU-written entry start_at is about to destroy, when that image holds the
+//    storage as it is now (uploaded, and no write since its last check) or content the GPU wrote, and
+//    alias_compatible allows;
+//  - else from the storage itself, uploaded as a CPU-written texture's is (upload).
+// With 1 the image then follows the storage as a CPU-written one's does (from_storage: make_fresh, the pool's list)
+// until the GPU or WriteTexels writes it. The texture pool refresh makes such an entry also for a slot whose descriptor
+// the game has let go of, long before the next texture's bytes arrive in that memory, and when both descriptors are
+// registered again the slot finds that entry: filled once (2), it shows the texture that was there before.
+// Left out: depth, stencil and multisample images, buffer textures, pools the CPU has no access to, storage over
+// SPLIT_FILL_MAX, and an entry made with a released entry's image, whose first transition is recorded at the replay's
+// position, after the upload batch (init_new); so create_tex gives an entry that is to be filled a new image. Nothing
+// is filled where a live entry at the address holds content the GPU wrote (that is what the new one should show, and
+// start_at copies it when it can), nor with NX2NAVI_TEX_ALIAS off.
+//
+// What follows the storage also takes what a stale descriptor's entry does not need: an entry made for a slot the game
+// let go of is uploaded again whenever its pages are written, by the next textures loaded into that memory, read in
+// its own format. The perf line counts those ("filled again after a write"); 2 does without them.
+//
+// What it costs: an upload (a copy out of the storage, a decode for ASTC) for each such entry that finds no image to
+// copy from, where the image was only cleared before. A render target in a CPU pool that the game makes anew often
+// pays that every time and no longer takes a released entry's image; the perf line counts the fills, their bytes and
+// their time. Until the GPU first writes it, its storage is also checked for writes once a submission.
+// What it can show: the bytes in the storage, whatever they are. For a render target that is the last picture the
+// game or a write-back left there, where the image was zero before: a pass that reads a new target before anything
+// drew into it sees that older picture instead of nothing.
+#define SPLIT_FILL_MAX ((uint64_t)32 << 20)
+static int split_mode = -1;
+// since the last perf line: entries started by a copy from the released entry they replace, filled from storage (with
+// the bytes and the time), filled again after a write; left empty for a reused image, for their size
+static uint64_t n_split_copy, n_split_fill, n_split_bytes, n_split_ns, n_split_refill, n_split_reused, n_split_big;
+static uint64_t split_total[2];   // copies and fills so far (vk_texture_split_counts)
+
+static int split_fill_mode(void) {
+    if (split_mode < 0) {
+        int v = cfg_int("NX2NAVI_TEX_SPLIT_FILL");
+        split_mode = v == 0 ? 0 : v == 2 ? 2 : 1;
+        rt_log("vk: a texture the CPU does not write, made at storage the CPU writes, %s (NX2NAVI_TEX_SPLIT_FILL=%d)",
+               !split_mode ? "starts empty" : split_mode == 2 ? "starts with the storage's bytes, once"
+                                                             : "starts with the storage's bytes and follows them", split_mode);
+    }
+    return split_mode;
+}
+
+// A test's hook (tex_probe.c): the mode from here on, and the copies and fills made so far.
+void vk_texture_split_fill_set(int mode) { split_mode = mode; }
+void vk_texture_split_counts(uint64_t *copies, uint64_t *fills) { *copies = split_total[0], *fills = split_total[1]; }
+
+// Whether split fill gives a new entry for t its storage's bytes, apart from the size (SPLIT_FILL_MAX).
+static int split_wants(const tex_t *t, const TexVkFormat *f) {
+    if (!split_fill_mode() || !t->mem || nvn_gpu_only((uintptr_t)t->mem) || tex_mirrored(t)) return 0;
+    if (!(t->pool_flags & (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED))) return 0;
+    if (f->depth || f->stencil || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    int bw, bh;
+    return nvn_fmt_bpb(t->d.format, &bw, &bh) != 0;
+}
+
+// Whether e's image takes its content from the storage: a texture the CPU writes, or one split fill fills.
+static int from_storage(const Tex *e) { return e->pub.mirrored || e->sfill == 1 || (e->sfill == 2 && !e->uploaded); }
 
 // Whether an image with these requirements can lie in the pool memory at e's address (*sp: that memory).
 static int pool_fits(VkCtx *c, const Tex *e, const VkMemoryRequirements *req, uint64_t guest_size, VkMemSpan *sp) {
@@ -1120,7 +1191,11 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         }
     }
     int gpu_only = !tex_mirrored(t);
-    if (!img && gpu_only && tex_reuse_on()) {   // the image of a released entry with these parameters (reuse, above)
+    // an entry split fill is to fill gets a new image: start_at uploads into it in the upload batch (see "split fill")
+    int to_fill = gpu_only && split_wants(t, &f) && L.size <= SPLIT_FILL_MAX;
+    for (const Tex *p = to_fill ? nvn_hm_get(&by_addr, &k->addr) : NULL; p; p = p->next_at)
+        if (alias_has_gpu_content(p)) { to_fill = 0; break; }   // start_at copies that in instead
+    if (!img && gpu_only && !to_fill && tex_reuse_on()) {   // the image of a released entry with these parameters (reuse, above)
         // Not one released in this frame or the one before: Ocarina releases its render targets and registers them
         // again every frame, and DLSS's scene target (2560x1440 at a fixed address in Kokiri Forest) lost its image
         // to a moving target of the same size in between, and DLSS its history (vk_dlaa.c evaluate), several times a
@@ -1387,7 +1462,7 @@ int vk_texture_pool_note_locked(int id, uint32_t *ent) {
     if (tslots[id].ce && tslots[id].cgen != agen[sinfo[id] & 0xffff]) vk_texture_by_id_locked(id, NULL, NULL);
     Tex *e = tslots[id].ce;
     if (!e) return 0;
-    if (!e->pidx && e->pub.mirrored && !e->pub.gpu_owned) {
+    if (!e->pidx && from_storage(e) && !e->pub.gpu_owned) {
         if (npent == cpent) {
             int n = cpent ? cpent * 2 : 1024;
             PEnt *p = realloc(pent, sizeof *p * (size_t)n);
@@ -1519,7 +1594,8 @@ static const char *const drop_names[DROP_N] = {
     "its storage went", "made whole again (texture detail)", "shutdown"};
 static const char *const start_names[START_N] = {
     "started on its own", "filled from storage over a live entry", "content copied from a live entry",
-    "content copied from a released entry", "started empty over a live entry", "started empty over a released entry"};
+    "content copied from a released entry", "started empty over a live entry", "started empty over a released entry",
+    "content copied from the released CPU-written entry it replaced (split fill)", "filled from its storage (split fill)"};
 
 static uint64_t frames_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED); }
 
@@ -1576,11 +1652,11 @@ static int origin_text(char *out, size_t n, const Tex *e) {
 }
 
 // Whether nothing ever put content into e's image: an entry the CPU writes that was not uploaded, or one it does not
-// write, at an address the CPU can see, that the GPU never wrote and that got no copy and no texels.
+// write, at an address the CPU can see, that the GPU never wrote and that got no copy, no texels and no split fill.
 static int no_content(const Tex *e) {
     if (e->pub.gpu_owned) return 0;
     if (e->pub.mirrored) return !e->uploaded;
-    return !e->had && e->key.addr && !nvn_gpu_only(e->key.addr);
+    return !e->had && !(e->sfill && e->uploaded) && e->key.addr && !nvn_gpu_only(e->key.addr);
 }
 
 // Lines per address for one kind of event: up to `most` each, in a table of the first SAID_N addresses that had one
@@ -2796,6 +2872,7 @@ static void upload(Tex *e) {
     uint64_t dt = kern_now_ns() - u0;
     if (e->uploaded) {
         n_reuploads++, perf_count(PERF_CNT_TEX_REUP);
+        n_split_refill += e->sfill != 0;
         ru_n++, ru_bytes += src_bytes, ru_ns += dt;
         if (e->wt_n) {
             ru_wt_n++, ru_wt_bytes += src_bytes, ru_wt_ns += dt;
@@ -2870,9 +2947,11 @@ static int same_content(const Tex *e) {
     return 1;
 }
 
-// A mirrored texture is uploaded on first use and again when its storage pages carry a newer write generation.
+// A mirrored texture is uploaded on first use and again when its storage pages carry a newer write generation. So is
+// one split fill fills (from_storage), while it is not released: the game may be unmapping a released one's storage,
+// and nothing keeps a slot from resolving to it as the stale rule does for a CPU-written one (slot_resolve).
 static void make_fresh(Tex *e) {
-    if (!e->pub.mirrored || e->pub.gpu_owned) return;
+    if (!from_storage(e) || e->pub.gpu_owned || (e->sfill && e->released)) return;
     uint64_t size = e->t.L.size;
     if (!e->uploaded) {
         if (up_wait(e)) return;
@@ -2891,7 +2970,7 @@ static void make_fresh(Tex *e) {
 // vk_mem_changed_snap) instead of a system call per texture. A write the snapshot of the texture's region missed (made
 // after it, during this replay) keeps its write-watch bit and is caught by the next submission's snapshot.
 static void make_fresh_snap(Tex *e) {
-    if (!e->pub.mirrored || e->pub.gpu_owned) return;
+    if (!from_storage(e) || e->pub.gpu_owned || (e->sfill && e->released)) return;
     if (!e->uploaded && up_wait(e)) return;
     uint32_t now;
     n_checks++;
@@ -3032,7 +3111,8 @@ static void create_failed(const TexKey *k) {
 //  - gone: e, which the CPU does not write, was made at an address the CPU can see, and the released CPU-written entry
 //    there was destroyed (gone: its description, gone_rel: the frame of its release). Nothing uploads e; a slot of e's
 //    descriptor that showed the destroyed entry's image (slot_resolve follows it while it is live) shows e's from now on.
-// flag: e was taken back (over), e got a copy of another entry's content (gone).
+// flag: e was taken back (over); how e started (gone): 0 empty, 1 with a copy of another entry's content, 2 with a
+// copy of the destroyed entry's, 3 filled from its storage (the last two: split fill).
 static uint64_t n_cpu_empty[3];   // since the last perf line: entries the CPU does not write, at an address it can see,
                                   // that started without content: on their own, over a released entry, over a live one
 #define START_LINES 8
@@ -3053,11 +3133,30 @@ static void start_line(const Tex *e, const Tex *over, const char *gone, uint64_t
                (unsigned long long)frames_now(), (unsigned long long)e->key.addr, flag ? " (taken back)" : "", d, o,
                why ? "not CPU-written: " : "CPU-written", why ? why : "", no_content(over) ? ", no content" : "", og);
     } else {
+        static const char *const how[4] = {"started empty", "got another entry's content", "got the destroyed entry's content",
+                                           "was filled from its storage"};
         rt_log("perf: frame %llu: texture %#llx, not CPU-written (%s), %s after the released CPU-written entry at its "
                "address was destroyed: new [%s]; destroyed [%s], released at frame %llu",
-               (unsigned long long)frames_now(), (unsigned long long)e->key.addr, mirror_refused(&e->t),
-               flag ? "got another entry's content" : "started empty", d, gone, (unsigned long long)gone_rel);
+               (unsigned long long)frames_now(), (unsigned long long)e->key.addr, mirror_refused(&e->t), how[flag & 3], d,
+               gone, (unsigned long long)gone_rel);
     }
+}
+
+// Split fill from the storage: e, new and through its first transition, gets its storage's bytes in the upload batch
+// (make_fresh, as a CPU-written texture's first use) and is marked to follow them or not (Tex.sfill). 0 when e is left
+// as it is: storage over SPLIT_FILL_MAX, an image taken from a released entry (see "split fill"), storage not mapped,
+// or an upload that had no memory, which make_fresh tries again later.
+static int split_fill(Tex *e) {
+    if (e->t.L.size > SPLIT_FILL_MAX) return n_split_big++, 0;
+    if (e->reused) return n_split_reused++, 0;
+    if (!mem_readable(e->pub.addr, e->t.L.size)) return 0;
+    uint64_t t0 = kern_now_ns();
+    e->sfill = (uint8_t)split_mode;
+    make_fresh(e);
+    if (!e->uploaded) return 0;
+    n_split_fill++, split_total[1]++, n_split_bytes += e->t.L.size, n_split_ns += kern_now_ns() - t0;
+    e->had |= HAD_FILL;
+    return 1;
 }
 
 static int depth_alias_log(void) {   // NX2NAVI_DEPTH_ALIAS_LOG=1: start_at logs each new depth entry over a live texture
@@ -3086,6 +3185,11 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
     char gone_desc[224] = "";      // trace: the last destroyed one, described while it existed
     uint64_t gone_rel = 0;
     Tex *src = NULL, *rsrc = NULL;
+    // split fill: e is to start with its storage's bytes; msrc: the released CPU-written entry whose image holds them
+    // (destroyed after the copy), msrc_gpu: it holds what the GPU wrote instead, msrc_gen: the storage's generation
+    int fill = !taken_back && tex_alias && split_wants(&e->t, &e->f), msrc_gpu = 0;
+    uint32_t msrc_gen = 0;
+    Tex *msrc = NULL;
     const char *why = "no live texture with GPU content";   // for the log of an alias left empty
     const Tex *other = NULL;
     int newer = 0;          // taken back: a texture at this address holds GPU content written since e's release
@@ -3104,6 +3208,15 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
                     gone_rel = p->rel_frame;
                 }
                 gone++;
+                const char *no;
+                uint32_t gen = 0;
+                int gpu = alias_has_gpu_content(p);
+                if (fill && !msrc && (gpu || (p->uploaded && !p->pub.gpu_owned &&
+                                              !vk_mem_changed(p->pub.addr, p->t.L.size, p->wgen, &gen))) &&
+                    alias_compatible(e, p, &no)) {
+                    msrc = p, msrc_gpu = gpu, msrc_gen = gen;
+                    continue;
+                }
                 drop_tex(p, DROP_REPLACED);
                 continue;
             }
@@ -3148,8 +3261,22 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
         if (taken_back) init_new(e);
         return;
     }
-    int copied = src && alias_copy(e, src);
-    if (copied) {
+    // split fill only where nothing live holds content the storage lacks: that content is what e should show
+    if (src || live_content) fill = 0;
+    int copied = src && alias_copy(e, src), filled = 0;
+    if (fill && msrc && alias_copy(e, msrc)) {   // from the released entry this one replaces
+        copied = filled = 1;
+        n_split_copy++, split_total[0]++;
+        e->og_start = START_COPY_GONE;
+        e->had |= HAD_COPY;
+        if (!msrc_gpu && e->t.L.size <= SPLIT_FILL_MAX) {   // the storage's bytes as of msrc_gen: followed from there
+            e->sfill = (uint8_t)split_mode, e->uploaded = 1, e->wgen = msrc_gen;
+            e->chash_ok = 0;
+        }
+    }
+    if (msrc) drop_tex(msrc, DROP_REPLACED);
+    if (filled) {   // nothing more: e is not CPU-written
+    } else if (copied) {
         n_alias_copied++;
         if (from_released) n_alias_released++;
         e->og_start = from_released ? START_COPY_RELEASED : START_COPY_LIVE;
@@ -3163,15 +3290,16 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
         e->chash_ok = 0;
     } else {
         init_new(e);
-        e->og_start = alias ? (e->pub.mirrored ? START_UPLOAD_LIVE : START_EMPTY_LIVE)
+        if (fill) filled = split_fill(e);
+        e->og_start = filled ? START_FILL : alias ? (e->pub.mirrored ? START_UPLOAD_LIVE : START_EMPTY_LIVE)
                     : (gone || rel_other) && !e->pub.mirrored ? START_EMPTY_RELEASED : START_NEW;
         // an entry the CPU does not write, at an address the CPU can see, that starts without content
-        if (!e->pub.mirrored && !nvn_gpu_only(k->addr)) n_cpu_empty[alias ? 2 : gone || rel_other ? 1 : 0]++;
+        if (!filled && !e->pub.mirrored && !nvn_gpu_only(k->addr)) n_cpu_empty[alias ? 2 : gone || rel_other ? 1 : 0]++;
         if (alias) {
             if (e->pub.mirrored) {
                 n_alias_upload++;
                 if (trace) start_line(e, other, NULL, 0, taken_back);
-            } else {
+            } else if (!filled) {
                 n_alias_uninit++;
                 static int logged;
                 // what an empty start over live memory was, to tell a black frame's cause; depth buffers start empty
@@ -3188,7 +3316,8 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
             }
         }
     }
-    if (trace && gone && !e->pub.mirrored && !nvn_gpu_only(k->addr)) start_line(e, NULL, gone_desc, gone_rel, copied);
+    if (trace && gone && !e->pub.mirrored && !nvn_gpu_only(k->addr))
+        start_line(e, NULL, gone_desc, gone_rel, e->og_start == START_COPY_GONE ? 2 : filled ? 3 : copied);
 }
 
 static Tex *entry_of(const tex_t *t) {
@@ -3776,6 +3905,15 @@ void vk_texture_new_submit(void) {
                (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none);
         memset(n_drop_by, 0, sizeof n_drop_by), memset(n_cpu_empty, 0, sizeof n_cpu_empty);
         n_mark_empty = n_mark_none = 0;
+        if (split_mode > 0)
+            rt_log("perf: frame %llu: split fill: entries the CPU does not write started with their storage's bytes: "
+                   "copied from the released entry they replaced %llu, filled from storage %llu (%.1f MiB, %.2f ms), "
+                   "filled again after a write %llu; left empty: image taken from a released entry %llu, storage over "
+                   "%llu MiB %llu", (unsigned long long)f * 60, (unsigned long long)n_split_copy,
+                   (unsigned long long)n_split_fill, n_split_bytes / 1048576.0, n_split_ns / 1e6,
+                   (unsigned long long)n_split_refill, (unsigned long long)n_split_reused,
+                   (unsigned long long)(SPLIT_FILL_MAX >> 20), (unsigned long long)n_split_big);
+        n_split_copy = n_split_fill = n_split_bytes = n_split_ns = n_split_refill = n_split_reused = n_split_big = 0;
     }
     unlock();
 }
@@ -3905,7 +4043,7 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
     if (g->level < e->pub.skip) return 1;
     uint32_t il = g->level - e->pub.skip;
     if (il >= e->pub.levels) return 0;
-    e->had |= HAD_TEXELS;
+    e->had |= HAD_TEXELS, e->sfill = 0;   // its content is no longer the storage's (split fill)
     uint32_t w = (uint32_t)r->width, h = (uint32_t)r->height;
     int rgb = e->f.expand_rgb, astc = e->f.astc_bw != 0, agpu = astc && vk_astc_gpu();
     size_t texels = (size_t)w * h, ib = agpu ? 0 : astc ? 4 : rgb ? (size_t)g->bpb / 3 * 4 : 0;
