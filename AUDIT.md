@@ -2127,8 +2127,11 @@ field's in the same way (111-114 fps standing against 126-128). The cause is not
 
 - At 22:50 `E:\nx2devrun\pipeline-prewarm-skip.txt` appeared (the ledger row quotes the line that wrote it). From then
   on every start in that folder, of every session, skips the boot's pipeline prebuild.
-- The file was not deleted: other sessions run there, and removing it is the user's call. Its own text says "Delete
-  this file to build ahead of play again."
+- The audit did not delete the file: other sessions run there, and removing it was the user's call. Its own text says
+  "Delete this file to build ahead of play again." On 2026-11-11 the user said to delete it; by then it was already
+  gone from `E:\nx2devrun` (who removed it, and when, is not known), so starts there build ahead of play again. The
+  copy in `out\audit\pcache_old` is the F-4-11 reproduction's own product and stays as its evidence; only starts that
+  name that folder as their pipeline cache read it.
 - Runs before 22:50 (`p3_route_cold`, `p3_route`, `p3_market_t1`, `p3_market_t2`) are in the earlier state. Runs after
   it (`p3_market_prof`, `p3_l31_*`) build pipelines in play and are slower: 99.9 fps standing in the day field against
   126-128 in the baseline. They cannot be compared with the baseline.
