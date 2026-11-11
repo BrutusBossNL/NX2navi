@@ -800,12 +800,25 @@ static uint32_t creg_max[RT_ADDRESS_LIMIT >> REG_SHIFT];
 // mirror summary, all consumers together; the queries that found written pages (they also flush TLBs) apart.
 static uint64_t ww_calls, ww_bytes, ww_ticks, ww_dirty_calls, ww_dirty_ticks, ww_pages;
 
+// NX2NAVI_TRACE=perf: a write-watch query, freeze or its follow-up query that took over 4 ms gets a line (the first
+// 200). A frame some ten frames after an area load took 51.6 ms of replay with 1.2 ms of it in the replay's ops; the
+// replaying thread's samples sat in GetWriteWatch under vk_mem_mirror_begin and in the freeze's VirtualProtect, and no
+// thread of the process could be sampled for 28 ms in between.
+static void slow_mem_call(const char *what, uint64_t addr, uint64_t size, uint64_t pages, uint64_t ns) {
+    static uint32_t logged;
+    if (ns < 4000000ull || !(rt_trace & RT_TRACE_PERF) || __atomic_add_fetch(&logged, 1, __ATOMIC_RELAXED) > 200) return;
+    rt_log("mem: slow %s: %.1f ms over %#llx + %.1f MiB, %lld pages written (frame %llu)", what, ns / 1e6,
+           (unsigned long long)addr, size / 1048576.0, pages == UINT64_MAX ? -1ll : (long long)pages,
+           (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+}
+
 static uint64_t ww_query(uint64_t addr, uint64_t size) {
     uint64_t t0 = qpc();
     uint64_t n = mem_written_pages(addr, size, gen_pages, sizeof gen_pages / sizeof *gen_pages);
     uint64_t dt = qpc() - t0;
     ww_ticks += dt, ww_calls++, ww_bytes += size;
     if (n && n != UINT64_MAX) ww_dirty_calls++, ww_dirty_ticks += dt, ww_pages += n;
+    slow_mem_call("write-watch query", addr, size, n, dt);
     return n;
 }
 
@@ -3207,7 +3220,10 @@ static void freeze_pass(void) {
         uint64_t j = fcand[--nfcand], a = j << REG_SHIFT;
         if (ww_ep - reg_last[j] < (uint32_t)freeze_idle || mem_frozen(a)) continue;
         done++;
-        if (!mem_freeze(a)) { n_frz_refused++; continue; }
+        uint64_t t0 = qpc();
+        int ok = mem_freeze(a);
+        slow_mem_call("freeze", a, 1ull << REG_SHIFT, 0, qpc() - t0);
+        if (!ok) { n_frz_refused++; continue; }
         query_stamp(a, a + (1ull << REG_SHIFT), ++gen_now);
     }
 }
@@ -3255,6 +3271,7 @@ void vk_mem_mirror_begin(void) {
     mrep.subs++;
     mrep.presnap_queries += q;
     mrep.presnap_t += qpc() - t0;
+    slow_mem_call("mirror begin (its queries and freezes)", 0, ww_bytes - b0, q, qpc() - t0);
 }
 
 int vk_mem_mirror_pending(void) { return npend || snl_copied < nsnl; }
