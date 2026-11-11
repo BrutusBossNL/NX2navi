@@ -30,6 +30,7 @@ void rt_log(const char *fmt, ...) { (void)fmt; }
 double gfx_window_refresh_hz(void) { return 144; }
 int ov_movie_live(void) { return 0; }
 int vk_fg_generating(void) { return 0; }
+float dbg_speed_factor(void) { return 1.0f; }   // the debug menu's game speed: normal
 int vk_fg_active(void) { return 0; }
 int vk_fg_wanted(void) { return 0; }
 static int fg_mult = 1;   // frames on screen per game frame

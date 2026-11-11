@@ -310,6 +310,7 @@ int input_menu_gate(int *h,int open,uint64_t *b,int32_t s[4]) { (void)h;(void)op
 int input_overlay_gate(int *h,uint64_t *b) { (void)h;(void)b;abort(); }
 int menu_is_open(void) { abort(); }
 void menu_toggle(void) { abort(); }
+void perf_segment(const char *name) { (void)name; }   // a script line's mark: no perf trace here
 void menu_perf_cycle(void) { abort(); }
 const char *input_action_name(int action) { (void)action;abort(); }
 void input_map_configure(void) { abort(); }

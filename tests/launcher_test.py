@@ -4803,7 +4803,7 @@ class WindowTest(Tmp):
         r = subprocess.run([sys.executable, '-m', 'launcher', '--root', str(self.tmp / 'w'), '--selftest'],
                            cwd=ROOT, capture_output=True, text=True, timeout=180)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn('15 screens drawn', r.stdout)
+        self.assertIn('16 screens drawn', r.stdout)
 
 
 if __name__ == '__main__':
