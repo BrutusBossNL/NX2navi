@@ -1438,6 +1438,11 @@ print(json.dumps({'status': 'pass', 'folders': []}))
 '''
 
 
+def prepared_list(programs, answers, translator, records=1):
+    """A version 2 shader-prepared.bin (runtime/prp_file.h): the head, what it was prepared from, then records."""
+    return b'NX2NSPRP' + struct.pack('<II', 2, 36) + programs + answers + translator + bytes(36 * records)
+
+
 class MakeGameTest(Tmp):
     def setUp(self):
         super().setUp()
@@ -1750,18 +1755,88 @@ class MakeGameTest(Tmp):
         with contextlib.redirect_stdout(io.StringIO()):
             self.mg.step_shaders(self.out, update=True)
         self.assertEqual(calls, [])                           # never prepared: nothing to build again
-        (self.out / 'shader-prepared.bin').write_bytes(bytes(16))
+        # a list that says what it was prepared from; the stand-in writes no seed, so there is none to differ from
+        (self.out / 'shader-prepared.bin').write_bytes(prepared_list(b'p' * 32, b'a' * 32, b't' * 32))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.mg.step_shaders(self.out, update=True)
-        self.assertEqual(calls, [([str(self.out / self.mg.EXE_NAME), '--warm-shaders'], str(self.out))])
+        self.assertEqual(calls[0][0][-1], '--no-run')         # the seed is written first, to compare the list with
+        self.assertEqual(calls[1:], [([str(self.out / self.mg.EXE_NAME), '--warm-shaders'], str(self.out))])
         self.assertIn("driver's cache warm", buf.getvalue())
         self.rc = 3
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.mg.step_shaders(self.out, update=True)       # no exception: the game warms it itself
         self.assertIn('did not finish (3)', buf.getvalue())
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 4)
+
+    def test_prepared_list_says_what_it_was_prepared_from(self):
+        """shader-prepared.bin carries the digests of the two seed files and the translator from version 2 on
+        (runtime/prp_file.h); a version 1 list, or a file cut short, says nothing, and no file is None."""
+        self.out.mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(self.mg.prepared_from(self.out))
+        lst = self.out / 'shader-prepared.bin'
+        lst.write_bytes(b'NX2NSPRP' + struct.pack('<II', 1, 36) + bytes(36 * 3))
+        self.assertEqual(self.mg.prepared_from(self.out), {})
+        lst.write_bytes(prepared_list(b'p' * 32, b'a' * 32, b't' * 32)[:60])
+        self.assertEqual(self.mg.prepared_from(self.out), {})
+        lst.write_bytes(prepared_list(b'p' * 32, b'a' * 32, b't' * 32, records=2))
+        self.assertEqual(self.mg.prepared_from(self.out),
+                         {'programs': '70' * 32, 'answers': '61' * 32, 'translator': '74' * 32})
+
+    def test_update_prepares_again_when_the_seed_changed(self):
+        """An update keeps the shaders prepared before only when their list was prepared from the seed this kit
+        writes: the seed is written first (--no-run) and compared with the list's head. Another seed, or a list that
+        does not say what it came from, runs the whole preparation; the same seed with another translator carries
+        over as before, and the seed files do not stay in the game folder either way."""
+        calls = []
+
+        def run(cmd, cwd=None, build_only=False):
+            calls.append(cmd[-1])
+            if cmd[-1] == '--no-run':                          # the kit's seed, as tools/prepare_shaders.py writes it
+                (self.out / 'seed-programs.bin').write_bytes(self.programs)
+                (self.out / 'seed-answers.bin').write_bytes(self.answers)
+            return 0
+        for name, value in (('shader_carry', lambda out: True), ('shader_run', run),
+                            ('pack_shader_cache', lambda out: None)):
+            self.addCleanup(setattr, self.mg, name, getattr(self.mg, name))
+            setattr(self.mg, name, value)
+        self.out.mkdir(parents=True, exist_ok=True)
+        (self.out / self.mg.EXE_NAME).write_bytes(b'MZ')
+        self.programs, self.answers = b'NX2NSPRG programs 1', b'NX2NSANS answers 1'
+        digest = lambda b: hashlib.sha256(b).digest()  # noqa: E731
+
+        def update():
+            calls.clear()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.mg.step_shaders(self.out, update=True)
+            self.assertFalse((self.out / 'seed-programs.bin').exists() or (self.out / 'seed-answers.bin').exists())
+            return buf.getvalue()
+        lst = self.out / 'shader-prepared.bin'
+        # prepared from this seed: kept, and the driver's cache is warmed
+        lst.write_bytes(prepared_list(digest(self.programs), digest(self.answers), b't' * 32))
+        self.assertIn('stay in use', update())
+        self.assertEqual(calls, ['--no-run', '--warm-shaders'])
+        # the same seed, another translator: still kept, the game carries the translations over
+        lst.write_bytes(prepared_list(digest(self.programs), digest(self.answers), b'u' * 32))
+        self.assertIn('stay in use', update())
+        # one byte of the seed's programs differs: everything is prepared again
+        self.programs = b'NX2NSPRG programs 2'
+        text = update()
+        self.assertIn('the shader seed changed since the shaders were prepared: preparing them again', text)
+        self.assertNotIn('stay in use', text)
+        self.assertEqual(calls, ['--no-run', self.mg.EXE_NAME])   # the seed, then the preparation (its last argument)
+        # so does a change to the answers alone
+        lst.write_bytes(prepared_list(digest(self.programs), digest(b'other answers'), b't' * 32))
+        self.assertIn('preparing them again', update())
+        # a list from before it recorded its seed
+        lst.write_bytes(b'NX2NSPRP' + struct.pack('<II', 1, 36) + bytes(36))
+        self.assertIn('do not say which shader seed', update())
+        self.assertEqual(calls, ['--no-run', self.mg.EXE_NAME])
+        # a preparation that then records this seed is kept by the next update
+        lst.write_bytes(prepared_list(digest(self.programs), digest(self.answers), b't' * 32))
+        self.assertIn('stay in use', update())
 
     def test_romfs_failure_stops_the_build(self):
         ran, lifting, failed = [], threading.Event(), threading.Event()

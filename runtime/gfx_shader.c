@@ -80,6 +80,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "platform/platform.h"
+#include "prp_file.h"
 
 #define CONTROL_SIZE 0x880
 #define CODE_SKIP 0x30                                     // graphics code starts after the first 0x30 bytes of the program
@@ -2820,10 +2821,40 @@ void gfx_shader_prepare_recorded(int threads, int procs) {
 }
 
 // ---- prepared variants (shader-prepared.bin next to pipeline-keys.bin)
-// "NX2NSPRP", version, record size; records: stage, priority, 2 zero bytes, input id. gfx_shader_prepare_seed writes
+// The layout is prp_file.h's: a head that says what the list was prepared from (the two seed files and the
+// translator), then one record per variant: stage, priority, 2 zero bytes, input id. gfx_shader_prepare_seed writes
 // them in priority order, one per input id; gfx_shader_warm_list reads them at boot.
-#define PRP_VERSION 1
-#define PRP_REC 36
+
+// The sha256 of the whole file; 0 when it cannot be read.
+static int file_sha256(const char *path, uint8_t out[32]) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);   // a seed past 2 GB is not read by rec_read either
+    fseek(f, 0, SEEK_SET);
+    uint8_t *b = len > 0 ? malloc((size_t)len) : NULL;
+    int ok = b && fread(b, 1, (size_t)len, f) == (size_t)len;
+    fclose(f);
+    if (ok) rt_sha256(b, (size_t)len, out);
+    free(b);
+    return ok;
+}
+
+// The records of the prepared list at path (PRP_REC bytes each, malloc'd; their count in *n), NULL without any.
+// *from, *has_from (both optional): what a version 2 file says it was prepared from.
+uint8_t *gfx_shader_prepared_read(const char *path, size_t *n, PrpFrom *from, int *has_from) {
+    uint64_t size = 0;
+    uint8_t *f = plat_file_read(path, &size), *out = NULL;
+    PrpFrom fr = {{0}};
+    int has = 0;
+    const uint8_t *recs = prp_parse(f, f ? size : 0, n, &fr, &has);
+    if (recs && (out = malloc(*n * PRP_REC))) memcpy(out, recs, *n * PRP_REC);
+    if (!out) *n = 0;
+    if (from) *from = fr;
+    if (has_from) *has_from = has;
+    free(f);
+    return out;
+}
 
 int gfx_shader_prepare_seed(const char *dir, int threads, int procs) {
     char ans[PATH_CAP + 32], prg[PATH_CAP + 32], out[PATH_CAP + 32];
@@ -2833,6 +2864,23 @@ int gfx_shader_prepare_seed(const char *dir, int threads, int procs) {
     double t0 = (double)plat_now_ms();
     uint64_t fail0 = (uint64_t)n_failures;
     uint8_t *ab = NULL, (*iid)[32] = NULL;
+    // What this list is prepared from goes into its head (prp_file.h): the seed as it is on the disk now, and the
+    // translator before the host options are mixed in, which is what nx2navi_xlate.id holds. The list there before
+    // is replaced whole at the end; the log says whether it came from this seed.
+    paths();
+    PrpFrom from = {{0}}, was;
+    int seeded = file_sha256(prg, from.programs) && file_sha256(ans, from.answers), had = 0;
+    memcpy(from.translator, xlate_base, 32);
+    size_t n_was = 0;
+    free(gfx_shader_prepared_read(out, &n_was, &was, &had));
+    if (seeded && n_was) {
+        int same_seed = had && !memcmp(was.programs, from.programs, 32) && !memcmp(was.answers, from.answers, 32);
+        int same_xl = had && !memcmp(was.translator, from.translator, 32);
+        rt_log("gfx_shader: prepare: %s holds %zu variants %s; it is replaced by this preparation", out, n_was,
+               !had ? "and does not say what they were prepared from"
+               : !same_seed ? "prepared from another seed"
+               : !same_xl ? "prepared from this seed by another translator" : "prepared from this seed and translator");
+    }
     // For the whole run: the variants built into the driver's cache after it (vk_pipeline.c lb_warm_prepared) are the
     // current translator's, as before carrying existed.
     plat_inc32(&C.suspended);
@@ -2852,18 +2900,21 @@ int gfx_shader_prepare_seed(const char *dir, int threads, int procs) {
         by[r[1]]++, stages[r[0]]++, u++;
     }
     free(seen.v);
-    RecHeader h = {{'N', 'X', '2', 'N', 'S', 'P', 'R', 'P'}, PRP_VERSION, PRP_REC};
-    uint8_t *file = recs ? malloc(sizeof h + u * PRP_REC + 1) : NULL;
+    uint8_t *file = recs ? malloc(PRP_HEAD + PRP_FROM_SIZE + u * PRP_REC + 1) : NULL;
     int ok = file != NULL;
     if (ok) {
-        memcpy(file, &h, sizeof h), memcpy(file + sizeof h, recs, u * PRP_REC);
-        ok = plat_file_write_atomic(out, file, sizeof h + u * PRP_REC);
+        size_t head = prp_head_write(file, &from);
+        memcpy(file + head, recs, u * PRP_REC);
+        ok = plat_file_write_atomic(out, file, head + u * PRP_REC);
     }
-    char msg[640];
+    char msg[768];
     snprintf(msg, sizeof msg, "gfx_shader: prepared %zu shader variants (vertex %zu, fragment %zu, compute %zu; title %zu, "
-             "warm-up %zu, other %zu) from %lld seed records, %llu translations failed, in %.0f ms; %s %s", u,
+             "warm-up %zu, other %zu) from %lld seed records (seed programs %02x%02x%02x%02x, answers %02x%02x%02x%02x, "
+             "translator %02x%02x%02x%02x), %llu translations failed, in %.0f ms; %s %s", u,
              stages[GFX_STAGE_VS], stages[GFX_STAGE_FS], stages[GFX_STAGE_CS], by[0], by[1], by[2], n,
-             (unsigned long long)((uint64_t)n_failures - fail0), (double)plat_now_ms() - t0,
+             from.programs[0], from.programs[1], from.programs[2], from.programs[3], from.answers[0], from.answers[1],
+             from.answers[2], from.answers[3], from.translator[0], from.translator[1], from.translator[2],
+             from.translator[3], (unsigned long long)((uint64_t)n_failures - fail0), (double)plat_now_ms() - t0,
              ok ? "wrote" : "cannot write", out);
     rt_log("%s", msg);
     printf("%s\n", msg);
@@ -2884,7 +2935,17 @@ size_t gfx_shader_warm_list(GfxWarmEnt **out) {
     plat_mutex_lock(&rec_io);                      // no append meanwhile
     rec_read(RC.ans_path, "NX2NSANS", ANS_VERSION, ANS_REC, &ab, &an);
     plat_mutex_unlock(&rec_io);
-    rec_read(prp, "NX2NSPRP", PRP_VERSION, PRP_REC, &pb, &pn);
+    PrpFrom from;
+    int has_from = 0;
+    pb = gfx_shader_prepared_read(prp, &pn, &from, &has_from), pn *= PRP_REC;
+    if (pb && has_from)
+        rt_log("gfx_shader: %s was prepared from seed programs %02x%02x%02x%02x, answers %02x%02x%02x%02x, by translator "
+               "%02x%02x%02x%02x%s", prp, from.programs[0], from.programs[1], from.programs[2], from.programs[3],
+               from.answers[0], from.answers[1], from.answers[2], from.answers[3], from.translator[0], from.translator[1],
+               from.translator[2], from.translator[3],
+               memcmp(from.translator, xlate_base, 32) ? " (not this one: its translations are carried over)" : "");
+    else if (pb)
+        rt_log("gfx_shader: %s does not say what it was prepared from (written before the list recorded it)", prp);
     size_t na = an / ANS_REC, np = pn / PRP_REC, n = 0;
     GfxWarmEnt *e = calloc(na + np + 1, sizeof *e);
     Set64 seen = {0};

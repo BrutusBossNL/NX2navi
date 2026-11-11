@@ -263,7 +263,11 @@ The stub swaps `python.next` in while no Python runs, then starts the new versio
    game files are already unpacked builds on from them as well (`jobs.InstallJob.args`).
 7. **Prepare the Shaders** is skipped once shaders were prepared before (`shader-prepared.bin`): the game keeps using
    them and translates them again with the new translator in the background (`NX2NAVI_SHADER_CARRY`). With
-   `shader_carry = 0`, or nothing prepared yet, the step prepares them all as at the install. The step still builds
+   `shader_carry = 0`, or nothing prepared yet, the step prepares them all as at the install. So it does when the
+   list was prepared from another shader seed than the one this kit writes: `shader-prepared.bin` carries the digests
+   of the two seed files and the translator identity (`runtime/prp_file.h`), the step writes the seed first
+   (`prepare_shaders.py --no-run`, seconds) and compares (`make_game.py` `seed_changed`); a list from before it
+   recorded its seed is prepared again once. Another translator alone does not prepare again. The step still builds
    the prepared shaders into the graphics driver's cache again (`make_game.py` `warm_driver_cache`): seconds while
    the driver has them, 20 minutes on a player's PC when the update changed what they are built with. Its bar
    follows that count from 0 to 100 %, and the Updates row says an update takes from a few minutes to half an hour

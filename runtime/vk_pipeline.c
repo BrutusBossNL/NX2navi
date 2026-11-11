@@ -47,6 +47,7 @@
 #include "host.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
+#include "prp_file.h"
 #include "tex.h"
 #include "vk_cache_file.h"
 #include "vk_gpa.h"
@@ -5637,12 +5638,11 @@ static void lw_start(void) {
     if (!cache_dir(dir, sizeof dir)) return;
     snprintf(path, sizeof path, "%s/shader-prepared.bin", dir);
     snprintf(LW.stamp, sizeof LW.stamp, "%s/shader-warm.txt", dir);
-    uint64_t size = 0;
-    uint8_t *f = plat_file_read(path, &size);
-    size_t n = f && size >= 16 ? (size_t)(size - 16) / 36 : 0;
+    size_t n = 0;
+    uint8_t *f = gfx_shader_prepared_read(path, &n, NULL, NULL);   // the records alone, whichever version the file is
     LW.e = n ? calloc(n, sizeof *LW.e) : NULL;
     for (size_t i = 0; LW.e && i < n; i++)
-        memcpy(LW.e[i].iid, f + 16 + 36 * i + 4, 32), LW.e[i].stage = f[16 + 36 * i], LW.e[i].prio = f[16 + 36 * i + 1];
+        memcpy(LW.e[i].iid, f + PRP_REC * i + 4, 32), LW.e[i].stage = f[PRP_REC * i], LW.e[i].prio = f[PRP_REC * i + 1];
     free(f);
     if (!LW.e) return;   // nothing prepared (a build without the preparation step)
     LW.n = n;
@@ -5776,12 +5776,11 @@ static void lb_warm_worker(void *arg) {
 static void lb_warm_prepared(const char *dir) {
     char path[PLAT_PATH_MAX * 2 + 32];
     snprintf(path, sizeof path, "%s/shader-prepared.bin", dir);
-    uint64_t size = 0;
-    uint8_t *f = plat_file_read(path, &size);
-    size_t n = f && size >= 16 ? (size_t)(size - 16) / 36 : 0;
+    size_t n = 0;
+    uint8_t *f = gfx_shader_prepared_read(path, &n, NULL, NULL);   // the records alone, whichever version the file is
     LB.e = n ? calloc(n, sizeof *LB.e) : NULL;
     for (size_t i = 0; LB.e && i < n; i++)
-        memcpy(LB.e[i].iid, f + 16 + 36 * i + 4, 32), LB.e[i].stage = f[16 + 36 * i], LB.e[i].prio = f[16 + 36 * i + 1];
+        memcpy(LB.e[i].iid, f + PRP_REC * i + 4, 32), LB.e[i].stage = f[PRP_REC * i], LB.e[i].prio = f[PRP_REC * i + 1];
     free(f);
     if (!LB.e) return;
     skip_init(dir);
