@@ -126,6 +126,7 @@ XLATE_NAME = 'nx2navi_xlate.exe' if WIN else 'nx2navi_xlate'
 # through a runtime header, is compiled on the player's PC; every other runtime source can come prebuilt.
 GENERATED_HEADERS = ('layout.h', 'patches.h', 'romfs_config.h')
 RUNTIME_LIB = 'libnx2navirt.a'
+FFX4_DLLS = ('amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll')   # AMD's FSR SDK 2.4, for FSR 4
 RUNTIME_PATTERNS = ('*.c', '*.cpp', 'platform/*.c', 'ui/*.cpp', 'third_party/imgui/*.cpp',
                     'third_party/imgui/backends/*.cpp')
 INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+)"', re.M)
@@ -1358,6 +1359,9 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
         copy_if_changed(xlate / name, out / name)
     if (KIT / 'bin' / 'amd_fidelityfx_vk.dll').is_file():   # FSR 3.1 (runtime/vk_ffx.cpp)
         copy_if_changed(KIT / 'bin' / 'amd_fidelityfx_vk.dll', out / 'amd_fidelityfx_vk.dll')
+    for name in FFX4_DLLS:   # FSR 4 (runtime/vk_ffx4.cpp): both or neither
+        if all((KIT / 'bin' / n).is_file() for n in FFX4_DLLS):
+            copy_if_changed(KIT / 'bin' / name, out / name)
     kept = place_dlss(out, linux=not WIN)   # NVIDIA DLSS (runtime/vk_dlaa.c): this platform's library from the kit
     if kept:
         say(f'  {kept}')

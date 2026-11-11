@@ -1,6 +1,7 @@
 """Assemble the build kit: what a player needs to build Ocarina of Time on their own PC with tools/make_game.py.
 
     python tools/make_kit.py --xlate <dir with nx2navi_xlate.exe and .id> [--ffx amd_fidelityfx_vk.dll]
+                             [--ffx4 FOLDER]
                              [--dlss nvngx_dlss.dll | --no-dlss] [--dlssg nx2navi_dlssg.dll [--streamline SDK]]
                              [--prompt-art FOLDER [FOLDER ...]] [--out build/kit] [--zip]
 
@@ -10,9 +11,9 @@ translator built from tools/xlate,
 NVIDIA's DLSS library with its notice (tools/dlss_pin.py: downloaded from NVIDIA's DLSS SDK repository and checked,
 or --dlss; not with --no-dlss), DLSS Frame Generation in bin/dlssg/ with --dlssg (nx2navi_dlssg.dll from
 tools/build_dlssg.py beside NVIDIA Streamline's runtime, tools/streamline_pin.py: downloaded from NVIDIA's Streamline
-SDK release and checked, or --streamline), AMD's FSR 3.1 library with --ffx, the button art with --prompt-art, and
-README-BuildKit.md; no game code, data or anything generated from the game. check_content runs over the folder before
-it is zipped.
+SDK release and checked, or --streamline), AMD's FSR 3.1 library with --ffx, its two FSR 4 libraries with --ffx4, the
+button art with --prompt-art, and README-BuildKit.md; no game code, data or anything generated from the game.
+check_content runs over the folder before it is zipped.
 
 --prompt-art names folders that hold XGamepad, P5Gamepad and Keyboard_Mouse, or those three folders themselves: the
 pictures tools/pad_prompts.py reads go into the kit's prompt-art folder (tools/prompt_art.py art_files), and
@@ -50,6 +51,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--xlate', type=Path, required=True, help='folder with nx2navi_xlate.exe and nx2navi_xlate.id')
     ap.add_argument('--ffx', type=Path, help="AMD's signed amd_fidelityfx_vk.dll (FidelityFX SDK 1.1.4, MIT) for FSR 3.1")
+    ap.add_argument('--ffx4', type=Path, help="the folder with AMD's signed amd_fidelityfx_loader_vk.dll and "
+                                              'amd_fidelityfx_upscaler_vk.dll (FSR SDK 2.4.0, MIT) for FSR 4')
     ap.add_argument('--dlss', type=Path, help="NVIDIA's nvngx_dlss.dll from disk instead of downloading it from "
                                                "NVIDIA's DLSS SDK repository")
     ap.add_argument('--no-dlss', action='store_true', help='leave NVIDIA DLSS out of the kit')
@@ -92,6 +95,9 @@ def main():
         shutil.copy2(a.xlate / n, kit / 'bin' / n)
     if a.ffx:   # FSR 3.1 loads it from beside the game (runtime/vk_ffx.cpp); its licence is runtime/third_party/ffx_api
         shutil.copy2(a.ffx, kit / 'bin' / 'amd_fidelityfx_vk.dll')
+    if a.ffx4:   # FSR 4 loads them from beside the game (runtime/vk_ffx4.cpp); their licence is runtime/third_party/ffx_sdk
+        for n in ('amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll'):
+            shutil.copy2(a.ffx4 / n, kit / 'bin' / n)
     if dlss:   # DLSS: NGX loads it from beside the game (runtime/vk_dlaa.c); make_game.py copies it there
         dlss_pin.place(dlss, kit / 'bin')
     if sdk:   # DLSS Frame Generation (runtime/vk_dlssg.c): make_game.py place_dlssg copies it beside the game

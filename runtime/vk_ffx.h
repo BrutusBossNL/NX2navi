@@ -23,7 +23,18 @@ int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage
                    const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y);
 void vk_ffx_release(void);   // before the device goes away
 
-#ifdef __cplusplus
+// AMD FSR 4 (vk_ffx4.cpp): the ML upscaler of AMD's FSR SDK 2.4, through amd_fidelityfx_loader_vk.dll and
+// amd_fidelityfx_upscaler_vk.dll beside the executable. vk_ffx_upscale runs it in FSR 3.1's place when the setting
+// asks (NX2NAVI_FSR4) and it runs here, and falls back to FSR 3.1 when it fails.
+int vk_ffx4_available(void);      // the libraries are there and list a 4.x version for the device; asked once, with the
+                                  // device, from any thread (0 before the device exists)
+const char *vk_ffx4_name(void);   // "AMD FSR 4.1.2" once vk_ffx4_available found it
+int vk_ffx4_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage *depth, const VkFfxImage *mv,
+                    const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y);   // as vk_ffx_upscale
+void vk_ffx4_release(void);
+int vk_ffx_fsr4(void);            // the setting asks for FSR 4 and it runs here: what vk_ffx_upscale uses, for the menu
+
+#if defined(__cplusplus) && !defined(VK_FFX_NO_API)
 // The API's calls themselves, for vk_fg.cpp (0 = FFX_API_RETURN_OK): the library loaded first (vk_ffx_load).
 #include "third_party/ffx_api/ffx_api.h"
 extern "C" {

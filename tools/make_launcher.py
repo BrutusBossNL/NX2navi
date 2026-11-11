@@ -1,6 +1,7 @@
 """Build a release of the NX2navi launcher (docs/launcher.md, "Releases").
 
     python tools/make_launcher.py --xlate build/xlate [--ffx amd_fidelityfx_vk.dll] [--dlss nvngx_dlss.dll | --no-dlss]
+                                  [--ffx4 FOLDER]
                                   [--prompt-art FOLDER [FOLDER ...]] [--out build/launcher-release]
                                   [--feed owner/name]
                                   [--notes notes.md] [--publish]
@@ -17,7 +18,8 @@ The release folder (--out) holds:
       python/                     python.org's embeddable Python 3.14.9, tkinter and Tcl/Tk 9.0 from its tcltk.msi,
                                   the packages of tools/requirements-launcher.txt, runtime-id.txt
       app/current.txt, app/<version>/   launcher/ (without native/), runtime/, recomp/, the tools make_game.py uses,
-                                  bin/nx2navi_xlate.exe and .id (and amd_fidelityfx_vk.dll with --ffx),
+                                  bin/nx2navi_xlate.exe and .id (and amd_fidelityfx_vk.dll with --ffx, AMD's two
+                                  FSR 4 libraries with --ffx4),
                                   bin/nvngx_dlss.dll and its notice (NVIDIA DLSS at the version tools/dlss_pin.py
                                   pins, downloaded from NVIDIA's DLSS SDK repository and checked, or --dlss; not with
                                   --no-dlss),
@@ -177,7 +179,7 @@ def build_python(py):
 
 # ---------------------------------------------------------------- app/<version>/
 
-def build_app(app, ver, xlate, feed_repo, lock, ffx=None, dlss=None, art=None, dlssg=None):
+def build_app(app, ver, xlate, feed_repo, lock, ffx=None, dlss=None, art=None, dlssg=None, ffx4=None):
     # The runtime's own shaders are source in the repository and SPIR-V headers in a release: a player's PC compiles
     # runtime/ (make_game.py) and has no shader compiler. Build the missing and the stale ones before the copy.
     build_shaders.build(ROOT / 'runtime')
@@ -198,6 +200,9 @@ def build_app(app, ver, xlate, feed_repo, lock, ffx=None, dlss=None, art=None, d
         shutil.copy2(xlate / n, app / 'bin' / n)
     if ffx:   # FSR 3.1 loads it from beside the game (runtime/vk_ffx.cpp); make_game.py copies it there
         shutil.copy2(ffx, app / 'bin' / 'amd_fidelityfx_vk.dll')
+    if ffx4:   # FSR 4 loads them from beside the game (runtime/vk_ffx4.cpp); make_game.py copies them there
+        for n in ('amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll'):
+            shutil.copy2(ffx4 / n, app / 'bin' / n)
     if dlss:   # DLSS: NGX loads it from beside the game (runtime/vk_dlaa.c); make_game.py copies it there
         dlss_pin.place(dlss, app / 'bin')
     if dlssg:   # DLSS Frame Generation (runtime/vk_dlssg.c): make_game.py place_dlssg copies it beside the game
@@ -314,6 +319,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--xlate', type=Path, required=True, help='folder with nx2navi_xlate.exe and nx2navi_xlate.id')
     ap.add_argument('--ffx', type=Path, help="AMD's signed amd_fidelityfx_vk.dll (FidelityFX SDK 1.1.4, MIT) for FSR 3.1")
+    ap.add_argument('--ffx4', type=Path, help="the folder with AMD's signed amd_fidelityfx_loader_vk.dll and "
+                                              'amd_fidelityfx_upscaler_vk.dll (FSR SDK 2.4.0, MIT) for FSR 4')
     ap.add_argument('--dlss', type=Path, help=f"NVIDIA's nvngx_dlss.dll (DLSS {dlss_pin.VERSION}) from disk instead of "
                                                "downloading it from NVIDIA's DLSS SDK repository")
     ap.add_argument('--no-dlss', action='store_true', help='leave NVIDIA DLSS out of the release')
@@ -356,7 +363,7 @@ def main():
     dlssg = (a.dlssg, streamline_pin.resolve(a.streamline, DL)) if a.dlssg else None
     say(f'DLSS Frame Generation: {a.dlssg}, Streamline {streamline_pin.VERSION}: {dlssg[1]}' if dlssg
         else 'DLSS Frame Generation left out (no --dlssg)')
-    build_app(folder / 'app' / ver, ver, a.xlate, a.feed, lock, a.ffx, dlss, a.prompt_art, dlssg)
+    build_app(folder / 'app' / ver, ver, a.xlate, a.feed, lock, a.ffx, dlss, a.prompt_art, dlssg, a.ffx4)
     (folder / 'app' / 'current.txt').write_text(ver + '\n', encoding='utf-8')
     build_python(folder / 'python')
     cc, windres = native_compiler(lock)

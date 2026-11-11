@@ -112,7 +112,8 @@ cannot give back what the game needs after its start: about 10 GB in Kokiri Fore
 
 AMD FSR 3.1 loads AMD's `amd_fidelityfx_vk.dll`, which only the Windows build can use: on Linux the menu offers neither
 FSR 3.1 upscaling nor FSR 3.1 frame generation, and `taa = fsr3` or `framegen = fsr3` in `nx2navi.ini` leave the
-game's own scaling and swapchain as they are (the log says so).
+game's own scaling and swapchain as they are (the log says so). AMD FSR 4 is in the Windows build alone for the same
+reason, and `fsr4 = 1` does nothing on Linux.
 
 NVIDIA DLSS (RTX cards) needs the driver's own `libnvidia-ngx.so.1` on the library path (the proprietary driver's
 utilities package, `nvidia-utils` on Arch) and NVIDIA's DLSS library `libnvidia-ngx-dlss.so.<version>` beside
@@ -151,7 +152,8 @@ beside the game.
 - **Screen** in the menu has Texture filtering (anisotropic, up to 16x, at once), Texture detail (Reduced and Low
   leave out the largest versions of the big surface textures so that the game fits the video memory of 6 and 8 GB
   cards; Automatic picks by the card), Upscaling (DLSS on NVIDIA RTX cards,
-  FSR 3.1 on any card where `amd_fidelityfx_vk.dll` loads), Frame generation (NVIDIA DLSS on RTX 40 and 50 cards, with
+  FSR 3.1 on any card where `amd_fidelityfx_vk.dll` loads, FSR 4 on the Radeon cards AMD's FSR 4 libraries list it
+  for), Frame generation (NVIDIA DLSS on RTX 40 and 50 cards, with
   a DLSS multiplier of 2x, or 3x and 4x on RTX 50 cards; FSR 3.1 on any card where it loads; it needs DLSS or FSR 3.1
   upscaling on, and the frame limit then counts the frames on screen; with no limit chosen it is the display's refresh
   rate), HDR (the game's picture tone mapped to your display, with its own grading rows, or Native, the game's own HDR; turn HDR on in Windows first) and the
@@ -162,7 +164,8 @@ beside the game.
   the keys `nx2navi.ini` binds when the build runs: after rebinding keys, run
   `py -I tools\make_game.py --rebuild --out "C:\Games\Ocarina"` to draw them again (it skips everything else).
 - The build copies NVIDIA's DLSS library `nvngx_dlss.dll` (with `nvngx_dlss-NOTICE.txt`, which names its licence)
-  and FSR 3.1's `amd_fidelityfx_vk.dll` beside `ocarina.exe` from the kit's `bin\`. To use another DLSS version, put
+  and FSR 3.1's `amd_fidelityfx_vk.dll` beside `ocarina.exe` from the kit's `bin\`, and FSR 4's
+  `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` when the kit has both. To use another DLSS version, put
   your own `nvngx_dlss.dll` there: later builds keep it. On Linux the library is `libnvidia-ngx-dlss.so.<version>`
   (see "Linux").
 - A kit with `bin\dlssg\` (made with `tools/make_kit.py --dlssg`) also brings DLSS Frame Generation on GeForce RTX 40

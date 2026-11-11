@@ -357,6 +357,8 @@ game folder is the default `<launcher>\game`. The dump is never touched.
    ```
 
    `--ffx` puts AMD's signed `amd_fidelityfx_vk.dll` (FidelityFX SDK 1.1.4) in the release for FSR 3.1.
+   `--ffx4 <folder>` puts AMD's signed `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` (FSR SDK
+   2.4.0, the files of its `Kits/FidelityFX/signedbin/`) in the release for FSR 4; without it the menu offers no FSR 4.
    NVIDIA's `nvngx_dlss.dll` goes in by itself: the script downloads the version `tools/dlss_pin.py` pins from
    NVIDIA's DLSS SDK repository (cached in `toolchain/launcher-dl/`), checks its size and sha256, and puts it in
    `bin/` with `nvngx_dlss-NOTICE.txt`; `make_game.py` copies both beside the game. `--dlss FILE` takes a copy on disk

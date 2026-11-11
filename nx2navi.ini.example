@@ -393,6 +393,17 @@
 # to match). They apply only with dlaa = 1 and the DLSS model next to the executable; otherwise the scene follows
 # render_scale. Changes while the game runs take effect at once.
 # dlss = dlaa
+# AMD FSR in DLSS's place, on any GPU (Windows): with taa = fsr3 and dlaa = 1 the scene is scaled by AMD FSR 3.1 in the
+# mode dlss names (dlaa is FSR's Native AA). The menu's Upscaling row sets all of these. Changes while the game runs
+# take effect at once.
+# taa = dlss
+# AMD FSR 4 in FSR 3.1's place (taa = fsr3, dlaa = 1): the machine-learned upscaler, a sharper and steadier picture
+# that costs more GPU time (on an RX 7900 XT at 3440x1440, Quality: 47 fps where FSR 3.1 gives 51) and about 220 MB of
+# video memory. It runs where AMD's amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll are next to the
+# executable (the setup puts them there) and that library lists FSR 4 for the GPU: Radeon RX 6000, RX 7000 and RX 9000
+# cards with AMD's driver 26.10.1 or newer. Elsewhere, or when it fails, FSR 3.1 runs and the log says why. Changes
+# while the game runs take effect at once.
+# fsr4 = 0
 # The DLSS model: default (NVIDIA's advice per mode: K for dlaa, quality and balanced, M for performance, L for
 # ultra_performance), k (K in every mode) or j (the other transformer model: slightly less ghosting behind moving
 # characters, a little more flicker). Any other model by its letter, a to m: on slower RTX cards the older model e is

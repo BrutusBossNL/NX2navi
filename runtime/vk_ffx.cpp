@@ -191,9 +191,27 @@ extern "C" int vk_ffx_available(void) {
 
 extern "C" int vk_ffx_framegen_available(void) { return vk_ffx_available(); }   // the same library, its API calls
 
+// NX2NAVI_FSR4 (default 0, live): FSR 4 where it runs (vk_ffx4.cpp), else FSR 3.1.
+extern "C" int vk_ffx_fsr4(void) { return cfg_bool("NX2NAVI_FSR4") && vk_ffx4_available(); }
+
 extern "C" int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const VkFfxImage *depth, const VkFfxImage *mv,
                               const VkFfxImage *out, float jx, float jy, int reset, float dt_ms, float fov_y) {
     if (!vk_ffx_load()) return 0;
+    // Each upscaler keeps a history of its own: the frame after a change from one to the other starts it anew, or it
+    // would blend this picture with whatever that upscaler last saw.
+    static int last;   // 3 or 4: which one made the frame before
+    if (vk_ffx_fsr4()) {
+        if (vk_ffx4_upscale(cb, color, depth, mv, out, jx, jy, reset || last != 4, dt_ms, fov_y)) {
+            if (last != 4) rt_log("ffx: the upscaler is %s", vk_ffx4_name());
+            last = 4;
+            return 1;
+        }
+        // it failed and said so: FSR 3.1 makes this frame
+    }
+    if (last != 3) {
+        if (last) rt_log("ffx: the upscaler is AMD FSR 3.1");
+        reset = 1, last = 3;
+    }
     Up *u = context_for(color->width, color->height, out->width, out->height);
     if (!u) return 0;
     ffxDispatchDescUpscale d = {};
@@ -243,6 +261,7 @@ extern "C" ffxReturnCode_t vk_ffx_dispatch(ffxContext *ctx, const ffxDispatchDes
 }
 
 extern "C" void vk_ffx_release(void) {
+    vk_ffx4_release();
     if (!A.ok) return;
     for (Up &u : U)
         if (u.ctx) A.destroy(&u.ctx, nullptr), u.ctx = nullptr;
