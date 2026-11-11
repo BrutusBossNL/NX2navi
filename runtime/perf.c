@@ -168,6 +168,127 @@ static int mark_text(const MarkSums *s, char *line, int n, size_t cap) {
     return n;
 }
 
+// ---- NX2NAVI_TRACE=perf segments (host.h perf_segment) and scenes (perf_scene). The present thread keeps the running
+// segment's frame times in 50 us bins (SEG_BINS, up to 204.8 ms; slower frames land in the last bin, the worst is kept
+// apart), so a segment's 1% low is exact to 50 us at any frame rate. perf_segment and perf_scene come from any thread
+// (the input script's guest thread, the game's loading threads) and leave a request under seg_lock for the present.
+#define SEG_BINS 4096
+#define SEG_BIN_NS 50000ull
+#define SCENE_SETTLE_NS 10000000000ull
+static PlatMutex seg_lock = PLAT_MUTEX_INIT;
+static char seg_next[96], scene_name[256];   // seg_lock: the requested segment's name; the areas loaded since the last snapshot
+static int seg_asked;                          // seg_lock: a segment was asked for
+static uint64_t scene_at;                      // seg_lock: the last area load (plat_now_ns), 0 none since the last snapshot
+static struct {
+    char name[96];
+    uint64_t f0, t0, frames, sum, max, max_frame, over25, over50, over100;
+    int64_t w0;
+    uint32_t hist[SEG_BINS];
+    MarkSums marks;
+    int on;
+} seg;
+
+__attribute__((weak)) void vk_mem_snapshot(uint64_t frame) { (void)frame; }
+__attribute__((weak)) int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact) {
+    (void)used, (void)budget, (void)exact;
+    return 0;
+}
+
+void perf_segment(const char *name) {
+    if (!(rt_trace & RT_TRACE_PERF)) return;
+    plat_mutex_lock(&seg_lock);
+    snprintf(seg_next, sizeof seg_next, "%s", name && *name ? name : "(unnamed)");
+    seg_asked = 1;
+    plat_mutex_unlock(&seg_lock);
+}
+
+void perf_scene(const char *name) {
+    if (!(rt_trace & RT_TRACE_PERF)) return;
+    rt_log("scene: %s loads (frame %llu, world %.1f s)", name,
+           (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), frame_step_world_us() / 1e6);
+    plat_mutex_lock(&seg_lock);
+    size_t n = strlen(scene_name);
+    if (n + strlen(name) + 2 < sizeof scene_name) snprintf(scene_name + n, sizeof scene_name - n, "%s%s", n ? ", " : "", name);
+    scene_at = plat_now_ns();
+    plat_mutex_unlock(&seg_lock);
+}
+
+// The process's memory and the VRAM in use, for the segment and scene lines.
+static void mem_text(char *out, size_t cap, int vram) {
+    uint64_t res, prv, used, budget;
+    int exact;
+    plat_process_memory(&res, &prv);
+    int n = snprintf(out, cap, "ram working set %.0f MiB, private %.0f MiB", res / 1048576.0, prv / 1048576.0);
+    if (vram && vk_mem_vram(&used, &budget, &exact) && n > 0 && (size_t)n < cap)
+        snprintf(out + n, cap - (size_t)n, "; vram %.0f of %.0f MiB", used / 1048576.0, budget / 1048576.0);
+}
+
+static void seg_close(uint64_t frame, uint64_t now, int at_exit) {
+    if (!seg.on) return;
+    seg.on = 0;
+    char mem[160], marks[700];
+    mem_text(mem, sizeof mem, !at_exit);
+    marks[0] = 0;
+    mark_text(&seg.marks, marks, 0, sizeof marks);
+    if (!seg.frames || !seg.sum) {
+        rt_log("segment: '%s' ended at frame %llu with no frames timed; %s", seg.name, (unsigned long long)frame, mem);
+        return;
+    }
+    uint64_t cut = (seg.frames + 99) / 100, acc = 0, low = 0;   // the slowest 1% of frames: the upper edge of its bin
+    for (int b = SEG_BINS - 1; b >= 0; b--)
+        if ((acc += seg.hist[b]) >= cut) { low = (uint64_t)(b + 1) * SEG_BIN_NS; break; }
+    if (low > seg.max) low = seg.max;
+    rt_log("segment: '%s' frames %llu-%llu, world %.1f-%.1f s: %llu frames in %.1f s, mean %.2f ms (%.1f fps), 1%% low %.1f "
+           "fps (%.2f ms), worst %.1f ms at frame %llu; over 25 ms %llu, 50 ms %llu, 100 ms %llu; %s%s",
+           seg.name, (unsigned long long)seg.f0, (unsigned long long)frame, seg.w0 / 1e6, frame_step_world_us() / 1e6,
+           (unsigned long long)seg.frames, (now - seg.t0) / 1e9, seg.sum / 1e6 / seg.frames, seg.frames * 1e9 / seg.sum,
+           low ? 1e9 / low : 0.0, low / 1e6, seg.max / 1e6, (unsigned long long)seg.max_frame,
+           (unsigned long long)seg.over25, (unsigned long long)seg.over50, (unsigned long long)seg.over100, mem, marks);
+    if (!at_exit) vk_mem_snapshot(frame);
+}
+
+static void seg_open(const char *name, uint64_t frame, uint64_t now) {
+    memset(&seg, 0, sizeof seg);
+    snprintf(seg.name, sizeof seg.name, "%s", name);
+    seg.f0 = frame, seg.t0 = now, seg.w0 = frame_step_world_us(), seg.on = 1;
+}
+
+// Each present while the trace is on: the frame into the running segment (d 0: the first present), then a requested
+// segment change and a settled scene's snapshot.
+static void seg_frame(uint64_t frame, uint64_t now, uint64_t d, const MarkSums *fm) {
+    if (!seg.on && seg.f0 == 0) seg_open("boot", frame, now);   // the first present opens the boot segment
+    if (seg.on && d) {
+        seg.frames++, seg.sum += d;
+        uint64_t b = d / SEG_BIN_NS;
+        seg.hist[b < SEG_BINS ? b : SEG_BINS - 1]++;
+        if (d > seg.max) seg.max = d, seg.max_frame = frame;
+        seg.over25 += d > 25000000ull, seg.over50 += d > 50000000ull, seg.over100 += d > 100000000ull;
+        for (int k = 0; k < PERF_M_N; k++) {
+            seg.marks.ns[k] += fm->ns[k], seg.marks.n[k] += fm->n[k], seg.marks.bytes[k] += fm->bytes[k];
+            if (fm->max[k] > seg.marks.max[k]) seg.marks.max[k] = fm->max[k];
+        }
+    }
+    char name[96], scenes[256];
+    int asked = 0, settled = 0;
+    plat_mutex_lock(&seg_lock);
+    if (seg_asked) asked = 1, seg_asked = 0, memcpy(name, seg_next, sizeof name);
+    if (scene_at && now - scene_at >= SCENE_SETTLE_NS)
+        settled = 1, scene_at = 0, memcpy(scenes, scene_name, sizeof scenes), scene_name[0] = 0;
+    plat_mutex_unlock(&seg_lock);
+    if (asked) {
+        seg_close(frame, now, 0);
+        seg_open(name, frame, now);
+        rt_log("segment: '%s' starts at frame %llu, world %.1f s", name, (unsigned long long)frame, seg.w0 / 1e6);
+    }
+    if (settled) {
+        char mem[160];
+        mem_text(mem, sizeof mem, 1);
+        rt_log("scene: %s settled (no area loaded for 10 s) at frame %llu, world %.1f s; %s", scenes,
+               (unsigned long long)frame, frame_step_world_us() / 1e6, mem);
+        vk_mem_snapshot(frame);
+    }
+}
+
 // ---- Frame-time summary, always on: every 60 s of play and at exit one line of frame count, mean fps, 1% low and the
 // frames over 25/50/100 ms, then the worst frames of the period with the render thread's waits in them. Per frame: a
 // histogram increment, the compare against the worst list, a memset of the wait array. No allocation.
@@ -397,6 +518,7 @@ __attribute__((weak)) void gfx_exit_log(void) {}
 __attribute__((weak)) void vk_texstat_frame(uint64_t frame, uint64_t d) { (void)frame, (void)d; }
 
 void perf_summary_flush(void) {   // at exit (prof_write)
+    if (rt_trace & RT_TRACE_PERF) seg_close(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), kern_now_ns(), 1);
     if (summary_t0) {
         ft_report(kern_now_ns(), "exit");
         gfx_exit_log();
@@ -638,6 +760,7 @@ void perf_present(uint64_t frame) {
     }
     MarkSums fm;
     mark_frame(&fm);
+    seg_frame(frame, now, last ? d : 0, &fm);
     if (last) {
         sum += d;
         n++;

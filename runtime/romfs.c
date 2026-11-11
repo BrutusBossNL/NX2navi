@@ -1154,6 +1154,18 @@ static void open_note(uint64_t i, const char *path) {
                "(romfs-check.json lists the files found damaged)", path);
 }
 
+// NX2NAVI_TRACE=perf: an area's static placement, Banc/<area>/<area>_<age>_Static.bcett.byml.zs, is read once when the
+// area loads (the game streams a neighbouring area the same way): perf_scene names it.
+static void scene_note(const char *p) {
+    static const char tail[] = "_Static.bcett.byml";
+    if (strncmp(p, "Banc/", 5)) return;
+    const char *leaf = strrchr(p, '/'), *t = leaf ? strstr(leaf, tail) : NULL;
+    if (!t || (t[sizeof tail - 1] && strcmp(t + sizeof tail - 1, ".zs"))) return;
+    char name[96];
+    snprintf(name, sizeof name, "%.*s", (int)(t - leaf - 1), leaf + 1);
+    perf_scene(name);
+}
+
 uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     fs_trace("rom", path);
     if (!out || mode != FS_OPEN_READ) return FS_R_UNSUPPORTED_OPEN;
@@ -1168,6 +1180,7 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     uint64_t i = file_index(p);
     if (i == UINT64_MAX) return FS_R_PATH_NOT_FOUND;
     open_note(i, p);
+    if (rt_trace & RT_TRACE_PERF) scene_note(p);
     if (!strcasecmp(p, CAMPACK)) cam_pack_opened();   // its values come into memory at the start's factor (camera_speed.c)
     uint32_t ov = overlay_slot(i);
     PlatFile *f = NULL;

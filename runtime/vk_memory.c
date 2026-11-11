@@ -614,6 +614,11 @@ static void outside_watch(uint64_t frame);
 
 static volatile uint64_t mirror_frame;   // the frame vk_mem_census last saw, for mirror_sync's log lines
 
+// NX2NAVI_TRACE=perf: the 600-frame memory lines now, at a segment's end and once a scene has settled (perf.c).
+void vk_mem_snapshot(uint64_t frame) {
+    if (rt_trace & RT_TRACE_PERF) vram_log(frame);
+}
+
 void vk_mem_census(uint64_t frame) {
     mirror_frame = frame;
     static uint64_t window_start;
