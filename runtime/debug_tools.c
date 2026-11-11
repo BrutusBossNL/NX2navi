@@ -873,8 +873,8 @@ static int contains_nocase(const char *s, const char *part, size_t len) {
 // own, so a walking test crosses the field instead of pressing into its walls. The left stick is turned from the way
 // he moves towards the next point (the game's camera follows behind him, so a stick to the side turns him), with an
 // integral that takes out the camera's own angle; a point counts as reached within ROUTE_NEAR metres. When he gains
-// less than a metre on it in 2.5 seconds he is stuck (a wall, a fence, a steep slope): he sidesteps for a while, to
-// one side and then the other, and after ROUTE_STUCK such tries the route ends.
+// less than a metre on it in 2.5 seconds he is stuck (a wall, a fence, a steep slope): he sidesteps for two seconds,
+// three times to one side and then to the other, and after ROUTE_STUCK such tries the route ends.
 #define ROUTE_MAX 16
 #define ROUTE_NEAR 4.0
 #define ROUTE_STUCK 10
@@ -934,8 +934,10 @@ static void route_pad(int32_t *lx, int32_t *ly) {
             rt_log("debug: route given up before %s: stuck %d times at %.1f %.1f %.1f", route.name[route.at], ROUTE_STUCK, p[0], p[1], p[2]);
             return;
         }
-        route.side = -route.side;
-        route.side_until = now + 1500000000ull, route.prog_ns = now + 1500000000ull, route.best = (float)d;
+        // the same side three times before the other: a wall is gone round, where turns to alternate sides kept him
+        // pressed against a cliff face south of the Kakariko Village gate
+        if (route.stuck % 3 == 1) route.side = -route.side;
+        route.side_until = now + 2000000000ull, route.prog_ns = now + 2000000000ull, route.best = (float)d;
         rt_log("debug: route: stuck at %.1f %.1f %.1f, %.1f m before %s: a sidestep to the %s", p[0], p[1], p[2], d,
                route.name[route.at], route.side > 0 ? "right" : "left");
     }
