@@ -405,6 +405,10 @@ value no machine has free. What the builders do when they are refused (`warm_bui
 `lw_worker`) shows in a run's log: start the game with `build_free_mb` set above the machine's free commit and read the
 `vk_pipeline:` lines that name the commit headroom.
 
+A change to when the pipeline caches are saved in play (`runtime/vk_save_retry.h`, `runtime/vk_pipeline.c`
+`autosave_once`) passes `python tests\save_retry_check.py`, which builds the header alone: a save for new content, none
+without, and after a save that did not happen a bounded row of tries at the save interval.
+
 A change to how FSR 3.1's pipelines reach the pipeline caches (`runtime/vk_ffx.cpp` `vk_ffx_proc_addr`,
 `runtime/vk_pipeline.c` `vk_pipeline_create_foreign`) passes `python tests\ffx_cache_check.py <game exe>`. It runs
 `--probe-ffx-cache` (one upscaling context on the device; no window, no game) twice on pipeline cache files of its own

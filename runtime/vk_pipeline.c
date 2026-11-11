@@ -52,6 +52,7 @@
 #include "vk_build_gate.h"
 #include "vk_cache_file.h"
 #include "vk_gpa.h"
+#include "vk_save_retry.h"
 #include "vk_warm_hint.h"
 
 #define LOG_ONCE(...) do { static volatile int32_t once_; if (!plat_xchg32(&once_, 1)) rt_log(__VA_ARGS__); } while (0)
@@ -6403,14 +6404,15 @@ static int seed_pipelines(const char *dir) {
     while (K.left) plat_cond_wait(&done_cv, &P.lock);   // those a pool worker took
     uint32_t built = K.built - built0, failed = K.failed - failed0;
     plat_mutex_unlock(&P.lock);
-    int saved = cache_save(5000);   // as a save at exit: it waits that long for a moment with no build running
+    int saved = cache_save(5000) > 0;   // as a save at exit: it waits that long for a moment with no build running
     plat_file_delete(mark);
     char msg[640];
     snprintf(msg, sizeof msg, "prepare-pipelines: %zu listed pipelines: %u built (%u mesh), %u failed, %u the same as one "
              "built before, %u without a shader this game version or its shader cache has, %u vertex pipelines left to "
              "their first draw (NX2NAVI_PREPARE_PIPELINES=%s), %u mesh pipelines this GPU cannot draw; on %d threads in "
              "%.0f ms; pipeline cache %s", n, built, mesh, failed, known, dropped, other, all ? "all" : "mesh", no_mesh,
-             nt ? nt : 1, now_ms() - t0, saved ? "saved" : "not saved (builds kept running)");
+             nt ? nt : 1, now_ms() - t0,
+             saved ? "saved" : "not saved (builds kept running, or its file could not be written)");
     printf("%s\n", msg);
     fflush(stdout);
     rt_log("vk_pipeline: %s", msg);
@@ -6718,7 +6720,8 @@ static PlatMutex save_lock = PLAT_MUTEX_INIT;   // one cache save at a time; shu
 // cache had held it: three saves of 358.1 MB in one run that added 0.3 MB (2026-11-11).
 // The lock is only ever tried, never waited for: a waiting exclusive request would hold back every new build
 // (a shared request queues behind it), so a pending save could stall the replay. wait_ms: how long to keep trying
-// while builds run (0: one try). Returns 0 when no build-free moment came, 1 otherwise (saved, or nothing to save).
+// while builds run (0: one try). Returns 0 when no build-free moment came, -1 when the data could not be copied or
+// its file not written (the log says which), 1 otherwise (saved, or nothing to save).
 static int cache_save_one(int which, uint32_t wait_ms) {
     VkPipelineCache cache = which ? P.play : P.cache;
     const char *path = which ? P.play_path : P.cache_path;
@@ -6735,12 +6738,14 @@ static int cache_save_one(int which, uint32_t wait_ms) {
     int got = sized && !same && (data = malloc(size)) && vkGetPipelineCacheData(P.device, cache, &size, data) == VK_SUCCESS;
     plat_mutex_unlock(&cache_rw);
     static uint64_t skipped[2];
+    int failed = sized && !same && !got;
     if (same) skipped[which]++;
-    if (sized && !same && !got) rt_log("vk_pipeline: %s not saved: no copy of its %.1f MB", path, size / 1048576.0);
+    if (failed) rt_log("vk_pipeline: %s not saved: no copy of its %.1f MB", path, size / 1048576.0);
     if (got) {
         uint64_t t0 = plat_now_ms();
         if (!plat_file_write_atomic(path, data, size)) {
             rt_log("vk_pipeline: cannot write %s (%.1f MB)", path, size / 1048576.0);
+            failed = 1;
         } else {
             uint64_t loaded = which ? P.play_loaded : P.cache_loaded;
             rt_log("vk_pipeline: %s saved: %.1f MB (%+.1f MB since the boot) written in %llu ms; %llu saves before it were "
@@ -6761,9 +6766,10 @@ static int cache_save_one(int which, uint32_t wait_ms) {
         }
     }
     free(data);
-    return 1;
+    return failed ? -1 : 1;
 }
 
+// Both caches' saves (cache_save_one): 1 when each is done, 0 when one found no build-free moment, -1 when one failed.
 static int cache_save(uint32_t wait_ms) {
     if (!P.ready || !P.cache || !P.cache_path[0]) return 1;
     // Not under P.lock: holding P.lock through the copy and the file write (about 60 ms on the 1.4.3 fight) stopped
@@ -6773,9 +6779,9 @@ static int cache_save(uint32_t wait_ms) {
         plat_mutex_unlock(&save_lock);
         return 1;
     }
-    int ok = 1;
+    int ok = 1, r;
     if (!P.play || P.fold) ok = cache_save_one(0, wait_ms);
-    if (P.play) ok = cache_save_one(1, wait_ms) && ok;
+    if (P.play && (r = cache_save_one(1, wait_ms)) < ok) ok = r;   // the worse of the two
     plat_mutex_unlock(&save_lock);
     return ok;
 }
@@ -6783,7 +6789,8 @@ static int cache_save(uint32_t wait_ms) {
 // Builds still running after this long at a save that waits (exit, the shader preparation) leave the file as it was.
 #define SAVE_WAIT_MS 5000
 
-static void save_with(uint32_t wait_ms) {
+// Returns cache_save's answer.
+static int save_with(uint32_t wait_ms) {
     if (P.ready) keys_flush(), pb_flush(), cu_flush(), cf_log();
     if (P.ready && P.gpl) {
         rt_log("vk_pipeline: gpl: %llu fast links (%llu by workers, %llu of those by the library workers for skipped draws; "
@@ -6838,9 +6845,11 @@ static void save_with(uint32_t wait_ms) {
     }
     gfx_shader_record_flush(1);
     if (P.ready && !P.cache) pb_log("at a save");   // with P.cache the line comes with its own save below
-    if (!cache_save(wait_ms) && wait_ms)
+    int saved = cache_save(wait_ms);
+    if (!saved && wait_ms)
         rt_log("vk_pipeline: %s not saved: pipeline builds kept running for %u ms", P.play ? P.play_path : P.cache_path,
                (unsigned)wait_ms);
+    return saved;
 }
 
 // The save at exit and after the shader preparation: it waits up to SAVE_WAIT_MS for a moment with no build running.
@@ -6849,9 +6858,11 @@ void vk_pipeline_save(void) {
 }
 
 // The game never shuts the device down (boot.c and the window end the process), so the cache is saved while it
-// runs: at most every 20 s, and only after new pipelines were built. New pipeline keys are appended every 2 s.
+// runs: at most every 20 s, and only after new pipelines were built or while a save that did not happen is still owed
+// (vk_save_retry.h). New pipeline keys are appended every 2 s.
 static void autosave_once(void) {
-    static uint64_t last_n, last_ms, last_keys;
+    static uint64_t last_keys;
+    static SaveRetry sr;
     if (!P.ready) return;
     uint64_t now = plat_now_ms();
     if (now - last_keys >= 2000) {
@@ -6861,19 +6872,20 @@ static void autosave_once(void) {
         cu_flush();
     }
     gfx_shader_record_flush(0);
-    if (now - last_ms < 20000) return;
+    if (now - sr.at_ms < SAVE_EVERY_MS) return;
     VkPipeStats s;
     vk_pipeline_stats(&s);
     uint64_t n = s.graphics + s.compute + cache_merges;   // a merge comes after its pipeline was counted (bg_main)
-    if (n == last_n && !P.fold) return;                    // P.fold: the play file merged at the start is to be written
+    if (!save_due(&sr, n, now, P.fold)) return;            // P.fold: the play file merged at the start is to be written
     // Only at a moment with no build running (cache_save): while one runs the save waits for the next tick, 500 ms
     // on, before it logs or flushes anything, so a busy stretch does not repeat the statistics lines every tick.
     if (P.cache && P.cache_path[0]) {
         if (!plat_mutex_trylock(&cache_rw)) return;
         plat_mutex_unlock(&cache_rw);
     }
-    last_n = n, last_ms = now;
-    save_with(0);
+    if (save_tried(&sr, n, now, save_with(0) > 0))
+        rt_log("vk_pipeline: the pipeline cache was not saved in %d tries in a row; the next try is made when a new "
+               "pipeline is built, or at exit", SAVE_RETRIES + 1);
 }
 
 // On its own thread: the save (vkGetPipelineCacheData and the file write, about 60 ms) and the key appends (a flush to
