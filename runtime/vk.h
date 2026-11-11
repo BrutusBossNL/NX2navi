@@ -874,5 +874,13 @@ void vk_pipeline_autosave(void);           // vk_pipeline_save at most every 20 
 void vk_pipeline_shutdown(void);           // waits for background builds, saves, destroys pipelines, layouts and the
                                            // cache; before vk_shutdown
 int vk_pipeline_selftest(void);            // one graphics and one compute pipeline from census shaders; 0 on success
+// Pipelines a library creates on our device without a pipeline cache of its own (FSR 3.1, vk_ffx.cpp), through the
+// pipeline caches kept across runs; as vkCreateComputePipelines (compute 1) or vkCreateGraphicsPipelines with no cache.
+VkResult vk_pipeline_create_foreign(VkDevice dev, int compute, uint32_t n, const void *infos,
+                                    const VkAllocationCallbacks *alloc, VkPipeline *out);
+// How many it made so far: from_cache came without a compile and compiled went into the play cache (both only with a
+// play cache, which is what can tell them apart); uncached were created with no cache of ours.
+typedef struct { uint64_t made, from_cache, compiled, uncached; } VkForeignPipes;
+void vk_pipeline_foreign_counts(VkForeignPipes *o);
 
 #include "vk_rec.h"   // last: its macros route the vkCmd* calls of every file that includes vk.h

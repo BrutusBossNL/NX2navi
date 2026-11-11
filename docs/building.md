@@ -174,6 +174,12 @@ of them.
    `make_release.py`). A list belongs to the record layout of the runtime that wrote it; another runtime says so and
    builds nothing from it. `python tests\pipeline_list_test.py` checks the tool on made-up folders.
 
+   What a game folder's shader cache holds can be checked without the game:
+   `python tools\validate_shader_cache.py <game folder>\shader-cache` reads every translated shader from the pack and
+   the loose files, applies the checks the game makes when it loads one (those that fail are translated again at
+   their next use) and runs `spirv-val` on the rest; `--every N` samples, `--out FILE` lists the failed ones. It writes
+   nothing to the cache. `python tests\validate_shader_cache_test.py` checks the tool on a made-up cache.
+
 7. Run. The game keeps running when its window loses the focus (`assume_focus = 1` in `nx2navi.ini`, the default; the
    Game tab switches it). With 0 it pauses, as it does on the Switch when Home is pressed.
 
@@ -404,6 +410,19 @@ admits and refuses and that builds under way count through their reservations. W
 value no machine has free. What the builders do when they are refused (`warm_builder`, `pipe_worker`, `lb_worker`,
 `lw_worker`) shows in a run's log: start the game with `build_free_mb` set above the machine's free commit and read the
 `vk_pipeline:` lines that name the commit headroom.
+
+A change to when the pipeline caches are saved in play (`runtime/vk_save_retry.h`, `runtime/vk_pipeline.c`
+`autosave_once`) passes `python tests\save_retry_check.py`, which builds the header alone: a save for new content, none
+without, and after a save that did not happen a bounded row of tries at the save interval.
+
+A change to how FSR 3.1's pipelines reach the pipeline caches (`runtime/vk_ffx.cpp` `vk_ffx_proc_addr`,
+`runtime/vk_pipeline.c` `vk_pipeline_create_foreign`) passes `python tests\ffx_cache_check.py <game exe>`. It runs
+`--probe-ffx-cache` (one upscaling context on the device; no window, no game) twice on pipeline cache files of its own
+and once with `ffx_pipe_cache = 0`: the library's pipelines must come through the runtime's creates, the second run
+must compile none of them, and with the setting off none may come through. The executable needs
+`amd_fidelityfx_vk.dll` beside it; without it the probe and the test skip. The graphics driver's own cache can serve
+the first run too, so to see the files alone do it, run the probe from a copy of the executable under a name the
+driver has not seen: its first run compiles, its second does not.
 
 A change to the start's memory warning (`runtime/mem_need.h`, `runtime/memory.c` `mem_start_note`) passes
 `python tests\mem_need_check.py [<game exe>]`, which builds the header alone and checks when the game's need counts

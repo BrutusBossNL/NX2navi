@@ -180,6 +180,10 @@
 # pipeline_cache_play = 1
 # The size (MB) at which pipeline-cache-play.bin is folded into pipeline-cache.bin at a start.
 # pipeline_cache_play_mb = 64
+# 1: the pipelines FSR 3.1 makes for upscaling and frame generation are kept in the pipeline cache files, so a later
+# start does not compile them again. 0: FSR 3.1 creates them without those files, as the graphics driver alone keeps
+# them.
+# ffx_pipe_cache = 1
 # 1: where the driver has VK_KHR_pipeline_binary, compiled pipelines are kept in pipeline-binaries.bin under the
 # runtime's own keys, so a renamed or updated exe starts without compiling them again (pipeline-cache.bin is then
 # not used). Default 0 (pipeline-cache.bin only) while it is being tested.
