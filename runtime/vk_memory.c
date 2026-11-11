@@ -271,7 +271,7 @@ static void destroy_rec(VkCtx *c, PoolRec *r) {
     free(r);
 }
 
-int vk_pool_init(pool_t *p) {
+static int pool_init(pool_t *p) {
     VkCtx *c = vk_ctx();
     if (!c) { rt_log("vk: MemoryPoolInitialize before vk_init"); return 0; }
     // The GPU never sees a GPU_NO_ACCESS pool, except a physical one (0x189; 1.4.3 also 0x18c, CPU-visible) through the
@@ -346,7 +346,7 @@ static uint32_t gpa_cover(uint64_t a) {
 
 static void gpa_retire(void *arg) { destroy_rec(vk_ctx(), arg); }
 
-void vk_pool_fini(pool_t *p) {
+static void pool_fini(pool_t *p) {
     VkCtx *c = vk_ctx();
     if (!c) return;
     pidx_ent e;
@@ -394,6 +394,21 @@ void vk_pool_fini(pool_t *p) {
     // mark it used): its buffer outlives the submission being recorded too
     else if (r->kind == POOL_PHYS && !r->used) vk_completion_add(vk_sync_issued() + 1, gpa_retire, r);
     else destroy_rec(c, r);
+}
+
+// NX2NAVI_TRACE=perf: a pool's initialize and finalize, with their imports, allocations, uploads and GPU waits, marked
+// as work a frame can wait for (perf.c perf_mark_add).
+int vk_pool_init(pool_t *p) {
+    uint64_t t0 = perf_mark_begin();
+    int r = pool_init(p);
+    perf_mark_end(PERF_M_POOL, t0, p->size);
+    return r;
+}
+
+void vk_pool_fini(pool_t *p) {
+    uint64_t t0 = perf_mark_begin(), size = p->size;
+    pool_fini(p);
+    perf_mark_end(PERF_M_POOL, t0, size);
 }
 
 // pool_lock held: the device address table follows a MapVirtual request on [lo, hi) of virtual pool v. Ranges it

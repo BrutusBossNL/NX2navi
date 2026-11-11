@@ -1222,7 +1222,7 @@ uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uin
     uint64_t base, fsize;
     if (!out || offset < 0 || !handle_source(h, &f, &base, &fsize)) return FS_R_INVALID;
     if ((uint64_t)offset > fsize || (!buffer && size)) return FS_R_INVALID;
-    uint64_t n = size < fsize - (uint64_t)offset ? size : fsize - (uint64_t)offset, done = 0;
+    uint64_t n = size < fsize - (uint64_t)offset ? size : fsize - (uint64_t)offset, done = 0, t0 = perf_mark_begin();
     if (f == image && image_map) {
         memcpy(buffer, image_map + base + (uint64_t)offset, (size_t)n);
         done = n;
@@ -1233,6 +1233,7 @@ uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uin
         if (r <= 0) rt_fatal("RomFS read failure at %#llx", (unsigned long long)(base + offset + done));
         done += (uint64_t)r;
     }
+    perf_mark_end(PERF_M_FILE, t0, done);
     *out = done;
     return 0;
 }

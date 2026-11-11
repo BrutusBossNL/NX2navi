@@ -48,6 +48,15 @@ enum { PERF_CNT_PIPE_ASYNC, PERF_CNT_PIPE_SKIP, PERF_CNT_TEX_UP, PERF_CNT_TEX_RE
        PERF_CNT_PIPE_WAIT, PERF_CNT_ONESHOT_WAIT, PERF_CNT_PIPE_BUILT, PERF_CNT_TEX_NEW, PERF_CNT_TEX_ALIAS,
        PERF_CNT_WB, PERF_CNT_WB_SKIP, PERF_CNT_N };
 void perf_count(int kind);
+// NX2NAVI_TRACE=perf: work on any thread that a frame can wait for besides the render thread's waits above, summed per
+// frame and per 60-frame window (perf.c perf_mark_add): RomFS reads, host zstd decodes, pipeline creates (vk_pipeline.c
+// pipe_create_in), guest memory maps (heap size, MapPhysicalMemory), NVN memory pool initialize and finalize
+// (vk_memory.c vk_pool_init, vk_pool_fini), and device memory VMA allocates (blocks and dedicated memory: count and
+// bytes, no time). perf_mark_begin returns 0 while the trace is off, so a normal run pays one branch per site.
+enum { PERF_M_FILE, PERF_M_ZSTD, PERF_M_PIPE, PERF_M_GMEM, PERF_M_POOL, PERF_M_DEVMEM, PERF_M_N };
+uint64_t perf_mark_begin(void);
+void perf_mark_end(int kind, uint64_t t0, uint64_t bytes);   // nothing when t0 is 0
+void perf_mark_add(int kind, uint64_t ns, uint64_t bytes);   // nothing while the trace is off
 // NX2NAVI_REPLAY_TIME=1: how long the replay spends in each kind of op (perf.c perf_replay_op reports it with the
 // frame-time summary). Draws and dispatches include their bindings and the vkCmd calls they record; binds are the state
 // and resource binds between them; xfer is copies and clears.

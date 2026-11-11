@@ -895,6 +895,7 @@ uint32_t mem_map_gen(void) { return __atomic_load_n(&map_gen, __ATOMIC_ACQUIRE);
 
 // ---- 0x01 SetHeapSize
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
+    uint64_t t0 = perf_mark_begin();   // NX2NAVI_TRACE=perf: the commit or decommit, the wait for the lock included
     plat_mutex_lock(&lock);
     if (size > HEAP_CAP || size % 0x200000 || size + image_bytes() > L.pool) {
         plat_mutex_unlock(&lock);
@@ -902,9 +903,11 @@ uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
     }
     if (size > heap_size) commit(L.heap.base + heap_size, size - heap_size, "heap");
     if (size < heap_size) decommit(L.heap.base + size, heap_size - size, "heap");
+    uint64_t moved = size > heap_size ? size - heap_size : heap_size - size;
     heap_size = size;
     __atomic_store_n(&map_gen, map_gen + 1, __ATOMIC_RELEASE);
     plat_mutex_unlock(&lock);
+    perf_mark_end(PERF_M_GMEM, t0, moved);
     if (addr) *addr = L.heap.base;
     return R_OK;
 }
@@ -1061,7 +1064,7 @@ static uint32_t alias_map(int unmap, uint64_t a, uint64_t n) {
     n = (n + PAGE - 1) & ~(uint64_t)(PAGE - 1);   // the SDK asks for byte ranges; a mapping is whole pages
     if ((a | n) & (PAGE - 1)) return R_INVALID_ADDRESS;
     if (!inside(a, n, L.alias)) return R_INVALID_REGION;
-    uint64_t first = (a - L.alias.base) / PAGE, count = n / PAGE;
+    uint64_t first = (a - L.alias.base) / PAGE, count = n / PAGE, t0 = perf_mark_begin();
     plat_mutex_lock(&lock);
     uint32_t r = R_OK;
     if (unmap) {
@@ -1087,6 +1090,7 @@ static uint32_t alias_map(int unmap, uint64_t a, uint64_t n) {
 out:
     __atomic_store_n(&map_gen, map_gen + 1, __ATOMIC_RELEASE);
     plat_mutex_unlock(&lock);
+    perf_mark_end(PERF_M_GMEM, t0, n);
     if (r) rt_log("%sMapPhysicalMemory %#llx+%#llx failed %#x (alias %#llx used, heap %#llx)", unmap ? "Un" : "",
                   (unsigned long long)a, (unsigned long long)n, r, (unsigned long long)alias_bytes,
                   (unsigned long long)heap_size);

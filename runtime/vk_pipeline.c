@@ -530,10 +530,12 @@ static volatile uint32_t cache_merges;
 static VkResult pipe_create_in(int kind, void *ci, VkPipeline *pipe, VkPipelineCache cache) {
     int shared = cache && !own_cache;
     if (cache && own_cache) cache = own_cache;
+    uint64_t t0 = perf_mark_begin();   // NX2NAVI_TRACE=perf: the create on any thread, its wait for cache_rw included
     if (shared) plat_mutex_lock_shared(&cache_rw);
     VkResult r = kind == 2 ? vkCreateComputePipelines(P.device, cache, 1, ci, NULL, pipe)
                            : vkCreateGraphicsPipelines(P.device, cache, 1, ci, NULL, pipe);
     if (shared) plat_mutex_unlock_shared(&cache_rw);
+    perf_mark_end(PERF_M_PIPE, t0, 0);
     return r;
 }
 

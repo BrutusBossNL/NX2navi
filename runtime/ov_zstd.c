@@ -152,7 +152,9 @@ static size_t tracked_decode(Cpu *c, uint64_t dst, uint64_t cap, uint64_t src, u
     if (d) __atomic_store_n(d, *d + 1, __ATOMIC_RELAXED);
     int away = size >= AWAY_BYTES ? kern_core_away() : 0;
     if (away) __atomic_add_fetch(&S.away, 1, __ATOMIC_RELAXED);
+    uint64_t t0 = perf_mark_begin();
     size_t r = host_decode(dst, cap, src, size, dict, dict_size, ddict, ok);
+    perf_mark_end(PERF_M_ZSTD, t0, *ok && !ZSTD_isError(r) ? r : 0);
     kern_core_back(&away);
     if (d) {
         int n = *d - 1;
@@ -372,12 +374,14 @@ static size_t stream_run(Cpu *c, Stream *st, ZSTD_outBuffer *out, ZSTD_inBuffer 
     if (d) __atomic_store_n(d, *d + 1, __ATOMIC_RELAXED);
     int away = in->size >= AWAY_BYTES ? kern_core_away() : 0;
     if (away) __atomic_add_fetch(&S.away, 1, __ATOMIC_RELAXED);
-    size_t r = 1;
+    size_t r = 1, o_start = out->pos;
+    uint64_t t0 = perf_mark_begin();
     while (in->pos < in->size) {
         size_t i0 = in->pos, o0 = out->pos;
         r = ZSTD_decompressStream(st->dctx, out, in);
         if (ZSTD_isError(r) || !r || (in->pos == i0 && out->pos == o0)) break;
     }
+    perf_mark_end(PERF_M_ZSTD, t0, out->pos - o_start);
     kern_core_back(&away);
     if (d) {
         int n = *d - 1;

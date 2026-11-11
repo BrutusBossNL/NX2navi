@@ -118,6 +118,56 @@ void perf_count(int kind) {
     if (__atomic_load_n(&perf_on, __ATOMIC_RELAXED)) plat_inc64(&counts[kind]);
 }
 
+// ---- NX2NAVI_TRACE=perf work marks (host.h PERF_M_*): any thread adds; the present takes the frame's sums (mark_frame),
+// names them on a slow frame's line and adds them to the 60-frame window's line.
+static const char *const mark_name[PERF_M_N] = {"file reads", "zstd decodes", "pipeline creates", "guest memory maps",
+                                                "pool init/finalize", "device memory allocations"};
+static volatile int64_t mk_ns[PERF_M_N], mk_n[PERF_M_N], mk_bytes[PERF_M_N], mk_max[PERF_M_N];   // since the last present
+typedef struct { uint64_t ns[PERF_M_N], n[PERF_M_N], bytes[PERF_M_N], max[PERF_M_N]; } MarkSums;
+static MarkSums mk_win;   // the 60-frame window's, present thread only
+
+uint64_t perf_mark_begin(void) { return (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0; }
+
+void perf_mark_add(int kind, uint64_t ns, uint64_t bytes) {
+    if (!(rt_trace & RT_TRACE_PERF) || (unsigned)kind >= PERF_M_N) return;
+    plat_add64(&mk_ns[kind], (int64_t)ns);
+    plat_inc64(&mk_n[kind]);
+    plat_add64(&mk_bytes[kind], (int64_t)bytes);
+    int64_t m = __atomic_load_n(&mk_max[kind], __ATOMIC_RELAXED);
+    while ((int64_t)ns > m && !__atomic_compare_exchange_n(&mk_max[kind], &m, (int64_t)ns, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+}
+
+void perf_mark_end(int kind, uint64_t t0, uint64_t bytes) {
+    if (t0) perf_mark_add(kind, kern_now_ns() - t0, bytes);
+}
+
+// Takes the sums since the last present into *f and adds them to the window.
+static void mark_frame(MarkSums *f) {
+    for (int k = 0; k < PERF_M_N; k++) {
+        f->ns[k] = (uint64_t)plat_xchg64(&mk_ns[k], 0), f->n[k] = (uint64_t)plat_xchg64(&mk_n[k], 0);
+        f->bytes[k] = (uint64_t)plat_xchg64(&mk_bytes[k], 0), f->max[k] = (uint64_t)plat_xchg64(&mk_max[k], 0);
+        mk_win.ns[k] += f->ns[k], mk_win.n[k] += f->n[k], mk_win.bytes[k] += f->bytes[k];
+        if (f->max[k] > mk_win.max[k]) mk_win.max[k] = f->max[k];
+    }
+}
+
+// "; on any thread: file reads 12.3 ms (40, 5.1 MiB, longest 2.0 ms), ..." for the kinds with work, appended at line + n.
+// Device memory allocations carry no time.
+static int mark_text(const MarkSums *s, char *line, int n, size_t cap) {
+    int any = 0;
+    for (int k = 0; k < PERF_M_N && n >= 0 && n < (int)cap - 100; k++) {
+        if (!s->n[k]) continue;
+        n += snprintf(line + n, cap - (size_t)n, "%s %s", any ? "," : "; on any thread:", mark_name[k]);
+        if (k == PERF_M_DEVMEM)
+            n += snprintf(line + n, cap - (size_t)n, " %llu (%.1f MiB)", (unsigned long long)s->n[k], s->bytes[k] / 1048576.0);
+        else
+            n += snprintf(line + n, cap - (size_t)n, " %.1f ms (%llu, %.1f MiB, longest %.1f ms)", s->ns[k] / 1e6,
+                          (unsigned long long)s->n[k], s->bytes[k] / 1048576.0, s->max[k] / 1e6);
+        any = 1;
+    }
+    return n;
+}
+
 // ---- Frame-time summary, always on: every 60 s of play and at exit one line of frame count, mean fps, 1% low and the
 // frames over 25/50/100 ms, then the worst frames of the period with the render thread's waits in them. Per frame: a
 // histogram increment, the compare against the worst list, a memset of the wait array. No allocation.
@@ -586,15 +636,21 @@ void perf_present(uint64_t frame) {
         const char *e = cfg_get("NX2NAVI_PERF_SLOW_MS");
         slow_ns = (uint64_t)(e && atoi(e) > 0 ? atoi(e) : 50) * 1000000ull;
     }
+    MarkSums fm;
+    mark_frame(&fm);
     if (last) {
         sum += d;
         n++;
         if (d > max) max = d, memcpy(worst_ns, frame_ns, sizeof worst_ns);
-        if (d >= slow_ns)
-            rt_log("perf: slow frame %llu: %.1f ms; blocked pipeline %.1f xlate %.1f texture %.1f astc %.1f fence %.1f pacing %.1f",
+        if (d >= slow_ns) {
+            char marks[700];
+            marks[0] = 0;
+            mark_text(&fm, marks, 0, sizeof marks);
+            rt_log("perf: slow frame %llu: %.1f ms; blocked pipeline %.1f xlate %.1f texture %.1f astc %.1f fence %.1f pacing %.1f%s",
                    (unsigned long long)frame, d / 1e6, frame_ns[PERF_PIPE] / 1e6, frame_ns[PERF_XLATE] / 1e6,
                    frame_ns[PERF_TEX] / 1e6, frame_ns[PERF_ASTC] / 1e6, frame_ns[PERF_FENCE] / 1e6,
-                   frame_ns[PERF_PACE] / 1e6);
+                   frame_ns[PERF_PACE] / 1e6, marks);
+        }
     }
     memset(frame_ns, 0, sizeof frame_ns);
     last = now;
@@ -629,6 +685,9 @@ void perf_present(uint64_t frame) {
                plat_xchg64(&replay_ns, 0) / 1e6 / n, (unsigned long long)ab_b, (unsigned long long)n, frame_step_world_us() / 1e6,
                (unsigned long long)dwin[0], dwin[1] / 1e6, (unsigned long long)dwin[2]);
     if (n && span) perf_gpu_line(frame, sum / 1e6 / n, (double)wait_ns[PERF_PACE] / span, n);
+    char marks[700];
+    if (mark_text(&mk_win, marks, 0, sizeof marks) > 0) rt_log("perf: frame %llu: work in the window%s", (unsigned long long)frame, marks);
+    memset(&mk_win, 0, sizeof mk_win);
     sum = max = n = ab_b = 0;
     memset(wait_ns, 0, sizeof wait_ns);
     win_start = now;
