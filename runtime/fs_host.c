@@ -1327,8 +1327,13 @@ static uint32_t open_directory(uint64_t *out, const char *path, int mode) {
 
 static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, int64_t max) {
     if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !count || max < 0 || (!out && max)) return FS_R_INVALID_ARGUMENT;
+    // lock held to the end: CloseDirectory on another guest thread frees the listing this copies from
+    plat_mutex_lock(&lock);
     Dir *d = &dirs[h - DIR_BASE];
-    if (!d->used) return FS_R_INVALID_ARGUMENT;
+    if (!d->used) {
+        plat_mutex_unlock(&lock);
+        return FS_R_INVALID_ARGUMENT;
+    }
     int64_t n = 0;
     while (n < max && d->next < d->n) {
         const Listed *e = &d->e[d->next++];
@@ -1342,6 +1347,7 @@ static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
         out[n].size = is_dir ? 0 : (int64_t)e->size;
         n++;
     }
+    plat_mutex_unlock(&lock);
     *count = n;
     return 0;
 }
@@ -1349,11 +1355,16 @@ static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
 // Result GetDirectoryEntryCount(int64_t *out, DirectoryHandle h): the entries ReadDirectory would still return
 static uint32_t directory_entry_count(int64_t *count, uint64_t h) {
     if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !count) return FS_R_INVALID_ARGUMENT;
+    plat_mutex_lock_shared(&lock);   // against a CloseDirectory on another guest thread
     Dir *d = &dirs[h - DIR_BASE];
-    if (!d->used) return FS_R_INVALID_ARGUMENT;
+    if (!d->used) {
+        plat_mutex_unlock_shared(&lock);
+        return FS_R_INVALID_ARGUMENT;
+    }
     int64_t n = 0;
     for (int i = d->next; i < d->n; i++)
         if (strlen(d->e[i].name) < 769 && (d->mode & (d->e[i].kind == PLAT_FS_DIR ? 1 : 2))) n++;
+    plat_mutex_unlock_shared(&lock);
     *count = n;
     return 0;
 }
