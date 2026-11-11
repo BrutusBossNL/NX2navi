@@ -5036,9 +5036,10 @@ static MfbVs mfb_vs_tab[MFB_TAB];
 static struct {
     PlatMutex lock;
     PlatCond wake;
-    PlatThread *th;
+    int threads, busy;                     // workers started, workers making a program now
     MfbCs *head, *tail;
     uint64_t made, failed, pending_skips;
+    uint64_t first_ms, drained;            // the first program's queueing; the queue has emptied once (logged)
 } MFB = {.lock = PLAT_MUTEX_INIT};
 
 static uint32_t mfb_binding_base(const GfxShader *s) {   // one past the highest binding the module declares
@@ -5090,6 +5091,16 @@ static void mfb_make(MfbCs *e) {
     __atomic_store_n(&e->state, ok ? 1 : -1, __ATOMIC_RELEASE);
 }
 
+// The programs queued at their first draws are made by NX2NAVI_MESH_FALLBACK_WORKERS threads (auto: one for each 4
+// logical processors, 1 to 4). A place's mesh programs all arrive in its first frames and each one's draws are left
+// out until its compute pipelines are built (up to seconds each on some drivers), so with one thread the foliage of a
+// first visit filled in one program at a time. The first time the queue empties the log says how long it took.
+static int mfb_worker_count(void) {
+    const char *v = cfg_value("NX2NAVI_MESH_FALLBACK_WORKERS");
+    int n = strcmp(v, "auto") ? atoi(v) : (int)plat_cpu_usable() / 4;
+    return n < 1 ? 1 : n > 4 ? 4 : n;
+}
+
 static void mfb_worker(void *arg) {
     (void)arg;
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);   // as the pipeline workers' optimised builds: the game's threads go first
@@ -5098,8 +5109,15 @@ static void mfb_worker(void *arg) {
         while (!MFB.head) plat_cond_wait(&MFB.wake, &MFB.lock);
         MfbCs *e = MFB.head;
         if (!(MFB.head = e->next)) MFB.tail = NULL;
+        MFB.busy++;
         plat_mutex_unlock(&MFB.lock);
         mfb_make(e);
+        plat_mutex_lock(&MFB.lock);
+        if (!--MFB.busy && !MFB.head && !MFB.drained++)
+            rt_log("vk: mesh fallback: %llu programs made (%llu refused) on %d threads, the queue empty %llu ms after the "
+                   "first program was queued (NX2NAVI_MESH_FALLBACK_WORKERS)", (unsigned long long)MFB.made,
+                   (unsigned long long)MFB.failed, MFB.threads, (unsigned long long)(plat_now_ms() - MFB.first_ms));
+        plat_mutex_unlock(&MFB.lock);
     }
 }
 
@@ -5132,7 +5150,15 @@ static MfbCs *mfb_cs_get(VkExec *ex, const GfxShader *ms, const GfxShader *ts) {
             return e;
         }
         plat_mutex_lock(&MFB.lock);
-        if (!MFB.th) plat_cond_init(&MFB.wake), MFB.th = plat_thread_new(mfb_worker, NULL, "mesh fallback");
+        if (!MFB.threads) {
+            plat_cond_init(&MFB.wake);
+            MFB.first_ms = plat_now_ms();
+            for (int w = mfb_worker_count(); w > 0; w--) {
+                PlatThread *t = plat_thread_new(mfb_worker, NULL, "mesh fallback");
+                if (t) plat_thread_detach(t), MFB.threads++;
+            }
+            if (!MFB.threads) rt_fatal("vk: mesh fallback: cannot start a worker thread");
+        }
         if (MFB.tail) MFB.tail->next = e;
         else MFB.head = e;
         MFB.tail = e;

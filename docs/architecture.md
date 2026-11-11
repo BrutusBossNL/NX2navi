@@ -153,8 +153,10 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
     a village frame's 45 mesh draws are 45 passes cut, 90 to 135 dispatches and about 270 barriers more than with mesh
     shaders. The buffers (`mesh_fallback_mb`, 128 MiB) are reused by every draw, so they hold the largest draw, not
     a frame; a draw that emits more loses what does not fit, and the log says how much it needed.
-  - A program's modules and compute pipelines are made on a thread of their own at its first draw, which is skipped
-    until they are ready; they are not recorded for the next start, where the pipeline cache makes them quick.
+  - A program's modules and compute pipelines are made by worker threads at its first draw, which is skipped until
+    they are ready (`mesh_fallback_workers`, auto: one for each 4 logical processors, 1 to 4, so a place's programs,
+    which all arrive in its first frames, are not made one after the other); they are not recorded for the next start,
+    where the pipeline cache makes them quick.
     Not carried: the far shadow cascades' coarser shading rate, a draw's first workgroup other than 0, and more
     workgroups in one draw than one compute dispatch may have.
 - Pipelines: `VK_EXT_graphics_pipeline_library` where the driver has it: stage libraries compiled ahead, a fast link

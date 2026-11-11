@@ -889,6 +889,9 @@
 # Video memory in MB for what those compute passes hand to the draws. A draw that needs more loses the geometry that
 # does not fit, and the log says so.
 # mesh_fallback_mb = 128
+# Threads that prepare those compute passes for the mesh programs a place uses, the first time each is drawn (until
+# then its draws are left out). auto (default): one for each 4 logical processors, 1 to 4.
+# mesh_fallback_workers = auto
 # Windows, 1 (experimental): the game's heap is committed a 64 KiB run at a time where it is first used, instead of
 # all of it when the game sizes it. Windows counts committed memory against RAM plus the page file whether it is used
 # or not, and in Castle Town after Hyrule Field about 3.4 of the heap's 6.8 GiB had never been used. 0: committed up
