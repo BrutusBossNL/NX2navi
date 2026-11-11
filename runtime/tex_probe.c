@@ -336,7 +336,22 @@ static int test_import(pool_t *pool) {
     VkCtx *c = vk_ctx();
     uint8_t *m = pool->mem;
     uint64_t a = (uintptr_t)m, pages[64], n;
+    // What the CPU wrote before the pool existed is still reported once its pages are imported (or copied into a
+    // shadow): making the pool must not take the write watch's record of those writes, which the first sync of a
+    // mirror and the texture checks read afterwards. Every page is touched first, so that the count printed tells
+    // what making the pool marks by itself.
+    memset(m, 0, pool->size);
+    mem_written_pages(a, pool->size, pages, 64);
+    m[0x3c000] = 0x5a, m[0x3e000] = 0xa5;
     GCHECK(vk_pool_init(pool), "vk_pool_init of a CPU-visible pool at %#llx", (unsigned long long)a);
+    n = mem_written_peek(a, pool->size, pages, 64);
+    int before = 0;
+    for (uint64_t i = 0; n != UINT64_MAX && i < n && i < 64; i++) before += pages[i] == a + 0x3c000 || pages[i] == a + 0x3e000;
+    GCHECK(before == 2, "of 2 pages the CPU wrote before the pool was made, %d are reported after it (%llu pages in all)",
+           before, (unsigned long long)n);
+    printf("probe-vkmem: CPU writes made before the pool was made: both pages reported after it (%llu of %llu pages "
+           "reported in all)\n", (unsigned long long)n, (unsigned long long)(pool->size >> 12));
+    g_gpu_checks++;
     VkMemSpan sp;
     GCHECK(vk_mem_resolve(a + 0x1000, 0x20000, &sp) && sp.buffer && sp.offset == 0x1000 && sp.avail == pool->size - 0x1000,
            "resolve inside the imported pool (offset %#llx, avail %#llx)", (unsigned long long)sp.offset,
