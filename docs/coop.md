@@ -8,6 +8,9 @@ What exists so far: rooms, the relay, a sealed channel for messages between the 
 menu's Co-op tab (below), which makes, joins, accepts and leaves a room. The other players are not shown in your
 world, and where your Link is never leaves your PC ("Other players in the world").
 
+**Co-op is a beta in 0.8.0.** The menu shows its Co-op tab only with `coop_beta = 1` under `[coop]` in `nx2navi.ini`;
+no menu row sets it. Everything below is as it is with the tab shown.
+
 ## What joining a room means for your save
 
 Read this before you join a room.

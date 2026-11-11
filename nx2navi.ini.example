@@ -583,6 +583,8 @@
 # The menu's Co-op tab sets the name, the relay and the rules below, and makes, joins, accepts and leaves a room.
 # 0 = off: no socket is opened, no name is looked up and nothing is sent. Takes effect at once.
 # coop = 0
+# Co-op is a beta: the menu shows its Co-op tab only with coop_beta = 1, which no menu row sets. Takes effect at once.
+# coop_beta = 0
 # Your name for the other players, at most 24 bytes. Default: Player- and four random hex digits.
 # coop_name =
 # The relay, host or host:port (default port 24680): run one with `python tools/coop_relay.py` and forward its UDP port, or

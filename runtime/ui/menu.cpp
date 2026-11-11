@@ -1536,6 +1536,10 @@ static void tab_coop(float scale) {
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
                                               UI_MENU_TAB_CONTROLS, UI_MENU_TAB_COOP};
 static int g_tab;               // the tab shown
+
+// The tabs the menu shows: the Co-op tab is a beta, shown only with coop_beta = 1 in nx2navi.ini (NX2NAVI_COOP_BETA),
+// which no menu row sets. Co-op itself is untouched by it: coop = 1 still runs a session (docs/coop.md).
+static int tabs_shown(void) { return cfg_bool("NX2NAVI_COOP_BETA") ? TAB_COUNT : TAB_COOP; }
 static int g_tab_request = -1;  // select this tab at the next layout; -1 none
 static int g_focus_page = -1;   // this tab's first row takes the cursor once it is shown; -1 none
 
@@ -1626,14 +1630,16 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
              : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
              : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1
                                                                                                          : 0;
-    if (step) g_tab_request = g_tab_sounded = (g_tab + step + TAB_COUNT) % TAB_COUNT;
+    const int ntabs = tabs_shown();
+    if (g_tab >= ntabs) g_tab_request = 0;   // the Co-op tab was shown and coop_beta went off
+    if (step) g_tab_request = g_tab_sounded = (g_tab + step + ntabs) % ntabs;
     if (step) menu_sound_play(step > 0 ? MENU_SOUND_TAB_RIGHT : MENU_SOUND_TAB_LEFT);
     if (g_tab_request >= 0) g_focus_page = g_tab_request;   // the new page's first row takes the cursor
 
     const ImGuiStyle &st = ImGui::GetStyle();
     float bottom = ImGui::GetFrameHeight() + st.ItemSpacing.y * 2;
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
-        for (int k = 0; k < TAB_COUNT; k++) {
+        for (int k = 0; k < ntabs; k++) {
             char label[128];
             snprintf(label, sizeof label, "  %s  ###tab%d", menu_text(kTabNames[k]), k);   // the id stays per language
             // the tab labels in the title face, on the rows' button (ui/menu_skin.cpp)
@@ -1979,7 +1985,7 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
         const char *dir = cfg_get("NX2NAVI_MENU_TEST_DIR");
         snprintf(path, sizeof path, "%s/menu-test-%llu-%d.png", dir ? dir : ".", (unsigned long long)frame, g_test.page);
         *shot = path;
-        if (++g_test.page == (g_debug.load() ? DEBUG_MENU_TABS : TAB_COUNT)) {
+        if (++g_test.page == (g_debug.load() ? DEBUG_MENU_TABS : tabs_shown())) {
             g_test.page = -1;
             g_test.opened = 0, g_test.next_at++;   // the next NX2NAVI_MENU_TEST frame opens it again
             set_open(0);   // the next frame lays out nothing
