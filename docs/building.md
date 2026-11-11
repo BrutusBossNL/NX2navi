@@ -272,7 +272,10 @@ writes come back at its fence. Pages both sides write keep a base copy, so each 
 a VRAM mirror's write-back merge marks the pages it changed, and only those are compared at the fence; a lookup that
 reads guest memory itself (the uniform snapshot, `vk_mem_lookup`) does not queue its pool for the copy-in. In Kokiri
 Forest (1.1.1, RTX 4090) that costs about 1 ms a frame (copy-in 0.5 ms, write-back 0.6 ms), and the copies hold about
-5 GB. `NX2NAVI_SHADOW=1` turns it on under Windows too. The Steam Deck's RADV has `VK_EXT_external_memory_host` as
+5 GB. The GPU's bytes reach guest memory in the fence's completion callback, later than an import's, so the wait
+after a frame's first submission covers the write-backs there (`runtime/vk_sync.c`, "the executed timeline"): the game
+rewrites what those passes wrote without a fence, and a write-back that landed after the rewrite left the GPU adding
+light onto its own last output, the whole scene brighter for a frame. `NX2NAVI_SHADOW=1` turns it on under Windows too. The Steam Deck's RADV has `VK_EXT_external_memory_host` as
 well: the shadow copies are chosen for the measured cost above, not for a missing extension.
 
 The device address table (`runtime/vk_gpa.c`) names a pool's shadow copy as it names an import, so shaders follow guest
