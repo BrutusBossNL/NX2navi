@@ -233,7 +233,8 @@ uint64_t mem_untouched_run(uint64_t a, uint64_t end);    // NX2NAVI_HEAP_LAZY: t
                                                            // that were never committed (a scan steps over it), else 0
 int mem_host_readable(uint64_t a, uint64_t n);             // plat_mem_readable that first commits the untouched
                                                            // pages of the lazy heap in [a, a+n), which read zero
-void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
+void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws,
+                      uint64_t *hot_holds);   // hot_holds: quick thaws that held their region thawed (memory.c "Hot regions")
 // NX2NAVI_WB_PROBE=1 (memory.c, "Probed regions"): who reads what the GPU wrote back into guest memory.
 // NX2NAVI_WB_LAZY (memory.c, "Lazy write-back"): pages the GPU wrote that come down only when the CPU touches them.
 int mem_lazy_enable(void (*fetch)(uint64_t h0, uint64_t h1, uint64_t off, uint64_t size),

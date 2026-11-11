@@ -75,6 +75,21 @@ static int reserve_at(uint64_t at, uint64_t size, int watch) { return plat_mem_r
 #define FRZ_HOLD_MS 5000u
 static volatile uint8_t frz[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static uint32_t thaw_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];   // frz_lock: GetTickCount of the last thaw request, 0 never
+// Hot regions. A region a write thaws soon after its freeze is one the game keeps writing (the buffers its loaders
+// stream an area into): frozen again as soon as it was idle a moment, it was thawed again moments later. Running
+// through Hyrule Field froze and thawed about 8,000 regions in 6,000 frames, and while the loaders wrote and the
+// driver locked new memory each thaw's VirtualQuery took 15 to 20 ms: a loader thread stalled 78 to 111 ms in thaws in
+// each of the hitches of 125 to 140 ms of that walk, with the game's main thread waiting for it. So a write that thaws a
+// region within FRZ_QUICK_MS of its freeze holds the region thawed for its hot time, FRZ_HOT_MIN_MS at first and
+// doubled at each such thaw up to FRZ_HOT_MAX_MS; a region that stayed frozen longer starts again from nothing. A
+// freeze only saves later write-watch queries over the region, which a region written that often needs anyway.
+#define FRZ_QUICK_MS 60000u
+#define FRZ_HOT_MIN_MS 4000u
+#define FRZ_HOT_MAX_MS 600000u
+static uint32_t frz_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];        // frz_lock: GetTickCount | 1 of its last freeze, 0 never
+static uint32_t frz_hot_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];    // frz_lock: its hot time now, 0 not hot
+static uint32_t frz_hot_until[RT_ADDRESS_LIMIT >> FRZ_SHIFT]; // frz_lock: no freeze before this GetTickCount, 0 none
+static volatile int64_t frz_hot_holds;                        // quick thaws that held a region, since the last stats
 static volatile int32_t nfrz;
 static PlatMutex frz_lock = PLAT_MUTEX_INIT;
 static volatile int64_t frz_count[4];   // freezes; thaws by a write fault, by mem_thaw, by a mapping change
@@ -612,6 +627,17 @@ static void thaw_locked(uint64_t r, int why) {
     __atomic_store_n(&frz[r], 0, __ATOMIC_RELEASE);
     plat_dec32(&nfrz);
     plat_inc64(&frz_count[why]);
+    if (why == 1) {   // a write: a quick one makes the region hot, a late one ends its hot time
+        uint32_t now = (uint32_t)plat_now_ms();
+        if (frz_ms[r] && now - frz_ms[r] < FRZ_QUICK_MS) {
+            uint32_t h = frz_hot_ms[r] ? frz_hot_ms[r] * 2 : FRZ_HOT_MIN_MS;
+            frz_hot_ms[r] = h > FRZ_HOT_MAX_MS ? FRZ_HOT_MAX_MS : h;
+            frz_hot_until[r] = (now + frz_hot_ms[r]) | 1;
+            plat_inc64(&frz_hot_holds);
+        } else {
+            frz_hot_ms[r] = 0;
+        }
+    }
 }
 
 // frz_lock held exclusively.
@@ -725,9 +751,12 @@ int mem_freeze(uint64_t a) {
     uint64_t r = a >> FRZ_SHIFT;
     int ok = 0;
     plat_mutex_lock(&frz_lock);
+    uint32_t now = (uint32_t)plat_now_ms();
     if (frz[r]) ok = 1;
-    else if (thaw_ms[r] && (int32_t)((uint32_t)plat_now_ms() - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) ok = 0;   // |1 may be ahead
+    else if (thaw_ms[r] && (int32_t)(now - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) ok = 0;   // |1 may be ahead
+    else if (frz_hot_until[r] && (int32_t)(frz_hot_until[r] - now) > 0) ok = 0;         // hot: held thawed
     else if (freeze_locked(r)) {
+        frz_ms[r] = now | 1;
         __atomic_store_n(&frz[r], 1, __ATOMIC_RELEASE);
         plat_inc32(&nfrz);
         plat_inc64(&frz_count[0]);
@@ -838,8 +867,10 @@ void mem_probe_report(uint64_t frame) {
     }
 }
 
-void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws) {
+void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws,
+                      uint64_t *hot_holds) {
     *frozen = (uint64_t)__atomic_load_n(&nfrz, __ATOMIC_RELAXED);
+    *hot_holds = (uint64_t)plat_xchg64(&frz_hot_holds, 0);
     *freezes = (uint64_t)plat_xchg64(&frz_count[0], 0);
     *fault_thaws = (uint64_t)plat_xchg64(&frz_count[1], 0);
     *other_thaws = (uint64_t)plat_xchg64(&frz_count[2], 0) + (uint64_t)plat_xchg64(&frz_count[3], 0);

@@ -3538,8 +3538,8 @@ static void mirror_log(uint64_t frame) {
     plat_mutex_unlock(&gen_lock);
     double wf = frame > ww_last ? (double)(frame - ww_last) : 1.0;
     ww_last = frame;
-    uint64_t fz, ff, ft, fo;
-    mem_freeze_stats(&fz, &ff, &ft, &fo);
+    uint64_t fz, ff, ft, fo, fh;
+    mem_freeze_stats(&fz, &ff, &ft, &fo, &fh);
     mem_probe_report(frame);
     mem_lazy_report(frame, lz_skipped);
     lz_skipped = 0;
@@ -3558,9 +3558,10 @@ static void mirror_log(uint64_t frame) {
     if (rt_trace & RT_TRACE_PERF)
         rt_log("mem: write-watch frame %llu: per frame, every consumer: %.1f queries over %.1f MiB, %.3f ms (%.1f found "
                "%.0f written pages, %.3f ms); frozen %.0f MiB; since the last line: freezes %llu, thaws by a write %llu, by a file read "
-               "or mapping change %llu, refused %llu",
+               "or mapping change %llu, refused %llu; quick thaws that held a hot region thawed %llu",
                (unsigned long long)frame, wc / wf, wb / wf / 1048576.0, qpc_ms(wt) / wf, dc / wf, wp / wf, qpc_ms(dt) / wf,
-               fz * 2.0, (unsigned long long)ff, (unsigned long long)ft, (unsigned long long)fo, (unsigned long long)nr);
+               fz * 2.0, (unsigned long long)ff, (unsigned long long)ft, (unsigned long long)fo, (unsigned long long)nr,
+               (unsigned long long)fh);
     if (!vk_mirror_on) return;
     plat_mutex_lock(&mirror_stat_lock);
     MirrorAcc a = macc;
