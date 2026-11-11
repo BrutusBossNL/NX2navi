@@ -207,6 +207,9 @@ int vk_hdr_native_picture(VkFormat f);   // vk_hdr_native, and f is the format o
 VkImageView vk_hdr_ui_target(VkCommandBuffer cb, uint32_t w, uint32_t h);
 void vk_hdr_ui_compose(VkCommandBuffer cb, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h);
 void vk_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r);
+// Luminance statistics of an HDR10 shot inside rect {x, y, w, h}: the darkest pixel, the 0.1st, 1st, 50th and 99th
+// percentiles and the brightest pixel in nits, and the share of pixels under 0.01 nits (vk_hdr.c).
+void vk_hdr_luminance_stats(const uint8_t *in, int stride, const int rect[4], int a2r, float out[7]);
 void vk_hdr_release(void);   // before the device goes away
 // The support buffer's HDR settings, five vec4 at 1440 (vk_exec_draw.c support_fill; read by the game's tonemap with
 // shaders/hdr_tonemap.frag spliced in, vk_hdr.c tonemap_splice).

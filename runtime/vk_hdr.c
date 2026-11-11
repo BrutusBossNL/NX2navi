@@ -1176,14 +1176,15 @@ void vk_hdr_release(void) {
     memset(&H, 0, sizeof H);
 }
 
-// PQ code (0..1023) of a 10-bit channel to the sRGB byte of the same colour at the HUD's white (menu test shots and
-// flight thumbnails of an HDR10 swapchain).
+// Luminance of a PQ code (0..1023 over 1) in nits.
 static float pq_nits(float e) {
     const float m1 = 0.1593017578125f, m2 = 78.84375f, c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
     float p = powf(e, 1.0f / m2);
     return 10000.0f * powf(fmaxf(p - c1, 0.0f) / (c2 - c3 * p), 1.0f / m1);
 }
 
+// 10-bit PQ pixels of an HDR10 swapchain to bytes that show on a display of gamma 2.2 what the HDR display shows, the
+// HUD's white at 255 (menu test shots and flight thumbnails): a dark tone the HDR display lifts looks lifted here too.
 void vk_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r) {
     float ui = nits().ui;
     // Rec. 2020 to Rec. 709 (the inverse of ITU-R BT.2087's matrix)
@@ -1196,9 +1197,43 @@ void vk_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r) {
         for (int k = 0; k < 3; k++) c[k] = pq_nits(c[k] / 1023.0f) / ui;
         for (int k = 0; k < 3; k++) {
             float l = fminf(fmaxf(m[3 * k] * c[0] + m[3 * k + 1] * c[1] + m[3 * k + 2] * c[2], 0.0f), 1.0f);
-            float s = l <= 0.0031308f ? 12.92f * l : 1.055f * powf(l, 1.0f / 2.4f) - 0.055f;
-            out[4 * i + k] = (uint8_t)(s * 255.0f + 0.5f);
+            out[4 * i + k] = (uint8_t)(powf(l, 1.0f / 2.2f) * 255.0f + 0.5f);
         }
         out[4 * i + 3] = 255;
     }
+}
+
+// The luminance (Rec. 2020 Y, in nits) of the 10-bit PQ pixels inside the rectangle {x, y, w, h} of a stride-wide
+// image: out = the darkest pixel's, the 0.1st, 1st, 50th and 99th percentiles, the brightest's, and the share of pixels
+// under 0.01 nits. The percentiles come from a histogram of 64 bins a stop, from 2^-24 to 2^14 nits; a value is a bin's
+// upper edge.
+void vk_hdr_luminance_stats(const uint8_t *in, int stride, const int rect[4], int a2r, float out[7]) {
+    enum { LO = -24, HI = 14, PER = 64, BINS = (HI - LO) * PER };
+    static uint32_t hist[BINS + 1];
+    static float lut[1024];
+    for (int i = 0; i < 1024; i++) lut[i] = pq_nits((float)i / 1023.0f);
+    memset(hist, 0, sizeof hist);
+    float lo = 1e30f, hi = 0.0f;
+    uint64_t total = 0, dark = 0;
+    for (int y = rect[1]; y < rect[1] + rect[3]; y++)
+        for (int x = rect[0]; x < rect[0] + rect[2]; x++) {
+            uint32_t v;
+            memcpy(&v, in + 4 * ((size_t)y * (size_t)stride + (size_t)x), 4);
+            float r = lut[v & 1023], g = lut[v >> 10 & 1023], b = lut[v >> 20 & 1023];
+            if (a2r) { float t = r; r = b; b = t; }
+            float l = 0.2627002120f * r + 0.6779980715f * g + 0.0593017165f * b;
+            lo = fminf(lo, l), hi = fmaxf(hi, l);
+            dark += l < 0.01f;
+            int bin = l > 0.0f ? (int)floorf((log2f(l) - LO) * PER) + 1 : 0;   // bin 0: exactly black
+            hist[bin < 0 ? 0 : bin > BINS ? BINS : bin]++;
+            total++;
+        }
+    static const double q[4] = {0.001, 0.01, 0.5, 0.99};
+    for (int k = 0; k < 4; k++) {
+        uint64_t want = (uint64_t)(q[k] * (double)total), seen = 0;
+        int bin = 0;
+        while (bin < BINS && seen + hist[bin] <= want) seen += hist[bin++];
+        out[1 + k] = bin == 0 ? 0.0f : exp2f((float)LO + (float)bin / PER);
+    }
+    out[0] = total ? lo : 0.0f, out[5] = hi, out[6] = total ? (float)((double)dark / (double)total) : 0.0f;
 }
