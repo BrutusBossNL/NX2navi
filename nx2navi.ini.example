@@ -490,8 +490,13 @@
 # frame before, DLSS is told to favour the current frame by this percentage (0, 35, 65 or 100; 0 off). Higher removes
 # more of the trails and leaves those edges a little less smooth. Changes while the game runs take effect at once.
 # dlss_char_mask = 65
-# The game's own FXAA after the post effects; with DLAA on it is not needed. Changes while the game runs take effect at
-# once.
+# Anti-aliasing of the 3D picture: game (the game's own SMAA, as on the console), off, fxaa, smaa (SMAA at its Ultra
+# preset in the game's place) or taa (DLSS or FSR 3.1 at full size: dlaa = 1 with dlss = dlaa, which the menu's
+# Anti-aliasing row sets with it). While DLSS or FSR 3.1 runs, the game's SMAA stays whatever this says. Changes while
+# the game runs take effect at once.
+# aa = game
+# The FXAA switch of the game this runtime was first written for; Ocarina has no such pass, so it changes nothing here
+# (aa above is the setting).
 # fxaa = 1
 # Frame generation: off, fsr3 (AMD FSR 3.1 on any GPU where amd_fidelityfx_vk.dll loads, so not on Linux: one generated
 # frame between every two the game draws, the HUD kept out of it) or dlss (NVIDIA DLSS Frame Generation on GeForce RTX

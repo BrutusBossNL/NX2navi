@@ -187,6 +187,11 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   cache", `cache_save`).
 - The game's tensor-core upscaler is replaced by a decode-and-scale pass (`vk_tonemap.c`); `vk_fsr.c` runs AMD FSR 1
   (EASU, RCAS) on the present when the window is larger than the picture.
+- Anti-aliasing (`vk_aa.c`, `NX2NAVI_AA`): the game anti-aliases with its own SMAA, three compute passes after the bloom
+  composite (edges, blending weights, composition into the scene target as square-rooted RGB9E5 words). `off`, `fxaa`
+  and `smaa` leave out the first two and replace the composition with `shaders/aa_post.comp` or SMAA at its Ultra preset
+  (`shaders/smaa_*.comp`); the game's passes are known by a hash of their guest code (`vk_exec_draw.c` `aa_dispatch`).
+  `taa` is DLSS or FSR 3.1 at the scene's size; while either runs, the game's SMAA stays.
 - HDR (`vk_hdr.c`): the game tonemaps its scene into a float target, upscales it, draws the HUD into a second float
   target and copies that into the 8-bit sRGB window texture it presents. With `NX2NAVI_HDR=1` the tonemap shader gets
   the function of `shaders/hdr_tonemap.frag` spliced in where its SDR curve clamps each channel, so the float picture

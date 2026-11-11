@@ -5695,6 +5695,110 @@ static int fallback_9e5_scene(VkFormat src, VkFormat dst) {
     return src == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && dst == VK_FORMAT_B10G11R11_UFLOAT_PACK32;
 }
 
+// FNV-1a of a program's compute code as the game hands it over, kept per program: what vk_aa.c knows the game's SMAA
+// passes by, the same with every translator and setting. 0 without compute code.
+static uint64_t cs_guest_hash(const prog_t *p) {
+    static struct { uint64_t serial, hash; } memo[1024];
+    typeof(memo[0]) *m = p->serial ? &memo[p->serial * 0x9E3779B97F4A7C15ull >> 54] : NULL;
+    if (m && m->serial == p->serial) return m->hash;
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    uint64_t h = 0;
+    if (find_stage(p, NVN_STAGE_CS, &ctl, &code, &len) && code && len) {
+        h = 0xcbf29ce484222325ull;
+        for (uint32_t i = 0; i < len; i++) h = (h ^ code[i]) * 0x100000001b3ull;
+    }
+    if (m) m->serial = p->serial, m->hash = h;
+    return h;
+}
+
+// The anti-aliasing setting (vk_aa.c): while it asks for something other than the game's SMAA, the game's edge and
+// weight passes are left out and its composition is replaced by vk_aa_record, from the same composite (the sampled
+// R11G11B10F image of the output's size) into the same scene target, through the integer storage view the game's own
+// pass writes it with. 1: the dispatch is handled (left out or replaced). NX2NAVI_AA_LOG=1 logs each compute program's
+// guest code hash once, with its dispatch size and output, to find the passes in another game version.
+static int aa_dispatch(VkExec *ex, int x, int y, int z) {
+    int mode = vk_aa_mode();
+    if (mode == VK_AA_GAME || !ex->prog) return 0;
+    uint64_t gh = cs_guest_hash(ex->prog);
+    static int log_on = -1;
+    if (log_on < 0) log_on = rt_knob("AA_LOG", "0");
+    if (log_on) {
+        static uint64_t seen[512];
+        static int nseen;
+        int known = 0;
+        for (int i = 0; i < nseen; i++) known |= seen[i] == gh;
+        if (!known && nseen < 512) {
+            seen[nseen++] = gh;
+            const VkTexImage *o = NULL;
+            vk_texture_lock();
+            for (int i = 0; i < 32 && !o; i++) {
+                uint64_t h = ex->img[NVN_STAGE_CS][i];
+                view_t v; int hv = 0;
+                o = h ? vk_texture_by_id_locked(NVN_HANDLE_TEX(h), &v, &hv) : NULL;
+            }
+            rt_log("aa: compute prog %llu guest %016llx dispatch %dx%dx%d output %ux%u fmt %d",
+                   (unsigned long long)ex->prog->serial, (unsigned long long)gh, x, y, z, o ? o->width : 0,
+                   o ? o->height : 0, o ? (int)o->format : 0);
+            vk_texture_unlock();
+        }
+    }
+    int role = vk_aa_role(gh);
+    if (role == VK_AA_ROLE_NONE) return 0;
+    if (role != VK_AA_ROLE_COMPOSE) return vk_aa_skip_ok();
+    const VkTexImage *dst = NULL, *src = NULL;
+    VkImageView dv = VK_NULL_HANDLE, sv = VK_NULL_HANDLE;
+    vk_texture_lock();
+    // the scene target, written as raw words: the R11G11B10F image, or at times the RGB9E5 one the same memory also
+    // resolves as (raw_9e5_twin), which takes the same words
+    for (int i = 0; i < 32 && !dst; i++) {
+        uint64_t h = ex->img[NVN_STAGE_CS][i];
+        view_t v; int hv = 0;
+        const VkTexImage *t = h ? vk_texture_by_id_locked(NVN_HANDLE_TEX(h), &v, &hv) : NULL;
+        if (!t || (t->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 && t->format != VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) ||
+            t->type != VK_IMAGE_TYPE_2D || t->samples != 1)
+            continue;
+        dst = t;
+        if (storage_view_format(t, &v, hv) == VK_FORMAT_R32_UINT) dv = get_view(ex, t, &v, hv, 3, 1);   // 3: Texture2D
+    }
+    for (int i = 0; dst && i < 128 && !src; i++) {   // the composite: R11G11B10F of the same size, another image
+        uint64_t h = ex->tex[NVN_STAGE_CS][i];
+        view_t v; int hv = 0;
+        const VkTexImage *t = h ? vk_texture_by_id_locked(NVN_HANDLE_TEX(h), &v, &hv) : NULL;
+        if (!t || t->image == dst->image || t->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || t->width != dst->width ||
+            t->height != dst->height || t->type != VK_IMAGE_TYPE_2D || t->samples != 1)
+            continue;
+        src = t;
+        view_t nv;
+        memset(&nv, 0, sizeof nv);
+        sv = get_view(ex, t, &nv, 0, 3, 0);
+    }
+    uint32_t w = dst ? dst->width : 0, hh = dst ? dst->height : 0;
+    if (dv && sv) vk_texture_storage_bound_locked(dst);   // the GPU writes it below, as the game's pass would have
+    // Left to the game, once logged. Expected while an area loads: the target is then the RGB9E5 image at the same
+    // memory, made without storage use, which the game's own pass cannot write either.
+    static int told;
+    if ((!dv || !sv) && !told++)
+        rt_log("aa: a composition of the game's SMAA left to the game: target %s (%ux%u fmt %d, storage %d), composite %s",
+               dst ? (dv ? "ok" : "without an integer storage view") : "not found", w, hh, dst ? (int)dst->format : 0,
+               dst ? !!(dst->usage & VK_IMAGE_USAGE_STORAGE_BIT) : 0, src ? (sv ? "ok" : "without a view") : "not found");
+    vk_texture_unlock();
+    // recorded without the texture lock: SMAA's first frame waits for its lookup textures' upload. The views stay valid
+    // meanwhile: images and views go only through the deferred release.
+    int ok = 0;
+    if (dv && sv) {
+        vk_exec_barrier_dispatch(ex);   // ends the pass; the composite's writes are visible
+        ok = vk_aa_record(ex->cb, mode, sv, dv, w, hh);
+        if (ok) {
+            B.pipe[1] = VK_NULL_HANDLE;   // the replay must bind its compute pipeline again
+            ex->recorded++;
+            vk_exec_barrier(ex);
+        }
+    }
+    vk_aa_composed(ok);
+    return ok;
+}
+
 static void untranslated_dispatch_fallback(VkExec *ex) {
     static int on = -1;
     if (on < 0) on = rt_knob("CS_FALLBACK", "1");
@@ -5877,6 +5981,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     vk_contact_flush(ex);
     cb_res(ex);
     dummies_init();
+    if (aa_dispatch(ex, d->x, d->y, d->z)) return;   // the game's SMAA left out or replaced (vk_aa.c)
     // A tensor-core program runs the stand-in while NX2NAVI_NATIVE_TENSOR is off, so ask that before translating it.
     // Translating it anyway recorded four AI-upscaler compute shaders of 0.87-4.4M SPIR-V words that this game never
     // dispatches natively, and building them cost gigabytes of memory at boot (NX2NAVI_LIB_PREBUILD_BIG, bg_main).
@@ -5932,6 +6037,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
         return warn_once(W_INDIRECT, "indirect dispatch arguments at %#llx are not backed or not aligned: skipped", (unsigned long long)d->ind);
     cb_res(ex);
     dummies_init();
+    if (aa_dispatch(ex, 0, 0, 0)) return;   // as in op_dispatch
     if (!native_tensor(ex)) { untranslated_dispatch_fallback(ex); return; }   // as in op_dispatch: never translate it
     int present;
     const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present, NULL, 0);

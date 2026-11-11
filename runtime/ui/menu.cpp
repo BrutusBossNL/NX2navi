@@ -990,6 +990,45 @@ static void row_upscaling(void) {
     // FSR 4 that failed in a row stays listed (it runs on this device) while FSR 3.1 serves: the row shows FSR 3.1, and
     // choosing FSR 4 again tries it anew
     if (e.kind == FSR4) vk_ffx4_retry();
+    // the Anti-aliasing row follows: DLSS and FSR 3.1 are its TAA, and leaving them leaves TAA for the game's SMAA
+    if (e.kind >= DLSS) opt_apply("NX2NAVI_AA", "taa");
+    else if (!strcmp(cfg_value("NX2NAVI_AA"), "taa")) opt_apply("NX2NAVI_AA", "game");
+}
+
+// Anti-aliasing (vk_aa.c NX2NAVI_AA): the game's own SMAA (the default), off, FXAA or SMAA in its place, or TAA, which is
+// DLSS or FSR 3.1 at the scene's size, the Upscaling row's temporal modes. TAA is listed where one of them runs: NVIDIA
+// DLAA where DLSS is offered, else FSR 3.1 Native AA where it loads. While a temporal mode is set (dlaa), the row shows
+// TAA, noted as the Upscaling row's when that mode also scales. Choosing TAA sets the upscaler to the native mode;
+// choosing another value turns the temporal upscaler off, with frame generation, which needs it, as the Upscaling row
+// does for bilinear and FSR 1, and the picture is then fitted to the window as that row had it.
+static void row_aa(void) {
+    enum { GAME, OFF, FXAA, SMAA, TAA };
+    static const char *const values[] = {"game", "off", "fxaa", "smaa", "taa"};
+    const bool dlss = dlss_offered(), fsr = vk_ffx_available(), temporal = cfg_bool("NX2NAVI_DLAA");
+    const bool fsr_set = !strcmp(cfg_value("NX2NAVI_TAA"), "fsr3");
+    const char *names[5] = {menu_text(UI_MENU_AA_GAME), menu_text(UI_MENU_FRAMEGEN_OFF), menu_text(UI_MENU_AA_FXAA),
+                            menu_text(UI_MENU_AA_SMAA), nullptr};
+    int n = 4;
+    if (dlss || fsr || temporal)
+        names[n++] = menu_text((temporal ? !fsr_set : dlss) ? UI_MENU_AA_TAA_DLSS : UI_MENU_AA_TAA_FSR);
+    int cur = GAME;
+    if (temporal) cur = TAA;
+    else
+        for (int i = 0; i < 4; i++)
+            if (!strcmp(cfg_value("NX2NAVI_AA"), values[i])) cur = i;
+    const char *note = temporal && strcmp(cfg_value("NX2NAVI_DLSS"), "dlaa") ? menu_text(UI_MENU_AA_UPSCALER) : nullptr;
+    int nv = opt_choice_index("NX2NAVI_AA", UI_MENU_AA, names, n, cur, GAME, UI_MENU_AA_DESC, note);
+    if (nv < 0 || nv >= n || nv == cur) return;
+    if (nv == TAA) {
+        opt_apply("NX2NAVI_DLAA", "1");
+        opt_apply("NX2NAVI_DLSS", "dlaa");
+        opt_apply("NX2NAVI_TAA", dlss ? "dlss" : "fsr3");
+        if (!dlss) opt_apply("NX2NAVI_FSR4", "0");
+    } else if (temporal) {
+        opt_apply("NX2NAVI_DLAA", "0");
+        opt_apply("NX2NAVI_FRAMEGEN", "off");
+    }
+    opt_apply("NX2NAVI_AA", values[nv]);
 }
 
 // Under the HDR value: "after restart" when what is set waits for one (the game's own HDR, to or from it:
@@ -1223,6 +1262,7 @@ static void tab_screen(float scale) {
     if (wide_available()) opt_choice("NX2NAVI_GAME_ASPECT", UI_MENU_GAME_ASPECT, wide, 4, UI_MENU_GAME_ASPECT_DESC);
     if (wide_available()) row_resolution();
     row_upscaling();
+    row_aa();
     row_framegen();
     row_hdr();
     // The sharpening runs under FSR 1 (vk_fsr.c vk_fsr_record, RCAS) and FSR 3.1 (vk_ffx.cpp, its own RCAS); with

@@ -280,6 +280,19 @@ int vk_exec_held_ready(void);         // ... and one of them can go on now (vk_b
 // sample DLSS's output vk_dlaa_swap_view in its place, so the game's scaling draw scales DLSS's picture.
 extern const VkTexImage *vk_dlaa_swap_img;
 extern VkImageView vk_dlaa_swap_view;
+// vk_aa.c, the anti-aliasing setting in place of the game's SMAA (vk_exec_draw.c aa_dispatch). vk_aa_mode: this frame's
+// replacement, VK_AA_GAME when the game's SMAA runs as it is. vk_aa_role: which of the game's SMAA passes a compute
+// program is, by the hash of its guest code. vk_aa_skip_ok: the edge and weight passes may be left out (the last
+// composition was replaced). vk_aa_record: the replacement of the composition into cb, from src (the composite, sampled)
+// into dst (the scene target's R32_UINT storage view) of w x h; 0 when it could not. vk_aa_composed: what became of the
+// composition this frame.
+enum { VK_AA_GAME, VK_AA_OFF, VK_AA_FXAA, VK_AA_SMAA };
+enum { VK_AA_ROLE_NONE, VK_AA_ROLE_EDGES, VK_AA_ROLE_WEIGHTS, VK_AA_ROLE_COMPOSE };
+int vk_aa_mode(void);
+int vk_aa_role(uint64_t guest_hash);
+int vk_aa_skip_ok(void);
+int vk_aa_record(VkCommandBuffer cb, int mode, VkImageView src, VkImageView dst, uint32_t w, uint32_t h);
+void vk_aa_composed(int ok);
 // vk_contact.c: a pass about to begin (its targets resolved, no pass open), and a dispatch or copy about to be recorded
 void vk_contact_pass_begin(VkExec *ex);
 void vk_contact_flush(VkExec *ex);
