@@ -283,9 +283,20 @@ pointers into either. A shader that reads through the table resolves nothing, so
 the copy-in: a part whose pipelines declare the table is marked at its draws and dispatches, and its prologue brings
 the shadow of every pool in the table up to date with the pages the CPU wrote and queues the same pages for those
 pools' VRAM mirrors (`vk_memory.c` `vk_mem_gpa_sync`). That copies the written pages of every CPU-visible pool in
-each such part, which the cost above does not include. What a shader stores through the table into a shadow copy does
-not come back to guest memory. `--probe-vkmem` checks the read: a shader follows the table to a word of a pool that is
-never bound, and must read `0x13579BDF` and, after a plain CPU write, `0x2468ACE0`. On Linux, run it for each backing:
+each such part, which the cost above does not include. What a shader stores through the table lands in the shadow copy
+and in the pool's VRAM mirror, and no binding names it, so nothing notes it as a GPU write: it does not come back to
+guest memory, and the next whole copy-in of its page (the CPU rewrites other words of the same records) puts guest
+memory's stale bytes back over it in both copies. In the runs measured so far that copy-in always came before the
+frame's stores, which does no harm. `NX2NAVI_SHADOW_TABLE_STORES=1` keeps the stores instead: the copy-ins then keep a
+hash of each page they write, a page whose shadow no longer matches its hash was stored into, keeps a base copy from
+then on like a page with a noted GPU write, and has its stores written back to guest memory at the fence of every
+submission that uses the table. It is off by default (`runtime/vk_memory.c`, "Pages a shader stores into", says why).
+`NX2NAVI_SHADOW_CHECK=1` logs every 60 frames how often a copy-in overwrote such a store and for which pools, how many
+write-backs landed on pages the CPU had written since their copy-in, and what the copy-ins cost and where they went.
+`--probe-vkmem` checks the read: a shader follows the table to a word of a pool that is never bound, and must read
+`0x13579BDF` and, after a plain CPU write, `0x2468ACE0`; and with `NX2NAVI_SHADOW_TABLE_STORES=1` the store: a GPU
+write into a shadow page that nothing notes must survive the CPU's writes of that page and reach guest memory. On
+Linux, run it for each backing:
 
 ```sh
 for shadow in 0 1; do for memory in import mirror; do

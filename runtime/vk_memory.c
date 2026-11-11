@@ -87,6 +87,16 @@ typedef struct PoolRec {
     // csb a power of two, page 0 an empty slot
     struct SBase { uint64_t page; uint8_t *base; } *sb;
     uint32_t nsb, csb;
+    // shadow_lock ("Pages a shader stores into through the device address table" below): a mark per page of
+    // [import_lo, import_hi), the hash of the shadow page as its last whole copy-in left it, 0 not known; the pages
+    // found stored into (guest addresses), and whether the pool is on the list of pools that have such pages
+    uint32_t *smark;
+    uint64_t *tpg;
+    uint32_t ntpg, ctpg;
+    uint8_t tlisted;
+    uint64_t t_over;                   // whole copy-ins that found such a store in the page they overwrote, so far
+    uint64_t t_over_log;               // t_over at the last log line
+    uint64_t s_in;                     // NX2NAVI_SHADOW_CHECK: bytes copied in whole since the last log line
     // NX2NAVI_TRACE=perf per-pool mirror traffic since the last mirror_pool_log, replay thread (the log reads and clears
     // them without a lock: a count lost to the race only blurs a diagnostic)
     uint64_t st_pages, st_flush, st_wb, st_merge;   // bytes: written pages and flush ranges copied up, GPU writes back
@@ -592,6 +602,7 @@ static void dirty_frame(uint64_t frame);
 static void mirror_log(uint64_t frame);
 static void mirror_pool_log(uint64_t frame);
 static void shadow_log(uint64_t frame);
+static int shadow_check_on(void);
 static int dead_pending(void);
 
 static void vram_log(uint64_t frame);
@@ -607,6 +618,8 @@ void vk_mem_census(uint64_t frame) {
     if ((rt_trace & RT_TRACE_PERF) && !vk_mirror_on) dirty_frame(frame);
     if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
         mirror_log(frame), shadow_log(frame);   // mirror_log also logs the write-watch line
+    else if (shadow_check_on() && frame % 60 == 0)
+        shadow_log(frame);   // NX2NAVI_SHADOW_CHECK: the shadow lines at that rate without the perf trace
     if (frame == 1200) {   // loading is over: the first window starts here
         for (int c = 0; c < VK_MCLS_N; c++)
             for (int u = 0; u < VK_MUSE_N; u++) plat_xchg64(&traffic[c][u], 0);
@@ -1030,6 +1043,46 @@ static int query_stamp(uint64_t lo, uint64_t hi, uint32_t g) {
 //   GPU's when the fence does. Whole-range copies both ways lost the CPU's bytes: Ocarina writes a lighting parameter
 //   into a buffer whose binding its compute passes write every frame, the GPU only ever read zero there, the lighting
 //   coefficients and then the volumetric fog came out NaN, and the fog pass drew the 3D scene black.
+// - The game must not get ahead of the write-backs. With an import the GPU's bytes are in guest memory when the GPU
+//   has stored them; here they get there in a completion callback, after the fence. A CPU write that should follow
+//   them and lands before that callback is overtaken: the write-back puts the GPU's older bytes over it and moves the
+//   base copy, and a rewrite with the base copy's value (a reset to zero) is no difference at any time. So the wait
+//   after a frame's first submission covers the write-backs with shadow storage (vk_sync.c "the executed timeline",
+//   which tells what the game rewrites there and what a frame looked like without it).
+// - Pages a shader stores into through the device address table (vk_gpa.c): the store goes to the pool's VRAM mirror
+//   and to its twin, which here is the shadow, not guest memory. No binding names the range, so nothing notes it
+//   (vk_mem_gpu_pending): the page has no base copy and guest memory never gets the bytes. The game's culling passes
+//   store counts and records this way into pages whose other words the CPU rewrites. For one such page P, a word X the
+//   shaders store and a word Y the CPU writes:
+//     part A (the pass that stores): the CPU wrote Y, so A's prologue copies P in whole (shadow_copy) and queues it
+//       for the mirror (mirror_sync). X in the shadow and in the mirror is now guest memory's X, which no store ever
+//       reached. A runs and stores X = v into both.
+//     part B (a later part that reads X through the table), the CPU has not written P since A's write-watch snapshot:
+//       B's prologue leaves P alone and its draws read v.
+//     part B, the CPU has written Y again between the two snapshots: B's prologue copies P in whole and uploads it, X
+//       is guest memory's stale word again in both copies, and the draws read that.
+//   An import does not have the fault: its twin is guest memory, and a page copied up from there holds the store.
+//   Measured (NX2NAVI_SHADOW_CHECK, a standing run outdoors, RTX 5090 with NX2NAVI_SHADOW=1, 2026-11-10): the stores
+//   go into one page each of ten pools of 20 and 44 KiB, and whole copy-ins overwrite one exactly four times a frame
+//   (240 in every 60 frames): part A's case, the copy that precedes the frame's stores, which does no harm. Part B's
+//   second case would add to the four and was not seen in 1,800 frames; nothing proves it cannot happen where the
+//   frame's timing differs.
+//   NX2NAVI_SHADOW_TABLE_STORES=1 keeps the stores. The pages are found by their content: each whole copy-in leaves a
+//   hash of the page it wrote (smark), and the next one hashes the shadow page first. A different hash means something
+//   stored into the shadow in between, and with no base copy on the page that was a store through the table. That
+//   copy-in still overwrites the store (nothing tells its bytes from the CPU's), and from then on the page keeps a
+//   base copy: copy-ins take the CPU's bytes only, and the fence of every submission with a part that uses the table
+//   writes the stored bytes of all such pages back to guest memory (table_wb_cb), as the fence of a noted write does.
+//   Guest memory needs them: a word the CPU resets each frame to the value it had before the stores would otherwise
+//   never differ from its base, and the reset would never reach the GPU.
+//   It is off by default, for three reasons. The fault it removes was not seen. Its hashes cost 1.8 ms a frame of
+//   the replay there (copy_marked). And it puts these pages under the rule of the bullet above: a count the CPU
+//   resets before that write-back has landed keeps counting from its old value, where the whole copy-in of today
+//   resets it every time; whether the game resets any of these words from the CPU is not known.
+// NX2NAVI_SHADOW_CHECK=1 counts, with the shadow line and at its rate every 60 frames (shadow_table_log): the whole
+// copy-ins that overwrote a store through the table, per pool; the write-backs that moved bytes into a page the CPU
+// had written since its copy-in (cpu_wrote_since); the bytes both sides changed since their base copy (taken from the
+// CPU at a copy-in, from the GPU at a fence); what the copy-ins cost by kind.
 // NX2NAVI_SHADOW=1/0 forces the mode on or off; the default is on for Linux and Wine.
 #define SB_PAGE 4096ull
 static PlatMutex shadow_lock = PLAT_MUTEX_INIT;   // after pool_lock; before gen_lock
@@ -1041,6 +1094,22 @@ static uint64_t s_syncs, s_copied, s_queries, s_untracked, s_wb_bytes, s_ticks; 
 static uint64_t s_wb_seen, s_wb_ticks;            // shadow_lock: bytes the fence write-backs compared, their time
 static uint64_t s_q_ticks;                        // shadow_lock: the copy-ins' write-watch queries
 static int wb_no_reup(void);
+// Pages a shader stores into through the device address table. The two switches are read in mirror_mode.
+static int s_learn;                               // NX2NAVI_SHADOW_TABLE_STORES: such pages get a base copy and a write-back
+static int s_check;                               // NX2NAVI_SHADOW_CHECK: the counts below marked "check"
+static PoolRec **tpools;                          // shadow_lock: the pools that have such pages
+static int ntpools, ctpools;
+static uint64_t s_tab_pages;                      // shadow_lock: such pages, all pools
+// shadow_lock, since the last log:
+static uint64_t s_tab_over;                       // whole copy-ins that overwrote a store through the table
+static uint64_t s_tab_wb, s_tab_wb_seen, s_tab_wb_ticks, s_tab_wb_jobs;   // table_wb_cb: bytes moved and compared, time, runs
+static uint64_t s_marked, s_mark_ticks;           // pages copied in whole with a mark; check: the time of those copies
+static uint64_t s_plain_ticks;                    // check: the time of the whole copies made without marks
+static uint64_t s_both_cpu, s_both_gpu;           // check: bytes both sides changed, taken from the CPU / from the GPU
+static uint64_t s_in_merge, s_in_nomirror;        // check: bytes copied in by merge_page; whole, into pools without a mirror
+static uint64_t s_gpa_ticks, s_gpa_syncs;         // vk_mem_gpa_sync: its time (part of s_ticks) and its runs
+static uint64_t s_t_over_all;                     // shadow_lock: s_tab_over since the start
+static uint64_t s_late_pages, s_late_bytes;       // shadow_lock, check: write-backs into pages the CPU wrote since their copy-in
 
 static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     r->import_lo = addr & ~0xfffull;
@@ -1184,12 +1253,91 @@ static uint64_t merge_page(uint8_t *dst, const uint8_t *src, uint8_t *b, uint64_
     return moved;
 }
 
+// ---- pages a shader stores into through the device address table ("shadow storage" above). shadow_lock held.
+
+// The mark of a 4 KiB page: a hash of its bytes, never 0. Four sums that do not wait for each other.
+static uint32_t page_mark(const uint8_t *p) {
+    uint64_t h[4] = {0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
+    for (uint64_t i = 0; i < SB_PAGE; i += 32) {
+        uint64_t w[4];
+        memcpy(w, p + i, 32);
+        for (int k = 0; k < 4; k++) {
+            h[k] = (h[k] ^ w[k]) * 0xFF51AFD7ED558CCDull;
+            h[k] = h[k] << 29 | h[k] >> 35;
+        }
+    }
+    uint64_t x = (h[0] ^ h[1] << 13 ^ h[2] << 27 ^ h[3] << 41 ^ h[1] >> 51 ^ h[2] >> 37 ^ h[3] >> 23) * 0xC4CEB9FE1A85EC53ull;
+    uint32_t m = (uint32_t)(x >> 32);
+    return m ? m : 1;
+}
+
+// Guest page pg of r was stored into through the table: it keeps a base copy from here on, taken from the shadow as
+// the whole copy-in just left it (guest memory's bytes), and table_wb_cb writes its stores back.
+static void table_page_add(PoolRec *r, uint64_t pg) {
+    sbase_make(r, pg);
+    if (r->ntpg == r->ctpg) {
+        uint32_t cap = r->ctpg ? r->ctpg * 2 : 16;
+        uint64_t *t = realloc(r->tpg, cap * sizeof *t);
+        if (!t) rt_fatal("vk: out of memory for the shadow's table pages");
+        r->tpg = t, r->ctpg = cap;
+    }
+    r->tpg[r->ntpg++] = pg;
+    s_tab_pages++;
+    if (r->tlisted) return;
+    if (ntpools == ctpools) grow((void **)&tpools, &ctpools, sizeof *tpools);
+    tpools[ntpools++] = r;
+    r->tlisted = 1;
+}
+
+// NX2NAVI_SHADOW_CHECK: the bytes of [0, n) that both sides changed since the base copy b and that now differ, which a
+// merge of src into dst is about to settle in src's favour.
+static uint64_t both_changed(const uint8_t *dst, const uint8_t *src, const uint8_t *b, uint64_t n) {
+    uint64_t k = 0;
+    for (uint64_t i = 0; i < n; i++) k += (src[i] != b[i]) & (dst[i] != b[i]) & (dst[i] != src[i]);
+    return k;
+}
+
+// Copies the whole guest pages [a, e) of r into its shadow, none of which has a base copy. Each page's mark tells
+// whether the shadow page still holds what the last such copy left: if not, a shader stored into it through the table
+// meanwhile, and this copy overwrites that store ("Pages a shader stores into" above says why it cannot be kept, and
+// what the page gets from here on).
+// Only with NX2NAVI_SHADOW_TABLE_STORES or NX2NAVI_SHADOW_CHECK (shadow_copy). A mark is two hashes of the page, one
+// of them of bytes the copy would not have read: outdoors, where 2,400 pages a frame are copied in whole, the marks
+// cost 1.8 ms a frame of the replay (3.09 against 1.32 ms of copy-ins, 67 against 75 fps, RTX 5090 with
+// NX2NAVI_SHADOW=1, 2026-11-10).
+static void copy_marked(PoolRec *r, uint64_t a, uint64_t e) {
+    if (!r->smark) {
+        r->smark = calloc((r->import_hi - r->import_lo) / SB_PAGE, sizeof *r->smark);
+        if (!r->smark) rt_fatal("vk: out of memory for the shadow's page marks");
+    }
+    for (uint64_t pg = a; pg < e; pg += SB_PAGE) {
+        uint8_t *s = r->smap + (pg - r->import_lo);
+        uint32_t *m = &r->smark[(pg - r->import_lo) / SB_PAGE];
+        int stored = *m && page_mark(s) != *m;
+        memcpy(s, (const void *)(uintptr_t)pg, SB_PAGE);
+        if (stored) {
+            s_tab_over++, s_t_over_all++, r->t_over++;
+            if (s_learn) {   // merged from now on: its mark is not read again
+                table_page_add(r, pg);
+                continue;
+            }
+        }
+        *m = page_mark(s);   // of the shadow, not of guest memory, which the CPU may be writing
+    }
+    s_marked += (e - a) / SB_PAGE;
+}
+
 // vk_pool_fini, after the pool left the index: off the touched list before its record goes.
 static void shadow_forget(PoolRec *r) {
     plat_mutex_lock(&shadow_lock);
     for (int i = 0; i < nstouch; i++)
         if (stouch[i] == r) { stouch[i] = stouch[--nstouch]; break; }
+    for (int i = 0; r->tlisted && i < ntpools; i++)
+        if (tpools[i] == r) { tpools[i] = tpools[--ntpools]; break; }
     s_live_n--, s_live_bytes -= (int64_t)(r->import_hi - r->import_lo);
+    s_tab_pages -= r->ntpg;
+    free(r->tpg), free(r->smark);
+    r->tpg = NULL, r->smark = NULL, r->ntpg = r->ctpg = 0, r->tlisted = 0;
     sbase_free(r);
     plat_mutex_unlock(&shadow_lock);
 }
@@ -1205,12 +1353,25 @@ static void shadow_copy(PoolRec *r, uint64_t a, uint64_t b) {
             if (e > b) e = b;
             if (e == a) {   // a starts on such a page: its part of [a, b)
                 uint64_t pg = a & ~(SB_PAGE - 1), pe = pg + SB_PAGE < b ? pg + SB_PAGE : b;
-                s_copied += merge_page(r->smap + (a - r->import_lo), (const uint8_t *)(uintptr_t)a, base + (a - pg), pe - a);
+                uint8_t *s = r->smap + (a - r->import_lo);
+                if (s_check) s_both_cpu += both_changed(s, (const uint8_t *)(uintptr_t)a, base + (a - pg), pe - a);
+                uint64_t n = merge_page(s, (const uint8_t *)(uintptr_t)a, base + (a - pg), pe - a);
+                s_copied += n, s_in_merge += n;
                 a = pe;
                 continue;
             }
         }
-        memcpy(r->smap + (a - r->import_lo), (const void *)(uintptr_t)a, e - a);
+        // The copies are of whole pages (shadow_sync_pool); the marks need the device address table, whose stores
+        // they find, and one of the two switches.
+        uint64_t t0 = s_check ? qpc() : 0;
+        int marks = (s_learn || s_check) && r->gpa_rec && !((a | e) & (SB_PAGE - 1));
+        if (marks) copy_marked(r, a, e);
+        else memcpy(r->smap + (a - r->import_lo), (const void *)(uintptr_t)a, e - a);
+        if (s_check) {
+            *(marks ? &s_mark_ticks : &s_plain_ticks) += qpc() - t0;
+            if (r->mstate != MS_ON) s_in_nomirror += e - a;
+            r->s_in += e - a;
+        }
         s_copied += e - a;
         a = e;
     }
@@ -1334,6 +1495,18 @@ static int shadow_bulk_write(void) {
     return on;
 }
 
+// NX2NAVI_SHADOW_CHECK: the CPU wrote guest page pg after the copy-in that sgen stands for: a write-watch snapshot
+// stamped it later, or its write-watch bit is set and no snapshot has read it yet. A write-back that moves bytes into
+// such a page may have come after a CPU write it should have come before ("The game must not get ahead of the
+// write-backs" above); a page of which the CPU wrote other bytes counts too.
+// No gen_lock, as lazy_clean: a stamp that lands meanwhile only blurs a count.
+static int cpu_wrote_since(uint64_t pg, uint32_t sgen) {
+    const uint32_t *ch = __atomic_load_n(&cgen_chunk[pg >> GEN_CHUNK_SHIFT], __ATOMIC_ACQUIRE);
+    if (ch && __atomic_load_n(&ch[(pg >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)], __ATOMIC_RELAXED) > sgen) return 1;
+    uint64_t p[1], n = mem_written_peek(pg, SB_PAGE, p, 1);
+    return n && n != UINT64_MAX;
+}
+
 // Completion thread: the GPU's bytes of [addr, addr+size) from the shadow into guest memory (merge_page against the
 // base copies; a page without one whole). Returns the bytes moved.
 static uint64_t shadow_write_back(uint64_t addr, uint64_t size) {
@@ -1350,8 +1523,12 @@ static uint64_t shadow_write_back(uint64_t addr, uint64_t size) {
         for (uint64_t a = addr, end = addr + size; a < end;) {
             uint64_t pg = a & ~(SB_PAGE - 1), pe = pg + SB_PAGE < end ? pg + SB_PAGE : end;
             uint8_t *base = sbase_find(r, pg), *s = r->smap + (a - r->import_lo);
-            if (base) moved += merge_page((uint8_t *)(uintptr_t)a, s, base + (a - pg), pe - a);
+            if (base && s_check) s_both_gpu += both_changed((const uint8_t *)(uintptr_t)a, s, base + (a - pg), pe - a);
+            int late = base && s_check && cpu_wrote_since(pg, r->sgen);   // before the merge's own stores into the page
+            uint64_t n = 0;
+            if (base) moved += n = merge_page((uint8_t *)(uintptr_t)a, s, base + (a - pg), pe - a);
             else memcpy((void *)(uintptr_t)a, s, pe - a), moved += pe - a;   // a write never noted as pending
+            if (late && n) s_late_pages++, s_late_bytes += n;
             a = pe;
         }
         s_wb_bytes += moved, s_wb_seen += size, s_wb_ticks += qpc() - t0;
@@ -1359,6 +1536,47 @@ static uint64_t shadow_write_back(uint64_t addr, uint64_t size) {
     plat_mutex_unlock(&shadow_lock);
     plat_mutex_unlock_shared(&pool_lock);
     return moved;
+}
+
+// Completion thread, at the fence of a submission with a part that uses the device address table (vk_mem_gpa_sync):
+// what the shaders stored into the pages found so far ("Pages a shader stores into" above) goes from the shadow into
+// guest memory, the bytes that differ from the page's base copy. A page whose shadow equals its base is passed over
+// before guest memory is touched, so a frozen region stays frozen. The pages that changed are stamped as a mirror's
+// write-back is (swb_run): the stores are in the mirror already.
+static void table_wb_cb(void *arg) {
+    (void)arg;
+    static uint64_t *wrote;   // this thread only: the pages that changed
+    static int cwrote;
+    int nwrote = 0, bulk = shadow_bulk_write(), back = wb_no_reup();   // before the locks: their first calls log
+    uint64_t t0 = qpc(), moved = 0, seen = 0;
+    plat_mutex_lock(&shadow_lock);
+    for (int i = 0; i < ntpools; i++) {
+        PoolRec *r = tpools[i];
+        for (uint32_t k = 0; k < r->ntpg; k++) {
+            uint64_t pg = r->tpg[k];
+            uint8_t *base = sbase_find(r, pg), *s = r->smap + (pg - r->import_lo);
+            seen += SB_PAGE;
+            if (!base || !memcmp(s, base, SB_PAGE)) continue;
+            if (mem_frozen(pg)) mem_thaw(pg, SB_PAGE);
+            if (bulk) plat_mem_prepare_write(pg, SB_PAGE);
+            if (s_check) s_both_gpu += both_changed((const uint8_t *)(uintptr_t)pg, s, base, SB_PAGE);
+            uint64_t n = merge_page((uint8_t *)(uintptr_t)pg, s, base, SB_PAGE);
+            if (!n) continue;   // the store came after the compare above: the next fence takes it
+            moved += n;
+            if (nvn_gpu_only(pg)) continue;
+            if (nwrote == cwrote) grow((void **)&wrote, &cwrote, sizeof *wrote);
+            wrote[nwrote++] = pg;
+        }
+    }
+    s_tab_wb += moved, s_tab_wb_seen += seen, s_tab_wb_jobs++;
+    if (nwrote) {
+        plat_mutex_lock(&gen_lock);
+        uint32_t g = ++gen_now;
+        for (int i = 0; i < nwrote; i++) stamp_page_as(wrote[i], g, back);
+        plat_mutex_unlock(&gen_lock);
+    }
+    s_tab_wb_ticks += qpc() - t0;
+    plat_mutex_unlock(&shadow_lock);
 }
 
 static void gpu_written(uint64_t addr, uint64_t size, int back) {
@@ -1398,8 +1616,92 @@ int vk_mem_mirrored(uint64_t addr, uint64_t size) {
     return r->mstate == MS_ON && addr >= r->import_lo && addr + size <= r->import_hi;
 }
 
+// shadow_lock held, with the shadow line: the pages a shader stores into through the device address table ("shadow
+// storage" above), and with NX2NAVI_SHADOW_CHECK (pool_lock held shared too, for the index) what the copy-ins did and
+// cost and the pools whose stores were overwritten most since the last line.
+#define TABLE_LOG_TOP 6
+static void shadow_table_log(uint64_t frame) {
+    rt_log("mem: shadow table stores at frame %llu (%s): %llu pages in %d pools keep a base copy; since the last: %llu whole "
+           "copy-ins overwrote a store (%llu so far), %llu pages copied in with a mark; written back %.3f MiB of %.1f "
+           "compared in %llu fence jobs, %.2f ms",
+           (unsigned long long)frame, s_learn ? "NX2NAVI_SHADOW_TABLE_STORES=1: kept from the second copy-in on" : "overwritten",
+           (unsigned long long)s_tab_pages, ntpools, (unsigned long long)s_tab_over, (unsigned long long)s_t_over_all,
+           (unsigned long long)s_marked, s_tab_wb / 1048576.0, s_tab_wb_seen / 1048576.0, (unsigned long long)s_tab_wb_jobs,
+           qpc_ms(s_tab_wb_ticks));
+    if (s_check) {
+        rt_log("mem: shadow check at frame %llu: copied in whole %.2f ms with marks, %.2f ms without; %.1f MiB by merge, "
+               "%.1f MiB whole into pools without a mirror; %llu table syncs %.2f ms; bytes both sides changed: %llu taken "
+               "from the CPU at a copy-in, %llu from the GPU at a fence; write-backs into %llu pages the CPU had written "
+               "since their copy-in, %llu bytes",
+               (unsigned long long)frame, qpc_ms(s_mark_ticks), qpc_ms(s_plain_ticks), s_in_merge / 1048576.0,
+               s_in_nomirror / 1048576.0, (unsigned long long)s_gpa_syncs, qpc_ms(s_gpa_ticks),
+               (unsigned long long)s_both_cpu, (unsigned long long)s_both_gpu, (unsigned long long)s_late_pages,
+               (unsigned long long)s_late_bytes);
+        PoolRec *top[TABLE_LOG_TOP];
+        int nt = 0;
+        for (int i = 0; i < pool_index.n; i++) {
+            PoolRec *r = pool_index.e[i].buf;
+            uint64_t d = r->kind == POOL_IMPORT ? r->t_over - r->t_over_log : 0;
+            int k = nt;
+            while (k > 0 && top[k - 1]->t_over - top[k - 1]->t_over_log < d) k--;
+            if (!d || k >= TABLE_LOG_TOP) continue;
+            int last = nt < TABLE_LOG_TOP ? nt : TABLE_LOG_TOP - 1;
+            memmove(top + k + 1, top + k, (size_t)(last - k) * sizeof *top);
+            top[k] = r;
+            if (nt < TABLE_LOG_TOP) nt++;
+        }
+        for (int i = 0; i < nt; i++) {
+            char f[160];
+            flag_names(top[i]->flags, f, sizeof f);
+            rt_log("mem: shadow check:   pool %#llx+%#llx (%s, %s): %llu whole copy-ins overwrote a store (%llu so far), "
+                   "%u of its pages keep a base copy for it",
+                   (unsigned long long)top[i]->lo, (unsigned long long)top[i]->size, f,
+                   top[i]->mstate == MS_ON ? "mirrored" : "no mirror",
+                   (unsigned long long)(top[i]->t_over - top[i]->t_over_log), (unsigned long long)top[i]->t_over, top[i]->ntpg);
+        }
+        // the pools that took the most whole pages, and what all pools of each flag set took
+        struct { uint32_t flags; uint64_t bytes; int n; } cls[16];
+        int ncls = 0;
+        nt = 0;
+        for (int i = 0; i < pool_index.n; i++) {
+            PoolRec *r = pool_index.e[i].buf;
+            if (r->kind != POOL_IMPORT || !r->s_in) continue;
+            int c = 0, k = nt;
+            while (c < ncls && cls[c].flags != r->flags) c++;
+            if (c == ncls && ncls < 16) cls[ncls++] = (__typeof__(cls[0])){r->flags, 0, 0};
+            if (c < ncls) cls[c].bytes += r->s_in, cls[c].n++;
+            while (k > 0 && top[k - 1]->s_in < r->s_in) k--;
+            if (k >= TABLE_LOG_TOP) continue;
+            int last = nt < TABLE_LOG_TOP ? nt : TABLE_LOG_TOP - 1;
+            memmove(top + k + 1, top + k, (size_t)(last - k) * sizeof *top);
+            top[k] = r;
+            if (nt < TABLE_LOG_TOP) nt++;
+        }
+        for (int i = 0; i < ncls; i++) {
+            char f[160];
+            flag_names(cls[i].flags, f, sizeof f);
+            rt_log("mem: shadow check:   copied in whole into %d pools %s: %.2f MiB", cls[i].n, f, cls[i].bytes / 1048576.0);
+        }
+        for (int i = 0; i < nt; i++) {
+            char f[160];
+            flag_names(top[i]->flags, f, sizeof f);
+            rt_log("mem: shadow check:   pool %#llx+%#llx (%s, %s, %s): %.2f MiB copied in whole",
+                   (unsigned long long)top[i]->lo, (unsigned long long)top[i]->size, f,
+                   top[i]->mstate == MS_ON ? "mirrored" : "no mirror", top[i]->used ? "resolved by the GPU" : "never resolved",
+                   top[i]->s_in / 1048576.0);
+        }
+        for (int i = 0; i < pool_index.n; i++) {
+            PoolRec *r = pool_index.e[i].buf;
+            if (r->kind == POOL_IMPORT) r->t_over_log = r->t_over, r->s_in = 0;
+        }
+    }
+    s_tab_over = s_tab_wb = s_tab_wb_seen = s_tab_wb_ticks = s_tab_wb_jobs = s_marked = s_mark_ticks = s_plain_ticks = 0;
+    s_both_cpu = s_both_gpu = s_in_merge = s_in_nomirror = s_gpa_ticks = s_gpa_syncs = s_late_pages = s_late_bytes = 0;
+}
+
 static void shadow_log(uint64_t frame) {
     if (!shadow_on) return;
+    if (s_check) plat_mutex_lock_shared(&pool_lock);   // before shadow_lock: shadow_table_log walks the index
     plat_mutex_lock(&shadow_lock);
     rt_log("mem: shadow at frame %llu: %lld pools %.1f MiB; since the last: %llu pool syncs, %llu queries, %.1f MiB "
            "copied in (%llu untracked), %.2f ms (queries %.2f); %.1f MiB written back of %.1f MiB the GPU may have written, %.2f ms; %llu "
@@ -1408,7 +1710,9 @@ static void shadow_log(uint64_t frame) {
            (unsigned long long)s_queries, s_copied / 1048576.0, (unsigned long long)s_untracked, qpc_ms(s_ticks),
            qpc_ms(s_q_ticks), s_wb_bytes / 1048576.0, s_wb_seen / 1048576.0, qpc_ms(s_wb_ticks), (unsigned long long)s_sb_pages);
     s_syncs = s_queries = s_copied = s_untracked = s_wb_bytes = s_ticks = s_wb_seen = s_wb_ticks = s_q_ticks = 0;
+    if (s_learn || s_check) shadow_table_log(frame);
     plat_mutex_unlock(&shadow_lock);
+    if (s_check) plat_mutex_unlock_shared(&pool_lock);
 }
 
 void vk_mem_dirty_submit(void) {
@@ -1657,6 +1961,14 @@ static void mirror_mode(int discrete) {
 #endif
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
                           sh && *sh ? " (NX2NAVI_SHADOW)" : "");
+    s_learn = shadow_on && rt_knob("SHADOW_TABLE_STORES", "0") == 1;
+    s_check = shadow_on && cfg_bool("NX2NAVI_SHADOW_CHECK");
+    if (shadow_on)
+        rt_log("mem: what shaders store through the device address table into a shadow copy %s "
+               "(NX2NAVI_SHADOW_TABLE_STORES)%s",
+               s_learn ? "is kept through the copy-ins and written back to guest memory, from the second copy-in of its page on"
+                       : "is overwritten by the next whole copy-in of its page",
+               s_check ? "; NX2NAVI_SHADOW_CHECK counts the overwrites" : "");
     rt_log("mem: mode %s (%s): %s", mode == 2 ? "verify" : mode ? "mirror" : "import", why,
            mode ? "pools used as buffers get a device-local mirror" : "every CPU-visible pool is imported host memory");
     // Import is the integrated-GPU mode. On a discrete card every draw reads the pools over PCIe (the comment above
@@ -2071,6 +2383,8 @@ static void mirror_sync(PoolRec *r) {
 static int gpa_part_used;   // replay thread: the part being recorded uses the table
 void vk_mem_gpa_use(void) { gpa_part_used = 1; }
 int vk_mem_shadow_storage(void) { return shadow_on; }
+static int shadow_check_on(void) { return s_check; }
+int vk_mem_shadow_table_stores(void) { return s_learn; }
 
 static int gpa_shadow_pool(const PoolRec *r) { return r->kind == POOL_IMPORT && r->gpa_rec && r->smap; }
 
@@ -2090,10 +2404,18 @@ static int shadow_pool_clean(const PoolRec *r, uint32_t epoch, int cpu) {
     return 1;
 }
 
-void vk_mem_gpa_sync(void) {
+void vk_mem_gpa_sync(uint64_t fence) {
     if (!gpa_part_used) return;
     gpa_part_used = 0;
     if (!shadow_on) return;
+    // What this part's shaders store through the table goes back to guest memory at the submission's fence, once a
+    // submission however many of its parts use the table (table_wb_cb). Asked before the copy-ins below: the part
+    // whose copy-ins find the first such page leaves it to the next part that uses the table.
+    static uint64_t wb_fence;   // replay thread: the last fence that got the job
+    if (s_learn && fence && fence != wb_fence && __atomic_load_n(&ntpools, __ATOMIC_RELAXED)) {
+        wb_fence = fence;
+        vk_completion_add(fence, table_wb_cb, NULL);
+    }
     uint64_t t0 = qpc(), run0 = 0, run1 = 0;
     uint32_t epoch = vk_texture_epoch();
     int cpu = vk_mirror_on && wb_no_reup(), have = 0;   // before the locks: its first call logs
@@ -2126,6 +2448,7 @@ void vk_mem_gpa_sync(void) {
         PoolRec *r = pool_index.e[i].buf;
         if (gpa_shadow_pool(r) && r->mstate == MS_ON && r->acc_sub != msub) mirror_sync(r);
     }
+    s_gpa_ticks += qpc() - t0, s_gpa_syncs++;
     s_ticks += qpc() - t0;
     plat_mutex_unlock(&shadow_lock);
     plat_mutex_unlock_shared(&pool_lock);

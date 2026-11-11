@@ -520,6 +520,100 @@ done:
     return bad;
 }
 
+// test_table_store: a submission whose one part uses the device address table and records nothing else, as a part of
+// the replay with such a shader ends: its prologue brings every pool of the table up to date (vk_mem_gpa_sync).
+static void table_part_record(VkCommandBuffer cb, void *arg) {
+    (void)arg;
+    vk_texture_new_submit();
+    vk_mem_mirror_begin();
+    vk_mem_gpa_use();
+    vk_mem_mirror_end(cb, vk_sync_issued() + 1);
+}
+
+static int table_part(void) {
+    uint64_t fence = vk_sync_probe_submit(table_part_record, NULL);
+    return vk_sync_fence_wait(fence, 5000000000ull);   // its completion callbacks have run when the wait returns
+}
+
+// Shadow storage: what a shader stores through the device address table lands in the pool's shadow copy and nothing
+// notes it (vk_memory.c "Pages a shader stores into"). A GPU copy into the shadow buffer that is not noted stands in
+// for the store. Word X of a page takes the stores, the CPU rewrites word Y of the same page before every part:
+// - the store made after the page's first whole copy-in is overwritten by the second, which finds it (nothing can
+//   keep it);
+// - every later store stays in the shadow through the copy-ins that bring Y, and is in guest memory after the fence;
+// - a CPU write of X after that reaches the shadow.
+static int test_table_store(uint8_t *guest) {
+    VkCtx *c = vk_ctx();
+    if (!vk_mem_shadow_storage() || !vk_gpa_wanted() || !vk_mem_shadow_table_stores()) {
+        printf("probe-vkmem: stores through the device address table into a shadow copy: skipped (%s)\n",
+               !vk_mem_shadow_storage() ? "no shadow storage" : !vk_gpa_wanted() ? "no device address table"
+                                                                                   : "NX2NAVI_SHADOW_TABLE_STORES is not 1");
+        return 0;
+    }
+    pool_t pool = {.magic = NVN_POOL_MAGIC, .flags = 0x24, .mem = guest + 0xB00000, .size = 0x10000,
+                   .game_mem = guest + 0xB00000};
+    volatile uint32_t *x = (volatile uint32_t *)(pool.mem + 0x200), *y = (volatile uint32_t *)(pool.mem + 0x100);
+    *x = 0, *y = 1;
+    GCHECK(vk_gpa_on() && vk_pool_init(&pool), "a CPU-visible pool in the device address table");
+    VkBuffer sb;
+    VmaAllocation sa;
+    volatile uint32_t *s = vk_staging(0x1000, &sb, &sa);
+    VkMemSpan sp;
+    int bad = 1;
+#define TS_CHECK(cond, ...) do { if (!(cond)) { printf("probe-vkmem: FAIL table store: "); printf(__VA_ARGS__); printf("\n"); goto done; } } while (0)
+#define TS_STORE(v)                                                                                                    \
+    do {                                                                                                               \
+        s[0] = (v);                                                                                                    \
+        vmaFlushAllocation(c->vma, sa, 0, VK_WHOLE_SIZE);                                                              \
+        TS_CHECK(vk_mem_lookup((uintptr_t)x, 4, &sp) && sp.buffer, "the pool has no buffer");                          \
+        copy_wait(sb, 0, sp.buffer, sp.offset, 4);                                                                     \
+    } while (0)
+#define TS_SHADOW(off, into)                                                                                           \
+    do {                                                                                                               \
+        TS_CHECK(vk_mem_lookup((uintptr_t)pool.mem + (off), 4, &sp) && sp.buffer, "the pool has no buffer");           \
+        copy_wait(sp.buffer, sp.offset, sb, 16, 4);                                                                    \
+        vmaInvalidateAllocation(c->vma, sa, 0, VK_WHOLE_SIZE);                                                         \
+        (into) = s[4];                                                                                                 \
+    } while (0)
+    uint32_t sx, sy;
+    *y = 2;
+    TS_CHECK(table_part(), "fence timed out");          // the page's first whole copy-in: its mark
+    TS_STORE(0xAAAA0001u);
+    *y = 3;
+    TS_CHECK(table_part(), "fence timed out");          // finds the store, overwrites it, the page keeps a base copy
+    TS_SHADOW(0x200, sx);
+    TS_CHECK(sx == 0, "the copy-in that found the store left X %#010x in the shadow, expected guest memory's 0", sx);
+    TS_STORE(0xAAAA0002u);
+    *y = 4;
+    TS_CHECK(table_part(), "fence timed out");          // brings Y, keeps X; its fence writes X back
+    TS_SHADOW(0x200, sx);
+    TS_SHADOW(0x100, sy);
+    TS_CHECK(sx == 0xAAAA0002u && sy == 4, "after a CPU write of the page the shadow holds X %#010x Y %u, expected "
+             "0xaaaa0002 and 4", sx, sy);
+    TS_CHECK(*x == 0xAAAA0002u && *y == 4, "guest memory holds X %#010x Y %u after the fence, expected 0xaaaa0002 and 4",
+             (uint32_t)*x, (uint32_t)*y);
+    *x = 0;                                             // the CPU resets the stored word
+    TS_CHECK(table_part(), "fence timed out");
+    TS_SHADOW(0x200, sx);
+    TS_CHECK(sx == 0 && *x == 0, "after the CPU reset X the shadow holds %#010x and guest memory %#010x", sx, (uint32_t)*x);
+    TS_STORE(0xAAAA0003u);                              // and a store after the reset comes back as well
+    TS_CHECK(table_part(), "fence timed out");
+    TS_CHECK(*x == 0xAAAA0003u && *y == 4, "guest memory holds X %#010x Y %u after the second fence", (uint32_t)*x,
+             (uint32_t)*y);
+    g_gpu_checks += 5;
+    printf("probe-vkmem: a store into a shadow page that nothing notes survives the CPU's writes of that page, reaches "
+           "guest memory at the fence, and gives way to a CPU write of the same word\n");
+    bad = 0;
+done:
+    vk_sync_finish();
+    vmaDestroyBuffer(c->vma, sb, sa);
+    vk_pool_fini(&pool);
+#undef TS_CHECK
+#undef TS_STORE
+#undef TS_SHADOW
+    return bad;
+}
+
 // ReadFile into a watched page, buffered and unbuffered: timed, and whether write watch saw the kernel's write.
 static int test_readfile(uint8_t *dst) {
     char dir[PLAT_PATH_MAX], path[PLAT_PATH_MAX + 64];
@@ -917,7 +1011,7 @@ static int test_gpu(void) {
     vk_mem_stats(&st);
     GCHECK(!st.imported_pools && !st.physical_pools && !st.virtual_pools, "pools left after fini");
     g_gpu_checks += 2;
-    return test_gpa_read(h);
+    return test_gpa_read(h) || test_table_store(h);
 }
 
 int probe_vkmem(void) {

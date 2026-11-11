@@ -531,7 +531,7 @@ static CmdSlot *take_slot(VkCtx *c, uint64_t fence) {
 // First brings the shadow storage up to date with the CPU's writes, which needs no command buffer.
 static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
     vk_mem_shadow_sync();   // shadow storage: the CPU's writes go in before the part is submitted
-    vk_mem_gpa_sync();      // a part whose shaders read through the device address table never resolved the pools they reach
+    vk_mem_gpa_sync(fence);   // a part whose shaders read through the device address table never resolved the pools they reach
     vk_mem_lazy_part_end();   // what the part left in the mirror and has to write back after all joins the snapshots
     if (!vk_mem_mirror_pending()) return VK_NULL_HANDLE;
     int i = claim_slot(c, fence);   // before reading slots: the claim may move it
