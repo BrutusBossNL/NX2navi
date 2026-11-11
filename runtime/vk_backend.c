@@ -732,7 +732,24 @@ static void vk_be_guest_read(uint64_t addr, uint64_t size) {
 }
 // After a fence wait: the value is done, so its replay is too; a later submission the replay records meanwhile marks
 // its targets with a later fence, which write_back_small leaves alone. No drain.
+// The count of such waits that came back while event-ordered work was still held (vk_exec.c): a submission stopped at an
+// event wait returns its value with its remainder held for a later replay, so the game may take a wait for that value
+// as the whole submission done and reuse what the held part still reads. How often that happens decides whether the
+// value should be signalled only after the remainder (audit finding F-2-05). The count is unlocked: a diagnostic.
+static uint64_t synced_n, synced_held;
+static void synced_held_count(uint64_t fence) {
+    synced_n++;
+    int held = vk_exec_held();
+    if (!held) return;
+    synced_held++;
+    if (synced_held <= 10 || synced_held % 600 == 0)
+        rt_log("vk: a game's wait for %llu returned with %d event-ordered submission(s) still held (%llu of %llu such "
+               "waits so far)", (unsigned long long)fence, held, (unsigned long long)synced_held,
+               (unsigned long long)synced_n);
+}
+
 static void vk_be_cpu_synced(uint64_t fence) {
+    synced_held_count(fence);
     if (!vk_texture_small_dirty()) return;
     vk_sync_start();
     vk_present_drain();
