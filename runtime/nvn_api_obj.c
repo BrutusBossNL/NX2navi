@@ -866,7 +866,7 @@ NVN_API(nvnQueuePresentTexture) {
         rt_fatal("nvn: QueuePresentTexture of image %d on window %p", idx, (void *)o);
     nvn_call_note(1, (uintptr_t)arg_p(c, 0), 1);
     o->presents++;
-    nvn_submits_in_frame = 0;
+    __atomic_store_n(&nvn_submits_in_frame, 0, __ATOMIC_RELAXED);
     const tex_t *t = (const tex_t *)o->tex[idx];
     uint64_t period = present_period(o), now = kern_now_ns();
     uint64_t slot = now + pace(&o->pace, now, period);

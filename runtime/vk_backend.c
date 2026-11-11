@@ -616,7 +616,7 @@ static void vk_be_program_release(const prog_t *p) { replay_drain(DR_PROG_RELEAS
 // the value returned is the one the replay will signal.
 static uint64_t vk_be_submit(const uint64_t *handles, int n) {
     if (!gfx_replay_async()) {
-        vk_sub_in_frame = nvn_submits_in_frame;   // the front end counts it up after the submit returns
+        vk_sub_in_frame = __atomic_load_n(&nvn_submits_in_frame, __ATOMIC_RELAXED);   // the front end counts it up after the submit returns
         return submit_sync(handles, n);
     }
     vk_sync_start();
