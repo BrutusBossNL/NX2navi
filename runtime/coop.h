@@ -1,6 +1,6 @@
 // Co-op session layer: one host thread, "coop", owns a UDP socket to a relay (tools/coop_relay.py), keeps the player in a
 // room of up to 8 and carries the messages the players send each other (coop_proto.h: the wire format). It never holds a
-// virtual core and never touches game state: progress sync and the player ghosts are layers above this one, which send
+// virtual core and never touches game state: progress sync is a layer above this one, which send
 // with coop_send and receive with coop_on_message. The game's own nn::socket stays offline.
 //
 // Threads. Everything below the "process" heading may be called from any thread; the callbacks run on the coop thread

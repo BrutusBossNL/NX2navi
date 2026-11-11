@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "cfg_private.h"
 #include "coop_app.h"
 #include "discord_app.h"
 #include "host.h"
@@ -315,8 +316,7 @@ static const CfgMeta metas[] = {
 static int is_known(const char *key) {
     for (size_t i = 0; i < sizeof known / sizeof *known; i++)
         if (!strcmp(known[i], key)) return 1;
-    return !strncmp(key, "CHEAT_", 6)      // cheats.c and the cheat patch sets (tools/cheats.py)
-           || !strncmp(key, "RESTORE_", 8);   // restore.c: one key per restoration
+    return !strncmp(key, "CHEAT_", 6);   // cheats.c and the cheat patch sets (tools/cheats.py)
 }
 
 // The keys of the file's lines that are not settings of this version (add), lower-case, ", " between them, each once;
@@ -817,7 +817,6 @@ static const char *section_of(const char *key) {
     for (size_t i = 0; i < sizeof sections / sizeof *sections; i++)
         if (!strcmp(sections[i].key, key)) return sections[i].section;
     if (!strncmp(key, "CHEAT_", 6)) return "cheats";   // cheats.c: one key per cheat of the cheat file
-    if (!strncmp(key, "RESTORE_", 8)) return "restorations";   // restore.c: one key per restoration
     return NULL;
 }
 
@@ -1004,13 +1003,15 @@ static void log_file_settings(void) {
         char key[64];
         snprintf(key, sizeof key, "%s", entries[i].key);
         for (char *p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
-        size_t vl = strlen(entries[i].value);
+        // a co-op room's secret, the relay, the player's name: only that they are set (cfg_private.h)
+        const char *value = cfg_private_key(entries[i].key) && entries[i].value[0] ? CFG_PRIVATE_SHOWN : entries[i].value;
+        size_t vl = strlen(value);
         if (vl > 200) vl = 200;   // a long value (a list of mods) is cut: the line shows that the key is set
         if (k && k + strlen(key) + vl + 5 > 900) {
             rt_log("cfg: nx2navi.ini sets: %s", line);
             k = 0;
         }
-        k += (size_t)snprintf(line + k, sizeof line - k, "%s%s = %.*s", k ? ", " : "", key, (int)vl, entries[i].value);
+        k += (size_t)snprintf(line + k, sizeof line - k, "%s%s = %.*s", k ? ", " : "", key, (int)vl, value);
     }
     if (k) rt_log("cfg: nx2navi.ini sets: %s", line);
     if (n_unknown)

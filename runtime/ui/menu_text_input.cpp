@@ -1,5 +1,5 @@
-// The window's text input follows the menu's text fields (ui/menu.h menu_text_input_follow). Its own file, so that the
-// page test (tests/saves_page_check.cpp) runs the same switch the menu does without the menu's Vulkan side.
+// The window's text input follows the menu's text fields (ui/menu.h menu_text_input_follow). Its own file, so that a
+// page test can run the same switch the menu does without the menu's Vulkan side.
 #include "ui/menu.h"
 
 static int g_text_on;   // what the window was last told; off at start, as the window makes it

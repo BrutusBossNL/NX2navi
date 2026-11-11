@@ -8,6 +8,7 @@
 #endif
 
 #include "cfg.h"
+#include "cfg_private.h"
 #include "host.h"
 #include "platform/platform.h"
 #include "sysinfo.h"
@@ -54,15 +55,10 @@ static void put(Out *o, const char *fmt, ...) {
 
 // The co-op room's secret and the offer number made from it, the relay's address and the player's name stay out of a
 // text that ends up in bug reports: only whether they are set.
-static int private_setting(const char *key) {
-    static const char *const keys[] = {"COOP_ROOM", "COOP_SERVER", "COOP_NAME", "COOP_ACCEPT"};
-    for (size_t i = 0; i < sizeof keys / sizeof *keys; i++)
-        if (!strcmp(key, keys[i])) return 1;
-    return 0;
-}
+static int private_setting(const char *key) { return cfg_private_key(key); }   // cfg_private.h: one list for all
 
 static void put_setting(const char *key, const char *value, int from_env, void *ctx) {
-    if (private_setting(key)) value = "(set, not shown)";
+    if (private_setting(key)) value = CFG_PRIVATE_SHOWN;
     put(ctx, from_env ? "  NX2NAVI_%s=%s (environment)\n" : "  %s = %s\n", key, value);
 }
 

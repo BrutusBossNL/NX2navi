@@ -1,4 +1,4 @@
-// nx2navi.exe entry: reserves the guest address space, parses the command line and runs one mode.
+﻿// nx2navi.exe entry: reserves the guest address space, parses the command line and runs one mode.
 //
 //   nx2navi.exe [--exefs DIR] [--romfs DIR] [--profile DIR] [--audio-device VALUE] [--monitor VALUE] <mode>
 //     --audio-device VALUE   play the sound on one output device: sets NX2NAVI_AUDIO_DEVICE before the settings are read, so

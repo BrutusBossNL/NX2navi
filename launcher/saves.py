@@ -393,6 +393,37 @@ def _fresh_file(folder, stem, suffix):
 NO_SAVE = 'the game has no save yet: play until it saves, then export'
 
 
+# Settings whose values stay on the player's PC (runtime/cfg_private.h has the same list): a co-op room's secret and
+# the offer number made for it, the relay's address, the player's name, the key a maker removes, the menu's test hook.
+PRIVATE_SETTINGS = ('coop_room', 'coop_server', 'coop_name', 'coop_accept', 'coop_remove', 'menu_test_set')
+PRIVATE_SHOWN = b'(set, not shown)'
+
+
+def scrub_settings(data):
+    """The bytes of an nx2navi.ini for a bug report: every private setting that has a value reads
+    "key = (set, not shown)"; everything else, comments and line ends included, byte for byte (cfg_ini_scrub in
+    runtime/cfg_private.h does the same for the game's own export)."""
+    out = []
+    for n, line in enumerate(data.split(b'\n')):
+        text = line[:-1] if line.endswith(b'\r') else line
+        start = 3 if n == 0 and text.startswith(b'\xef\xbb\xbf') else 0
+        body = text[start:].lstrip(b' \t')
+        key, eq, value = body.partition(b'=')
+        if (eq and value.strip(b' \t') and body[:1] not in (b'#', b';', b'[')
+                and key.strip(b' \t').lower() in tuple(k.encode() for k in PRIVATE_SETTINGS)):
+            line = text[:text.index(b'=') + 1] + b' ' + PRIVATE_SHOWN + line[len(text):]
+        out.append(line)
+    return b'\n'.join(out)
+
+
+def _add_report_file(z, f):
+    """One file of a bug report into the zip: nx2navi.ini without its private values, anything else as it is."""
+    if f.name == 'nx2navi.ini':
+        z.writestr(REPORT_DIR + f.name, scrub_settings(f.read_bytes()))
+    else:
+        z.write(f, REPORT_DIR + f.name)
+
+
 def _export_log(game, dest, version, log):
     """The bug report of a game without a save (it stopped before its first one): NX2navi-log-<date>_<time>-bug-report.zip
     with the game's latest log, nx2navi.ini and a manifest that counts no save files; import_zip refuses it as a zip
@@ -411,7 +442,7 @@ def _export_log(game, dest, version, log):
         with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr(MANIFEST, json.dumps(manifest, indent=1) + '\n')
             for f in extras:
-                z.write(f, REPORT_DIR + f.name)
+                _add_report_file(z, f)
         os.replace(tmp, out)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -456,7 +487,7 @@ def export_save(game, dest=None, bug_report=False, version='', log=print):
                 for rel in files:
                     z.write(current / rel, SAVE_DIR + rel.as_posix())
                 for f in extras:
-                    z.write(f, REPORT_DIR + f.name)
+                    _add_report_file(z, f)
             os.replace(tmp, out)
         except FileNotFoundError:
             tmp.unlink(missing_ok=True)
