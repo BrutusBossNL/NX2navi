@@ -115,6 +115,9 @@ static void shadow_forget(PoolRec *r);
 static void pool_retiring(PoolRec *r);  // pool_fini: kept until pool_retire (or vk_mem_shutdown)
 static void shadow_table_add(PoolRec *r);
 static void pool_retire(void *arg);    // completion thread: destroys a finalized pool's record
+static int pool_fini_idle(void);
+static void pool_fini_wait(void);
+static void pool_wait_add(PoolRec *r);
 static void grow(void **arr, int *cap, size_t elem);
 
 static PlatMutex pool_lock = PLAT_MUTEX_INIT;
@@ -395,13 +398,24 @@ static void pool_fini(pool_t *p) {
     // Images cut from this range go first; a used buffer or memory waits until the GPU is done with it, since the
     // guest gets the storage back when this returns.
     vk_texture_range_gone(r->lo, r->size, r->alloc);
+    int narrow = 0;
     if (r->used && r->kind != POOL_VIRT) {
-        vk_upload_flush(1);
-        vk_queue_lock();
-        vkQueueWaitIdle(c->gfx_queue);
-        vk_queue_unlock();
+        if (pool_fini_idle()) {
+            vk_upload_flush(1);
+            vk_queue_lock();
+            vkQueueWaitIdle(c->gfx_queue);
+            vk_queue_unlock();
+        } else {
+            narrow = 1;
+            pool_fini_wait();
+        }
     }
     vk_mem_collect();
+    if (narrow) {   // the Vulkan objects outlive the upload batches and the submission being recorded (pool_wait_add)
+        pool_retiring(r);
+        pool_wait_add(r);
+        return;
+    }
     // A record that waits for the next submission is on the retiring list until its callback runs: when no
     // submission follows (a pool freed at the end), vk_mem_shutdown destroys it. Left to the callback alone, a
     // shadow copy's buffer was still allocated when the allocator went, which stops the process there.
@@ -3963,10 +3977,73 @@ static void destroy_dead(VkCtx *c, const Dead *d) {
 
 // The objects the GPU is done with: destroyed here (out != NULL: moved to *out, for the caller to destroy without
 // cmd_lock; *nout of them).
+// ---- The finalize of a used pool (pool_fini)
+// The finalize returned only once the queue was idle and every upload batch was through (vkQueueWaitIdle), since the
+// guest gets the storage back when it returns. During an area load the queue also holds the load's texture uploads,
+// which name no pool's storage: entering Kokiri Forest, one finalize waited 418 ms for them, the frame took 462 ms.
+// The game finalizes a pool once its own work with it is done, as on the console, so the finalize now waits for the
+// submissions issued so far (the game's work, the mirror copies and write-backs in it) and returns. The pool's buffer
+// and memory, which images cut from it (vk_texture_range_gone) and the upload batches open or in flight may still
+// name, go later: once those batches and the submission being recorded are through (pool_wait_collect, from the
+// upload collector). NX2NAVI_POOL_FINI_IDLE=1 waits for the idle queue as before.
+typedef struct { PoolRec *r; uint64_t seq, tl; } PoolWait;
+static PoolWait *pwait;   // retire_lock
+static int npwait, cpwait;
+static uint64_t pf_n, pf_ns, pf_max_ns, pf_logged;   // narrowed finalizes, their waits (any thread; statistics only)
+
+static int pool_fini_idle(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = rt_knob("POOL_FINI_IDLE", "0") == 1;
+        rt_log("vk: a pool's finalize waits for %s (NX2NAVI_POOL_FINI_IDLE=%d)",
+               on ? "the idle queue, the upload batches included" : "the submissions issued so far", on);
+    }
+    return on;
+}
+
+static void pool_fini_wait(void) {
+    uint64_t t0 = kern_now_ns(), v = vk_sync_issued();
+    vk_sync_fence_wait(v, UINT64_MAX);
+    uint64_t d = kern_now_ns() - t0;
+    uint64_t n = __atomic_add_fetch(&pf_n, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&pf_ns, d, __ATOMIC_RELAXED);
+    if (d > __atomic_load_n(&pf_max_ns, __ATOMIC_RELAXED)) __atomic_store_n(&pf_max_ns, d, __ATOMIC_RELAXED);
+    if (d > 20000000ull && __atomic_add_fetch(&pf_logged, 1, __ATOMIC_RELAXED) <= 20)
+        rt_log("vk: a pool's finalize waited %.1f ms for the submissions up to %llu (finalizes so far %llu, %.1f ms in all)",
+               d / 1e6, (unsigned long long)v, (unsigned long long)n, __atomic_load_n(&pf_ns, __ATOMIC_RELAXED) / 1e6);
+    else if (n % 256 == 0)
+        rt_log("vk: pool finalizes that waited for the GPU: %llu, %.1f ms in all, the longest %.1f ms",
+               (unsigned long long)n, __atomic_load_n(&pf_ns, __ATOMIC_RELAXED) / 1e6,
+               __atomic_load_n(&pf_max_ns, __ATOMIC_RELAXED) / 1e6);
+}
+
+static void pool_wait_add(PoolRec *r) {
+    // every upload batch handed out so far, and the submission another thread may be recording (vk_sync_submit sets
+    // issued after it), as defer stamps a deferred object
+    PoolWait w = {r, __atomic_load_n(&next_seq, __ATOMIC_ACQUIRE), vk_sync_issued() + 1};
+    plat_mutex_lock(&retire_lock);
+    if (npwait == cpwait) grow((void **)&pwait, &cpwait, sizeof *pwait);
+    pwait[npwait++] = w;
+    plat_mutex_unlock(&retire_lock);
+}
+
+// cmd_lock held (collect_locked_out): the waiting pools whose batches and submission are through go now.
+static void pool_wait_collect(uint64_t tl) {
+    PoolRec *go[64];
+    int n = 0;
+    plat_mutex_lock(&retire_lock);
+    for (int i = 0; i < npwait && n < 64;)
+        if (pwait[i].seq <= done_seq && pwait[i].tl <= tl) go[n++] = pwait[i].r, pwait[i] = pwait[--npwait];
+        else i++;
+    plat_mutex_unlock(&retire_lock);
+    for (int i = 0; i < n; i++) pool_retire(go[i]);   // off the retiring list, then destroyed
+}
+
 static void collect_locked_out(VkCtx *c, Dead **out, int *nout, int *cout) {
     retire(c, 0);
     uint64_t tl = 0;
     if (c->timeline) vkGetSemaphoreCounterValue(c->device, c->timeline, &tl);
+    if (npwait) pool_wait_collect(tl);
     int k = 0;
     for (int i = 0; i < ndead; i++) {
         Dead *d = &dead[i];
@@ -4304,6 +4381,7 @@ void vk_mem_shutdown(void) {
     plat_mutex_unlock(&shadow_lock);
     for (int i = 0; i < nretiring; i++) destroy_rec(c, retiring[i]);   // finalized ones whose callback never ran
     nretiring = 0;
+    npwait = 0;   // those waiting for pool_wait_collect were on the retiring list too
     __atomic_add_fetch(&pool_gen, 1, __ATOMIC_RELEASE);
     nphys = 0;
     plat_mutex_unlock(&pool_lock);
