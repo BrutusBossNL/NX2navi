@@ -31,6 +31,7 @@ void vk_fg_release(void);
 // and every call above goes to these while this path holds the swapchain.
 int vk_fg4_available(void);                  // its libraries are beside the executable and list a frame generation for the device
 int vk_fg4_failed(void);                     // it failed in this run: FSR 3.1's library generates the frames
+const char *vk_fg4_name(void);               // the frame generation version the loader lists first for the device ("3.1.6"), "" unknown
 int vk_fg4_active(void);
 int vk_fg4_generating(void);
 void vk_fg4_queues(VkQueue present, VkQueue acquire);

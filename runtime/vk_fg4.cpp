@@ -25,6 +25,7 @@ extern "C" {
 }
 extern "C" int vk_fg4_available(void) { return 0; }
 extern "C" int vk_fg4_failed(void) { return 0; }
+extern "C" const char *vk_fg4_name(void) { return ""; }
 extern "C" int vk_fg4_active(void) { return 0; }
 extern "C" int vk_fg4_generating(void) { return 0; }
 extern "C" void vk_fg4_queues(VkQueue, VkQueue) {}
@@ -92,6 +93,7 @@ struct {
 std::mutex g_lock;       // the probe: the menu asks from its thread, the present from its own
 int g_avail = -1;        // -1 not asked yet; 0 this path does not run here; 1 it does
 char g_sc_list[96];      // the swapchain versions the loader listed, for the log
+char g_fg_name[24];      // the frame generation version a context gets: the one asked for, else the first listed
 uint64_t g_fg_pin, g_sc_pin;   // NX2NAVI_FG4_VERSION, NX2NAVI_FG4_SWAPCHAIN (tests): the version asked for by its id; 0 the loader's choice
 
 VkResult submit_game(uint32_t n, const VkSubmitInfo *si, VkFence fence) {
@@ -184,6 +186,10 @@ extern "C" int vk_fg4_available(void) {
     int ns = list_versions(FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK, cfg_get("NX2NAVI_FG4_SWAPCHAIN"), sc, sizeof g_sc_list,
                            &g_sc_pin);
     a = nf > 0 && ns > 0;
+    // the menu's name for it: the first of the list, which the loader takes when none is asked for (a test's version
+    // changes the context, not this name); a version the driver brings carries a star
+    snprintf(g_fg_name, sizeof g_fg_name, "%.*s", (int)strcspn(fg, ",*"), fg);
+    for (size_t k = strlen(g_fg_name); k && g_fg_name[k - 1] == ' '; k--) g_fg_name[k - 1] = 0;
     __atomic_store_n(&g_avail, a, __ATOMIC_RELEASE);
     if (a) rt_log("fg4: the FSR SDK lists for this device: frame generation %s; its swapchain %s", fg, sc);
     else rt_log("fg4: the FSR SDK lists no frame generation for this device: FSR 3.1's library generates the frames");
@@ -191,6 +197,8 @@ extern "C" int vk_fg4_available(void) {
 }
 
 extern "C" int vk_fg4_failed(void) { return F.failed; }
+
+extern "C" const char *vk_fg4_name(void) { return g_fg_name; }
 
 extern "C" void vk_fg4_queues(VkQueue present, VkQueue acquire) { F.present = present, F.acquire = acquire; }
 

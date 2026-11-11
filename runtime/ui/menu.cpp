@@ -73,6 +73,10 @@ int vk_ffx_available(void);             // vk_ffx.cpp: FSR 3.1 upscaling can run
 int vk_ffx_framegen_available(void);    // ... and FSR 3.1 frame generation
 int vk_ffx4_available(void);            // vk_ffx4.cpp: AMD's FSR 4 runs on this device (its libraries, card and driver)
 int vk_ffx_fsr4(void);                  // vk_ffx.cpp: ... and the setting asks for it (NX2NAVI_FSR4)
+int vk_fg4_available(void);             // vk_fg4.cpp: the frame generation of AMD's FSR 4 library runs on this device
+int vk_fg4_failed(void);                // ... it failed in this run, FSR 3.1's generates the frames
+int vk_fg4_active(void);                // ... its swapchain is in place
+const char *vk_fg4_name(void);          // ... the version the library runs here ("3.1.6", "4.0.2")
 int vk_texture_detail_auto(void);       // vk_texture.c: the texture detail auto picks on this card, 0 full to 2 low
 double frame_step_limit_hz(void);
 int frame_limit_follows_display(void);
@@ -1007,6 +1011,19 @@ static bool framegen_restart(void) {
     return framegen_ngx() ? set && !vk_ngxfg_wanted() : set != (vk_dlssg_wanted() != 0);
 }
 
+// The frame generation of the library FSR 4 comes with (vk_fg4.cpp), as the row names it: with the version the library
+// runs on this card, the machine-learned 4.x on a Radeon RX 9000 and 3.1.x on any other.
+static const char *fg4_label(void) {
+    static char s[48];
+    const char *v = vk_fg4_name();
+    snprintf(s, sizeof s, *v ? "AMD FSR 4 library (%s)" : "AMD FSR 4 library", v);
+    return s;
+}
+// It is the one in use: set (NX2NAVI_FSR4_FG) with FSR 4 as the upscaler, where it runs (vk_fg.cpp use4).
+static bool fg4_chosen(void) {
+    return cfg_bool("NX2NAVI_FSR4_FG") && vk_ffx_fsr4() && vk_fg4_available() && !vk_fg4_failed();
+}
+
 // Frame generation (vk_fg.cpp, at once; NVIDIA's after a restart); it needs a temporal upscaler's motion vectors
 static void row_framegen(void) {
     // the generated frames are made from DLSS's or FSR 3.1's motion vectors: without one of them it would do nothing,
@@ -1026,14 +1043,21 @@ static void row_framegen(void) {
     // Off, AMD's where FSR 3.1 loads and NVIDIA DLSS (vk_dlssg.c, through Streamline and nx2navi_dlssg.dll) on NVIDIA GPUs,
     // now that Reflex paces it from the frame's start and generated frames are presented; elsewhere one stays listed
     // while it is set
-    static const char *const all_values[] = {"off", "fsr3", "dlss"};
-    const char *all_names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), "AMD FSR 3.1", "NVIDIA DLSS"};
-    const char *values[3], *names[3];
+    // AMD's has two libraries where FSR 4 runs: the FSR 3.1 library's, and the one of the library FSR 4 comes with,
+    // listed after it as a choice of its own. That one generates only beside FSR 4 upscaling, so choosing it sets the
+    // upscaler to FSR 4 as well; both are NX2NAVI_FRAMEGEN = fsr3, told apart by NX2NAVI_FSR4_FG.
+    enum { OFF, FSR3, FSR4LIB, DLSS };
+    const bool four = cur == 1 && fg4_chosen();
+    const bool four_offered = fsr && vk_ffx4_available() && vk_fg4_available() && !vk_fg4_failed();
+    const int now = cur == 2 ? DLSS : cur == 1 ? (four ? FSR4LIB : FSR3) : OFF;
+    const char *all_names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), "AMD FSR 3.1", fg4_label(), "NVIDIA DLSS"};
+    int kinds[4];
+    const char *names[4];
     int n = 0, at = 0;
-    for (int i = 0; i < 3; i++) {
-        if ((i == 1 && !fsr && cur != 1) || (i == 2 && !dlss && cur != 2)) continue;
-        if (i == cur) at = n;
-        values[n] = all_values[i], names[n++] = all_names[i];
+    for (int i = 0; i < 4; i++) {
+        if ((i == FSR3 && !fsr && cur != 1) || (i == FSR4LIB && !four_offered && !four) || (i == DLSS && !dlss && cur != 2)) continue;
+        if (i == now) at = n;
+        kinds[n] = i, names[n++] = all_names[i];
     }
     // AMD's follows the setting; NVIDIA's is set up with the device, so only a change to or from it waits for a restart.
     // Through NGX it follows the setting too, once NGX is up, which needs DLSS upscaling on when the game starts.
@@ -1046,8 +1070,18 @@ static void row_framegen(void) {
     const int st = cur != 2 || restart ? DLSSG_RUNS : ngx ? (vk_ngxfg_max() ? DLSSG_RUNS : DLSSG_NO_FILES) : vk_dlssg_status();
     if (st == DLSSG_NO_GPU) note = UI_MENU_FRAMEGEN_OFF_GPU;
     else if (st == DLSSG_NO_FILES) note = UI_MENU_FRAMEGEN_OFF_FILES;
-    int nv = opt_choice_index("NX2NAVI_FRAMEGEN", UI_MENU_FRAMEGEN, names, n, at, 0, desc, menu_text(note));
-    if (nv >= 0 && nv < n) opt_apply("NX2NAVI_FRAMEGEN", values[nv]);
+    // the note under AMD's names FSR 3.1 as what it needs; the FSR 4 library's runs beside FSR 4, so it has none
+    int nv = opt_choice_index("NX2NAVI_FRAMEGEN", UI_MENU_FRAMEGEN, names, n, at, 0, desc, four && !restart ? NULL : menu_text(note));
+    if (nv >= 0 && nv < n) {
+        const int k = kinds[nv];
+        opt_apply("NX2NAVI_FRAMEGEN", k == OFF ? "off" : k == DLSS ? "dlss" : "fsr3");
+        if (k == FSR4LIB) {
+            opt_apply("NX2NAVI_FSR4_FG", "1");
+            if (!vk_ffx_fsr4()) opt_apply("NX2NAVI_TAA", "fsr3"), opt_apply("NX2NAVI_FSR4", "1");
+        } else if (k == FSR3 && cfg_bool("NX2NAVI_FSR4_FG")) {
+            opt_apply("NX2NAVI_FSR4_FG", "0");
+        }
+    }
     else if (cur == 2 && upscaled && dlss && ngx) row_framegen_mult_ngx();
     else if (cur == 2 && upscaled && dlss) row_framegen_mult(restart);
 }
@@ -1654,7 +1688,8 @@ static void perf_picture(const MenuTarget *t, PerfPanel *p) {
     snprintf(v[8], sizeof v[8], "%s", menu_text(!strcmp(hdr, "native") ? UI_MENU_HDR_NATIVE : cfg_bool("NX2NAVI_HDR") ? UI_MENU_HDR_TONEMAPPED : UI_MENU_FRAMEGEN_OFF));
     const char *fg = cfg_value("NX2NAVI_FRAMEGEN");
     const bool fsr_fg = !strcmp(fg, "fsr3") && vk_ffx_framegen_available();   // set but not loadable: off
-    snprintf(v[9], sizeof v[9], "%s", fsr_fg ? "AMD FSR 3.1" : !strcmp(fg, "dlss") ? "NVIDIA DLSS" : menu_text(UI_MENU_FRAMEGEN_OFF));
+    snprintf(v[9], sizeof v[9], "%s", fsr_fg ? (vk_fg4_active() ? fg4_label() : "AMD FSR 3.1")
+                                      : !strcmp(fg, "dlss") ? "NVIDIA DLSS" : menu_text(UI_MENU_FRAMEGEN_OFF));
     if (!strcmp(fg, "dlss") && vk_dlssg_active())   // its multiplier as set, clamped to what this GPU allows
         snprintf(v[9], sizeof v[9], "NVIDIA DLSS %dx",
                  vk_dlssg_multiplier_of(cfg_value("NX2NAVI_FRAMEGEN_MULTIPLIER"), vk_dlssg_multiplier_max(nullptr), nullptr));
