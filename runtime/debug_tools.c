@@ -17,6 +17,17 @@
 //
 // Link's position is shown but not written: it is the actor's copy ([[main+0x4e371d0]+0x480]+0x31c), which the physics
 // writes every frame. Writing it, or every copy of it in the heap, moved Link back within three frames.
+//
+// Teleporting is the game's own change of area, as a loading zone, a warp song or a cutscene makes it: the game's
+// event script reserves the next area and the name of a start position in it (game data texts), and asks the
+// sequence that runs during events to change area (the enum Sequence_ControlInEvent = ChangeBancOnEvent). warp_tick
+// does the same during a short event of the game that only waits (DefaultParentEvent, 30 frames), so the game unloads
+// the area, loads the next one and places Link exactly as it does for its own doors. The places offered are the ones
+// in the player's game files (Banc/BancBasedResource/StartPos.byml.zs: each area with its named start positions,
+// the warp songs' pads and both sides of every loading zone among them); none of that list is kept in this code.
+//
+// An event (a cutscene, a conversation, a scripted moment) is started by its file's name through the game's event
+// manager, as the game's own actors start them.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -264,6 +275,49 @@ static int sarc_member(const uint8_t *p, size_t n, const char *name, size_t *at,
     return 0;
 }
 
+// ---- the places to teleport to and the events, from the player's game files (names_thread)
+typedef struct { const char *area, *pos; } Place;
+static Place *places;          // by area, as the game's file lists them; the texts stay in the file's buffer
+static int place_n;
+static char **event_names;     // the event files that hold a script, by name
+static int event_n;
+
+static uint32_t u24(const uint8_t *p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16; }
+
+// The i-th key of a BYML file's key table (a node 0xc2: its count, then the offsets of its texts).
+static const char *byml_key(const uint8_t *p, size_t n, uint32_t keys, uint32_t i) {
+    uint32_t off;
+    if ((size_t)keys + 8 > n || p[keys] != 0xc2 || i >= u24(p + keys + 1) || (size_t)keys + 8 + 4 * (size_t)i > n) return NULL;
+    memcpy(&off, p + keys + 4 + 4 * (size_t)i, 4);
+    if ((size_t)keys + off >= n || !memchr(p + keys + off, 0, n - keys - off)) return NULL;
+    return (const char *)p + keys + off;
+}
+
+// The start positions file: a dictionary (node 0xc1: its count, then entries of a key's number in 24 bits, the
+// value's kind and the value's offset) of areas, each a dictionary of its start positions.
+static void places_in(const uint8_t *p, size_t n) {
+    uint32_t keys, root;
+    if (n < 16 || memcmp(p, "YB", 2)) return;
+    memcpy(&keys, p + 4, 4), memcpy(&root, p + 12, 4);
+    if ((size_t)root + 4 > n || p[root] != 0xc1) return;
+    uint32_t areas = u24(p + root + 1);
+    Place *list = malloc(sizeof(Place) * 4096);
+    int count = 0;
+    for (uint32_t i = 0; list && i < areas && (size_t)root + 12 + 8 * (size_t)i <= n; i++) {
+        const uint8_t *e = p + root + 4 + 8 * (size_t)i;
+        const char *area = byml_key(p, n, keys, u24(e));
+        uint32_t at;
+        memcpy(&at, e + 4, 4);
+        if (!area || e[3] != 0xc1 || (size_t)at + 4 > n || p[at] != 0xc1 || strlen(area) > 63) continue;
+        uint32_t spots = u24(p + at + 1);
+        for (uint32_t k = 0; k < spots && count < 4096 && (size_t)at + 12 + 8 * (size_t)k <= n; k++) {
+            const char *pos = byml_key(p, n, keys, u24(p + at + 4 + 8 * (size_t)k));
+            if (pos && strlen(pos) <= 63) list[count++] = (Place){area, pos};
+        }
+    }
+    places = list, place_n = count;
+}
+
 static void names_thread(void *arg) {
     (void)arg;
     uint64_t t0 = plat_now_ns(), dn = 0;
@@ -289,17 +343,31 @@ static void names_thread(void *arg) {
             if (raw && ZSTD_decompress_usingDDict(dctx, raw, (size_t)rn, z, (size_t)fsize, dd) == rn) {
                 names_in(raw, (size_t)rn);
                 files++;
+                // an event file that holds a script (the count at 0x20) can be started by its name
+                uint16_t scripts = 0;
+                if (rn > 0x22 && !memcmp(raw, "BFEVFL", 6)) memcpy(&scripts, raw + 0x20, 2);
+                const char *dot = strchr(path + 16, '.');
+                if (scripts && dot && dot - (path + 16) < 80 && (event_names || (event_names = calloc((size_t)count, sizeof *event_names)))) {
+                    char *name = calloc(1, (size_t)(dot - (path + 16)) + 1);
+                    if (name) memcpy(name, path + 16, (size_t)(dot - (path + 16))), event_names[event_n++] = name;
+                }
             }
             free(raw);
             free(z);
         }
+        uint64_t zn = 0;
+        uint8_t *z = romfs_load("Banc/BancBasedResource/StartPos.byml.zs", &zn);
+        unsigned long long rn = z ? ZSTD_getFrameContentSize(z, (size_t)zn) : 0;
+        uint8_t *raw = z && rn && rn < (16u << 20) ? malloc((size_t)rn) : NULL;   // kept: the places' texts are in it
+        if (raw && ZSTD_decompress_usingDDict(dctx, raw, (size_t)rn, z, (size_t)zn, dd) == rn) places_in(raw, (size_t)rn);
+        free(z);
     }
     ZSTD_freeDCtx(dctx);
     ZSTD_freeDDict(dd);
     free(dics);
     free(dz);
-    rt_log("debug: names for %d of %d flags, from %d of the game's event files, in %.0f ms", names_found, flag_n, files,
-           (double)(plat_now_ns() - t0) / 1e6);
+    rt_log("debug: names for %d of %d flags, from %d of the game's event files, in %.0f ms; %d events, %d places to teleport to",
+           names_found, flag_n, files, (double)(plat_now_ns() - t0) / 1e6, event_n, place_n);
     __atomic_store_n(&names_state, 2, __ATOMIC_RELEASE);
 }
 
@@ -315,6 +383,169 @@ int dbg_names(int *found) {
     }
     if (found) *found = s == 2 ? names_found : 0;
     return s;
+}
+
+int dbg_places(void) { return __atomic_load_n(&names_state, __ATOMIC_ACQUIRE) == 2 ? place_n : 0; }
+const char *dbg_place_area(int i) { return i >= 0 && i < dbg_places() ? places[i].area : ""; }
+const char *dbg_place_pos(int i) { return i >= 0 && i < dbg_places() ? places[i].pos : ""; }
+int dbg_events(void) { return __atomic_load_n(&names_state, __ATOMIC_ACQUIRE) == 2 ? event_n : 0; }
+const char *dbg_event_name(int i) { return i >= 0 && i < dbg_events() ? event_names[i] : ""; }
+
+// ---- the game data's other kinds: the manager holds a section of 0x60 bytes for each kind (the kind's number times
+// 0x60: +0x10 the entries' count, +0x18 the entries, +0x20 the {hash, index} table, +0x2c its size). An entry of a
+// 64-character text is 0x108 bytes, the text's pointer at +0x68 (a second one at +0x18) and its room at +0x70.
+// main+0x3e0980 (manager, value, hash) queues the change of an enum, whose value is the hash of the value's name.
+enum { GD_TEXT64 = 16 };
+static uint32_t hash_of(const char *text) { return murmur3((const uint8_t *)text, strlen(text)); }
+
+static uint64_t gmd_entry(int kind, uint32_t stride, uint32_t hash) {
+    uint64_t m = gmd(), sec = m + (uint64_t)kind * 0x60, table = m ? rd_ptr(sec + 0x20) : 0, entries = m ? rd_ptr(sec + 0x18) : 0;
+    uint32_t count = 0, size = 0;
+    if (!table || !entries || !rd(sec + 0x10, &count, 4) || !rd(sec + 0x2c, &size, 4) || !size || size > 100000) return 0;
+    for (uint32_t i = hash % size, n = 0; n < size; i = i + 1 < size ? i + 1 : 0, n++) {
+        Pair pr;
+        if (!rd(table + (uint64_t)i * 8, &pr, 8) || !pr.hash) return 0;
+        if (pr.hash == hash) return pr.index < count ? entries + (uint64_t)pr.index * stride : 0;
+    }
+    return 0;
+}
+
+static int text_get(const char *name, char out[64]) {
+    uint64_t e = gmd_entry(GD_TEXT64, 0x108, hash_of(name)), text = e ? rd_ptr(e + 0x68) : 0;
+    out[0] = 0;
+    if (!text || !rd(text, out, 63)) return 0;
+    out[63] = 0;
+    return 1;
+}
+
+// A text written into the entry's own buffers (game thread). 0: the game has no such text.
+static int text_set(const char *name, const char *value) {
+    uint64_t e = gmd_entry(GD_TEXT64, 0x108, hash_of(name)), text = e ? rd_ptr(e + 0x68) : 0, other = e ? rd_ptr(e + 0x18) : 0;
+    int32_t room = 0;
+    char buf[64] = {0};
+    if (!text || !rd(e + 0x70, &room, 4) || room < 64) return 0;
+    snprintf(buf, sizeof buf, "%s", value);
+    if (other && other != text) wr(other, buf, 64);
+    return wr(text, buf, 64);
+}
+
+static void enum_set(Cpu *c, const char *name, const char *value) {
+    rt_call(c, MOD_MAIN_BASE + 0x3e0980, 3, gmd(), (uint64_t)hash_of(value), (uint64_t)hash_of(name));
+}
+
+// ---- events. main+0xd79f10 builds an event request in a block of 0x2000 bytes: the event's name goes into the buffer
+// its +0x1a90 points to (the room at +0x1a98). main+0xd7a820 (the event manager **[main+0x4c7e090], request) hands it
+// in and answers whether the event starts; the request's two lists at +0x1968 and +0x1950 are then destroyed
+// (main+0x20b6f0, their table main+0x4974b20), as the game's own request node does (main+0x32db1a0).
+static int event_request(Cpu *c, const char *name) {
+    static _Alignas(16) uint8_t arg[0x2000];
+    uint64_t a = (uint64_t)(uintptr_t)arg, slot = rd_ptr(MOD_MAIN_BASE + 0x4c7e090), mgr = slot ? rd_ptr(slot) : 0;
+    if (!mgr) return 0;
+    memset(arg, 0, sizeof arg);
+    rt_call(c, MOD_MAIN_BASE + 0xd79f10, 1, a);
+    uint64_t buf = rd_ptr(a + 0x1a90), took = 0;
+    int32_t room = 0;
+    rd(a + 0x1a98, &room, 4);
+    if (buf >= a && buf < a + sizeof arg && room > 1 && strlen(name) < (size_t)room) {
+        memcpy((void *)(uintptr_t)buf, name, strlen(name) + 1);
+        took = rt_call(c, MOD_MAIN_BASE + 0xd7a820, 2, mgr, a) & 0xff;
+    }
+    uint64_t vt = MOD_MAIN_BASE + 0x4974b20;
+    memcpy(arg + 0x1968, &vt, 8);
+    rt_call(c, MOD_MAIN_BASE + 0x20b6f0, 1, a + 0x1968);
+    memcpy(arg + 0x1950, &vt, 8);
+    rt_call(c, MOD_MAIN_BASE + 0x20b6f0, 1, a + 0x1950);
+    return took != 0;
+}
+
+// ---- the teleport and the event start: asked for by the menu, done by warp_tick on the game's thread
+enum { W_IDLE, W_ASKED, W_EVENT, W_FLIGHT };
+static struct {
+    char area[64], pos[64], event[80];   // q_lock: what the menu asked for
+    int state;                           // W_*
+    uint64_t at;                         // the tick of the next step, or the one at which the wait for the arrival ends
+    float from[3];                       // where Link stood
+} warp;
+static char status[160];                 // q_lock: the last thing that happened, for the menu
+
+static void status_set(const char *fmt, const char *a, const char *b) {
+    plat_mutex_lock(&q_lock);
+    snprintf(status, sizeof status, fmt, a, b);
+    plat_mutex_unlock(&q_lock);
+    rt_log("debug: %s", status);
+}
+
+void dbg_status(char out[160]) {
+    plat_mutex_lock(&q_lock);
+    memcpy(out, status, sizeof status);
+    plat_mutex_unlock(&q_lock);
+}
+
+int dbg_busy(void) { return warp.state != W_IDLE || warp.event[0]; }
+
+void dbg_warp(const char *area, const char *pos) {
+    plat_mutex_lock(&q_lock);
+    if (warp.state == W_IDLE && !warp.event[0] && area[0]) {
+        snprintf(warp.area, sizeof warp.area, "%s", area);
+        snprintf(warp.pos, sizeof warp.pos, "%s", pos);
+        warp.state = W_ASKED;
+    }
+    plat_mutex_unlock(&q_lock);
+}
+
+void dbg_event_start(const char *name) {
+    plat_mutex_lock(&q_lock);
+    if (warp.state == W_IDLE && !warp.event[0]) snprintf(warp.event, sizeof warp.event, "%s", name);
+    plat_mutex_unlock(&q_lock);
+}
+
+static const char REFUSED[] = "The game refused %s: it is in a cutscene, a conversation or a menu, or Link cannot take part "
+                              "now (swimming, in the air). Try again once he stands free.";
+
+static void warp_tick(Cpu *c, uint64_t tick) {
+    if (warp.event[0]) {
+        char name[80];
+        snprintf(name, sizeof name, "%s", warp.event);
+        status_set(player() && event_request(c, name) ? "Started the event %s." : REFUSED, name, "");
+        plat_mutex_lock(&q_lock);
+        warp.event[0] = 0;
+        plat_mutex_unlock(&q_lock);
+    }
+    if (warp.state == W_ASKED) {
+        // the game's event that only waits: the change of area is asked for while it runs
+        if (player() && gmd() && dbg_player_pos(warp.from) && event_request(c, "DefaultParentEvent")) {
+            warp.at = tick + 4, warp.state = W_EVENT;
+        } else {
+            status_set(REFUSED, "the teleport", "");
+            warp.state = W_IDLE;
+        }
+    } else if (warp.state == W_EVENT && tick >= warp.at) {
+        // what the game's own script reserves (its actor's ReserveBancChange): the next area and the start position's
+        // name, no event at the arrival, the event held during the change, a black fade, and the request itself
+        int ok = text_set("Sequence_ReservedNextBanc", warp.area) && text_set("Sequence_ReservedNextStartPosName", warp.pos);
+        text_set("Sequence_ReservedBootEventName", "");
+        text_set("Sequence_ReservedEventStarterName", "");
+        if (ok) {
+            rt_call(c, MOD_MAIN_BASE + 0x682b20, 3, gmd(), (uint64_t)1, (uint64_t)hash_of("Sequence_IsEventBancChangePause"));
+            enum_set(c, "Sequence_BancChangeFadePattern", "BlackFade");
+            enum_set(c, "Sequence_ControlInEvent", "ChangeBancOnEvent");
+            status_set("Teleporting to %s, %s...", warp.area, warp.pos[0] ? warp.pos : "its default start");
+            warp.at = tick + 3600, warp.state = W_FLIGHT;
+        } else {
+            status_set("The teleport to %s could not be asked for: the game's texts for it are not there.", warp.area, "");
+            warp.state = W_IDLE;
+        }
+    } else if (warp.state == W_FLIGHT) {
+        char now[64];
+        float p[3];
+        int there = text_get("Sequence_CurrentBanc", now) && !strcmp(now, warp.area) && dbg_player_pos(p) &&
+                    fabsf(p[0] - warp.from[0]) + fabsf(p[1] - warp.from[1]) + fabsf(p[2] - warp.from[2]) > 0.5f;
+        if (there || tick >= warp.at) {
+            status_set(there ? "Arrived in %s, %s." : "The teleport to %s, %s was asked for; no arrival was seen.", warp.area,
+                       warp.pos[0] ? warp.pos : "its default start");
+            warp.state = W_IDLE;
+        }
+    }
 }
 
 // ---- the memory search: values of 1, 2 or 4 bytes in the game's heap
@@ -396,10 +627,11 @@ int dbg_search_next(int mode, uint32_t value) {
 }
 
 // ---- NX2NAVI_DBG_TEST="<tick>:flag <hash hex> <0|1>;<tick>:speed <factor>;<tick>:find <value> <size>;
-// <tick>:next <mode> <value>;<tick>:setfirst <value>;<tick>:holdfirst <value>;<tick>:show [<hash hex>]": the menu's
-// requests without the menu, for test runs. Ticks count the game's pad reads from the player's first appearance.
+// <tick>:next <mode> <value>;<tick>:setfirst <value>;<tick>:holdfirst <value>;<tick>:show [<hash hex>];
+// <tick>:warp <area> [<start position>];<tick>:event <name>;<tick>:text <game data text's name>": the menu's requests
+// without the menu, for test runs. Ticks count the game's pad reads from the player's first appearance.
 static void test_script(uint64_t tick) {
-    static char buf[512];
+    static char buf[2048];
     static const char *next;
     static int state;
     if (!state) {
@@ -417,6 +649,20 @@ static void test_script(uint64_t tick) {
             dbg_flag_set(hash, (int)on);
         } else if (sscanf(colon + 1, "speed %f", &f) == 1) {
             dbg_speed_set(f);
+        } else if (!strncmp(colon + 1, "warp ", 5)) {
+            char area[64] = "", pos[64] = "";
+            if (sscanf(colon + 6, "%63[^ ;] %63[^ ;]", area, pos) >= 1) dbg_warp(area, pos);
+        } else if (!strncmp(colon + 1, "event ", 6)) {
+            char name[80] = "";
+            if (sscanf(colon + 7, "%79[^ ;]", name) == 1) dbg_event_start(name);
+        } else if (!strncmp(colon + 1, "text ", 5)) {
+            char name[80] = "", now[64];
+            float p[3] = {0, 0, 0};
+            sscanf(colon + 6, "%79[^ ;]", name);
+            int got = text_get(name, now);
+            dbg_player_pos(p);
+            rt_log("debug: tick %llu: %s = \"%s\"%s; player %.1f %.1f %.1f", (unsigned long long)tick, name, now,
+                   got ? "" : " (not found)", p[0], p[1], p[2]);
         } else if (sscanf(colon + 1, "setfirst %llu", &value) == 1) {
             dbg_mem_write(dbg_search_addr(0), value, dbg_search_size());
         } else if (sscanf(colon + 1, "holdfirst %llu", &value) == 1) {
@@ -458,6 +704,7 @@ void dbg_tick(Cpu *c) {
     if (!dbg_supported() || (!tick && !player())) return;
     tick++;
     test_script(tick);
+    warp_tick(c, tick);
     static Req todo[Q_MAX];
     int n;
     plat_mutex_lock(&q_lock);

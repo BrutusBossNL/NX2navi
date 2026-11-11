@@ -1264,9 +1264,10 @@ static void tab_game(float scale) {
         opt_group_text("Testing");
         const bool on = cfg_bool("NX2NAVI_DEBUG_MENU");
         if (opt_toggle_text("debug_menu", "Debug menu (F9)",
-                            "F9 opens a window for testing: the game's flags by name, the game's speed, and a search of "
-                            "its memory with values to set and hold. Changing flags or memory can break a save: keep a "
-                            "copy of the save first.", on))
+                            "F9 opens a window for testing: the game's flags by name, a teleport to every area's start "
+                            "positions, its cutscenes to start, the game's speed, and a search of its memory with values "
+                            "to set and hold. All of these can break a save, and the game saves by itself after a change "
+                            "of area: keep a copy of the save first.", on))
             opt_apply("NX2NAVI_DEBUG_MENU", on ? "0" : "1");
     }
     opt_end();

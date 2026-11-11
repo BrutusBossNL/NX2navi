@@ -25,6 +25,20 @@ const char *dbg_flag_name(int i);      // NULL: no name found for it
 void dbg_flag_set(uint32_t hash, int on);
 int dbg_names(int *found);             // 0 not started, 1 being read from the game's files, 2 read (*found of them)
 
+// Teleporting and events. The places are the game's areas with their named start positions, and the events its event
+// files that hold a script: both lists come from the player's game files with the flag names (0 until dbg_names
+// answers 2). dbg_warp changes area as the game's own doors do; dbg_event_start starts an event by its name. One at a
+// time: nothing is taken while dbg_busy. dbg_status is the last thing that happened, in words.
+int dbg_places(void);
+const char *dbg_place_area(int i);
+const char *dbg_place_pos(int i);      // "": the area's default start
+void dbg_warp(const char *area, const char *pos);
+int dbg_events(void);
+const char *dbg_event_name(int i);
+void dbg_event_start(const char *name);
+int dbg_busy(void);
+void dbg_status(char out[160]);
+
 // Memory: values of 1, 2 or 4 bytes in the game's heap.
 int dbg_search_new(uint32_t value, int size);       // returns the number of places
 int dbg_search_next(int mode, uint32_t value);      // 0 equals value, 1 changed, 2 unchanged, 3 greater, 4 less

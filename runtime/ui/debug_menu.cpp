@@ -1,8 +1,8 @@
 // The debug menu's panel (F9 with debug_menu = 1; ui/menu.cpp lays it out in the settings menu's place while it is
 // open, so its input, its sounds and the game's blocked pad are the menu's own): on the left edge, in the performance
 // overlay's look, with the game in view beside it. What it does to the game is in
-// debug_tools.c: the game's on/off flags by name, the game's speed, Link's position, and a search of the game's memory
-// with values to set and to hold. Plain Dear ImGui with English text: a tool for testing, not part of the game's
+// debug_tools.c: the game's on/off flags by name, teleporting to the game's own start positions, starting its events,
+// the game's speed, Link's position, and a search of the game's memory with values to set and to hold. Plain Dear ImGui with English text: a tool for testing, not part of the game's
 // interface. Present thread only.
 #include <algorithm>
 #include <ctype.h>
@@ -128,6 +128,143 @@ void tab_flags(void) {
     }
 }
 
+// ---- teleport and cutscenes
+char t_filter[64], e_filter[64];
+int t_group;          // 0 all, 1 the warp songs' pads, 2 the two sides of the loading zones, 3 boss rooms
+int *t_rows, t_rows_n, t_count = -1, t_group_was = -1;
+int *e_rows, e_rows_n, e_count = -1;
+char t_filter_was[64] = "\x01", e_filter_was[64] = "\x01";
+
+bool ends_with(const char *s, const char *end) {
+    size_t n = strlen(s), m = strlen(end);
+    return n >= m && !strcmp(s + n - m, end);
+}
+
+// The groups go by the words the game's own names use: a warp song's pad is named after its song, a loading zone's
+// far side after where it leads, and a boss's room is an area of its own whose name ends in Stage.
+bool in_group(int group, const char *area, const char *pos) {
+    static const char *const songs[] = {"Minuet", "Bolero", "Serenade", "Requiem", "Nocturne", "Prelude"};
+    static const char *const doors[] = {"From", "Side", "Entrance", "Front"};
+    if (group == 1) {
+        for (const char *w : songs)
+            if (ends_with(pos, w)) return true;
+        return false;
+    }
+    if (group == 2) {
+        for (const char *w : doors)
+            if (strstr(pos, w)) return true;
+        return false;
+    }
+    if (group == 3) return ends_with(area, "Stage");
+    return true;
+}
+
+// The last thing the teleport or an event start did, and whether one is under way.
+void status_line(void) {
+    char status[160];
+    dbg_status(status);
+    if (status[0]) ImGui::TextWrapped("%s", status);
+}
+
+// The lists come with the flag names, from the game's files: reading them starts once the game's flags are there.
+bool lists_ready(const char *what) {
+    dbg_flags_refresh();
+    if (dbg_names(NULL) == 2) return true;
+    ImGui::TextWrapped("Reading %s from the game's files... They appear once a save is loaded.", what);
+    return false;
+}
+
+void tab_teleport(void) {
+    if (!lists_ready("the game's areas")) return;
+    int count = dbg_places();
+    if (!count) {
+        ImGui::TextWrapped("The game's list of start positions was not found in its files.");
+        return;
+    }
+    ImGui::TextWrapped("Every area of the game with its start positions, from the game's own list. Link arrives through the "
+                       "game's own change of area, as after a door or a warp song.");
+    static const char *const groups[] = {"All", "Warp song pads", "Loading zones", "Boss rooms"};
+    for (int g = 0; g < 4; g++) {
+        if (g) ImGui::SameLine();
+        bool is = t_group == g;
+        if (is) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        if (ImGui::Button(groups[g])) t_group = g;
+        if (is) ImGui::PopStyleColor();
+    }
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##tfilter", "part of an area's or a position's name", t_filter, sizeof t_filter);
+    if (count != t_count || t_group != t_group_was || strcmp(t_filter, t_filter_was)) {
+        if (!t_rows) t_rows = (int *)malloc(sizeof(int) * 4096);
+        t_rows_n = 0;
+        for (int i = 0; t_rows && i < count && i < 4096; i++) {
+            const char *area = dbg_place_area(i), *pos = dbg_place_pos(i);
+            if (!in_group(t_group, area, pos)) continue;
+            if (t_filter[0] && !contains(area, t_filter) && !contains(pos, t_filter)) continue;
+            t_rows[t_rows_n++] = i;
+        }
+        t_count = count, t_group_was = t_group;
+        snprintf(t_filter_was, sizeof t_filter_was, "%s", t_filter);
+        if (getenv("NX2NAVI_DBG_TEST")) rt_log("debug: teleport list: group %d, filter \"%s\": %d of %d places", t_group, t_filter, t_rows_n, count);
+    }
+    status_line();
+    bool busy = dbg_busy() != 0;
+    const float foot = ImGui::GetTextLineHeightWithSpacing() * 3.2f;
+    if (ImGui::BeginChild("##places", ImVec2(0, -foot), ImGuiChildFlags_Borders)) {
+        if (busy) ImGui::BeginDisabled();
+        ImGuiListClipper clip;
+        clip.Begin(t_rows_n);
+        while (clip.Step())
+            for (int r = clip.DisplayStart; r < clip.DisplayEnd; r++) {
+                int i = t_rows[r];
+                const char *area = dbg_place_area(i), *pos = dbg_place_pos(i);
+                char label[160];
+                snprintf(label, sizeof label, "%s   >   %s##%d", area, pos[0] ? pos : "(default start)", i);
+                if (ImGui::Selectable(label)) dbg_warp(area, pos);
+            }
+        if (busy) ImGui::EndDisabled();
+    }
+    ImGui::EndChild();
+    ImGui::TextWrapped("Areas ending in _Child or _Adult are the two times of the same place: Link arrives at the age he has. "
+                       "The game may save by itself in the new area, as it does after its own doors: keep a copy of the save.");
+}
+
+void tab_events(void) {
+    if (!lists_ready("the game's events")) return;
+    int count = dbg_events();
+    ImGui::TextWrapped("The game's event scripts by name: cutscenes (most start with Dm_), conversations and scripted moments. "
+                       "One starts as if its trigger had fired, in the area Link is in.");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##efilter", "part of a name", e_filter, sizeof e_filter);
+    if (count != e_count || strcmp(e_filter, e_filter_was)) {
+        if (!e_rows) e_rows = (int *)malloc(sizeof(int) * 4096);
+        e_rows_n = 0;
+        for (int i = 0; e_rows && i < count && i < 4096; i++)
+            if (!e_filter[0] || contains(dbg_event_name(i), e_filter)) e_rows[e_rows_n++] = i;
+        e_count = count;
+        snprintf(e_filter_was, sizeof e_filter_was, "%s", e_filter);
+        if (getenv("NX2NAVI_DBG_TEST")) rt_log("debug: event list: filter \"%s\": %d of %d events", e_filter, e_rows_n, count);
+    }
+    status_line();
+    bool busy = dbg_busy() != 0;
+    const float foot = ImGui::GetTextLineHeightWithSpacing() * 4.2f;
+    if (ImGui::BeginChild("##events", ImVec2(0, -foot), ImGuiChildFlags_Borders)) {
+        if (busy) ImGui::BeginDisabled();
+        ImGuiListClipper clip;
+        clip.Begin(e_rows_n);
+        while (clip.Step())
+            for (int r = clip.DisplayStart; r < clip.DisplayEnd; r++) {
+                char label[112];
+                snprintf(label, sizeof label, "%s##%d", dbg_event_name(e_rows[r]), e_rows[r]);
+                if (ImGui::Selectable(label)) dbg_event_start(dbg_event_name(e_rows[r]));
+            }
+        if (busy) ImGui::EndDisabled();
+    }
+    ImGui::EndChild();
+    ImGui::TextWrapped("An event made for another area, or for actors that are not here, may show nothing, end at once or leave "
+                       "the game waiting: teleport to its area first. An event can set the story's flags and can move Link to "
+                       "another area, as it does in the game: keep a copy of the save.");
+}
+
 // ---- world
 void tab_world(void) {
     float p[3];
@@ -151,9 +288,7 @@ void tab_world(void) {
     ImGui::TextWrapped("The whole game runs at this speed, its interface and its music's timing included. It goes back to 1x when "
                        "the game is closed.");
     ImGui::Separator();
-    ImGui::TextWrapped("Not in this menu yet: teleporting, the free camera and starting cutscenes. They need the game's own "
-                       "scene-change, warp and event functions, which are not connected yet; writing Link's position into "
-                       "memory does not move him (the physics puts him back).");
+    ImGui::TextWrapped("Not in this menu yet: the free camera.");
 }
 
 // ---- memory
@@ -293,11 +428,13 @@ extern "C" void debug_menu_layout(uint32_t w, uint32_t h, float scale) {
         if (!dbg_supported()) {
             ImGui::TextWrapped("The debug menu knows the structures of Ocarina of Time 1.1.1 only.");
         } else if (ImGui::BeginTabBar("##tabs")) {
-            static const char *const names[] = {"Flags", "World", "Memory"};
-            for (int t = 0; t < 3; t++) {
+            static const char *const names[DEBUG_MENU_TABS] = {"Flags", "Teleport", "Cutscenes", "World", "Memory"};
+            for (int t = 0; t < DEBUG_MENU_TABS; t++) {
                 if (ImGui::BeginTabItem(names[t], NULL, g_tab == t ? ImGuiTabItemFlags_SetSelected : 0)) {
                     if (t == 0) tab_flags();
-                    else if (t == 1) tab_world();
+                    else if (t == 1) tab_teleport();
+                    else if (t == 2) tab_events();
+                    else if (t == 3) tab_world();
                     else tab_memory();
                     ImGui::EndTabItem();
                 }
