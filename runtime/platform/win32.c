@@ -702,8 +702,15 @@ static int write_swap(const char *path, const void *data, size_t n, int durable)
     if (len < 0 || len >= (int)sizeof tmp || !widen(tmp, a, WPATH) || !widen(path, b, WPATH)) return 0;
     HANDLE h = CreateFileW(a, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    DWORD put = 0;
-    int ok = WriteFile(h, data, (DWORD)n, &put, NULL) && put == n && (!durable || FlushFileBuffers(h));
+    // In pieces: WriteFile takes a 32-bit count, so a block of 4 GB or more (a pipeline cache can grow that far)
+    // would otherwise be cut to its low 32 bits and the write refused.
+    int ok = 1;
+    for (size_t at = 0; ok && at < n;) {
+        DWORD piece = n - at > (1u << 30) ? (1u << 30) : (DWORD)(n - at), put = 0;
+        ok = WriteFile(h, (const char *)data + at, piece, &put, NULL) && put == piece;
+        at += piece;
+    }
+    ok = ok && (!durable || FlushFileBuffers(h));
     CloseHandle(h);
     if (ok && MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING | (durable ? MOVEFILE_WRITE_THROUGH : 0))) return 1;
     DeleteFileW(a);
