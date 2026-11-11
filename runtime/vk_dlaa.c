@@ -1345,6 +1345,55 @@ static void hl_destroy(void) {
 // The device is idle here. Release NGX features and parameters before their Vulkan resources, then shut down NGX even
 // if initialization succeeded but the layout check failed. The Linux core's Shutdown1 takes an extra output pointer
 // compared with the SDK's public wrapper; it reports the number of devices still using NGX.
+// ---- the free camera's view of the ground (debug_tools.c dbg_pad). While it flies, nine of the view distances
+// mv_pass wrote (a grid over the lower part of the view, where the ground is) go back to the host, and the camera rises
+// where the closest is nearer than its clearance: flown through a hill, it showed the void below the map. A slot is
+// read FC_SLOTS evaluations after its copy, when the GPU has long been past it.
+int dbg_freecam_flying(void);                          // debug_tools.c
+void dbg_freecam_ground(const float *dist, int n);
+#define FC_N 9
+#define FC_SLOTS 4
+static VkBuffer fc_buf;
+static VmaAllocation fc_mem;
+static float *fc_map;
+static uint32_t fc_next;
+static uint8_t fc_have[FC_SLOTS];
+
+static void fcam_probe(VkCommandBuffer cb, const struct Size *e, uint32_t w, uint32_t h) {
+    if (!dbg_freecam_flying() || !e->dist_ok) {   // dist_ok: mv_pass wrote this frame's distances (Ocarina's frame)
+        memset(fc_have, 0, sizeof fc_have);
+        return;
+    }
+    const VkCtx *c = vk_ctx();
+    if (!fc_buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = FC_SLOTS * FC_N * sizeof(float),
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(c->vma, &bi, &ai, &fc_buf, &fc_mem, &info) != VK_SUCCESS) {
+            fc_buf = VK_NULL_HANDLE;
+            return;
+        }
+        fc_map = info.pMappedData;
+    }
+    uint32_t s = fc_next++ % FC_SLOTS;
+    if (fc_have[s]) {
+        vmaInvalidateAllocation(c->vma, fc_mem, s * FC_N * sizeof(float), FC_N * sizeof(float));
+        dbg_freecam_ground(fc_map + s * FC_N, FC_N);
+    }
+    // the replay's viewports have negative heights: row 0 is the top of the view
+    static const float fx[3] = {0.2f, 0.5f, 0.8f}, fy[3] = {0.6f, 0.78f, 0.96f};
+    VkBufferImageCopy r[FC_N];
+    for (int i = 0; i < FC_N; i++)
+        r[i] = (VkBufferImageCopy){.bufferOffset = (s * FC_N + i) * sizeof(float),
+                                   .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                   .imageOffset = {(int32_t)(fx[i % 3] * (w - 1)), (int32_t)(fy[i / 3] * (h - 1)), 0},
+                                   .imageExtent = {1, 1, 1}};
+    vkCmdCopyImageToBuffer(cb, e->dist[e->dist_cur ^ 1], VK_IMAGE_LAYOUT_GENERAL, fc_buf, FC_N, r);
+    fc_have[s] = 1;
+}
+
 void vk_dlaa_release(void) {
 #ifndef _WIN32
     const VkCtx *c = vk_ctx();
@@ -1365,6 +1414,7 @@ void vk_dlaa_release(void) {
     if (D.mv_samp) vkDestroySampler(c->device, D.mv_samp, NULL);
     if (D.camb) vmaDestroyBuffer(c->vma, D.camb, D.camb_mem);
     if (D.mvm) vmaDestroyBuffer(c->vma, D.mvm, D.mvm_mem);   // mapped for good: the destroy unmaps it
+    if (fc_buf) vmaDestroyBuffer(c->vma, fc_buf, fc_mem), fc_buf = VK_NULL_HANDLE, fc_map = NULL;
     if (R.pipe) vkDestroyPipeline(c->device, R.pipe, NULL);
     if (R.layout) vkDestroyPipelineLayout(c->device, R.layout, NULL);
     if (R.dsl) vkDestroyDescriptorSetLayout(c->device, R.dsl, NULL);
@@ -1666,6 +1716,7 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     uint64_t c0 = timed ? kern_now_ns() : 0;
     rec_drain();   // NGX records into the command buffer itself: the recorder thread must have made every call so far
     if (timed) T.cpu_drain += kern_now_ns() - c0;
+    if (mv == 1) fcam_probe(cb, e, w, h);   // mv_pass's distances, behind its barrier
     if (fsr) {   // FSR 3.1 (vk_ffx.cpp) in DLSS's place: the same images, then the same blit below
         if (t->level || t->base_layer || z->level || z->base_layer) return dl_fail("FSR 3.1 on a target that is not level 0, layer 0", 0);
         if (D.last_color != t->image) target_changed(t, mv == 1);
