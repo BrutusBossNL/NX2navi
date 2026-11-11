@@ -74,8 +74,9 @@ static int hold_max = -1;
 
 // ---- the executed timeline
 // The wait after a frame's first submission (nvn_api_core.c nvnQueueSubmitCommands) is there so that the GPU has run
-// that submission's passes before the game rewrites what they read. It is the fence's wait (NX2NAVI_WB_SPLIT=0, the
-// default). NX2NAVI_WB_SPLIT=1 makes it a wait on exec_tl, a second timeline that reaches a submission's value when
+// that submission's passes before the game rewrites what they read. With NX2NAVI_WB_SPLIT=0 it is the fence's wait.
+// The default is 1 again: the fence's wait cost about 4.5 % of the frames a second and the flicker it was put in
+// against was still reported with it. NX2NAVI_WB_SPLIT=1 makes it a wait on exec_tl, a second timeline that reaches a submission's value when
 // the GPU has executed its own commands: the replay ends the part before the write-backs (vk_exec.c,
 // vk_sync_split_exec; vk_memory.c vk_mem_mirror_end: what the shaders wrote into VRAM mirrors goes back to guest
 // memory), that part signals exec_tl, and the write-backs follow in a part of their own, which signals the timeline

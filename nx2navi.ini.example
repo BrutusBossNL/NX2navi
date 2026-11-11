@@ -841,7 +841,7 @@
 # about 0.7 ms less of every frame in the open (6 % at 85 frames a second), but the game then reads visibility
 # results that may be a frame old, and things near the camera can come and go from frame to frame. With shadow
 # storage (Linux, Wine) 1 changes nothing; 2 forces it there as well, for tests.
-# wb_split = 0
+# wb_split = 1
 # 1: what the game's shaders write into its memory is copied back from the video card once, and after that only when
 # the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field), for about a third more frames
 # a second in open areas. 0: copied back at the end of every GPU submission, as in 0.7.0.
