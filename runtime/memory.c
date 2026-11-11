@@ -658,6 +658,15 @@ void mem_kernel_access(uint64_t a, uint64_t n) {
     plat_mutex_unlock(&frz_lock);
 }
 
+// For a host scan of guest memory (camera_speed.c rewrite): the end of the run of pages at a that the lazy heap left
+// reserved, at most end, or 0 when the page at a is not such a page. Nothing was ever written there, so a scan steps
+// over the run; reading it would commit every page of the heap and undo what the setting saves.
+uint64_t mem_untouched_run(uint64_t a, uint64_t end) {
+    if (!heap_lazy || a < L.heap.base || a >= L.heap.base + L.heap.size) return 0;
+    uint64_t y, x = a & ~(PAGE - 1);
+    return plat_mem_state(x, end, &y) == PLAT_MEM_RESERVED && y > a ? y : 0;
+}
+
 // plat_mem_readable for a pointer the host is about to read: untouched heap pages of a lazy heap count as readable
 // (they are committed here, and read zero as they would have).
 int mem_host_readable(uint64_t a, uint64_t n) {
@@ -1417,9 +1426,6 @@ void mem_kernel_free(void *p, uint64_t size) {
     plat_mutex_unlock(&klock);
 }
 
-// NX2NAVI_TRACE=perf: how many bytes of each guest region are committed, so a process that has grown says which region
-// holds the memory. A region is reserved whole at start-up and committed page by page, so the walk reads each run of
-// pages of the same state; the alias window is the largest and costs the most steps when it is full.
 // NX2NAVI_TRACE=perf: what the lazy heap's first-use faults cost since the last line (perf.c, every perf window that had
 // some), so that a hitch can be told from them: the time includes the wait for frz_lock.
 void mem_lazy_heap_report(uint64_t frame) {
@@ -1437,6 +1443,9 @@ void mem_lazy_heap_report(uint64_t frame) {
     faults_prv = faults, bytes_prv = bytes;
 }
 
+// NX2NAVI_TRACE=perf: how many bytes of each guest region are committed, so a process that has grown says which region
+// holds the memory. A region is reserved whole at start-up and committed page by page, so the walk reads each run of
+// pages of the same state; the alias window is the largest and costs the most steps when it is full.
 void mem_guest_census(uint64_t frame) {
     const RtGuestLayout *g = mem_layout();
     const struct { const char *name; RtRange r; } reg[] = {

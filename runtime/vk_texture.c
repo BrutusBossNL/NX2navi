@@ -1555,6 +1555,9 @@ static int idle(const Tex *e, uint64_t now);
 // or the page file, and the VRAM pressure and tex_disuse already bound it. Counted in, it held the bound all through
 // Hyrule Field on a 16 GB PC with a 16 GB card (RTX 5060 Ti): the process at 28.9 to 30.7 GB, 9 to 10 GB of it video
 // memory, while the system had 8 to 10 GB of its 49 GB limit free, and the ground flickered white as textures gave way.
+// So on such a PC the 42 GB process above, half of it device memory, no longer reaches this bound: the system's
+// figure and the VRAM pressure are what act there. The part of a card's memory the driver has moved into shared
+// system memory is subtracted too, which it should not be; the driver does not report it apart.
 #define COMMIT_LOW_KEEP ((uint64_t)256 << 20)
 #define PROC_COMMIT_MIN_MB 24576
 static uint64_t released_cap;   // bytes; 0 = not read yet, UINT64_MAX = no limit
@@ -1616,8 +1619,9 @@ static int commit_is_low(void) {
         char note[2048];   // the platform layer's own lines go to stderr only, so the log file gets this through here
         if (plat_commit_note(note, sizeof note)) rt_log("platform: %s", note);
         if (proc_commit_mb)
-            rt_log("vk: textures give way as under low commit while this process's commit is above %lld MB "
-                   "(NX2NAVI_TEX_PROC_COMMIT_MB; 0 = off)", proc_commit_mb);
+            rt_log("vk: textures give way as under low commit while this process's commit%s is above %lld MB "
+                   "(NX2NAVI_TEX_PROC_COMMIT_MB; 0 = off)",
+                   plat_commit_counts_vram() ? ", less the video memory in use on a discrete card," : "", proc_commit_mb);
     }
     if (!commit_free_mb && !proc_commit_mb) return 0;
     double proc, used, limit;
@@ -1655,9 +1659,10 @@ static int commit_is_low(void) {
         static int hinted;
         if (low && !hinted && plat_page_file_managed() == 1) {
             hinted = 1;
-            rt_log("vk: the page file is sized by Windows, which grows it only slowly: a fixed page file of at least "
-                   "32 GB keeps the system's commit from running low (System > About > Advanced system settings > "
-                   "Performance Settings > Advanced > Virtual memory > Change: Custom size, then restart Windows)");
+            rt_log("vk: the page file is sized by Windows, which grows it only slowly: a fixed page file whose initial "
+                   "size is at least 32 GB keeps the system's commit from running low (System > About > Advanced system "
+                   "settings > Performance Settings > Advanced > Virtual memory > Change: untick the automatic "
+                   "management, Custom size with an initial size of 32768 MB or more, Set, then restart Windows)");
         }
     }
     sys_low = low;

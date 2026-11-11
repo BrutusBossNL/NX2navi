@@ -165,7 +165,7 @@ extern "C" NX2SL_API void nx2sl_log_unavailable(VkPhysicalDevice physical) {
     sl::AdapterInfo adapter{};
     adapter.vkPhysicalDevice = physical;
     sl::Result r = supported(sl::kFeatureDLSS_G, adapter);
-    say("dlssg: frame generation support on the selected Vulkan adapter: %s (%d)", sl::getResultAsStr(r), (int)r);
+    say("dlssg: Streamline's support check for frame generation: %s (%d)", sl::getResultAsStr(r), (int)r);
 }
 
 // Streamline sets Reflex's mode on the swapchain it was told of last (VK_NV_low_latency2) and drops it while there is

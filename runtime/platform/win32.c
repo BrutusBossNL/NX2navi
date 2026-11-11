@@ -1938,7 +1938,7 @@ int plat_page_file_managed(void) {
             wchar_t *sp = wcschr(e, L' ');
             unsigned long lo = sp ? wcstoul(sp, &sp, 10) : 0, hi = sp ? wcstoul(sp, NULL, 10) : 0;
             int own = e[0] == L'?' || (!lo && !hi);
-            r = own ? 1 : r < 0 ? 0 : r;
+            r = own && r != 0 ? 1 : 0;   // a page file with its sizes set is the user's choice: no advice then
         }
     }
     return managed = r;

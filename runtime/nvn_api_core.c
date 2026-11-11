@@ -700,8 +700,10 @@ NVN_API(nvnQueueSubmitCommands) {
     // NX2NAVI_SUBMIT_FINISH=<mask>: bit i waits after the i-th submission of a frame (default 0x1); a plain 1 waits
     // after every submission, 0 never.
     // The wait is for the submission's passes, which is what the rewrite races with: exec_wait leaves out the
-    // write-backs of what they wrote (vk_sync.c exec_tl), which nothing here needs before the game goes on. The fences
-    // the game itself waits on cover them as before.
+    // write-backs of what they wrote (vk_sync.c exec_tl), which nothing here needs before the game goes on where the
+    // pools are imports or mirrors. With shadow storage the write-backs reach guest memory later and the game must
+    // not rewrite a pool before them, so there the wait covers them (vk_sync_exec_wait). The fences the game itself
+    // waits on cover them as before.
     static long long finish_mask = -2;
     if (finish_mask == -2) {
         const char *e = cfg_get("NX2NAVI_SUBMIT_FINISH");

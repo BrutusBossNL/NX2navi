@@ -435,7 +435,8 @@ static void mem_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src, VkAccessF
 // So each is kept to half a VMA block (vk_vma_block_size's default 64 MiB), where VMA still places it in a block, not in
 // memory of its own: 16 MiB of texels, their blocks and BC3 fit in 32 MiB.
 #define CHUNK_OUT (16ull << 20)
-#define SCRATCH_MIN (32ull << 20)   // the shared scratch's least size: one chunk's texels plus its blocks and BC3
+#define SCRATCH_MIN (32ull << 20)   // the shared scratch's usual least size: one chunk's texels plus its blocks and BC3
+                                    // (smaller only after the device ran out of memory: scratch_get's second try)
 
 // The shared scratch and the command buffer it was last recorded into. An upload batch's command buffer is used again
 // only after that batch completed (vk_memory.c: completed batches go to the spare list), so the same handle means the

@@ -6,8 +6,8 @@
 //   - minStorageBufferOffsetAlignment above 4 (NX2NAVI_VK_SSBO_ALIGN=<power of two> raises it): the translator computes
 //     storage offsets from the guest address rounded down to that alignment (the translator's unaligned storage path), and
 //     vk_exec_draw.c ssbo_info binds the rounded-down address, so shader writes reach guest memory instead of a copy.
-//   - no graphics pipeline library with fast linking (NX2NAVI_GPL=0 forces it; it also defaults off on AMD's RDNA 1/2
-//     Windows driver branch, see vk_caps_gpl): vk_caps.gpl = 0, the extension stays disabled, and pipelines are built whole.
+//   - no graphics pipeline library with fast linking (NX2NAVI_GPL=0 forces it; it also defaults off on AMD's Windows
+//     driver for RDNA 2 and older, see vk_caps_gpl): vk_caps.gpl = 0, the extension stays disabled, and pipelines are built whole.
 //   - no 32-lane pin (no subgroupSizeControl, 32 outside min..max, or NX2NAVI_VK_SUBGROUP_PIN=0): stages run at the
 //     device's subgroupSize (SPIR-V 1.3 without a required size) and the translator is told that size.
 //     NX2NAVI_VK_SUBGROUP=<n> pins n instead of 32 where the driver allows it.
@@ -56,14 +56,16 @@ void vk_caps_driver(VkPhysicalDevice p) {
 }
 
 // NX2NAVI_GPL=0 turns graphics pipeline libraries off and 1 turns them on; unset, they are on wherever the driver has
-// fast linking, except on AMD's Windows driver for RDNA 1 and 2 (vk_caps.amd_sc). That driver faults inside
-// vkCreateGraphicsPipelines when it links the stage libraries of a burst of new pipelines, which the game asks for when
-// an enemy dies and its effects are drawn for the first time: the game ended with code 71 at every kill on an RX 6700 XT
-// and an RX 5700 XT (issue #418), and no longer with gpl = 0. The price there is that a new pipeline is built whole on
-// the draw's path (frames of 0.5-1.2 s on an RX 6600 while an area is new). The same driver had libraries off before,
-// for device losses at boot (issue #5), whose cause was GPU writes past 3D BC images (vk_exec.c, "3D BC render
-// targets"); it boots with them since that was fixed, so gpl = 1 is there to try on a newer driver. RDNA 4 under RADV
-// is reported to hang the GPU at the title screen with GPL.
+// fast linking, except on AMD's Windows driver for RDNA 2 and older (vk_caps.amd_sc: RX 400 to RX 6000). On an
+// RX 6700 XT the game ended with code 71 at every enemy killed, from 0.5 on, and no longer with gpl = 0; an RX 5700 XT
+// showed the same ending (issue #418). Where in the driver it faults is not established: a kill draws its effects
+// for the first time, which asks for a burst of new pipelines linked from stage libraries, and building them whole
+// avoids it. The price there: with libraries off a pipeline the game needs for the first time is built whole by a
+// worker while its draw is left out (vk_exec_draw.c, "pipeline still building"), so new things appear some frames
+// late, and the start waits for every recorded pipeline instead of 20 s at most (vk_pipeline.c prewarm_run). The
+// same driver had libraries off before, for device losses at boot (issue #5), whose cause was GPU writes past 3D BC
+// images (vk_exec.c, "3D BC render targets"); it boots with them since that was fixed, so gpl = 1 is there to try on
+// a newer driver. RDNA 4 under RADV is reported to hang the GPU at the title screen with GPL.
 int vk_caps_gpl(const VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *f,
                 const VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT *p) {
     gpl_lib = f->graphicsPipelineLibrary;
@@ -74,7 +76,7 @@ int vk_caps_gpl(const VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *f,
     gpl_off = vk_caps.gpl ? NULL
              : !gpl_lib || !gpl_fast ? "the driver has no fast linking"
              : e && *e ? "NX2NAVI_GPL=0"
-                       : "default on AMD's driver for RDNA 1 and 2 (NX2NAVI_GPL=1 turns it on)";
+                       : "default on AMD's driver for RDNA 2 and older (NX2NAVI_GPL=1 turns it on)";
     return vk_caps.gpl;
 }
 

@@ -1,6 +1,8 @@
 // The action prompt's diamond of face buttons for the pad layout at start. The action prompt (top right) shows the
 // four face buttons as a diamond in the Switch's places, A on the right. Under a layout by label (NX2NAVI_PAD_LAYOUT =
-// xbox, playstation or auto; input_map.c input_pad_layout_pick) A is the bottom button, so romfs.c
+// xbox or playstation; input_map.c input_pad_layout_pick) A is the bottom button, and auto is treated the same at
+// start, when no pad is open yet: a pad that labels its right button A then plays by position under auto and sees
+// the diamond the other way round, which docs/controls.md says and nintendo avoids. So romfs.c
 // (action_prompt_overlay) serves the shared interface layouts with the diamond laid out as such a pad has its buttons:
 // A bottom, B right, X left, Y top. The game reads the layouts once at start, so a change of layout shows after a
 // restart.

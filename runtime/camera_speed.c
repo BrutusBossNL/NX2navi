@@ -183,6 +183,11 @@ static int rewrite(float k, float to, int fresh) {
                 continue;
             }
             while (a < stop) {
+                uint64_t skip = mem_untouched_run(a, stop);   // heap pages the lazy heap never committed hold nothing
+                if (skip) {
+                    a = skip;
+                    continue;
+                }
                 uint64_t n = stop - a < PIECE ? stop - a : PIECE;
                 if (n >= len && mem_read_hold(a, n)) {
                     const uint8_t *p = (const uint8_t *)(uintptr_t)a, *e = p + n;

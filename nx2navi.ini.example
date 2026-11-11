@@ -184,9 +184,10 @@
 # the new translator cannot translate keeps its old translation. 0: shaders the new translator has not translated yet
 # are translated before they are used (at start or when the game first draws them), as earlier versions did.
 # shader_carry = 1
-# Vulkan graphics pipeline library, 0 or 1. Default: on, except with AMD's Windows driver for RX 5000 and RX 6000
-# cards, which faults when it links a burst of new pipelines (the game ended at every enemy killed); there it is off,
-# new pipelines are built whole, and gpl = 1 turns it on again.
+# Vulkan graphics pipeline library, 0 or 1. Default: on, except with AMD's Windows driver for RX 6000 and older cards
+# (RX 400 to RX 6000), where the game ended at every enemy killed with it on. There it is off: a pipeline needed for
+# the first time is built whole while its draw is left out for some frames, and the start waits until every pipeline
+# of earlier sessions is built. gpl = 1 turns it on again.
 # gpl = 1
 
 # Textures and memory.
@@ -744,7 +745,8 @@
 # wb_probe = 0
 # 1: what the GPU wrote goes back to the game's memory in a GPU submission of its own, and the wait after each frame's
 # first submission ends when that submission's passes are through, without waiting for the copy back (3 to 4 ms of
-# every frame). 0: the copy back is part of the submission, and the wait covers it.
+# every frame). 0: the copy back is part of the submission, and the wait covers it. With shadow storage (Linux, Wine)
+# the wait covers the copy back either way: the game must not go on before it.
 # wb_split = 1
 # 1: what the game's shaders write into its memory is copied back from the video card once, and after that only when
 # the game's CPU code touches it (most of it never is: 66 MiB a frame in Hyrule Field), for about a third more frames
@@ -773,7 +775,8 @@
 # Windows, 1 (experimental): the game's heap is committed a 64 KiB run at a time where it is first used, instead of
 # all of it when the game sizes it. Windows counts committed memory against RAM plus the page file whether it is used
 # or not, and in Castle Town after Hyrule Field about 3.4 of the heap's 6.8 GiB had never been used. 0: committed up
-# front. Linux commits pages on first use anyway.
+# front. Linux commits pages on first use anyway. With 1, a PC whose commit is used up ends the game at the moment a
+# heap page is first used, in the middle of play, where with 0 it would not have started.
 # heap_lazy = 0
 # Linux, shadow storage: 1 clears the write watch's protection of a range in one call before the GPU's bytes are copied
 # back into the game's memory, instead of taking a fault at the first store into each page.

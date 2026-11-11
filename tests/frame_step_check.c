@@ -39,6 +39,8 @@ void rtss_limit_want(int64_t millihz) { (void)millihz; }
 int rtss_limit_active(void) { return 0; }
 int plat_mem_read(uint64_t a, void *out, size_t n) { (void)a, (void)out, (void)n; return 0; }
 int plat_mem_readable(uint64_t a, size_t n) { (void)a, (void)n; return 0; }
+void mem_kernel_access(uint64_t a, uint64_t n) { (void)a, (void)n; }
+int mem_host_readable(uint64_t a, uint64_t n) { (void)a, (void)n; return 0; }
 uint64_t kern_now_ns(void) { return 0; }
 
 // ---- one present: the pacer asks for the period, then reports the display time. Returns the step in 60 Hz frames.
