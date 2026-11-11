@@ -135,6 +135,9 @@ static uint64_t ru_same_n, ru_same_bytes;   // re-uploads skipped: the pages wer
 // live image that the GPU wrote gets that image's content (alias_copy). Counts since the last log line.
 static int tex_alias = -1;
 static uint64_t n_alias_copied, n_alias_upload, n_alias_uninit, n_alias_kept, n_alias_released;
+// New depth and stencil images (not reused) init_new started at the replay's position, those of them for which an open
+// pass was ended, and those that went in the upload batch (no replay recording), since the last perf line.
+static uint64_t n_dinit_inline, n_dinit_inpass, n_dinit_upload;
 static uint32_t submit_epoch = 1;   // bumped per queue submit: draw bindings check a texture's storage once per submit
 // The thresholds further down that count presents (STALE_FRAMES, GPU_STALE_FRAMES, OVERWRITTEN_KEEP, DISUSE_FRAMES)
 // were set at 60 presents a second. Without a limit the game presents 85 to 240 a second (a menu), and "120 presents"
@@ -723,18 +726,35 @@ static void init_image(Tex *e, VkCommandBuffer cb) {
     }
 }
 
+// NX2NAVI_DEPTH_INIT_INLINE (default 1; 0: in the upload batch, as before): a new depth or stencil image goes through
+// init_image at the replay's position too. Its clear writes the image's memory, and an image bound into pool memory
+// (bind_pool_memory) shares that with the live texture at its address; from the upload batch, which runs before the
+// whole part being recorded (vk_sync.c split_part), the clear can zero what earlier commands of the part still read as
+// that texture. Ocarina makes a new depth descriptor over a live one about 40 times a second at the castle town gate
+// (a 1280x720 DEPTH32F over a 640x360 one, its sun shadow maps as they resize), and for one frame a few times a minute
+// the shadowing went fully dark. At the replay's position vk_exec_inline_begin's barrier orders the clear after them.
+static int depth_init_inline(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("DEPTH_INIT_INLINE", "1") != 0;
+    return on;
+}
+
 // A new entry's first transition. A reused image goes through it at the replay's current position: earlier commands
 // of the part being recorded may still use the image as the texture it was, and the upload batch runs before the part.
+// So does a new depth or stencil image (depth_init_inline).
 static void init_new(Tex *e) {
-    if (e->reused) {
+    int ds = !e->reused && (e->f.depth || e->f.stencil) && depth_init_inline();
+    if (e->reused || ds) {
         int reopen;
         VkCommandBuffer cb = vk_exec_inline_begin(&reopen);
         if (cb) {
             init_image(e, cb);
             vk_exec_inline_end(reopen);
+            if (ds) n_dinit_inline++, n_dinit_inpass += reopen != 0;
             return;
         }
     }
+    if (ds) n_dinit_upload++;
     init_image(e, vk_upload_begin());
     vk_upload_end();
 }
@@ -2542,30 +2562,9 @@ static int img_block(const Tex *e, int *bw, int *bh) {
 // on screen, so a descriptor made over a live target's memory is often a few texels larger or smaller than it. The game
 // reads the bytes there as its content (the same memory on the console); started empty instead, the scene went black
 // for a frame about once a second while the camera turned, from 0.6.1 on (issue #253).
-// NX2NAVI_DEPTH_ALIAS=1 (test, default 0): a depth-only image of the same format as the live one at its address takes
-// its depth too (the region both cover), where it started cleared to 0 (init_image). NX2NAVI_DEPTH_ALIAS_LOG=1 logs
-// every depth entry made over a live texture, with the frame, so a one-frame dark shadowing can be lined up with it.
-static int depth_alias(void) {
-    static int on = -1;
-    if (on < 0) {
-        on = rt_knob("DEPTH_ALIAS", "0");
-        rt_log("vk: depth aliases: %s (NX2NAVI_DEPTH_ALIAS)", on == 2 ? "a new depth image takes the live one's depth in the B blocks"
-                                                              : on ? "a new depth image takes the live one's depth"
-                                                                   : "a new depth image starts cleared");
-    }
-    return RT_KNOB_ON(on);
-}
-
-static int depth_alias_log(void) {
-    static int on = -1;
-    if (on < 0) on = rt_knob("DEPTH_ALIAS_LOG", "0");
-    return on;
-}
-
 static int alias_compatible(const Tex *e, const Tex *src, const char **why) {
     const VkTexImage *p = &e->pub, *q = &src->pub;
-    int dd = depth_alias() && e->f.depth && src->f.depth && !e->f.stencil && !src->f.stencil && e->f.vk == src->f.vk;
-    if (((e->f.depth || e->f.stencil || src->f.depth || src->f.stencil) && !dd) || p->samples > 1 || q->samples > 1)
+    if (e->f.depth || e->f.stencil || src->f.depth || src->f.stencil || p->samples > 1 || q->samples > 1)
         return *why = "depth, stencil or multisample", 0;
     if (p->type != q->type) return *why = "another image type", 0;
     if (p->skip || q->skip) return *why = "made without its top levels (texture detail)", 0;   // level i is not level i
@@ -2596,7 +2595,6 @@ static int alias_copy(Tex *e, const Tex *src) {
     VkCommandBuffer cb = vk_exec_inline_begin(&reopen);
     if (!cb) return 0;
     int bw, bh, bpb = img_block(e, &bw, &bh);
-    VkImageAspectFlags asp = e->f.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;   // depth_alias
     uint32_t levels = e->pub.levels < src->pub.levels ? e->pub.levels : src->pub.levels;
     uint32_t layers = e->pub.layers < src->pub.layers ? e->pub.layers : src->pub.layers, n = levels * layers, k = 0;
     // the region both images cover (alias_compatible: the same shape for block-compressed ones); the rest of a larger
@@ -2611,7 +2609,7 @@ static int alias_copy(Tex *e, const Tex *src) {
             uint32_t w = umin(mip(e->pub.width, lv), mip(src->pub.width, lv));
             uint32_t h = umin(mip(e->pub.height, lv), mip(src->pub.height, lv));
             uint32_t z = umin(mip(e->pub.depth, lv), mip(src->pub.depth, lv));
-            rg[k] = (VkBufferImageCopy){.bufferOffset = total, .imageSubresource = {asp, lv, ly, 1},
+            rg[k] = (VkBufferImageCopy){.bufferOffset = total, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, ly, 1},
                                         .imageExtent = {w, h, z}};
             total += ((VkDeviceSize)(w + bw - 1) / bw * ((h + bh - 1) / bh) * z * bpb + 15) & ~15ull;
         }
@@ -2631,17 +2629,11 @@ static int alias_copy(Tex *e, const Tex *src) {
                                 .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                                 .image = e->pub.image,
-                                .subresourceRange = {asp, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
+                                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb,
                            .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ib};
     vkCmdPipelineBarrier2(cb, &di);
-    if (partial && e->f.depth) {   // the rest of a larger depth image starts as init_image leaves a new one
-        VkClearDepthStencilValue dz = {0.0f, 0};
-        VkImageSubresourceRange all = {asp, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
-        vkCmdClearDepthStencilImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &dz, 1, &all);
-        barrier(cb, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    } else if (partial && vk_fix_zero() && !e->bound_to && !e->pub.mirrored && !format_compressed(e->f.vk)) {
+    if (partial && vk_fix_zero() && !e->bound_to && !e->pub.mirrored && !format_compressed(e->f.vk)) {
         VkClearColorValue zero = {0};
         VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         vkCmdClearColorImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
@@ -2674,6 +2666,12 @@ static int create_held(const TexKey *k) {
 static void create_failed(const TexKey *k) {
     unsigned i = failed_next++ % FAILED_HOLD;
     failed_hold[i].k = *k, failed_hold[i].until_ns = plat_now_ns() + 2000000000ull;
+}
+
+static int depth_alias_log(void) {   // NX2NAVI_DEPTH_ALIAS_LOG=1: start_at logs each new depth entry over a live texture
+    static int on = -1;
+    if (on < 0) on = rt_knob("DEPTH_ALIAS_LOG", "0");
+    return on;
 }
 
 // The start of e's content at its address, for a new entry and for a superseded one taken back (taken_back): another
@@ -2723,15 +2721,20 @@ static void start_at(Tex *e, const TexKey *k, int taken_back) {
     int from_released = !src && rsrc && !live_content;
     if (from_released) src = rsrc;
     if (alias) perf_count(PERF_CNT_TEX_ALIAS);
-    if (alias && (e->f.depth || e->f.stencil) && depth_alias_log()) {   // depth_alias
+    if (alias && (e->f.depth || e->f.stencil) && depth_alias_log()) {
+        // each new depth or stencil entry over a live texture, with the frame and whether the two are bound into pool
+        // memory (the same allocation: they share bytes), to line up with a dark frame
         static int n_dlog;
         if (n_dlog++ < 20000)
-            rt_log("vk: depth alias: frame %llu %#llx %ux%ux%u fmt %#x%s over %ux%ux%u fmt %#x%s: %s",
+            rt_log("vk: depth alias: frame %llu %#llx %ux%ux%u fmt %#x%s%s over %ux%ux%u fmt %#x%s%s%s: %s",
                    (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), (unsigned long long)k->addr,
-                   e->pub.width, e->pub.height, e->pub.layers, e->t.d.format, taken_back ? " (taken back)" : "",
-                   other->pub.width, other->pub.height, other->pub.layers, other->t.d.format,
-                   other->f.depth ? " depth" : "", taken_back && !newer && !e->pub.mirrored ? "kept its own"
-                   : !tex_alias ? "cleared (aliases off)" : src ? (from_released ? "copied from a released one" : "copied") : why);
+                   e->pub.width, e->pub.height, e->pub.layers, e->t.d.format, e->bound_to ? " bound" : " own memory",
+                   taken_back ? " (taken back)" : "", other->pub.width, other->pub.height, other->pub.layers,
+                   other->t.d.format, other->f.depth ? " depth" : "", other->bound_to ? " bound" : " own memory",
+                   e->bound_to && e->bound_to == other->bound_to ? ", same allocation" : "",
+                   taken_back && !newer && !e->pub.mirrored ? "kept its own"
+                   : e->reused || taken_back ? "cleared at the replay's position (reused)"
+                   : depth_init_inline() ? "cleared at the replay's position" : "cleared in the upload batch");
     }
     if (taken_back && !newer && !e->pub.mirrored) {   // its image still holds its content
         n_alias_kept++;
@@ -3309,6 +3312,11 @@ void vk_texture_new_submit(void) {
                (unsigned long long)f * 60, (unsigned long long)n_alias_copied, (unsigned long long)n_alias_released,
                (unsigned long long)n_alias_upload, (unsigned long long)n_alias_uninit, (unsigned long long)n_alias_kept);
         n_alias_copied = n_alias_upload = n_alias_uninit = n_alias_kept = n_alias_released = 0;
+        if (n_dinit_inline || n_dinit_upload)
+            rt_log("perf: frame %llu: new depth images started at the replay's position %llu (%llu ended an open pass), "
+                   "in the upload batch %llu", (unsigned long long)f * 60, (unsigned long long)n_dinit_inline,
+                   (unsigned long long)n_dinit_inpass, (unsigned long long)n_dinit_upload);
+        n_dinit_inline = n_dinit_inpass = n_dinit_upload = 0;
         rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms); "
                "skipped with unchanged bytes %llu (%.1f MiB)",
                (unsigned long long)f * 60, (unsigned long long)ru_n, ru_bytes / 1048576.0, ru_ns / 1e6,
