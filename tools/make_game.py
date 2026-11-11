@@ -1773,7 +1773,7 @@ def shader_progress(phase, done, total, quiet_s, elapsed_s, build_only=False):
     if quiet_s >= SHADER_STALL_S:
         detail += (f'. No change for {int(quiet_s) // 60} min, but it is still running: one large shader can take '
                    'a while')
-    return {'step': 'shaders', 'fraction': round(fraction, 4), 'detail': detail}
+    return {'step': 'shaders', 'fraction': fraction, 'detail': detail}
 
 
 # In the game's shader-cache/: the translator identities its translations are of, newest first (runtime/gfx_shader.c,
