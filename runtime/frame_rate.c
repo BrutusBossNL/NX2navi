@@ -235,6 +235,8 @@ double frame_step_game_hz(void) {
 // RivaTuner Statistics Server (rtss_limit.c) gets the same limit; while it limits this process the pacer holds no
 // frames, so the two never stack. NX2NAVI_RTSS=0 and frame generation (RTSS would count the generated frames) keep it out.
 static double paced_hz;   // the game frames a second the newest frame_step_cap_ns paces at (ocarina_step); 0: none
+static int movie_paced;   // the movie rate the newest frame_step_cap_ns paces at (ocarina_step, frame_step_movie_hz); 0: none
+int frame_step_movie_hz(void) { return movie_paced; }
 uint64_t frame_step_cap_ns(void) {
     frame_limit_live();
     static int rtss_allowed = -1;
@@ -245,6 +247,12 @@ uint64_t frame_step_cap_ns(void) {
     int rtss = rtss_allowed && !vk_fg_wanted() && !vk_dlssg_active();
     int gen = generated_factor();
     int movie_hz = movie_cap_hz();
+    static int movie_clock = -1;   // NX2NAVI_MOVIE_CLOCK=0: the steady step and the usual pacing through a movie too
+    if (movie_clock < 0) {
+        const char *e = cfg_get("NX2NAVI_MOVIE_CLOCK");
+        movie_clock = !(e && !strcmp(e, "0"));
+    }
+    movie_paced = movie_clock ? movie_hz : 0;
     static int movie_was, movie_logs;
     if (!!movie_hz != movie_was) {
         movie_was = !!movie_hz;
@@ -392,11 +400,32 @@ static void ocarina_step_reset(void) {
     os_owed = 0;
 }
 
+// While a movie plays (frame_step_cap_ns paces the game at the movie's rate) the step is exactly one movie frame, whatever
+// the display intervals; NX2NAVI_MOVIE_CLOCK=0 leaves movies to the steady step (comparison runs). The game's movie
+// player (main+0x3b5ca60) adds the time manager's seconds times 60 to an accumulator at each update and advances the
+// movie by its whole pictures, at most the player's limit per update (+0x20, set at main+0x3b5d094: 1, or 2 in one of
+// its modes), keeping the rest. The Triforce movie showed one picture per update (600 pictures in 600 updates at 59.6
+// updates a second), so the time a late frame left owed, which the steady step pays back as steps over one frame, never
+// became pictures: the picture fell behind its sound, which plays by the clock, by each late frame for good. The
+// movie's event counts updates as 60 Hz frames too (frame_step_cap_ns). So the updates themselves keep the clock
+// (nvn_api_obj.c pace keeps the movie's slots through a late frame) and each counts as one movie frame, for the
+// picture, the event and the game's clock alike. The filter starts again at a movie's start and end, so neither rate's
+// intervals reach the other.
 static double ocarina_step(double dt) {
-    static int steady = -1;
+    static int steady = -1, movie_was;
     if (steady < 0) {
         const char *e = cfg_get("NX2NAVI_STEP_STEADY");
         steady = !(e && !strcmp(e, "0"));
+    }
+    if (movie_paced != movie_was) {
+        movie_was = movie_paced;
+        ocarina_step_reset();
+    }
+    if (movie_paced > 0) {
+        double step = 1.0 / movie_paced;
+        if (os_step_lo <= 0 || step < os_step_lo) os_step_lo = step;
+        if (step > os_step_hi) os_step_hi = step;
+        return step;
     }
     if (dt > STEP_MAX_S) dt = STEP_MAX_S;
     os_ring[os_next++ % OSTEP_WINDOW] = dt;
