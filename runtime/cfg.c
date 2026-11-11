@@ -12,6 +12,8 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "cfg_private.h"
+#include "coop_app.h"
 #include "discord_app.h"
 #include "host.h"
 #include "platform/platform.h"
@@ -73,6 +75,12 @@ static const char *const known[] = {
     "TEXUP_LOG_MS", "DYN_RES", "DYN_RES_TARGET", "DYN_RES_STEP", "TEXTURE_DETAIL",
     "RECORDER_CORE", "RECORDER_PRIO", "REPLAY_TIME", "LOCK_TIME", "POOL_CREATE_BUDGET", "POOL_CREATE_MS", "POOL_LOAD_BACKLOG", "POOL_LOAD_MS", "VA_REPORT",
     "VMA_BLOCK_MB", "ASTC_BC_PROBE", "SYNC_WAKE_ALL", "LOG_ASYNC",
+    "COOP", "COOP_NAME", "COOP_SERVER", "COOP_PORT", "COOP_ROOM", "COOP_AUTO", "COOP_DROP",   // co-op (coop.c); the last three have no menu row
+    "COOP_PROGRESS", "COOP_ITEMS", "COOP_SONGS", "COOP_QUEST", "COOP_KEYS", "COOP_RUPEES", "COOP_AMMO",   // the room's rules (coop_game.c)
+    "COOP_TEST_SET",   // test: sets flags by hash at given frames (coop_game.c); no menu row
+    "COOP_ACCEPT",     // accepts a co-op room's members and rules before anything of it is applied (coop_game.c)
+    "COOP_REMOVE",     // the room's maker removes a member: its id (coop.c), or a key's fingerprint (coop_game.c); no row (the Co-op tab's Remove)
+    "COOP_RESET_POOLS",   // the room's maker resets the pools when it changes to a value other than 0 (coop_game.c); no row (the tab's Reset the pools)
 };
 
 // The nx2navi.ini section a key cfg_set may write goes to when the file lacks it (nx2navi.ini.example's sections).
@@ -96,6 +104,9 @@ static const struct { const char *key, *section; } sections[] = {
     {"FRAMEGEN", "display"}, {"FRAMEGEN_MULTIPLIER", "display"}, {"FG_MULT", "display"},
     {"DEVICE_PROFILE", "display"}, {"ASSUME_FOCUS", "display"},
     {"DISCORD_RPC", "discord"}, {"DISCORD_APP_ID", "discord"}, {"DISCORD_IMAGE", "discord"},
+    {"COOP", "coop"}, {"COOP_NAME", "coop"}, {"COOP_SERVER", "coop"}, {"COOP_PORT", "coop"},
+    {"COOP_PROGRESS", "coop"}, {"COOP_ITEMS", "coop"}, {"COOP_SONGS", "coop"}, {"COOP_QUEST", "coop"}, {"COOP_KEYS", "coop"},
+    {"COOP_RUPEES", "coop"}, {"COOP_AMMO", "coop"}, {"COOP_ACCEPT", "coop"},
     {"SHADOW_SCALE", "display"}, {"SHADOW_RANGE", "display"}, {"CONTACT_SHADOWS", "display"},
     {"PCSS", "display"},
     {"MODS_DIR", "mods"}, {"MODS_ORDER", "mods"}, {"MODS_DISABLED", "mods"}, {"MODS_REBUILD", "mods"},
@@ -227,6 +238,18 @@ static const CfgMeta metas[] = {
     {"DISCORD_RPC", "1", "0|1", LIVE},
     {"DISCORD_APP_ID", NX2NAVI_DISCORD_APP_ID_DEFAULT, NULL, LIVE},
     {"DISCORD_IMAGE", NX2NAVI_DISCORD_IMAGE_DEFAULT, NULL, LIVE},
+    // Co-op (coop.c): off until the player turns it on. The server is host[:port] of a relay (tools/coop_relay.py), and has no
+    // default until coop_app.h names one; the name is at most 24 bytes, empty for Player-xxxx; the port is the local UDP port
+    // (0: any). COOP_ROOM, COOP_AUTO, COOP_DROP and COOP_TEST_SET are read with cfg_get, no row.
+    {"COOP", "0", "0|1", LIVE}, {"COOP_NAME", "", NULL, LIVE},
+    {"COOP_SERVER", NX2NAVI_COOP_SERVER_DEFAULT, NULL, LIVE}, {"COOP_PORT", "0", "0..65535", RESTART},
+    // The rules a room made by this player syncs by (coop_state.h, docs/coop.md); a joiner's own are not used in the room.
+    {"COOP_PROGRESS", "shared", "shared|own", LIVE}, {"COOP_ITEMS", "shared", "shared|own", LIVE},
+    {"COOP_SONGS", "shared", "shared|own", LIVE}, {"COOP_QUEST", "shared", "shared|own", LIVE},
+    {"COOP_KEYS", "pool", "pool|own", LIVE}, {"COOP_RUPEES", "own", "own|pool", LIVE}, {"COOP_AMMO", "own", "own|pool", LIVE},
+    // Nothing from a room is applied before its members and rules are accepted (coop_game.c): ask (the log names the
+    // offer's number, which this setting or the menu accepts), always (every room, the save still copied first), or a number.
+    {"COOP_ACCEPT", "ask", NULL, LIVE},
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
@@ -982,13 +1005,15 @@ static void log_file_settings(void) {
         char key[64];
         snprintf(key, sizeof key, "%s", entries[i].key);
         for (char *p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
-        size_t vl = strlen(entries[i].value);
+        // a co-op room's secret, the relay, the player's name: only that they are set (cfg_private.h)
+        const char *value = cfg_private_key(entries[i].key) && entries[i].value[0] ? CFG_PRIVATE_SHOWN : entries[i].value;
+        size_t vl = strlen(value);
         if (vl > 200) vl = 200;   // a long value (a list of mods) is cut: the line shows that the key is set
         if (k && k + strlen(key) + vl + 5 > 900) {
             rt_log("cfg: nx2navi.ini sets: %s", line);
             k = 0;
         }
-        k += (size_t)snprintf(line + k, sizeof line - k, "%s%s = %.*s", k ? ", " : "", key, (int)vl, entries[i].value);
+        k += (size_t)snprintf(line + k, sizeof line - k, "%s%s = %.*s", k ? ", " : "", key, (int)vl, value);
     }
     if (k) rt_log("cfg: nx2navi.ini sets: %s", line);
     if (n_unknown)
@@ -1011,6 +1036,43 @@ static void load_ini(void) {
         if (getenv(var)) rt_log("cfg: %s is set in the environment and overrides nx2navi.ini", var);
     }
 }
+
+int cfg_ini_read(const char *path, const char *key, char *out, size_t cap) {
+    if (cap) out[0] = 0;
+    uint64_t size = 0;
+    uint8_t *data = plat_file_read(path, &size);
+    if (!data || !size) {   // gone or empty for a moment (an editor saving it), or locked: no reading, not "no value"
+        free(data);
+        return -1;
+    }
+    int found = 0;
+    char *p = (char *)data;
+    if (size >= 3 && !memcmp(p, "\xEF\xBB\xBF", 3)) p += 3;   // as cfg_load: editors add a BOM
+    for (;;) {
+        char *eol = strchr(p, '\n');
+        if (eol) *eol = 0;
+        char *s = trim(p), *eq = strchr(s, '=');
+        if (*s && *s != '#' && *s != ';' && *s != '[' && eq) {
+            *eq = 0;
+            const char *k = trim(s);
+            size_t i = 0;
+            while (k[i] && key[i] && tolower((unsigned char)k[i]) == tolower((unsigned char)key[i])) i++;
+            if (!k[i] && !key[i]) {   // as cfg_load: a repeated key's later line wins, quotes go, "key =" sets nothing
+                char *v = trim(eq + 1);
+                size_t vl = strlen(v);
+                if (vl >= 2 && v[0] == '"' && v[vl - 1] == '"') v[vl - 1] = 0, v++;
+                snprintf(out, cap, "%s", v);
+                found = *v != 0;
+            }
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+    free(data);
+    return found;
+}
+
+int cfg_ini_now(const char *key, char *out, size_t cap) { return find_ini() ? cfg_ini_read(ini_path, key, out, cap) : 0; }
 
 void cfg_init(void) {
     load_ini();

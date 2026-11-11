@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "coop_game.h"
 #include "fs.h"
 #include "host.h"
 #include "platform/platform.h"
@@ -599,6 +600,66 @@ void fs_save_crash_wait(void) {
            (unsigned long long)(plat_now_ms() - t0));
 }
 
+int fs_profile_path(const char *rel, char *out, size_t cap) {
+    if (cap) out[0] = 0;
+    return *profile && snprintf(out, cap, "%s/%s", profile, rel) < (int)cap;
+}
+
+int fs_save_snapshot(const char *folder, const char *prefix, int keep, char *out, size_t cap) {
+    char root[1100];
+    if (cap) out[0] = 0;
+    if (!*profile || snprintf(root, sizeof root, "%s/%s", profile, folder) >= (int)sizeof root) return 0;
+    make_dirs(root);
+    uint64_t ns = plat_unix_time_ns();
+    struct tm t;
+    plat_gmtime((int64_t)(ns / 1000000000u), &t);
+    char name[64];
+    if (!prefix) prefix = "";
+    if (*prefix >= '0' && *prefix <= '9') return 0;   // a name that begins with a digit is one the pruning may take
+    int len = snprintf(name, sizeof name, "%.16s%04d%02d%02d-%02d%02d%02d-%03u", prefix, t.tm_year + 1900, t.tm_mon + 1,
+                       t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, (unsigned)(ns / 1000000u % 1000u));
+    char *dst = join(root, name);
+    for (unsigned k = 1; exists(dst) && k < 1000; k++) {   // two in one millisecond
+        free(dst);
+        snprintf(name + len, sizeof name - (size_t)len, "-%03u", k);
+        dst = join(root, name);
+    }
+    int nfiles = 0, nlinked = 0, have = 0, ok = 0;
+    uint64_t bytes = 0;
+    plat_mutex_lock(&tx_lock);   // no Commit swaps the save while it is copied
+    const char *src = newest_save();
+    have = exists(src);
+    if (have) ok = !copy_tree(src, dst, NULL, 1, &nfiles, &nlinked, &bytes);
+    plat_mutex_unlock(&tx_lock);
+    if (!have) {
+        free(dst);
+        return 1;   // nothing saved yet: nothing to go back to
+    }
+    if (!ok) {
+        rt_log("fs: cannot copy the save to %s", dst);
+        remove_tree(dst);
+        free(dst);
+        return 0;
+    }
+    if (cap) snprintf(out, cap, "%s", dst);
+    free(dst);
+    Listing l;   // the newest keep copies stay; their names sort by time; a prefixed one is never pruned
+    if (!list_dir(root, &l)) {
+        qsort(l.e, (size_t)l.n, sizeof *l.e, listed_cmp);
+        int dirs = 0;
+        for (int i = 0; i < l.n; i++) dirs += l.e[i].kind == PLAT_FS_DIR && l.e[i].name[0] >= '0' && l.e[i].name[0] <= '9';
+        for (int i = 0; i < l.n && dirs > keep; i++) {
+            if (l.e[i].kind != PLAT_FS_DIR || l.e[i].name[0] < '0' || l.e[i].name[0] > '9') continue;
+            char *p = join(root, l.e[i].name);
+            remove_tree(p);
+            free(p);
+            dirs--;
+        }
+        listing_free(l.e, l.n);
+    }
+    return 1;
+}
+
 static uint32_t commit_run(void) {
     committing = 1;
     plat_mutex_lock(&tx_lock);
@@ -1107,7 +1168,10 @@ static int64_t host_read_at(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
 }
 
 static uint32_t open_file(uint64_t *out, const char *path, int mode) {
-    if (romfs_owns(path)) return romfs_open(out, path, mode);
+    if (romfs_owns(path)) {
+        coop_game_rom_open(path);   // coop_game.c: the title screen's start
+        return romfs_open(out, path, mode);
+    }
     fs_trace(mode & FS_OPEN_WRITE ? "write" : "read", path);
     if (!out || !(mode & (FS_OPEN_READ | FS_OPEN_WRITE)) || (mode & ~7)) return FS_R_INVALID_ARGUMENT;
     char p[PATH_CAP];
@@ -2009,6 +2073,21 @@ static void probe_storage(void) {
           RES(S_ENTRY_TYPE, U(&type), U("save:/dir")) == FS_R_PATH_NOT_FOUND, "DeleteDirectoryRecursively");
     CHECK(tx_commit() == 0 && !fs_save_busy(), "Commit after the changes");
     probe_save_tx(uid);
+
+    // copies of the save: the first one, prefixed, outlasts the rotation of the later ones
+    char first[PLAT_PATH_MAX], later[PLAT_PATH_MAX];
+    int copies = fs_save_snapshot("coop-backup", "first-", 3, first, sizeof first);
+    for (int i = 0; i < 6; i++) copies += fs_save_snapshot("coop-backup", NULL, 3, later, sizeof later);
+    char backup[PLAT_PATH_MAX * 3 + 96];
+    snprintf(backup, sizeof backup, "%s/coop-backup", dir);
+    Listing bl;
+    int dated = 0, prefixed = 0;
+    if (!list_dir(backup, &bl)) {
+        for (int i = 0; i < bl.n; i++) dated += bl.e[i].name[0] >= '0' && bl.e[i].name[0] <= '9', prefixed += !strncmp(bl.e[i].name, "first-", 6);
+        listing_free(bl.e, bl.n);
+    }
+    CHECK(copies == 7 && first[0] && exists(first) && prefixed == 1 && dated == 3,
+          "save copies: the first (prefixed) stays beside the newest 3 of 6 later ones (%d made, %d first, %d dated)", copies, prefixed, dated);
 
     // temporary and cache storage
     CHECK(RES(S_MOUNT_TEMP, U("temp")) == 0 && RES(S_CREATE_FILE, U("temp:/t.bin"), 4) == 0 && !fs_save_busy(),

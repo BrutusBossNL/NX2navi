@@ -524,6 +524,69 @@
 # The key of the application's uploaded art asset (Rich Presence > Art Assets) shown as the status's large image.
 # discord_image = nx2navi_512x512
 
+[coop]
+# Co-op: your own game and save, with the other players' progress shared through a relay (docs/coop.md). Positions are
+# not shared yet: you do not see the other players in your world.
+# The menu's Co-op tab sets the name, the relay and the rules below, and makes, joins, accepts and leaves a room.
+# 0 = off: no socket is opened, no name is looked up and nothing is sent. Takes effect at once.
+# coop = 0
+# Your name for the other players, at most 24 bytes. Default: Player- and four random hex digits.
+# coop_name =
+# The relay, host or host:port (default port 24680): run one with `python tools/coop_relay.py` and forward its UDP port, or
+# use one a friend runs. No default: with none set the session stays idle and the log says why.
+# coop_server =
+# The local UDP port, 0 = any. For a firewall rule or a port forward when testing on a LAN. Takes effect at the next start.
+# coop_port = 0
+# For tests and LAN parties, no menu row: coop_auto = create or join starts a session at launch (a join needs coop_room, the
+# room's secret of 18 characters from 23456789BCDFGHJKMNPRSTVWXYZ, XXXXXX-XXXXXX-XXXXXX; a create without it makes a new
+# one). While the session runs, a room the relay lost (a restart) is made again or waited for (asked for every 10 s; a
+# refusal for too many joins from your network waits a minute), and a create that finds the room open joins it. Joining
+# is not accepting: nothing from the room is applied before you accept it (coop_accept).
+# off = no session at launch.
+# coop_auto = off
+# coop_room =
+# Test: percent of received co-op datagrams thrown away, 0 to 100.
+# coop_drop = 0
+# The rules of a room you make (a room you join uses its maker's; the log names them). Take effect at once.
+# Story, world and dungeon progress: shared or own.
+# coop_progress = shared
+# Equipment, key items, upgrades; songs; medallions, stones and the other quest items: shared or own. Own only with
+# coop_progress = own: in a shared world a chest one player opened is empty for the others.
+# coop_items = shared
+# coop_songs = shared
+# coop_quest = shared
+# Small keys: pool = every key anyone picks up goes into the dungeon's pool and every door anyone opens takes one out of it;
+# own = keys stay with the player who picked them up (doors still open for everyone). Own with coop_progress = own.
+# coop_keys = pool
+# Rupees and ammunition: own, or pool = one count every player adds to and spends from.
+# coop_rupees = own
+# coop_ammo = own
+# Nothing from a room is applied to your game before you accept who is in it (by their keys) and its rules, and before
+# your save is copied to coop-backup in the profile folder (docs/coop.md: going back). ask = the log shows each room's
+# offer with a number (eight hex digits, new at each start of the game); accept it on the menu's Co-op tab, or put that
+# number here while the game runs to accept that offer (this line as the file is now counts, before the one read at
+# start). A new member, other rules or another save loaded make a new offer with a new number (another save joins the
+# pools only once you accept it). A member who never says who it is keeps the room from being accepted. Your key pools
+# count only you and the players you accepted, among those the room's maker lets use them. Every message that can
+# change your save is signed by the player who sent it, so someone who knows the room's secret and runs the relay (or
+# sends from its address on your network) can read and disturb the room but not set flags in a player's name.
+# Accepting every room (always) is taken from the environment only (NX2NAVI_COOP_ACCEPT=always), never from this file,
+# so an ini someone hands you cannot accept a room for you.
+# coop_accept = ask
+# The room's maker (the Co-op tab's Remove and Reset the pools do the same): coop_remove = a player's key fingerprint
+# (xxxx-xxxx-xxxx-xxxx, as the log and the tab show it beside each member; without dashes it may be all digits), in the
+# room or after it left; every game drops that key and what it took from the pools, and keys others brought while it
+# was in a pool stay theirs. A member number here is not taken: numbers pass to other players as members come and go.
+# coop_reset_pools = a new value (1, then 2, or 0 and then 1 again): every game joins the pools again with what they
+# held for the players in the room, and what each held counts from the reset on. A player who drained a pool and is
+# still in the room when you reset keeps what it took: remove it first, then reset (both in one save of this file act
+# in that order).
+# Both are read from this file once a second while you are in a room, and each value acts once. The key your game signs
+# the rules of a room you made with is kept in the profile folder (coop-keys, readable by your account only), so a
+# restart keeps you the room's maker; never hand out a copy of the profile folder.
+# coop_remove =
+# coop_reset_pools =
+
 [audio]
 # none mixes without opening an audio device.
 # audio = default
@@ -653,7 +716,7 @@
 # cheat_0123abcd = 1
 
 [diagnostics]
-# Extra lines in the log, comma separated: svc, host, ipc, fs, gfx, perf, sched, audio, present or all. The menu's
+# Extra lines in the log, comma separated: svc, host, ipc, fs, gfx, perf, sched, audio, present, coop or all. The menu's
 # Performance log sets perf (frame timings). Default: none.
 # trace = perf
 # 1: with trace = perf, walks of the process's address space count its private and write-combined memory every 600

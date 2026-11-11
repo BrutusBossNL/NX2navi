@@ -146,7 +146,7 @@ if WIN:
     RT_FLAGS.append('-D_WIN32_WINNT=0x0A00')
     # -Xlinker passes the map path as one argument; -Wl, would split it at any comma in the build dir path
     LINK_FLAGS = ['-fuse-ld=lld', '-Wl,--stack,16777216', '-Xlinker', '"--Map=$builddir/nx2navi.map"']   # the map feeds tools/prof_report.py
-    LINK_LIBS = ['-lpsapi', '-lbcrypt', '-lvulkan-1', '-luser32', '-lgdi32', '-ldwmapi', '-limm32', '-lwinmm', '-lole32', '-lshell32', '-luuid', '-lSDL3', '-lopus', '-l:libdav1d.a', '-l:libvpx.a', '-l:libzstd.a', '-l:libstdc++.a', '-l:libwinpthread.a']   # Vulkan back end; libvpx and libdav1d static (movies); libzstd static (resolution.c)
+    LINK_LIBS = ['-lpsapi', '-lbcrypt', '-lws2_32', '-lvulkan-1', '-luser32', '-lgdi32', '-ldwmapi', '-limm32', '-lwinmm', '-lole32', '-lshell32', '-luuid', '-lSDL3', '-lopus', '-l:libdav1d.a', '-l:libvpx.a', '-l:libzstd.a', '-l:libstdc++.a', '-l:libwinpthread.a']   # Vulkan back end; libvpx and libdav1d static (movies); libzstd static (resolution.c)
     VMA_INCLUDE = UCRT.parent / 'include' / 'vma'   # vk_mem_alloc.h; MSYS2 package vulkan-memory-allocator
 else:
     # -no-pie: the lifted modules' function tables (hundreds of thousands of pointers) need no load-time relocation.
@@ -217,7 +217,7 @@ def vulkan_include(clang=None, env=None):
 
 
 # --toolchain: an llvm-mingw tree. The libraries, headers and DLLs MSYS2 supplies come from the deps directory instead.
-LLVM_LINK_LIBS = ['-lpsapi', '-lbcrypt', '-luser32', '-lgdi32', '-ldwmapi', '-limm32', '-lwinmm', '-lole32', '-lshell32', '-luuid', '-lvulkan-1', '-lSDL3', '-lopus',
+LLVM_LINK_LIBS = ['-lpsapi', '-lbcrypt', '-lws2_32', '-luser32', '-lgdi32', '-ldwmapi', '-limm32', '-lwinmm', '-lole32', '-lshell32', '-luuid', '-lvulkan-1', '-lSDL3', '-lopus',
                   '-l:libdav1d.a', '-l:libvpx.a', '-l:libzstd.a', '-l:libc++.a', '-l:libc++abi.a', '-l:libunwind.a', '-l:libwinpthread.a']
 DEFAULT_DEPS = ROOT / 'toolchain' / 'deps-mingw'
 # Runtime sources compiled per install, not in the library: romfs.c includes romfs_config.h, patches.c and ov_zstd.c
@@ -357,7 +357,7 @@ def runtime_sources(skip=()):
     """Every runtime/*.c, *.cpp, platform/*.c, *.rc, the in-game menu (ui/*.cpp) and Dear ImGui of this OS except the
     names in skip, so a task adds a file without editing this script."""
     pats = ('*.c', '*.cpp', 'platform/*.c', '*.rc', 'ui/*.cpp', 'third_party/imgui/*.cpp',
-            'third_party/imgui/backends/*.cpp')
+            'third_party/imgui/backends/*.cpp', 'third_party/monocypher/*.c')
     return sorted(p for pat in pats for p in RUNTIME.glob(pat) if p.name not in skip and not other_os(p.name))
 
 

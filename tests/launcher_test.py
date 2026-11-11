@@ -3866,6 +3866,24 @@ class SaveShareTest(unittest.TestCase):
         self.assertFalse([n for n in names if 'keys' in n])
         self.assertEqual(len([n for n in names if n.startswith('save/')]), len(self.SAVE))
 
+    def test_a_bug_report_keeps_the_private_settings_values_out(self):
+        """A co-op room's secret, the relay and the player's name are not in the nx2navi.ini a bug report carries;
+        every other byte of the file is."""
+        ini = (b'\xef\xbb\xbf[coop]\r\ncoop = 1\r\n  Coop_Room = H7K3WM-BCDFGH-234567\r\ncoop_server=relay.example:24680\r\n'
+               b'# coop_name = in a comment\r\ncoop_name =\r\ncoop_accept = 1a2b3c4d\nfps_limit = 60')
+        self.game_with_save(self.game, self.SAVE)
+        self.files(self.game, {'logs/nx2navi.log': b'the log', 'nx2navi.ini': ini})
+        r = saves.export_save(self.game, self.out, bug_report=True, log=lambda m: None)
+        with zipfile.ZipFile(r['path']) as z:
+            got = z.read('bug-report/nx2navi.ini')
+        self.assertEqual(got, b'\xef\xbb\xbf[coop]\r\ncoop = 1\r\n  Coop_Room = (set, not shown)\r\n'
+                              b'coop_server= (set, not shown)\r\n# coop_name = in a comment\r\ncoop_name =\r\n'
+                              b'coop_accept = (set, not shown)\nfps_limit = 60')
+        for secret in (b'H7K3WM', b'relay.example', b'1a2b3c4d'):
+            self.assertNotIn(secret, got)
+        self.assertEqual(saves.scrub_settings(b'[x]'), b'[x]')
+        self.assertEqual(saves.scrub_settings(b''), b'')
+
     def test_no_save_no_export(self):
         with self.assertRaises(saves.SaveError):
             saves.export_save(self.game, self.out, log=lambda m: None)   # a game that never ran
