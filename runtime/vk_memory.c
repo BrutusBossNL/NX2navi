@@ -68,7 +68,9 @@ typedef struct PoolRec {
     uint8_t pm_cur, pm_prev;           // replay: the places in their frame (vk_sub_in_frame, 7 the rest) of the submissions
                                        // that synced it, in frame pm_frame and in the one before (NX2NAVI_PRESNAP_PLACE)
     uint32_t wb_sub;                   // replay: the last submission that wrote mirror bytes back to guest memory
-    uint32_t retry_sub;                // replay: a mirror refused for the VRAM budget is asked again from here, 0 never
+    uint32_t retry_sub;                // replay: a mirror refused for the VRAM budget or a failed allocation is asked
+                                       // again from here, 0 never
+    uint8_t refused_why;               // replay: the MR_* reason of its refusal, for the counts when it is asked again
     uint8_t asked_room;                // replay: its refusal already asked the textures for room (once until it gets one)
     uint8_t twin;                      // MS_ON: the table's writes reach guest memory too (twin_wanted); 0: the mirror only
     uint32_t vd_wrote_sub, vd_use_sub; // verify mode: the last submission that bound it written / used its mirror
@@ -1742,10 +1744,15 @@ static void mbarrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags
 
 static void refuse(PoolRec *r, int why, const char *what) {
     r->mstate = MS_REFUSED;
-    r->retry_sub = why == MR_BUDGET ? (msub + RETRY_SUBS ? msub + RETRY_SUBS : 1) : 0;
+    // A failed device-local allocation is asked again as a budget refusal is: memory that was short at the pool's
+    // first use may be there 600 submissions later, and a pool never asked again was read over the bus until the game
+    // finalized it. Untracked and overlapping pools stay refused: nothing about them changes.
+    r->retry_sub = why == MR_BUDGET || why == MR_ALLOC ? (msub + RETRY_SUBS ? msub + RETRY_SUBS : 1) : 0;
+    r->refused_why = (uint8_t)why;
     uint64_t n = r->import_hi - r->import_lo;
-    static volatile int32_t logged;   // budget refusals are asked again (vk_mem_use): a few lines in all
-    if (plat_inc64(&m_refused_n[why]) <= 4 && plat_inc32(&logged) <= 12) {
+    static volatile int32_t logged[MR_N];   // four lines per reason: the refusals asked again would repeat theirs
+    plat_inc64(&m_refused_n[why]);
+    if (plat_inc32(&logged[why]) <= 4) {
         char f[160];
         flag_names(r->flags, f, sizeof f);
         rt_log("mem: pool %#llx+%#llx (%s) stays imported: %s", (unsigned long long)r->lo, (unsigned long long)r->size,
@@ -2138,8 +2145,8 @@ void vk_mem_gpa_sync(void) {
 void vk_mem_use(VkMemSpan *sp) {
     PoolRec *r = sp->pool;
     if (r->mstate == MS_REFUSED && r->retry_sub && (int32_t)(msub - r->retry_sub) >= 0 && evict_enabled()) {
-        plat_dec64(&m_refused_n[MR_BUDGET]);   // counted again if refused again
-        plat_add64(&m_refused_bytes[MR_BUDGET], -(int64_t)(r->import_hi - r->import_lo));
+        plat_dec64(&m_refused_n[r->refused_why]);   // counted again if refused again
+        plat_add64(&m_refused_bytes[r->refused_why], -(int64_t)(r->import_hi - r->import_lo));
         plat_inc64(&m_retries);
         r->mstate = MS_NONE, r->retry_sub = 0;   // refuse sets it again
     }
