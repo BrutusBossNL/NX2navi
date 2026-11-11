@@ -1679,8 +1679,27 @@ static int commit_drops_held(void) {
 }
 
 // destroy_tex with the reason, which every caller gives.
+// An entry the GPU drew into since its last write-back holds texels its storage lacks. Dropped for a reason that leaves
+// the storage to the game (a budget, a commit or video memory squeeze, its release, a replacement at its address), a
+// texture the game makes again from that storage (the drawn-once maps the fence write-back is for, moved or remade)
+// would start from what the storage held before the GPU drew. Such an entry goes back first when the fence write-back
+// would take it (wb_wanted) and the CPU has not rewritten its storage since; the commit drop pause above counts it the
+// same either way. Not an entry another target drew over (DROP_OVERWRITTEN: the storage is the newer one's), nor at
+// shutdown.
+static int wb_wanted(const Tex *e);
+static void wb_cfg_init(void);
+static int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now);
+static void write_back_n(Tex **v, int n);
+static uint64_t n_drop_wb;   // entries written back before their drop since the last perf line
+
 static void drop_tex(Tex *e, int why) {
     if (why == DROP_COMMIT || why == DROP_IDLE_COMMIT) commit_drop_note(e);
+    if (e->gpu_dirty && why != DROP_OVERWRITTEN && why != DROP_SHUTDOWN) {
+        uint32_t now;
+        wb_cfg_init();
+        if (storage_rewritten(e, e->gpu_gen, &now) == 1) e->gpu_dirty = 0;
+        else if (wb_wanted(e)) write_back_n(&e, 1), n_drop_wb++;
+    }
     n_drop_by[why]++;
     if (rt_trace & RT_TRACE_PERF)
         drops[ndrops++ % DROPS_N] = (DropRec){key_hash(&e->key), e->key.addr, frames_now(), (uint32_t)e->t.d.format,
@@ -4091,12 +4110,12 @@ void vk_texture_new_submit(void) {
         rt_log("perf: frame %llu: texture origins: released entries dropped past RELEASED_MAX %llu, replaced by another "
                "descriptor at their address %llu; entries the CPU does not write made without content at an address it "
                "can see: on their own %llu, over a released entry %llu, over a live one %llu; marked slots that met an "
-               "entry without content %llu, that show no entry %llu",
+               "entry without content %llu, that show no entry %llu; GPU-drawn entries written back before their drop %llu",
                (unsigned long long)f * 60, (unsigned long long)n_drop_by[DROP_MAX], (unsigned long long)n_drop_by[DROP_REPLACED],
                (unsigned long long)n_cpu_empty[0], (unsigned long long)n_cpu_empty[1], (unsigned long long)n_cpu_empty[2],
-               (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none);
+               (unsigned long long)n_mark_empty, (unsigned long long)n_mark_none, (unsigned long long)n_drop_wb);
         memset(n_drop_by, 0, sizeof n_drop_by), memset(n_cpu_empty, 0, sizeof n_cpu_empty);
-        n_mark_empty = n_mark_none = 0;
+        n_mark_empty = n_mark_none = n_drop_wb = 0;
         rt_log("perf: frame %llu: texture finalizes: slots marked %llu; slots of another live texture with the same "
                "parameters at the storage, left current %llu (terrain heightmaps %llu); lookups the stale rule gave the "
                "stand-in %llu (terrain heightmaps %llu)", (unsigned long long)f * 60, (unsigned long long)n_fin_own,
