@@ -1936,8 +1936,27 @@ static int shared_address(const Tex *e) {
     return 0;
 }
 
+// NX2NAVI_TEX_DISUSE_EVICT (default 0; 1 = textures no shader sampled for a while are retired under pressure, as
+// before). Off since players' ground went flat and see-through after such evictions and stayed so (Hyrule Field, Lon
+// Lon Ranch; 1,441 retired on arriving in a village, 82 back): with the eviction off the same play kept its ground,
+// and neither of the two holes closed in the way back (shared_address, the hold drop in vk_pool_marks_read) acted
+// in the session that still lost it. What takes the retired texture's place for good is not known yet; a draw that
+// samples the stand-in once into a picture the game keeps would do it, and no mark can undo that. The shaders keep
+// their marks (NX2NAVI_TEX_DISUSE), so turning this on changes no pipeline. Released textures and the idle ones the
+// game no longer names still give way under pressure.
+static int disuse_evict_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = rt_knob("TEX_DISUSE_EVICT", "0") == 1;
+        rt_log("vk: textures no shader sampled for a while %s under pressure (NX2NAVI_TEX_DISUSE_EVICT)",
+               on ? "are retired" : "stay");
+    }
+    return on;
+}
+
 // tex_lock held; returns the bytes retired (freed a few submissions later), counting those still retiring as freed
 static uint64_t evict_disused(uint64_t want) {
+    if (!disuse_evict_on()) return 0;
     if (!want || !vk_pool_marks_enabled() || __atomic_load_n(&vk_pool_marks_missed, __ATOMIC_RELAXED) || marks_reads < 2 ||
         marks_live < 2 || vk_sync_fence_done() < evict_wait)
         return 0;
