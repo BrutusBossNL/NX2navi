@@ -348,6 +348,20 @@ static void stream_drop(Stream *st) {
     plat_mutex_unlock(&stream_lock);
 }
 
+// Drops the slot of stream state s, if it has one. Found and cleared under one hold of the lock: between a
+// stream_find and a stream_drop another thread can take a spent slot for its own stream (stream_take), and the drop
+// then cleared that thread's slot, which a third thread took as free and reset the decoder context in use.
+static void stream_drop_of(uint64_t s) {
+    plat_mutex_lock(&stream_lock);
+    for (int i = 0; i < NSTREAM; i++)
+        if (streams[i].s == s) {
+            free(streams[i].shadow);
+            streams[i].shadow = NULL;
+            streams[i].s = 0, streams[i].spent = 0;
+        }
+    plat_mutex_unlock(&stream_lock);
+}
+
 static void stream_spent(Stream *st) {
     plat_mutex_lock(&stream_lock);
     st->spent = 1;
@@ -560,7 +574,7 @@ static void host_stream(Cpu *c) {
     if (trusted() && s && s < RT_ADDRESS_LIMIT - 0x38) {
         uint8_t ph = *(const uint8_t *)gp(s);
         if (ph == 1) {
-            stream_drop(stream_find(s));   // a stream the game gave up without ending it
+            stream_drop_of(s);   // a stream the game gave up without ending it
             st = stream_begin(s, src, size, ddict);
             if (!st) __atomic_add_fetch(&SS.guest, 1, __ATOMIC_RELAXED);
         } else if (ph == 2) {
