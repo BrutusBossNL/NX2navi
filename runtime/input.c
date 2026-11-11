@@ -538,7 +538,11 @@ static void pad_primary(SDL_Gamepad *p, const char *why) {
 
 // Under lock: closes the gamepads that went away and opens the ones that came; the primary falls back to the first
 // open one when it left. Logs each change.
+// The game is always told one controller is connected, so a disconnect read as nothing pressed and play went on
+// uncontrolled (the console would stop and ask for a controller). When the primary goes and no other gamepad takes
+// its place, the menu opens: the player sees it, and it takes the keyboard and mouse until it is closed.
 static void scan_pads(void) {
+    int had = pad != NULL;
     for (int i = 0; i < npads;) {
         if (SDL_GamepadConnected(pads[i])) { i++; continue; }
         rt_log("input: gamepad \"%s\" disconnected", SDL_GetGamepadName(pads[i]) ? SDL_GetGamepadName(pads[i]) : "?");
@@ -563,6 +567,10 @@ static void scan_pads(void) {
     }
     SDL_free(ids);
     if (!pad && npads) pad_primary(pads[0], "in use");
+    if (had && !pad && !menu_is_open()) {
+        rt_log("input: the gamepad in use went away and no other is connected: the menu opens");
+        menu_toggle();
+    }
 }
 
 // Under lock: 1 when p has a button down, a trigger pulled or a stick past half way (a drifting stick does not count).
