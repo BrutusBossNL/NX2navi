@@ -373,9 +373,14 @@ A change to the log queue (`runtime/logq.c`) passes `python tests\logq_check.py`
 layer and a destination of its own: 160,000 lines from eight threads arrive whole and in each thread's order, a line
 logged while the queue's lock is taken waits and does not pass the lines queued before it, a destination that takes
 30 ms a write does not hold the threads that log, the line about slow writes comes once in ten seconds, a destination
-that stops while four times the queue's size is logged loses nothing, and `logq_sync` returns with everything written.
-The test passes on a busy machine too: it waits for the queue to empty instead of for a time, and counts slow lines
-instead of timing one. No game files.
+that stops while four times the queue's size is logged loses nothing, lines logged together are written in one write
+a quarter of a second after the first and not before, a queue that is half full is written at once, and `logq_sync`
+returns with everything written, the lines the log thread was still gathering included. The program then runs twice
+more as a process that logs 200 lines to a file and ends at once, by an exit and as a fatal error does: each file
+holds every line, and the fatal line last.
+The test passes on a busy machine too: it waits for the queue to empty instead of for a time, counts slow lines
+instead of timing one, leaves out a check its own thread was too late for, and tries the half-full write three times.
+No game files.
 
 A change to the button prompts (`tools/make_romfs_patches.py --prompts`, `tools/button_icons.py`) passes
 `.venv-py314\Scripts\python tests\romfs_prompts_test.py`, which runs the tool on a RomFS it makes itself (no game

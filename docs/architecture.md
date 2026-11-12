@@ -41,10 +41,11 @@ from other projects, with its license, is listed in [THIRD_PARTY_NOTICES.md](../
   variables and written back when the in-game menu changes it. The menu and the performance overlay are Dear ImGui,
   drawn into the swapchain image (`runtime/ui/`); their text is in `ui_text.c`.
 - Log: in a game run the lines go through a queue to a thread that writes them (`runtime/logq.c`), so a stalled
-  write to the log file or the console does not hold the thread that logged. A thread's lines reach the log in the
-  order it logged them: a line waits for the queue's lock, and one that finds the queue full is written after
-  everything queued before it. A fatal error, the crash report and the end of the process write the queue out first
-  (`rt_log_sync`). `NX2NAVI_LOG_ASYNC=0` writes each line where it is logged.
+  write to the log file or the console does not hold the thread that logged. The log thread gathers the lines of
+  a quarter of a second, or half a queue, into one write, so the log is up to that much behind the game. A thread's
+  lines reach the log in the order it logged them: a line waits for the queue's lock, and one that finds the queue
+  full is written after everything queued before it. A fatal error, the crash report and the end of the process write
+  the queue out first (`rt_log_sync`). `NX2NAVI_LOG_ASYNC=0` writes each line where it is logged.
 - Co-op (`coop.c`, `coop_proto.c`, [coop.md](coop.md)): a host thread with a UDP socket to a relay (`tools/coop_relay.py`),
   rooms of up to 8 players and a channel for messages between them; it never holds a virtual core.
 - OS calls the host makes go through `runtime/platform/` (`platform.h`, `win32.c`).
