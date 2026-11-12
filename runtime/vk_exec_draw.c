@@ -5871,7 +5871,7 @@ static void log_cs_bindings_locked(const VkExec *ex) {
     const uint8_t *ctl, *code;
     uint32_t len;
     int ntex = -1, nimg = -1;
-    if (ex->prog && find_stage(ex->prog, NVN_STAGE_CS, &ctl, &code, &len) && ctl_nvn2(ctl)) ntex = ctl[0xb3], nimg = ctl[0xb6];
+    if (ex->prog && find_stage(ex->dc, ex->prog, NVN_STAGE_CS, &ctl, &code, &len) && ctl_nvn2(ctl)) ntex = ctl[0xb3], nimg = ctl[0xb6];
     rt_log("vk_exec:   its bindings (control: %d texture, %d image entries):%s", ntex, nimg, line);
 }
 
@@ -5914,7 +5914,7 @@ static uint64_t cs_guest_hash(const prog_t *p) {
     const uint8_t *ctl, *code;
     uint32_t len;
     uint64_t h = 0;
-    if (find_stage(p, NVN_STAGE_CS, &ctl, &code, &len) && code && len) {
+    if (find_stage_scan(p, NVN_STAGE_CS, &ctl, &code, &len) && code && len) {
         h = 0xcbf29ce484222325ull;
         for (uint32_t i = 0; i < len; i++) h = (h ^ code[i]) * 0x100000001b3ull;
     }
@@ -6000,7 +6000,7 @@ static int aa_dispatch(VkExec *ex, int x, int y, int z) {
         vk_exec_barrier_dispatch(ex);   // ends the pass; the composite's writes are visible
         ok = vk_aa_record(ex->cb, mode, sv, dv, w, hh);
         if (ok) {
-            B.pipe[1] = VK_NULL_HANDLE;   // the replay must bind its compute pipeline again
+            ex->dc->B.pipe[1] = VK_NULL_HANDLE;   // the replay must bind its compute pipeline again
             ex->recorded++;
             vk_exec_barrier(ex);
         }
@@ -6032,7 +6032,7 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
     int nimg = 32;
     const uint8_t *ctl, *code;
     uint32_t len;
-    if (ex->prog && find_stage(ex->prog, NVN_STAGE_CS, &ctl, &code, &len) && ctl_nvn2(ctl)) nimg = ctl[0xb6] ? ctl[0xb6] : 1;
+    if (ex->prog && find_stage(ex->dc, ex->prog, NVN_STAGE_CS, &ctl, &code, &len) && ctl_nvn2(ctl)) nimg = ctl[0xb6] ? ctl[0xb6] : 1;
     if (nimg > 32) nimg = 32;
     vk_texture_lock();
     for (int i = 0; i < nimg; i++) {
