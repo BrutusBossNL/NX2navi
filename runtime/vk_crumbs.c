@@ -15,6 +15,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "vk.h"
 
 static PFN_vkCmdWriteBufferMarkerAMD write_marker;
@@ -27,6 +28,11 @@ int vk_pass_marks_on;
 static int pm_amd;                          // marks into words 2 and 3
 static PFN_vkCmdSetCheckpointNV set_checkpoint;
 static void pass_marks_init(VkCtx *c);
+static void pass_times_init(VkCtx *c);
+static void pass_times_poll(void);
+static VkQueryPool pt_pool;           // pass times (below): two timestamps per ring slot
+static volatile uint8_t pt_timed[VK_PASS_MARKS];   // the slot's mark writes timestamps; cleared once they are read
+
 
 static void buffer_init(VkCtx *c) {
     write_marker = (PFN_vkCmdWriteBufferMarkerAMD)vk_dpa(c->device, "vkCmdWriteBufferMarkerAMD");
@@ -49,11 +55,14 @@ static void buffer_init(VkCtx *c) {
 void vk_crumbs_init(VkCtx *c) {
     if (c->has_buffer_marker) buffer_init(c);
     pass_marks_init(c);
+    pass_times_init(c);
 }
 
 void vk_crumbs_release(void) {
     VkCtx *c = vk_ctx();
     if (buf && c) vmaDestroyBuffer(c->vma, buf, alloc);
+    if (pt_pool && c) vkDestroyQueryPool(c->device, pt_pool, NULL);
+    pt_pool = VK_NULL_HANDLE;
     buf = VK_NULL_HANDLE, alloc = NULL, words = NULL, write_marker = NULL;
     vk_pass_marks_on = pm_amd = 0, set_checkpoint = NULL;
 }
@@ -120,7 +129,11 @@ static void pass_marks_init(VkCtx *c) {
                                               : "no VK_AMD_buffer_marker; NX2NAVI_PASS_CRUMBS=1 asks for NVIDIA checkpoints");
 }
 
+
 void vk_pass_mark_cmd(VkCommandBuffer cb, uint32_t id, int end) {
+    if (pt_pool && pt_timed[id & (VK_PASS_MARKS - 1)] == 1)
+        vkCmdWriteTimestamp(cb, end ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pt_pool,
+                            (id & (VK_PASS_MARKS - 1)) * 2 + (end != 0));
     if (pm_amd)
         write_marker(cb, end ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, buf,
                      end ? 12 : 8, id);
@@ -447,10 +460,13 @@ void vk_gpu_passes_frame(uint64_t frame) {
 
 VkPassMark *vk_pass_mark_begin(VkCommandBuffer cb, int kind, uint64_t fence) {
     if (!vk_pass_marks_on || !cb) return NULL;
+    if (pt_pool) pass_times_poll();
     uint32_t id = ++seq;
     if (!id) id = ++seq;   // 0 means no mark
     VkPassMark *m = &ring[id & (VK_PASS_MARKS - 1)];
     m->id = id, m->kind = (uint8_t)kind, m->fence = fence, m->draws = UINT32_MAX;
+    // timed unless the slot's previous mark is still waiting to be read (its queries are not reset yet)
+    if (pt_pool) pt_timed[id & (VK_PASS_MARKS - 1)] = !pt_timed[id & (VK_PASS_MARKS - 1)] ? 1 : 2;
     rec_pass_mark(cb, id, 0);
     gp_begin(cb, m);
     gp_in_mark = 1;
@@ -590,4 +606,142 @@ void vk_pass_marks_report(void) {
         log_lines(t);
     }
     nv_report();
+}
+
+// ---- pass times (NX2NAVI_PASS_TIMES=1): GPU time per render pass and dispatch, for GPUs no vendor profiler supports
+// (RGP covers RDNA only, so an RX 580 has none, and RenderDoc cannot capture this program). Every pass mark also
+// writes a timestamp at its two points (TOP_OF_PIPE before the pass, BOTTOM_OF_PIPE after it), into the query slot
+// pair of its ring slot. pass_times_poll, on the replay thread at each new mark, takes in the marks whose submission
+// has finished, resets their slots on the host (hostQueryReset) and sums their time per kind of pass: its size,
+// attachment formats and its first fragment (or compute) shader. Every 600 presented frames the log lists the passes
+// with the most GPU time per frame. Passes overlap on the GPU, so the times are each pass's span, not its exclusive
+// share; their order is what matters. A slot whose mark was not read yet when the ring comes round is not timed
+// (pt_timed 2) for that turn.
+#define PT_SUMS 1024
+#define PT_REPORT_FRAMES 600
+#define PT_TOP 15
+typedef struct {
+    uint64_t key;
+    uint8_t kind, ncolor;
+    uint32_t w, h, d;
+    VkFormat c0, depth;
+    unsigned long long sid;
+    double us;
+    uint64_t n, draws;
+} PtSum;
+static PtSum pt_sum[PT_SUMS];
+static uint32_t pt_read;                 // the newest mark id taken in
+static double pt_ns_per_tick, pt_total_us;
+static uint64_t pt_mask, pt_frame0, pt_marks, pt_lost;
+
+static void pass_times_init(VkCtx *c) {
+    const char *e = cfg_get("NX2NAVI_PASS_TIMES");
+    if (!e || !*e || !strcmp(e, "0")) return;
+    if (!vk_pass_marks_on) {
+        rt_log("vk: NX2NAVI_PASS_TIMES: pass marks are off (NX2NAVI_PASS_CRUMBS=0 or no marker extension): no pass times");
+        return;
+    }
+    VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f12};
+    vkGetPhysicalDeviceFeatures2(c->phys, &f2);
+    uint32_t nq = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(c->phys, &nq, NULL);
+    VkQueueFamilyProperties qp[16];
+    if (nq > 16) nq = 16;
+    vkGetPhysicalDeviceQueueFamilyProperties(c->phys, &nq, qp);
+    uint32_t bits = c->gfx_family < nq ? qp[c->gfx_family].timestampValidBits : 0;
+    VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                .queryCount = 2 * VK_PASS_MARKS};
+    if (!f12.hostQueryReset || !bits || c->props.limits.timestampPeriod <= 0 ||
+        vkCreateQueryPool(c->device, &qi, NULL, &pt_pool) != VK_SUCCESS) {
+        rt_log("vk: NX2NAVI_PASS_TIMES: no hostQueryReset or no timestamps on the queue: no pass times");
+        pt_pool = VK_NULL_HANDLE;
+        return;
+    }
+    vkResetQueryPool(c->device, pt_pool, 0, 2 * VK_PASS_MARKS);
+    pt_ns_per_tick = c->props.limits.timestampPeriod;
+    pt_mask = bits >= 64 ? ~0ull : (1ull << bits) - 1;
+    pt_read = seq;
+    pt_frame0 = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    rt_log("vk: pass times on (NX2NAVI_PASS_TIMES): GPU time per render pass and dispatch, the top %d every %d frames",
+           PT_TOP, PT_REPORT_FRAMES);
+}
+
+static void pt_add(const VkPassMark *m, double us) {
+    unsigned long long sid = shader_id(m->kind == VK_MARK_DISPATCH ? m->first[0] : m->first[1]);
+    uint64_t key = sid * 0x9E3779B97F4A7C15ull ^ (uint64_t)m->kind << 56 ^ (uint64_t)m->w << 32 ^ (uint64_t)m->h << 16 ^
+                   (uint64_t)m->ncolor << 8 ^ (uint64_t)m->color[0] * 0x100000001b3ull ^ (uint64_t)m->depth << 40;
+    if (!key) key = 1;
+    for (uint32_t i = (uint32_t)(key % PT_SUMS), k = 0; k < PT_SUMS; k++, i = (i + 1) % PT_SUMS) {
+        PtSum *e = &pt_sum[i];
+        if (e->key && e->key != key) continue;
+        if (!e->key)
+            *e = (PtSum){key, m->kind, m->ncolor, m->w, m->h, m->d, m->ncolor ? m->color[0] : VK_FORMAT_UNDEFINED,
+        e->us += us, e->n++, e->draws += m->draws == UINT32_MAX ? 0 : m->draws;
+        return;
+    }
+    pt_lost++;   // table full: counted in the total only
+}
+
+static int pt_cmp(const void *a, const void *b) {
+    double x = ((const PtSum *)a)->us, y = ((const PtSum *)b)->us;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void pt_report(uint64_t frames) {
+    static PtSum top[PT_SUMS];
+    int n = 0;
+    for (int i = 0; i < PT_SUMS; i++)
+        if (pt_sum[i].key) top[n++] = pt_sum[i];
+    qsort(top, (size_t)n, sizeof *top, pt_cmp);
+    double f = frames ? (double)frames : 1;
+    rt_log("vk: pass times over %llu frames: %.2f ms of pass spans per frame in %.0f passes and dispatches (%d kinds%s)",
+           (unsigned long long)frames, pt_total_us / f / 1e3, pt_marks / f, n, pt_lost ? ", table full" : "");
+    for (int i = 0; i < n && i < PT_TOP; i++) {
+        const PtSum *e = &top[i];
+        if (e->kind == VK_MARK_DISPATCH)
+            rt_log("vk:   %5.2f ms/frame %5.1f%% dispatch %ux%ux%u groups, cs %016llx: %.1f per frame, %.3f ms each",
+                   e->us / f / 1e3, pt_total_us > 0 ? e->us * 100 / pt_total_us : 0, e->w, e->h, e->d, e->sid, e->n / f,
+                   e->us / (double)e->n / 1e3);
+        else
+            rt_log("vk:   %5.2f ms/frame %5.1f%% pass %ux%u x%u, %u colour (first fmt %d), depth fmt %d, fs %016llx: %.1f per "
+    }
+    memset(pt_sum, 0, sizeof pt_sum);
+    pt_total_us = 0, pt_marks = 0, pt_lost = 0;
+}
+
+// Replay thread (vk_pass_mark_begin).
+static void pass_times_poll(void) {
+    VkCtx *c = vk_ctx();
+    uint64_t done = vk_sync_fence_done();
+    while (pt_read != seq) {
+        uint32_t id = pt_read + 1;
+        if (!id) { pt_read = id; continue; }
+        uint32_t slot = id & (VK_PASS_MARKS - 1);
+        const VkPassMark *m = &ring[slot];
+        if (m->id == id) {
+            if (!m->fence || m->fence > done) break;   // its submission is still being recorded or running
+            // the submission finished: both timestamps are in, or one was never written (a pass whose end was not
+            // recorded), which leaves that mark out
+            if (pt_timed[slot] == 1 && m->draws != UINT32_MAX) {
+                uint64_t r[4] = {0};
+                VkResult q = vkGetQueryPoolResults(c->device, pt_pool, slot * 2, 2, sizeof r, r, 16,
+                                                   VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+                if ((q == VK_SUCCESS || q == VK_NOT_READY) && r[1] && r[3]) {
+                    double us = (double)((r[2] - r[0]) & pt_mask) * pt_ns_per_tick / 1e3;
+                    if (us < 1e6) pt_add(m, us), pt_total_us += us, pt_marks++;
+                }
+            }
+            if (pt_timed[slot]) {
+                vkResetQueryPool(c->device, pt_pool, slot * 2, 2);
+                pt_timed[slot] = 0;
+            }
+        }
+        pt_read = id;
+    }
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (now - pt_frame0 >= PT_REPORT_FRAMES) {
+        pt_report(now - pt_frame0);
+        pt_frame0 = now;
+    }
 }
