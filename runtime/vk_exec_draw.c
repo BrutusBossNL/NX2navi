@@ -3844,6 +3844,12 @@ static int pipe_skip_mode(void) {
 // libraries prepared, 67 pipelines the install's list did not hold) 44 were usable under 4 ms after their miss, 17
 // after 4 to 8 ms and 6 later, and of 87 draws that waited for a fast link 66 were skipped at the end of their 3 ms:
 // each of those frames paid the wait and was then not shown, the previous picture staying for one frame more.
+// A frame that has left a draw out already waits for no fast link (prepare_draw_ex): it is held back or shown without
+// that draw whatever its other pipelines do, and at an area's first frames, with hundreds of pipelines new at once,
+// every frame spent its whole budget that way. A walk through a village with no pipeline recorded (610 missed, the
+// libraries of most in the driver's cache), 3 ms and 6 ms against 8 ms and 16 ms with this rule: the picture stood
+// still 50 times against 15, 73 frames held back against 31, 22 frames shown incomplete against 1, and 17 frames over
+// 25 ms against 15 in the minute of the area's load. Without the rule the longer waits gave 49 frames over 25 ms.
 // NX2NAVI_PIPE_FRAME_WAIT_MS (default 50; 0 to 500): the wait pool of one presented frame. Its full-screen draws and
 // its one-shot draws (NX2NAVI_ONESHOT_BUDGET) wait for their shaders and pipelines from it, each for what the ones
 // before left, and are skipped once it is spent, so the pipelines of one frame hold the replay thread this long in
@@ -4220,7 +4226,9 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         if (wait_ms) t0 = kern_now_ns();
     } else {
         budget = link_budget();
-        wait_ms = (uint32_t)(*budget / 1000000);
+        // A frame that has left a draw out already is not shown, or is shown without that draw (pending_draws,
+        // vk_backend.c frame_hold): a wait for another pipeline would only make it later.
+        wait_ms = pending_draws ? 0 : (uint32_t)(*budget / 1000000);
         if (wait_ms > LINK_DRAW_MS) wait_ms = LINK_DRAW_MS;
         linking = wait_ms != 0;
         if (!wait_ms) budget = NULL;
