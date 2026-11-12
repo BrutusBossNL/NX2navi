@@ -283,6 +283,53 @@ retry:
     vk_mem_class_log(&g_vk.props, &g_vk.mem_props);
     return 1;
 }
+// Heap limits for VMA where the GPU has more than one device-local heap. An RX 580 (8 GiB, AMD 23.10) shows a 6 GiB
+// heap and a 2 GiB host-visible one; Windows granted the game 5.1 GiB of the first. VMA, asked for device-local memory,
+// takes the first heap whatever its budget, and a save load put 5.6 GiB there while the second held 69 MiB: the next
+// submit failed with VK_ERROR_OUT_OF_DEVICE_MEMORY. With a limit VMA counts a heap full at it and places what follows in
+// the next memory type that allows it (the other device-local heap first), for every allocation: textures, render
+// targets, VRAM mirrors, pools. The limit is each device-local heap's budget when the device is made (VK_EXT_memory_budget,
+// what other programs leave) less a margin for memory VMA does not see (swapchain, FidelityFX): a tenth, at least
+// 256 MiB. NX2NAVI_VRAM_HEAP_LIMIT: auto (default), 0 (no limits), or a number of MiB for the largest device-local heap.
+static int vram_heap_limits(VkDeviceSize *limit) {
+    const char *e = cfg_get("NX2NAVI_VRAM_HEAP_LIMIT");
+    long mb = e && *e && strcmp(e, "auto") ? atol(e) : -1;
+    if (!mb) return 0;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+                                            .pNext = g_vk.has_memory_budget ? &b : NULL};
+    vkGetPhysicalDeviceMemoryProperties2(g_vk.phys, &p2);
+    const VkPhysicalDeviceMemoryProperties *mp = &p2.memoryProperties;
+    int nlocal = 0;
+    uint32_t largest = 0;
+    for (uint32_t h = 0; h < mp->memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++)
+        if (mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            if (!nlocal++ || mp->memoryHeaps[h].size > mp->memoryHeaps[largest].size) largest = h;
+        }
+    if (mb < 0 && (nlocal < 2 || !g_vk.has_memory_budget)) return 0;   // auto: only where another heap can take the rest
+    for (uint32_t h = 0; h < VK_MAX_MEMORY_HEAPS; h++) limit[h] = VK_WHOLE_SIZE;
+    for (uint32_t h = 0; h < mp->memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++) {
+        if (!(mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) continue;
+        VkDeviceSize lim;
+        if (mb > 0) {
+            if (h != largest) continue;
+            lim = (VkDeviceSize)mb << 20;
+        } else {
+            VkDeviceSize budget = b.heapBudget[h] && b.heapBudget[h] < mp->memoryHeaps[h].size ? b.heapBudget[h]
+                                                                                                 : mp->memoryHeaps[h].size;
+            VkDeviceSize margin = budget / 10 > (256ull << 20) ? budget / 10 : (256ull << 20);
+            if (budget <= margin * 2) continue;   // too small to limit
+            lim = budget - margin;
+        }
+        if (lim >= mp->memoryHeaps[h].size) continue;
+        limit[h] = lim;
+        rt_log("vk: memory heap %u (%llu MiB, budget %llu MiB): the allocator uses at most %llu MiB, then the next heap "
+               "(NX2NAVI_VRAM_HEAP_LIMIT)", h, (unsigned long long)(mp->memoryHeaps[h].size >> 20),
+               (unsigned long long)(b.heapBudget[h] >> 20), (unsigned long long)(lim >> 20));
+    }
+    return 1;
+}
+
 
 typedef struct {
     VkPhysicalDeviceFeatures2 f2;
@@ -467,9 +514,13 @@ static int create_device(void) {
         rt_log("vk: mesh shaders: %s", g_vk.has_mesh_shader ? "VK_EXT_mesh_shader" : "the extension is there, its task or mesh feature is not");
     }   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension
     {   // mesh_fallback: auto (on a device without mesh shaders), 1 (on every device, for testing) or 0
-        const char *mf = cfg_value("NX2NAVI_MESH_FALLBACK");
-        g_vk.mesh_fallback = !strcmp(mf, "1") || (strcmp(mf, "0") && !g_vk.has_mesh_shader);
-        if (g_vk.mesh_fallback)
+        // without mesh shaders the mesh emulation (NX2NAVI_MESH_EMULATION, on unless 0) draws them; mesh_emulation = 0
+        // leaves them to this fallback
+        const char *mf = cfg_value("NX2NAVI_MESH_FALLBACK"), *me = cfg_value("NX2NAVI_MESH_EMULATION");
+        int emu = !g_vk.has_mesh_shader && strcmp(me, "0");
+        g_vk.mesh_fallback = !emu && (!strcmp(mf, "1") || (strcmp(mf, "0") && !g_vk.has_mesh_shader));
+        if (emu) rt_log("vk: mesh shaders: emulated with compute (mesh_emulation = 1); mesh_fallback is not used");
+        else if (g_vk.mesh_fallback)
             rt_log("vk: mesh fallback: task and mesh programs run as compute passes and are drawn from their buffers (%s)",
                    g_vk.has_mesh_shader ? "mesh_fallback = 1" : "this device has no mesh shaders");
         else if (!g_vk.has_mesh_shader)
@@ -536,6 +587,8 @@ static int create_device(void) {
                                           (g_vk.has_memory_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0),
                                  .preferredLargeHeapBlockSize = vk_vma_block_size(),
                                  .pDeviceMemoryCallbacks = vk_headroom_callbacks()};
+    VkDeviceSize heap_limit[VK_MAX_MEMORY_HEAPS];
+    if (vram_heap_limits(heap_limit)) ai.pHeapSizeLimit = heap_limit;
     if ((r = vmaCreateAllocator(&ai, &g_vk.vma)) != VK_SUCCESS) { rt_log("vk: vmaCreateAllocator failed (%d)", (int)r); return 0; }
     vk_mem_ballast(g_vk.vma);
 

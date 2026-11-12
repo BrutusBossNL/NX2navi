@@ -237,8 +237,17 @@ static int alloc_physical(VkCtx *c, PoolRec *r) {
     VkMemoryRequirements req = {.size = (rb.size + align - 1) & ~(align - 1), .alignment = align, .memoryTypeBits = bits};
     VmaAllocationCreateInfo aci = {.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
                                    .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
-    if ((res = vmaAllocateMemory(c->vma, &req, &aci, &r->alloc, NULL)) != VK_SUCCESS ||
-        (res = vmaBindBufferMemory(c->vma, r->alloc, r->buf)) != VK_SUCCESS) {
+    res = vmaAllocateMemory(c->vma, &req, &aci, &r->alloc, NULL);
+    if (res != VK_SUCCESS) {   // video memory full (VMA heap limits, vk_device.c): any memory the pool can live in
+        VmaAllocationCreateInfo any = {.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+                                       .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+        r->alloc = NULL;
+        res = vmaAllocateMemory(c->vma, &req, &any, &r->alloc, NULL);
+        if (res == VK_SUCCESS)
+            rt_log("vk: physical pool of %#llx bytes: no video memory left, placed in system memory",
+                   (unsigned long long)r->size);
+    }
+    if (res != VK_SUCCESS || (res = vmaBindBufferMemory(c->vma, r->alloc, r->buf)) != VK_SUCCESS) {
         rt_log("vk: physical pool of %#llx bytes: device-local allocation failed (%d)", (unsigned long long)r->size, (int)res);
         if (r->alloc) vmaFreeMemory(c->vma, r->alloc);
         vkDestroyBuffer(c->device, r->buf, NULL);
