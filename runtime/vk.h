@@ -394,6 +394,8 @@ uint64_t vk_headroom_release(void);     // a refused allocation: the anchors go,
 // A refused allocation: the staging and snapshot buffers kept for reuse and the headroom's spare blocks go back to the
 // driver before the caller tries once more (vk_memory.c). Returns the bytes.
 uint64_t vk_mem_give_back(void);
+void vk_mem_ballast(VmaAllocator vma);   // NX2NAVI_VRAM_BALLAST_MB (test): video memory taken for the session (vk_memory.c)
+void vk_mem_ballast_release(VmaAllocator vma);
 VkDeviceSize vk_vma_block_size(void);   // VMA's block size on heaps over 1 GiB (NX2NAVI_VMA_BLOCK_MB)
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when all of [addr, addr+size) is backed
 // vk_mem_resolve for a caller that reads guest memory itself or only asks what backs it: with shadow storage the pool

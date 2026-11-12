@@ -537,6 +537,7 @@ static int create_device(void) {
                                  .preferredLargeHeapBlockSize = vk_vma_block_size(),
                                  .pDeviceMemoryCallbacks = vk_headroom_callbacks()};
     if ((r = vmaCreateAllocator(&ai, &g_vk.vma)) != VK_SUCCESS) { rt_log("vk: vmaCreateAllocator failed (%d)", (int)r); return 0; }
+    vk_mem_ballast(g_vk.vma);
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
                                     .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 0};
@@ -561,6 +562,7 @@ static void destroy_all(void) {
     if (lost_fence) vkDestroyFence(g_vk.device, lost_fence, NULL);   // vk_device_lost_poll
     lost_fence = VK_NULL_HANDLE;
     vk_headroom_stop();
+    if (g_vk.vma) vk_mem_ballast_release(g_vk.vma);
     if (g_vk.vma) vmaDestroyAllocator(g_vk.vma);
     if (g_vk.device) vkDestroyDevice(g_vk.device, NULL);
     if (g_vk.messenger) {

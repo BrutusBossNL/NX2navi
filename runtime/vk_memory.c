@@ -726,6 +726,40 @@ static uint64_t budget_cap(void) {
     return (uint64_t)mb << 20;
 }
 
+// NX2NAVI_VRAM_BALLAST_MB (test; unset or 0: none): that much device-local memory is taken when the allocator is made
+// and held until it goes, in buffers of BALLAST_PIECE of their own memory. NX2NAVI_VRAM_BUDGET_MB above changes only the
+// number the decisions compare with; this fills the card for real, so the driver's own behaviour at its limit (slow
+// allocations, memory moved to system RAM, refusals) shows on a large card as it does on an 8 GB one or beside another
+// program's use.
+#define BALLAST_PIECE (256ull << 20)
+#define BALLAST_MAX 512
+static VkBuffer ballast_buf[BALLAST_MAX];
+static VmaAllocation ballast_alloc[BALLAST_MAX];
+static int nballast;
+
+void vk_mem_ballast(VmaAllocator vma) {   // vk_device.c, right after the allocator is made (before vk_ctx answers)
+    const char *s = cfg_get("NX2NAVI_VRAM_BALLAST_MB");
+    uint64_t want = s && *s && atoll(s) > 0 ? (uint64_t)atoll(s) << 20 : 0, got = 0;
+    if (!want) return;
+    while (got < want && nballast < BALLAST_MAX) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = want - got < BALLAST_PIECE ? want - got : BALLAST_PIECE,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                                      .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+                                      .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+        if (vmaCreateBuffer(vma, &bi, &ai, &ballast_buf[nballast], &ballast_alloc[nballast], NULL) != VK_SUCCESS) break;
+        got += bi.size, nballast++;
+    }
+    rt_log("mem: %llu of %llu MiB of video memory taken and held for the session (NX2NAVI_VRAM_BALLAST_MB, a test)",
+           (unsigned long long)(got >> 20), (unsigned long long)(want >> 20));
+}
+
+void vk_mem_ballast_release(VmaAllocator vma) {   // before the allocator goes
+    for (int i = 0; i < nballast; i++) vmaDestroyBuffer(vma, ballast_buf[i], ballast_alloc[i]);
+    nballast = 0;
+}
+
 static int vram_query(uint64_t *used, uint64_t *budget, int *exact) {
     VkCtx *c = vk_ctx();
     *used = *budget = 0, *exact = 0;
