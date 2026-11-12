@@ -1157,6 +1157,7 @@ int cfg_ini_now(const char *key, char *out, size_t cap) { return find_ini() ? cf
 
 void cfg_init(void) {
     load_ini();
+    __atomic_store_n(&lowend, -1, __ATOMIC_RELEASE);   // asked before the file was read: decided again (lowend_of)
     if (profile_of())
         rt_log("cfg: device profile Steam Deck: defaults for the keys nx2navi.ini does not set (NX2NAVI_DEVICE_PROFILE=desktop "
                "turns it off)");

@@ -465,6 +465,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_AMIIBO_STATUS] = "Status: %s",
     [UI_MENU_MENU_LANG] = "Menu language", [UI_MENU_MENU_LANG_DESC] = "Language of this menu and the overlay.",
     [UI_MENU_MENU_LANG_AUTO] = "Automatic (from Windows)",
+    [UI_MENU_LOW_END_GPU] = "Low-end GPU mode (experimental)",
+    [UI_MENU_LOW_END_GPU_DESC] = "For older graphics cards and cards short of video memory. Runs the game's mesh shaders as compute shaders "
+                                 "where the card has none, keeps video memory within what the driver reports free, waits less for the GPU and "
+                                 "prepares frames on a thread of their own. Measured on a Radeon RX 580 only: it can show a dark or flickering "
+                                 "frame now and then, so leave it off on a newer card.",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
     [UI_MENU_DISCORD_RPC_DESC] = "Shows \"Playing NX2navi\" with the play time in your Discord status while the "
                                  "game runs. discord_app_id and discord_image in nx2navi.ini choose the application.",
@@ -1154,6 +1159,11 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_AMIIBO_STATUS] = "Состояние: %s",
     [UI_MENU_MENU_LANG] = "Язык меню", [UI_MENU_MENU_LANG_DESC] = "Язык этого меню и индикатора.",
     [UI_MENU_MENU_LANG_AUTO] = "Автоматически (из Windows)",
+    [UI_MENU_LOW_END_GPU] = "Режим для слабых видеокарт (экспериментальный)",
+    [UI_MENU_LOW_END_GPU_DESC] = "Для старых видеокарт и карт с малым объёмом видеопамяти. Меш-шейдеры игры выполняются как вычислительные там, "
+                                 "где карта их не поддерживает, видеопамять удерживается в пределах свободного объёма по данным драйвера, игра "
+                                 "меньше ждёт видеокарту, а кадры готовятся в отдельном потоке. Проверено только на Radeon RX 580: изредка "
+                                 "возможен тёмный или мерцающий кадр, поэтому на новой карте оставьте выключенным.",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
     [UI_MENU_DISCORD_RPC_DESC] = "Пока игра запущена, показывает «Играю в NX2navi» со временем игры в статусе "
                                  "Discord. Приложение выбирают discord_app_id и discord_image в nx2navi.ini.",
@@ -1685,6 +1695,11 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_AMIIBO_STATUS] = "Estado: %s",
     [UI_MENU_MENU_LANG] = "Idioma do menu", [UI_MENU_MENU_LANG_DESC] = "Idioma deste menu e do indicador.",
     [UI_MENU_MENU_LANG_AUTO] = "Automático (do Windows)",
+    [UI_MENU_LOW_END_GPU] = "Modo para GPUs fracas (experimental)",
+    [UI_MENU_LOW_END_GPU_DESC] = "Para placas de vídeo antigas ou com pouca memória de vídeo. Executa os mesh shaders do jogo como compute "
+                                 "shaders onde a placa não os tem, mantém a memória de vídeo dentro do que o driver informa como livre, espera "
+                                 "menos pela GPU e prepara os quadros numa thread própria. Medido apenas numa Radeon RX 580: pode mostrar um "
+                                 "quadro escuro ou piscando de vez em quando, então deixe desligado numa placa mais nova.",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
     [UI_MENU_DISCORD_RPC_DESC] = "Mostra \"Jogando NX2navi\" com o tempo de jogo no seu status do Discord "
                                  "enquanto o jogo roda. discord_app_id e discord_image no nx2navi.ini escolhem a "
@@ -2459,6 +2474,10 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_MENU_LANG] = "菜单语言",
     [UI_MENU_MENU_LANG_DESC] = "本菜单和性能浮层的语言。",
     [UI_MENU_MENU_LANG_AUTO] = "自动（跟随 Windows）",
+    [UI_MENU_LOW_END_GPU] = "低端显卡模式（实验性）",
+    [UI_MENU_LOW_END_GPU_DESC] = "适用于较旧的显卡和显存不足的显卡。在显卡不支持网格着色器时以计算着色器运行游戏的网格着色器，"
+                                 "将显存占用控制在驱动报告的可用范围内，减少等待 GPU 的时间，并在独立线程上准备帧。"
+                                 "仅在 Radeon RX 580 上测试过：偶尔可能出现变暗或闪烁的画面，较新的显卡请保持关闭。",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
     [UI_MENU_DISCORD_RPC_DESC] = "游戏运行时在 Discord 状态中显示“正在玩 NX2navi”及游戏时长。nx2navi.ini 中的 "
                                  "discord_app_id 和 discord_image 选择应用。",

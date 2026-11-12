@@ -288,15 +288,15 @@
 # which game memory gets no copy in video memory (memory = mirror), which costs far more frame time than a texture
 # uploaded again. 0: textures never give way for video memory.
 # tex_vram_pressure = 80
-# Older graphics cards, and ones short of video memory: 1 turns on the settings written for them and measured on a
-# Radeon RX 580, for every key below that this file does not set itself. Mesh shaders run as compute where the card
-# has none (mesh_emulation), video memory stays within what the driver reports free (vram_heap_limit = auto,
-# vram_reserve_mb = 512), large texture upload batches go to the GPU early (upload_batch_mb = 256), game memory is
-# copied for the GPU while a frame is recorded and the game waits less for the GPU (mirror_stage = 1,
-# submit_finish_gpu = 0), frames are prepared on a thread of their own (replay_async = 1, which can show a dark or
-# flickering frame now and then), pools the game refills every frame stay in system memory (mirror_hot = 25), and a
-# texture read after another image was drawn over its memory gets memory of its own (tex_clobber = 1). 0, the
-# default: each of these stays as it was in 0.9.1. Read at start.
+# Low-end GPU mode (experimental; also in the settings menu's Game tab). For older graphics cards, and ones short of
+# video memory: 1 turns on the settings written for them and measured on a Radeon RX 580, for every key below that
+# this file does not set itself. Mesh shaders run as compute where the card has none (mesh_emulation), video memory
+# stays within what the driver reports free (vram_heap_limit = auto, vram_reserve_mb = 512), large texture upload
+# batches go to the GPU early (upload_batch_mb = 256), game memory is copied for the GPU while a frame is recorded and
+# the game waits less for the GPU (mirror_stage = 1, submit_finish_gpu = 0), frames are prepared on a thread of their
+# own (replay_async = 1, which can show a dark or flickering frame now and then), pools the game refills every frame
+# stay in system memory (mirror_hot = 25), and a texture read after another image was drawn over its memory gets
+# memory of its own (tex_clobber = 1). 0, the default: each of these stays as it was in 0.9.1. Read at start.
 # low_end_gpu = 0
 # Textures the game released that are kept as they are (1 to 16384); past this count only those that lose nothing
 # when dropped go. Default: one per 2 MB of the video memory budget, 2048 to 8192. Read at start.
