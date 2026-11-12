@@ -863,3 +863,14 @@ int probe_vkdevice(void) {
 
 // The GPU has mesh shaders: the mesh emulation (NX2NAVI_MESH_EMULATION) does nothing there (the low-end GPU rows of the menu's Game tab).
 int vk_mesh_shader_native(void) { return g_vk.has_mesh_shader; }
+
+// The card the low-end GPU mode (cfg.c LOWEND) was written for: one without mesh shaders, or one whose driver reports
+// a video memory budget under 8 GiB. The menu offers the mode only there (ui/menu.cpp tab_game): on a GeForce RTX 5090
+// the mode's own-memory rule for overwritten textures moved the 1600x1600 sun shadow map and the scene depth to memory
+// of their own, and the ground's shadow was a dark patch with straight edges that turned with the camera.
+int vk_low_end_card(void) {
+    if (!g_vk.has_mesh_shader) return 1;
+    uint64_t used = 0, budget = 0;
+    int exact = 0;
+    return vk_mem_vram(&used, &budget, &exact) && budget && budget >> 20 < 8192;
+}

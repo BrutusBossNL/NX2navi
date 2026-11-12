@@ -84,6 +84,7 @@ int vk_fg4_active(void);                // ... its swapchain is in place
 const char *vk_fg4_name(void);          // ... the version the library runs here ("3.1.6", "4.0.2")
 int vk_texture_detail_auto(void);       // vk_texture.c: the texture detail auto picks on this card, 0 full to 2 low
 int vk_mesh_shader_native(void);        // vk_device.c: the GPU has mesh shaders (the mesh emulation does nothing)
+int vk_low_end_card(void);              // vk_device.c: no mesh shaders, or under 8 GiB of video memory
 double frame_step_limit_hz(void);
 int frame_limit_adjustable(void);
 int rtss_limit_state(void);
@@ -1423,6 +1424,10 @@ static void tab_game(float scale) {
     }
     // Last, as its own settings follow it while it is on (rows_low_end). cfg.c LOWEND: the defaults for older graphics
     // cards, read at start.
+    // Offered on the cards it was written for (vk_low_end_card). On any other the row cannot turn the mode on; while
+    // the mode is on there (set earlier, or in nx2navi.ini) the row stays usable, to turn it off again.
+    if (!cfg_bool("NX2NAVI_LOW_END_GPU") && !cfg_low_end_active() && !vk_low_end_card())
+        opt_disable_next(UI_MENU_LOWEND_NOT_FOR_CARD);
     opt_toggle("NX2NAVI_LOW_END_GPU", UI_MENU_LOW_END_GPU, UI_MENU_LOW_END_GPU_DESC);
     // the mode's settings are read only while it is on (cfg.c LOWEND_ONLY), so their rows wait for the restart too
     if (cfg_low_end_active()) rows_low_end();

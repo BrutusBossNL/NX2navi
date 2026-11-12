@@ -91,6 +91,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_FULL] = "Full", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduced", [UI_MENU_TEX_DETAIL_LOW] = "Low",
     [UI_MENU_LOWEND_INTRO] = "The settings of the low-end GPU mode. Each can be changed here; most take effect after a restart.",
     [UI_MENU_LOWEND_RESTART] = "The mode turns on after a restart. Its settings are listed here then.",
+    [UI_MENU_LOWEND_NOT_FOR_CARD] = "Not for this graphics card: it has mesh shaders and 8 GB of video memory or more. "
+                                    "The mode is for older cards and can break shadows on this one.",
     [UI_MENU_LOWEND_MEMORY] = "Video memory and textures",
     [UI_MENU_LOWEND_RENDER] = "Rendering",
     [UI_MENU_LOWEND_BUILD] = "Build",
