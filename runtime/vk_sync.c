@@ -16,6 +16,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
+#include "prof.h"
 #include "vk.h"
 #include "platform/platform.h"
 
@@ -255,6 +256,7 @@ static void hold_flush_locked(VkCtx *c) {
                  (unsigned long long)H.last, (int)r);
     }
     if (H.last) __atomic_store_n(&queued_v, H.last, __ATOMIC_RELEASE);
+    uint64_t now = plat_now_ns();
     for (int k = 0; k < nhold_pairs; k++) ts_queue_ns[hold_pairs[k]] = now;
     nhold_pairs = 0;
     H.batches++, H.subs += (uint64_t)H.n;
@@ -454,7 +456,74 @@ void vk_gtl_note(int kind, uint64_t sub_ns, uint64_t start_tick, uint64_t end_ti
     vk_gtl_note_ns(kind, (int64_t)sub_ns, (int64_t)sub_ns, tick_ns(s), tick_ns(e));
 }
 
+// ---- the game's waits for GPU work (NX2NAVI_TRACE=perf): for each submission value, when the game handed it to the
+// replay (vk_sync_reserve; the submit itself without asynchronous replay), when the replay had recorded and submitted it
+// (issued) and when it was done (GPU and completion). A fence wait of any thread but the replay's is split into its
+// time until the waited submission was submitted (the replay still recording it or those before it) and its time after
+// (the GPU, the submit batching's hold, the completion thread). Every 60 frames with the GPU timeline (vk_gtl_log).
+#define GW_RING 4096
+typedef struct { uint64_t v, res, iss, done; } GwSub;
+static GwSub gw[GW_RING];
+static PlatMutex gw_lock = PLAT_MUTEX_INIT;
+static uint64_t gw_n, gw_ns, gw_rep_ns, gw_gpu_ns, gw_lead_ns, gw_age, gw_before, gw_lat_rep, gw_lat_gpu, gw_lat_n;
 
+static GwSub *gw_at(uint64_t v) {   // gw_lock held
+    GwSub *e = &gw[v & (GW_RING - 1)];
+    if (e->v != v) *e = (GwSub){v, 0, 0, 0};
+    return e;
+}
+
+static void gw_mark(uint64_t v, int what) {
+    if (!(rt_trace & RT_TRACE_PERF) || !v) return;
+    uint64_t now = plat_now_ns();
+    plat_mutex_lock(&gw_lock);
+    GwSub *e = gw_at(v);
+    if (what == 0) e->res = now;
+    else if (what == 1) e->iss = now;
+    else if (!e->done) e->done = now;
+    plat_mutex_unlock(&gw_lock);
+}
+
+// the waits: t0 to t1 for value; newest: the newest value handed out at t0, sent: the newest submitted at t0
+static void gw_wait(uint64_t value, uint64_t t0, uint64_t t1, uint64_t newest, uint64_t sent) {
+    if (!(rt_trace & RT_TRACE_PERF) || t1 <= t0 || plat_thread_id() == prof_replay_tid) return;
+    uint64_t d = t1 - t0;
+    plat_mutex_lock(&gw_lock);
+    GwSub e = gw[value & (GW_RING - 1)];
+    gw_n++, gw_ns += d;
+    if (d > gw_max_ns) gw_max_ns = d;
+    if (e.v != value || !e.iss) {
+        gw_unknown++, gw_gpu_ns += d;
+    } else {
+        uint64_t rep = e.iss > t0 ? (e.iss < t1 ? e.iss : t1) - t0 : 0;
+        gw_rep_ns += rep, gw_gpu_ns += d - rep;
+        if (e.res && e.res <= t0) gw_lead_ns += t0 - e.res;
+        if (e.res && e.done && e.iss >= e.res && e.done >= e.iss)
+            gw_lat_rep += e.iss - e.res, gw_lat_gpu += e.done - e.iss, gw_lat_n++;
+    }
+    if (newest > value) gw_age += newest - value;
+    if (value > sent + 1) gw_before += value - sent - 1;
+    plat_mutex_unlock(&gw_lock);
+}
+
+static void gw_log(uint64_t frame, int frames) {
+    plat_mutex_lock(&gw_lock);
+    uint64_t n = gw_n, ns = gw_ns, rep = gw_rep_ns, gpu = gw_gpu_ns, lead = gw_lead_ns, age = gw_age, before = gw_before,
+    gw_n = gw_ns = gw_rep_ns = gw_gpu_ns = gw_lead_ns = gw_age = gw_before = gw_lat_rep = gw_lat_gpu = gw_lat_n = 0;
+    plat_mutex_unlock(&gw_lock);
+    if (!n) {
+        rt_log("perf: frame %llu: waits for GPU work outside the replay: none", (unsigned long long)frame);
+        return;
+    }
+    double f = frames;
+    rt_log("perf: frame %llu: waits for GPU work outside the replay: %.1f per frame, %.2f ms per frame (longest %.2f ms): "
+           "%.2f ms until the replay had submitted the waited submission (%.2f submissions still before it in the replay "
+           "on average), %.2f ms after (GPU, submit batching hold, completion; %llu without a record); the waited one was "
+           "%.2f submissions behind the newest and handed to the replay %.2f ms before the wait; per waited submission "
+           "%.2f ms from hand-over to submit and %.2f ms from submit to done",
+           (unsigned long long)frame, n / f, ns / 1e6 / f, mx / 1e6, rep / 1e6 / f, (double)before / (double)n,
+           gpu / 1e6 / f, (unsigned long long)unk, (double)age / (double)n, lead / 1e6 / (double)n,
+           ln ? lr / 1e6 / (double)ln : 0.0, ln ? lg / 1e6 / (double)ln : 0.0);
 }
 
 static int gtl_cmp(const void *a, const void *b) {
@@ -464,6 +533,7 @@ static int gtl_cmp(const void *a, const void *b) {
 
 void vk_gtl_log(uint64_t frame, int frames) {
     static GtlEv ev[GTL_N];
+    gw_log(frame, frames);
     plat_mutex_lock(&gtl_lock);
     int n = gtl_n;
     memcpy(ev, gtl, sizeof ev[0] * (size_t)n);
@@ -807,8 +877,10 @@ static void completion_main(void *arg) {
             // finished submissions held (vk_mem_collect: upload batches, destroyed images, views and buffers, each
             // checked against the timeline itself) is nothing they read, and it takes cmd_lock, which the upload
             // path holds, so done waited behind uploads.
+            uint64_t was = done;
             __atomic_store_n(&done, reached, __ATOMIC_RELEASE);
             plat_cond_broadcast(&cv_done);
+            for (uint64_t v = reached - was > GW_RING ? reached - GW_RING + 1 : was + 1; v <= reached; v++) gw_mark(v, 2);
             plat_mutex_unlock(&st_lock);
             vk_mem_collect();
             plat_mutex_lock(&st_lock);
@@ -1122,6 +1194,7 @@ uint64_t vk_sync_reserve(void) {
     if (reserved < issued) reserved = issued;
     uint64_t v = ++reserved;
     plat_mutex_unlock(&st_lock);
+    gw_mark(v, 0);
     return v;
 }
 
@@ -1186,6 +1259,7 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     vk_mem_lazy_handed();
     s->fence = sent ? fence : 0;
     vk_mem_note_submit(fence);
+    gw_mark(fence, 1);
     plat_mutex_lock(&st_lock);
     __atomic_store_n(&issued, fence, __ATOMIC_RELEASE);
     plat_cond_broadcast(&cv_work);
@@ -1265,7 +1339,10 @@ static int fence_wait_impl(uint64_t value, uint64_t timeout_ns);
 
 int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns) {
     uint64_t p0 = perf_begin();
+    uint64_t newest = __atomic_load_n(&reserved, __ATOMIC_ACQUIRE), sent = __atomic_load_n(&issued, __ATOMIC_ACQUIRE);
+    uint64_t w0 = __atomic_load_n(&done, __ATOMIC_ACQUIRE) >= value ? 0 : plat_now_ns();
     int ok = fence_wait_impl(value, timeout_ns);
+    if (w0 && ok) gw_wait(value, w0, plat_now_ns(), newest > sent ? newest : sent, sent);
     perf_end(PERF_FENCE, p0);
     perf_gpu_wait(p0);
     return ok;
