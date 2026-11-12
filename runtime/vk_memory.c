@@ -998,6 +998,43 @@ static uint64_t snap_regions(uint64_t r0, uint64_t r1, uint32_t epoch) {
     return calls;
 }
 
+// NX2NAVI_SNAP_WIDEN=<regions> (default 8, 0 off): a texture check that has to query widens the query to up to this
+// many 2 MiB regions on each side, inside the import pool that holds the texture, so the textures of one pool are
+// snapped by one query a submission instead of one each. With freezing off (NX2NAVI_FREEZE_IDLE) an RX 580 in Hyrule
+// Field made about 1,130 texture queries a frame, about 6 MiB each on average incl. repeats, 9.4 ms with the pools'.
+static int snap_widen_n(void) {
+    static int n = -1;
+    if (n < 0) {
+        const char *e = cfg_get("NX2NAVI_SNAP_WIDEN");
+        n = e && *e ? atoi(e) : 8;
+        if (n < 0) n = 0;
+        rt_log("mem: a texture check's write-watch query takes up to %d neighbouring 2 MiB regions of its pool on each "
+               "side (NX2NAVI_SNAP_WIDEN)", n);
+    }
+    return n;
+}
+
+// r0..r1 widened inside the import pool that holds [lo, hi); pool_lock taken here (before gen_lock, as everywhere).
+static void snap_widen(uint64_t lo, uint64_t hi, uint64_t *r0, uint64_t *r1) {
+    int w = snap_widen_n();
+    if (!w) return;
+    plat_mutex_lock_shared(&pool_lock);
+    const pidx_ent *e = pidx_find(&pool_index, (uintptr_t)lo, hi - lo);
+    const PoolRec *r = e ? e->buf : NULL;
+    if (r && r->kind == POOL_IMPORT && r->buf && r->import_hi > r->import_lo) {
+        uint64_t p0 = (r->import_lo + (1ull << SNAP_SHIFT) - 1) >> SNAP_SHIFT;   // whole regions of the pool only
+        uint64_t p1 = r->import_hi >> SNAP_SHIFT;                                // [p0, p1)
+        if (p1 > p0) {
+            uint64_t a = *r0 > (uint64_t)w ? *r0 - (uint64_t)w : 0, b = *r1 + (uint64_t)w;
+            if (a < p0) a = p0;
+            if (b > p1 - 1) b = p1 - 1;
+            if (a < *r0) *r0 = a;
+            if (b > *r1 && b < SNAP_REGIONS) *r1 = b;
+        }
+    }
+    plat_mutex_unlock_shared(&pool_lock);
+}
+
 int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t epoch, uint32_t *now) {
     if (!size) { *now = since; return 0; }
     uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull;
@@ -1009,8 +1046,10 @@ int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t e
         if (snap_at[r] != epoch) { excl = 1; break; }
     if (excl) {
         plat_mutex_unlock_shared(&gen_lock);
+        uint64_t w0 = r0, w1 = r1;
+        snap_widen(lo, hi, &w0, &w1);
         plat_mutex_lock(&gen_lock);
-        n_snap_calls += snap_regions(r0, r1, epoch);
+        n_snap_calls += snap_regions(w0, w1, epoch);
     }
     int untracked = 0, changed = 0;
     for (uint64_t r = r0; r <= r1; r++) untracked |= snap_untracked[r];
