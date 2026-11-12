@@ -112,6 +112,9 @@ typedef struct Tex {
     VmaAllocation flat3d_alloc;
     uint32_t flat3d_up, flat3d_layer;   // n_up and the layer of the copy's last refresh
     uint64_t flat3d_wr;           // wr_fence then
+    uint64_t used_frame;          // presented frame (gfx_counters.frames) when a draw binding or lookup last named it
+    uint8_t in_rt;                // in rts[] (bound into pool memory, the GPU wrote it)
+    uint8_t clobbered;            // another image of another layout wrote over its pool memory since its own last write
 } Tex;
 
 // A slot keeps what vk_texture_by_id resolved for it, so a draw binding skips the key lookup and the address chain: the
@@ -1146,6 +1149,79 @@ static VkResult vma_image(VkCtx *c, const VkImageCreateInfo *ci, const ImgKey *i
 }
 
 // defer_init: the caller records the image's first transition (init_image or alias_copy).
+// ---------------------------------------------------------------- overwritten pool memory (NX2NAVI_TEX_CLOBBER)
+// The game places transient render targets over each other in its memory pools, and the replay binds their images
+// into the same memory (bind_pool_memory). An image of another format or size that renders over an image's memory
+// leaves it holding the other image's texels in the GPU's own tiled and compressed layout, which reads back as
+// unrelated numbers. Ocarina's volumetric fog reads its 360x202 RGBA32F fog-volume texture at the start of a frame,
+// before it draws it again; at the end of the previous frame the 1440x810 R11G11B10F bloom target had been drawn over
+// that memory, and the fog lighting took those numbers as volume distances and types: teal splotches in the fog of
+// Kokiri Forest, on AMD and NVIDIA. An image read while in that state gets memory of its own from then on
+// (private_keys), so it keeps what it last drew; the read that found it takes an empty image once.
+// NX2NAVI_TEX_CLOBBER=0 keeps such images in pool memory.
+static Tex **rts;                    // pool-bound images the GPU wrote, sorted by address
+static int nrts, crts;
+static uint64_t max_rt;              // largest storage size in rts[]
+static nvn_hmap private_keys = {.klen = sizeof(TexKey)};
+static int clobber_fix = -1;
+static volatile int32_t n_unaliased;
+
+static int rts_lower(uint64_t a) {
+    int lo = 0, hi = nrts;
+    while (lo < hi) {
+        int m = (lo + hi) / 2;
+        if (rts[m]->pub.addr < a) lo = m + 1;
+        else hi = m;
+    }
+    return lo;
+}
+
+static void rt_add(Tex *e) {
+    if (e->in_rt) return;
+    if (nrts == crts) {
+        crts = crts ? 2 * crts : 256;
+        if (!(rts = realloc(rts, sizeof *rts * (size_t)crts))) rt_fatal("vk: out of memory for the render target list");
+    }
+    int i = rts_lower(e->pub.addr);
+    memmove(rts + i + 1, rts + i, sizeof *rts * (size_t)(nrts - i));
+    rts[i] = e;
+    nrts++;
+    if (e->t.L.size > max_rt) max_rt = e->t.L.size;
+    e->in_rt = 1;
+}
+
+static void rt_remove(Tex *e) {
+    if (!e->in_rt) return;
+    for (int i = rts_lower(e->pub.addr); i < nrts && rts[i]->pub.addr == e->pub.addr; i++)
+        if (rts[i] == e) {
+            memmove(rts + i, rts + i + 1, sizeof *rts * (size_t)(nrts - i - 1));
+            nrts--;
+            break;
+        }
+    e->in_rt = 0;
+}
+
+static int alias_compatible(const Tex *e, const Tex *src, const char **why);
+
+// e, bound into pool memory, was just written by the GPU: its own content is current, and the pool-bound images of
+// another layout whose storage overlaps it no longer hold theirs.
+static void mark_clobbered(Tex *e) {
+    if (clobber_fix < 0) clobber_fix = cfg_bool("NX2NAVI_TEX_CLOBBER");
+    e->clobbered = 0;
+    if (!clobber_fix || !e->bound_to) return;
+    rt_add(e);
+    uint64_t lo = e->pub.addr, hi = lo + e->t.L.size;
+    for (int i = rts_lower(lo > max_rt ? lo - max_rt : 0); i < nrts && rts[i]->pub.addr < hi; i++) {
+        Tex *o = rts[i];
+        if (o == e || o->clobbered || o->bound_to != e->bound_to || o->pub.addr + o->t.L.size <= lo) continue;
+        const char *why;   // the same texels through both: a compatible image of the same shape (another size tiles apart)
+        if (o->pub.image == e->pub.image || (alias_compatible(o, e, &why) && o->pub.width == e->pub.width &&
+                                             o->pub.height == e->pub.height && o->pub.depth == e->pub.depth))
+            continue;
+        o->clobbered = 1;
+    }
+}
+
 static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     static volatile int32_t n_unmapped, n_unsupported, n_failed, n_unbound, n_thick;
     VkCtx *c = vk_ctx();
@@ -1257,7 +1333,9 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     e->pub.addr = k->addr;
     img_key_of(&ci, &e->ik);
     VkImage img = VK_NULL_HANDLE;
-    if (scale == 1 && nvn_gpu_only(k->addr)) {   // storage in a physical or virtual pool: alias the pool memory (section 3.2)
+    // storage in a physical or virtual pool: alias the pool memory (section 3.2), unless an image of another layout
+    // overwrote it there before it was read (private_keys)
+    if (scale == 1 && nvn_gpu_only(k->addr) && !nvn_hm_get(&private_keys, k)) {
         const VkMemoryRequirements *q = nvn_hm_get(&img_reqs, &e->ik);
         VkMemSpan sp;
         if (q && !pool_fits(c, e, q, L.size, &sp)) {   // it would not bind there (img_reqs)
@@ -1961,6 +2039,32 @@ static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
     }
     if (!any) k = snprintf(out, n, "none");
     return k < (int)n ? k : (int)n - 1;
+}
+
+    }
+}
+
+    rt_remove(e);
+    n_site[0]++;
+    tex_gen_bump(e->key.addr);
+    nvn_hm_del(&by_key, &e->key);
+    Tex *head = nvn_hm_get(&by_addr, &e->key.addr);
+    if (head == e) {
+        if (e->next_at) nvn_hm_put(&by_addr, &e->key.addr, e->next_at);
+        else nvn_hm_del(&by_addr, &e->key.addr);
+    } else {
+        for (Tex *p = head; p; p = p->next_at)
+            if (p->next_at == e) { p->next_at = e->next_at; break; }
+    if (e->released) nreleased--, rel_unlink(e);
+    if (e->pub.image) vk_exec_image_gone(e->pub.image);   // none when another texture took it (create_tex, reuse)
+    vk_defer_image(e->pub.image, e->alloc);
+    free(e->snap);
+    // The record goes once the GPU is past the submission being recorded, as its image: the replay keeps &e->pub as a
+    // render target for the rest of a command buffer (vk_exec.c resolve_target) and DLSS for the frame, and this runs on
+    // whichever thread released the texture. Freed here, a pass that began again read the freed record, cached a view of
+    // the dead image (vk_exec_target_view), and a later image given the same handle drew through it into freed memory.
+    e->pub.gone = 1;
+    vk_defer_free(e);
 }
 
 // Released entries with another descriptor at the same address are replaced; past RELEASED_MAX released entries one
@@ -3999,6 +4103,7 @@ void vk_texture_gpu_written(const tex_t *t) {
         }
         pool_gpu_owned(e);
         e->pub.gpu_owned = 1;
+        mark_clobbered(e);
         e->chash_ok = 0;   // the image now holds the GPU's content: matching storage bytes no longer mean "unchanged"
         if (e->pub.skip) {   // texture detail leaves out what the GPU can write (detail_skip); said if it ever does
             static volatile int32_t n_skip_written;
@@ -4339,6 +4444,7 @@ const VkTexImage *vk_texture_by_id(int id, view_t *view, int *has_view) {
 const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
     if (id < 0 || id >= ntslots || !tslots[id].used) return NULL;
     TexSlot *s = &tslots[id];
+again:;
     uint32_t g = agen[sinfo[id] & 0xffff];
     // resolved again: an entry at its address was created, dropped or released, or the slot registered (s->ce
     // cleared); an empty result is not kept, as image creation may succeed later, except a held one for the pool
@@ -4359,6 +4465,9 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
     // a draw binding: the texture is in use, whether or not the pool's refresh checked it first in this submission
     // (by list that check is no lookup, vk_texture_pool_fresh_locked, so the stamp of the use is left here too)
     if (e && !pool_ctx) touch(e);
+        s->ce = NULL;
+        goto again;
+    }
     // Bindings of one submit share one check, answered from the submit's write-watch snapshot (guest writes during a
     // replay race the GPU read on hardware too). After one check an entry is either uploaded or never uploads (not
     // mirrored, GPU-owned or no CPU layout), so a slot that checked its entry in this submit has nothing left to do. A
