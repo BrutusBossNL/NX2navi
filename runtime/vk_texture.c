@@ -4543,6 +4543,27 @@ static int stale_kept(const Tex *own) {
     return on && own && !own->superseded && !own->overwritten && (own->uploaded || own->pub.gpu_owned);
 }
 
+// NX2NAVI_POOL_DATA_FIRST (default 1; 0: it waits for the budget like any other): a slot of a texture that is not
+// block-compressed and holds at most DATA_FIRST_BYTES is made at its lookup too, beside the count budget and the
+// frame's creation time, DATA_PER_FRAME of them a present. The budget exists for the pictures the game streams, ASTC
+// that has to be decoded; a plain-format texture is as often the game's data (a terrain height map, a lookup table,
+// a mask), and a draw that reads the stand-in in its place for a frame puts geometry or lighting in the wrong place
+// instead of showing a surface a little late. It costs an upload and no decode.
+#define DATA_PER_FRAME 24
+#define DATA_FIRST_BYTES (4u << 20)
+static int data_take(const TexSlot *s) {
+    static int on = -1;
+    static uint64_t frame = ~0ull;
+    static int left;
+    if (on < 0) on = cfg_bool("NX2NAVI_POOL_DATA_FIRST");
+    if (!on || s->t.L.size > DATA_FIRST_BYTES) return 0;
+    int bw = 1, bh = 1;
+    if (!nvn_fmt_bpb(s->t.d.format, &bw, &bh) || bw > 1 || bh > 1) return 0;   // unknown or block-compressed
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != frame) frame = f, left = DATA_PER_FRAME;
+    return left > 0 ? left-- : 0;
+}
+
 static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
     *view = s->v;
     *has_view = s->has_view;
@@ -4591,7 +4612,7 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         // was about a thousand slots at once, which vk_exec_draw.c pool_sync_entries took for an area load, several
         // times a second in some places, and each time lifted the count budget and the frame's creation time.
         else if (!mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size)) e = NULL;
-        else if (!create_budget && !(s->cwant && want_take()) && !shown_take(s)) create_deferred = 1;
+        else if (!create_budget && !(s->cwant && want_take()) && !shown_take(s) && !data_take(s)) create_deferred = 1;
         else {
             uint64_t m0 = kern_now_ns();
             e = entry_of(&s->t);
