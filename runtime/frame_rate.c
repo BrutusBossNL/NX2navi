@@ -476,6 +476,65 @@ static double ocarina_step(double dt) {
     return step;
 }
 
+// ---- whole frames out of the real-time step (the set ostep's sites that cut it to a whole number, patches-v111.txt)
+// The game adds the step, or the step times a whole number, to a few counters and cuts the sum to a whole number: at the
+// console's 60 fps the step is 1 and they count frames. With the step the display interval in 60 Hz frames, under one
+// above 60 fps, the cut loses the fraction every frame. whole_frames keeps it per counter (by its guest address) and
+// hands out the whole part, so each counter moves at the game's pace at any frame rate; at a step of exactly one it
+// gives what the game computes. A value that is not positive, or too large for a count, is cut as fcvtzs cuts it.
+#define WHOLE_SLOTS 8
+static struct { uint64_t at; float rem; uint32_t used; } whole_slot[WHOLE_SLOTS];
+static uint32_t whole_calls;
+static PlatMutex whole_lock = PLAT_MUTEX_INIT;
+
+static uint32_t cut_fcvtzs(float f) {   // fcvtzs w, s: toward zero, saturating, NaN 0
+    if (f != f) return 0;
+    if (f >= 2147483648.0f) return 0x7fffffffu;
+    if (f <= -2147483648.0f) return 0x80000000u;
+    return (uint32_t)(int32_t)f;
+}
+
+static uint32_t whole_frames(uint64_t at, float amount) {
+    if (!(amount > 0.0f) || amount >= 2147483648.0f) return cut_fcvtzs(amount);
+    plat_mutex_lock(&whole_lock);
+    int k = -1, oldest = 0;
+    for (int i = 0; i < WHOLE_SLOTS; i++) {
+        if (whole_slot[i].at == at) { k = i; break; }
+        if (whole_slot[i].used < whole_slot[oldest].used) oldest = i;
+    }
+    if (k < 0) k = oldest, whole_slot[k].at = at, whole_slot[k].rem = 0.0f;
+    whole_slot[k].used = ++whole_calls;
+    float sum = whole_slot[k].rem + amount;
+    uint32_t whole = cut_fcvtzs(sum);
+    whole_slot[k].rem = sum - (float)whole;
+    plat_mutex_unlock(&whole_lock);
+    return whole;
+}
+
+// The time of day (main+0x3cdf70, patches-v111.txt): s0 holds twice the step, the game seconds of this frame; w8 gets
+// the whole ones, the counter being the seconds of the day at +0x3c of the object in x19.
+// NX2NAVI_TRACE=perf: every 10 s, the game seconds the day was given beside those the cut alone would have given.
+void frame_rate_day_host(Cpu *c) {
+    uint32_t bits = (uint32_t)c->v[0];
+    float secs;
+    memcpy(&secs, &bits, 4);
+    uint32_t whole = whole_frames(c->x[19] + 0x3c, secs);
+    c->x[8] = whole;
+    if (rt_trace & RT_TRACE_PERF) {
+        static uint64_t t0, given, cut;
+        static double exact;
+        uint64_t now = plat_now_ns();
+        given += whole, cut += cut_fcvtzs(secs), exact += secs;
+        if (!t0) t0 = now;
+        if (now - t0 >= 10000000000ull) {
+            rt_log("frame rate: the time of day got %llu game seconds in %.1f s (the frames' step makes %.1f; cut "
+                   "to whole seconds each frame, as the game cuts them, %llu)", (unsigned long long)given,
+                   (now - t0) / 1e9, exact, (unsigned long long)cut);
+            t0 = now, given = cut = 0, exact = 0;
+        }
+    }
+}
+
 // The 60 Hz frames the game steps at each update where the set ostep gives them (Ocarina); 1 elsewhere, the game's own
 // nominal frame. The mouse camera divides by it (mouse_direct.c): the game multiplies camera input by this step.
 float frame_step_frames(void) {

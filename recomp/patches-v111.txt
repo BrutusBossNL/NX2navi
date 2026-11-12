@@ -38,6 +38,14 @@ site ostep main 6e6cc4 1e201828 bd410148    # fdiv s8, s1, s0 -> ldr s8, [x10, #
 # never differ. x9 is not read in the function and is free across the call that follows; the store keeps x8.
 site ostep main 3b4eaf4 5e21d800 @page:x9   # scvtf s0, s0 -> adrp x9, page
 site ostep main 3b4eaf8 1e201820 bd410120   # fdiv s0, s1, s0 -> ldr s0, [x9, #256]
+# The time of day: its update (main+0x3cdf70) adds trunc(2 * frames per update) game seconds a frame to the seconds of
+# the day (+0x3c of its object, carried into the day count by the code after it). With the step above below one frame
+# per update the sum was 1 from 61 to 119 fps (the day at 83% of its pace at 100 fps) and 0 above 120, where the clock
+# stood still and the sun swung back and forth around a frozen hour; at 60 fps a step a little under one frame lost a
+# second too. The cut calls the page's +0xf60 instead (runtime/frame_rate.c frame_rate_day_host): the frame's seconds
+# with the fraction kept for the next frame, so the day keeps the game's pace at any frame rate. x30 is the function's
+# own saved one, and the call at main+0x3cdfc8 sets it again.
+site ostep main 3cdfc0 1e380008 952b4be8   # fcvtzs w8, s0 -> bl page+0xf60
 
 # Physics solver steps: the physics system's step setup (main+0x38aeb80, and the same code in main+0x38afc10) gives the
 # rigid body world its solver step count for the frame, trunc(frames per update * count + 0.001) with the count at

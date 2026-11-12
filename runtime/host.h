@@ -393,6 +393,7 @@ int frame_limit_adjustable(void);                         // the frame limit set
 int frame_free_running(void);                             // no fps60/realtime patch set: the game steps by the clock
 double frame_step_limit_hz(void);                         // the frame rate the limit gives (overlay); 0 unknown
 double frame_step_game_hz(void);                          // the rate the game draws at under the limit; 0 unknown
+void frame_rate_day_host(Cpu *c);                         // the time of day's seconds a frame (set ostep, page +0xf60)
 float frame_step_frames(void);                            // the 60 Hz frames the game steps per update (set ostep), else 1
 void frame_step_flight(float *page, float *game, uint64_t *presents);   // flight.c: the step at a host present
 // rtss_limit.c: RivaTuner Statistics Server takes the frame limit where it runs
