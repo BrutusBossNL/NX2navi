@@ -69,6 +69,7 @@ typedef struct PoolRec {
                                        // that synced it, in frame pm_frame and in the one before (NX2NAVI_PRESNAP_PLACE)
     uint32_t wb_sub;                   // replay: the last submission that wrote mirror bytes back to guest memory
     uint64_t wb_fence;                 // replay: that submission's fence (mirror_capture waits for no write-back)
+    uint8_t wb_kept;                   // replay: a write-back left bytes in the mirror alone (wb_skip): never evicted
     uint32_t retry_sub;                // replay: a mirror refused for the VRAM budget or a failed allocation is asked
                                        // again from here, 0 never
     uint8_t refused_why;               // replay: the MR_* reason of its refusal, for the counts when it is asked again
@@ -2203,6 +2204,7 @@ static uint64_t mirror_evict(uint64_t need, uint32_t min_idle, const char *why) 
         uint32_t age = msub - r->acc_sub;
         if (age < min_idle || r->wb_sub == msub || msub - r->wb_sub < 2) continue;
         if (!r->twin && r->gpa_rec) continue;   // the table's writes are in the mirror alone
+        if (r->wb_kept) continue;               // so are the bytes wb_skip kept from guest memory
         int at = nv;
         while (at > 0 && msub - v[at - 1]->acc_sub < age) at--;
         if (at == MAXV) continue;
@@ -3101,9 +3103,38 @@ static int wb_lazy(void) {
 
 static void gpu_wrote_range(const VkMemSpan *sp, uint64_t size, int shader);
 
+// NX2NAVI_WB_SKIP_MB (default 0, off), a test switch for drivers that run without the lazy write-back (AMD's, and
+// outside Windows: wb_lazy_choice.h): there, what a binding written by a shader or a copy holds goes back to guest
+// memory at the end of every submission, up to 66 MiB a frame in Hyrule Field. With it, a written range of at least
+// this many MiB goes back only for its first WB_SKIP_HEAD bytes and the rest stays in the mirror. The CPU reads a few
+// words at the start of such buffers (12 bytes into ranges of 6.3 and 15.2 MiB, see "Lazy write-back" in memory.c),
+// which the head still carries; a CPU read further in would see older bytes, and a CPU write further in would have the
+// next sync copy that page's older guest bytes over what the GPU wrote there. The pool's mirror is never evicted from
+// then on, since guest memory lacks those bytes.
+#define WB_SKIP_HEAD (64u << 10)
+static uint64_t wb_skip(void) {
+    static int64_t at = -1;
+    if (at < 0) {
+        int mb = cfg_int("NX2NAVI_WB_SKIP_MB");
+        at = mb > 0 ? (int64_t)mb << 20 : 0;
+        if (at)
+            rt_log("mem: without the lazy write-back, written ranges of %d MiB or more go back to guest memory only for "
+                   "their first %u KiB (NX2NAVI_WB_SKIP_MB)", mb, WB_SKIP_HEAD >> 10);
+    }
+    return (uint64_t)at;
+}
+static int64_t m_wb_skipped;    // bytes wb_skip kept in mirrors since the last summary
+
 static void gpu_wrote(const VkMemSpan *sp, uint64_t size, int shader) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size || !wb_lazy()) {
+        uint64_t skip = r && r->mstate == MS_ON && sp->buffer == r->mbuf ? wb_skip() : 0;
+        if (skip && size >= skip && !wb_lazy()) {
+            gpu_wrote_range(sp, WB_SKIP_HEAD, shader);
+            r->wb_kept = 1;
+            plat_add64(&m_wb_skipped, (int64_t)(size - WB_SKIP_HEAD));
+            return;
+        }
         gpu_wrote_range(sp, size, shader);
         return;
     }
@@ -3708,10 +3739,15 @@ static void mirror_log(uint64_t frame) {
            a.presnap_queries / f, a.presnap_bytes / f / M, a.sync_queries / f, a.prologues / f, qpc_ms(a.presnap_t + a.sync_t) / f,
            qpc_ms(a.presnap_t) / f, qpc_ms(a.sync_t) / f, (long long)m_evicted_n, m_evicted_bytes / M, (long long)m_retries,
            (long long)m_untwinned_n, m_untwinned_bytes / M, ver);
-    char capl[160] = "";
+    char capl[240] = "";
+    if (wb_skip()) {
+        snprintf(capl, sizeof capl, "; written ranges kept in the mirror alone %.3f MiB",
+                 (uint64_t)plat_xchg64(&m_wb_skipped, 0) / f / M);
+    }
     if (capture_cap())
-        snprintf(capl, sizeof capl, "; copied by the CPU at hand-over %.3f MiB in %.1f ranges, %.3f ms; left to the GPU "
-                 "copy %.3f MiB", a.cap_bytes / f / M, a.cap_ranges / f, qpc_ms(a.cap_t) / f, a.cap_left / f / M);
+        snprintf(capl + strlen(capl), sizeof capl - strlen(capl), "; copied by the CPU at hand-over %.3f MiB in %.1f "
+                 "ranges, %.3f ms; left to the GPU copy %.3f MiB", a.cap_bytes / f / M, a.cap_ranges / f,
+                 qpc_ms(a.cap_t) / f, a.cap_left / f / M);
     rt_log("mem: mirror frame %llu: upload sources per frame, overlaps counted twice: written pages %.3f MiB; flush ranges "
            "%.2f, %.3f MiB, from %.1f flushes of %.3f MiB; flushed and not copied (write-watched) %.3f MiB%s",
            (unsigned long long)frame, a.page_bytes / f / M, a.flush_n / f,
