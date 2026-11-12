@@ -160,6 +160,27 @@ FfxApiResource image(const VkFfxImage *i, uint32_t state, uint32_t usage) {
     return ffxApiGetResourceVK((void *)i->image, ffxApiGetImageResourceDescriptionVK(i->image, ci, usage), state);
 }
 
+// NX2NAVI_FFX_KEYS=<key>:<value>[,...] (test): FSR 3.1's tuning constants for each new context (ffx_upscale.h
+// FfxApiConfigureUpscaleKey: 0 velocity factor, 1 reactiveness scale, 2 shading change scale, 3 accumulation added per
+// frame, 4 minimum disocclusion accumulation). The library reads the value through the pointer.
+void configure_keys(ffxContext *ctx) {
+    const char *e = cfg_get("NX2NAVI_FFX_KEYS");
+    static float value[8];
+    for (int n = 0; e && *e && n < 8; n++) {
+        unsigned key = 0;
+        float v = 0;
+        if (sscanf(e, "%u:%f", &key, &v) != 2) break;
+        value[n] = v;
+        ffxConfigureDescUpscaleKeyValue d = {};
+        d.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
+        d.key = key, d.ptr = &value[n];
+        ffxReturnCode_t r = A.configure(ctx, &d.header);
+        rt_log("ffx: FSR 3.1 key %u = %g (%s)", key, (double)v, r == FFX_API_RETURN_OK ? "set" : "refused");
+        e = strchr(e, ',');
+        if (e) e++;
+    }
+}
+
 Up *context_for(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
     up_tick++;
     uint64_t now = plat_now_ns();
@@ -218,6 +239,7 @@ Up *context_for(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
         return nullptr;
     }
     slot->mw = mw, slot->mh = mh, slot->ow = ow, slot->oh = oh, slot->drs = drs, slot->used = up_tick, slot->used_ns = now;
+    configure_keys(&slot->ctx);
     ffxQueryGetProviderVersion v = {};
     v.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     A.query(&slot->ctx, &v.header);
@@ -321,10 +343,13 @@ extern "C" int vk_ffx_upscale(VkCommandBuffer cb, const VkFfxImage *color, const
     d.motionVectorScale = {1.0f, 1.0f};
     d.renderSize = {color->width, color->height};
     d.upscaleSize = {out->width, out->height};
-    // The sharpness slider (0-100) drives FSR's own RCAS here, as it does for FSR 1
+    // The sharpness slider (0-100) drives FSR's own RCAS here, as it does for FSR 1. Below a render scale of three
+    // quarters it goes towards the maximum, all the way from Performance down, where FSR 3.1 is soft (vk_dlaa.c
+    // "FSR 3.1's second sharpening pass", which has the measurements); 0 still turns it off.
     int sharp = cfg_int("NX2NAVI_SHARPNESS");
     d.enableSharpening = sharp > 0;
     d.sharpness = sharp > 100 ? 1.0f : sharp / 100.0f;
+    if (sharp > 0) d.sharpness += (1.0f - d.sharpness) * vk_dlaa_fsr3_boost(color->width, out->width);
     d.frameTimeDelta = dt_ms;
     d.preExposure = 1.0f;
     d.reset = reset != 0;
