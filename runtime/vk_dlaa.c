@@ -33,6 +33,7 @@
 #include "vk_ffx.h"
 #include "vk_rec.h"
 #include "dlaa_mv_spv.h"
+#include "dlaa_sharpen_spv.h"
 
 typedef int NgxResult;   // NVSDK_NGX_Result: 1 success, 0xBAD00000 | n failures
 #define NGX_OK(r) (((unsigned)(r) & 0xFFF00000u) != 0xBAD00000u)
@@ -472,6 +473,9 @@ static struct {
         VkImage out, mv;
         VmaAllocation out_mem, mv_mem;
         VkImageView out_view, mv_view;
+        VkImage sharp;           // FSR 3.1's second sharpening pass writes here (fsr3_sharpen), at the output size
+        VmaAllocation sharp_mem;
+        VkImageView sharp_view;
         VkImage mask, chars[2];  // the bias mask DLSS reads, the character class mask of this and last frame (R8)
         VmaAllocation mask_mem, chars_mem[2];
         VkImageView mask_view, chars_view[2];
@@ -702,6 +706,8 @@ static void destroy_size(struct Size *e) {
     if (e->mv_view) vkDestroyImageView(c->device, e->mv_view, NULL);
     if (e->out) vmaDestroyImage(c->vma, e->out, e->out_mem);
     if (e->mv) vmaDestroyImage(c->vma, e->mv, e->mv_mem);
+    if (e->sharp_view) vkDestroyImageView(c->device, e->sharp_view, NULL);
+    if (e->sharp) vmaDestroyImage(c->vma, e->sharp, e->sharp_mem);
     if (e->mask_view) vkDestroyImageView(c->device, e->mask_view, NULL);
     if (e->mask) vmaDestroyImage(c->vma, e->mask, e->mask_mem);
     for (int i = 0; i < 2; i++) {
@@ -1475,12 +1481,12 @@ static void hl_destroy(void) {
 // The device is idle here. Release NGX features and parameters before their Vulkan resources, then shut down NGX even
 // if initialization succeeded but the layout check failed. The Linux core's Shutdown1 takes an extra output pointer
 // compared with the SDK's public wrapper; it reports the number of devices still using NGX.
-// ---- the free camera's view of the ground (debug_tools.c dbg_pad). While it flies, nine of the view distances
-// mv_pass wrote (a grid over the lower part of the view, where the ground is) go back to the host, and the camera rises
-// where the closest is nearer than its clearance: flown through a hill, it showed the void below the map. A slot is
-// read FC_SLOTS evaluations after its copy, when the GPU has long been past it.
+// ---- the free camera's view of the ground (debug_tools.c dbg_pad, ground avoidance). While it flies with that on,
+// nine of the view distances mv_pass wrote (a grid over the lower part of the view, where the ground is) go back to
+// the host, which works out how far below the camera the ground is (ground_under). A slot is read FC_SLOTS evaluations
+// after its copy, when the GPU has long been past it.
 int dbg_freecam_flying(void);                          // debug_tools.c
-void dbg_freecam_ground(const float *dist, int n);
+void dbg_freecam_ground(const float *dist, int n, float tan_half_y, float aspect);
 #define FC_N 9
 #define FC_SLOTS 4
 static VkBuffer fc_buf;
@@ -1510,7 +1516,8 @@ static void fcam_probe(VkCommandBuffer cb, const struct Size *e, uint32_t w, uin
     uint32_t s = fc_next++ % FC_SLOTS;
     if (fc_have[s]) {
         vmaInvalidateAllocation(c->vma, fc_mem, s * FC_N * sizeof(float), FC_N * sizeof(float));
-        dbg_freecam_ground(fc_map + s * FC_N, FC_N);
+        dbg_freecam_ground(fc_map + s * FC_N, FC_N, D.fg_cam_ok ? tanf(0.5f * D.fg_cam.fov_y) : 0.0f,
+                           D.fg_cam_ok ? D.fg_cam.aspect : 0.0f);
     }
     // the replay's viewports have negative heights: row 0 is the top of the view
     static const float fx[3] = {0.2f, 0.5f, 0.8f}, fy[3] = {0.6f, 0.78f, 0.96f};
@@ -1909,6 +1916,116 @@ static void edge_fill(VkCommandBuffer cb, const VkExecTarget *t, const VkExecTar
     full_barrier(cb);
 }
 
+// ---------------------------------------------------------------- FSR 3.1's second sharpening pass
+// FSR 3.1 in its scaling modes is soft where FSR 4 is not, most of all while the camera moves. Measured on a village
+// save while the camera turned at a steady rate (present screenshots every 0.4 s, the mean absolute Laplacian of the
+// scene's luminance as the fine detail): FSR 3.1 Native AA 6.7, FSR 4 Performance 5.9 and Ultra Performance 5.4, FSR 3.1
+// Performance 4.0 and Ultra Performance 3.3 with its own sharpening at the slider's default of 80, 5.0 and 4.1 with it
+// at 100. FSR 3.1's tuning constants (velocity factor, accumulation per frame, shading change scale) gave nothing or
+// took detail away. So below a render scale of three quarters FSR 3.1's own sharpening goes towards its maximum
+// (vk_ffx.cpp vk_ffx_upscale) and its picture gets a second pass of RCAS here (shaders/dlaa_sharpen.comp), before the
+// HUD is drawn over it: both grow as the scale falls, full from Performance down, and both follow the sharpness
+// slider, 0 turning them off. NX2NAVI_FSR3_SHARPEN=0 (test): no second pass.
+#define SHARPEN_STOPS 1.5f
+static struct {
+    int ok;   // -1 not tried
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkPipeline pipe;
+} SH = {.ok = -1};
+
+static int sharpen_init(void) {
+    if (SH.ok >= 0) return SH.ok;
+    SH.ok = 0;
+    const VkCtx *c = vk_ctx();
+    if (!mv_init() || !D.mv_samp) return 0;   // its sampler serves the texel fetches
+    VkDescriptorSetLayoutBinding b[2] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                           .bindingCount = 2, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 4 * sizeof(float)};
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof dlaa_sharpen_spv,
+                                   .pCode = dlaa_sharpen_spv};
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (vkCreateDescriptorSetLayout(c->device, &dci, NULL, &SH.dsl) != VK_SUCCESS) return 0;
+    VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &SH.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    if (vkCreatePipelineLayout(c->device, &li, NULL, &SH.layout) != VK_SUCCESS ||
+        vkCreateShaderModule(c->device, &mi, NULL, &m) != VK_SUCCESS)
+        return 0;
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                      .layout = SH.layout};
+    VkResult r = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &SH.pipe);
+    vkDestroyShaderModule(c->device, m, NULL);
+    if (r != VK_SUCCESS) {
+        rt_log("dlaa: FSR 3.1's second sharpening pass could not be set up");
+        return 0;
+    }
+    return SH.ok = 1;
+}
+
+// How much of the extra sharpening a render scale takes: none from three quarters of the output's width up, all of it
+// from half (Performance) down. vk_ffx.cpp raises FSR 3.1's own sharpness by the same share.
+float vk_dlaa_fsr3_boost(uint32_t w, uint32_t ow) {
+    double share = ow ? (double)w / ow : 1.0, k = (0.75 - share) / 0.25;
+    return (float)(k < 0 ? 0 : k > 1 ? 1 : k);
+}
+
+// FSR 3.1's picture e->out (w x h rendered, ow x oh out) sharpened once more, in place: RCAS into e->sharp and back.
+static void fsr3_sharpen(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_t ow, uint32_t oh) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("FSR3_SHARPEN", "1");
+    int slider = cfg_int("NX2NAVI_SHARPNESS");
+    float k = vk_dlaa_fsr3_boost(w, ow);
+    if (!on || slider <= 0 || k <= 0 || !sharpen_init()) return;
+    if (!e->sharp) {
+        VkImageUsageFlags u = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (!image2d(ow, oh, VK_FORMAT_R16G16B16A16_SFLOAT, u, &e->sharp, &e->sharp_mem, &e->sharp_view)) {
+            const VkCtx *c = vk_ctx();
+            if (e->sharp_view) vkDestroyImageView(c->device, e->sharp_view, NULL);
+            if (e->sharp) vmaDestroyImage(c->vma, e->sharp, e->sharp_mem);
+            e->sharp = VK_NULL_HANDLE, e->sharp_view = VK_NULL_HANDLE;
+            return;
+        }
+        VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                    .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                    .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = e->sharp,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                               .pImageMemoryBarriers = &ib};
+        vkCmdPipelineBarrier2(cb, &di);
+        rt_log("dlaa: FSR 3.1's picture gets a second sharpening pass at this render scale (%u of %u wide)", w, ow);
+    }
+    // RCAS takes its sharpness in stops below the most (0). At full strength (0.4 stops at the slider's 80, as vk_fsr.c
+    // maps it for the present) the pass took Performance's fine detail to 8.2, past Native AA's 6.7: grain on every
+    // surface. It runs SHARPEN_STOPS weaker, and weaker still above Performance's scale.
+    const float stops = SHARPEN_STOPS + (100.0f - (float)(slider > 100 ? 100 : slider)) / 50.0f + 2.0f * (1.0f - k);
+    const float pc[4] = {(float)ow, (float)oh, stops, 0};
+    VkDescriptorImageInfo si = {D.mv_samp, e->out_view, VK_IMAGE_LAYOUT_GENERAL},
+                          di = {VK_NULL_HANDLE, e->sharp_view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet wr[2] = {
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &si},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &di}};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, SH.pipe);
+    rec_push(vk_pipeline_push_fn(), cb, VK_PIPELINE_BIND_POINT_COMPUTE, SH.layout, 0, 2, wr);
+    vkCmdPushConstants(cb, SH.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    vkCmdDispatch(cb, (ow + 15) / 16, (oh + 15) / 16, 1);
+    full_barrier(cb);
+    VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                      .extent = {ow, oh, 1}};
+    vkCmdCopyImage(cb, e->sharp, VK_IMAGE_LAYOUT_GENERAL, e->out, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+    full_barrier(cb);
+}
+
 // Set when the scene the upscaler runs on has another size than the last one; vk_dlaa_resized_take reads it.
 static volatile int32_t size_changed;
 
@@ -2057,6 +2174,7 @@ evaluated:
     if (D.evals % 600 == 0) query_vram();
     stale_sizes(e);
     full_barrier(cb);
+    if (fsr && !vk_ffx_fsr4() && w < ow) fsr3_sharpen(cb, e, w, ow, oh);   // FSR 3.1 made the picture
     vk_mvcheck_output(cb, e->out, ow, oh);   // NX2NAVI_MV_CHECK (test)
     // the result into the scene target (DLAA: the bloom, the post passes and the HUD read it and draw over it) or into
     // the scaling pass's target (the HUD draws over it)
