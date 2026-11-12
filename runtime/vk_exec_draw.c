@@ -1550,6 +1550,7 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
         // (NX2NAVI_MIRROR_STAGE) ended the wait once the replay had submitted, and the game wrote the next frame's
         // instances while the GPU still drew from them: the small grass and moss, which reach their instances through
         // the table, flickered and slid over the ground as the camera turned (RX 580, Kokiri Forest, 2026-11-11).
+        // Not every bind comes here (the bind skip, the kept descriptors): gpa_reader notes it at each bind.
         vk_mem_note_live();
         VkDescriptorBufferInfo t = vk_gpa_info();
         return t.buffer ? t : (VkDescriptorBufferInfo){Z.zbuf, 0, VK_WHOLE_SIZE};
@@ -3478,7 +3479,29 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // template reads directly (VkPipeInfo.tpl); write structs are filled only when a set has no template.
 static _Thread_local const VkDescSlot *emu_d;   // set 0's descriptors of the last bind_resources build (mesh emulation)
 static uint32_t emu_d_bytes;
+// A pipeline that binds the device address table reads what it names, mostly guest memory itself (pools without a
+// mirror), as the GPU runs: the submission's submit wait is the GPU's (vk_mem_take_live). Without this the staged mirror
+// uploads (NX2NAVI_MIRROR_STAGE) ended the wait once the replay had submitted, and the game wrote the next frame's
+// instances while the GPU still drew from them: the small grass and moss, which reach their instances through the
+// table, flickered and slid over the ground as the camera turned (RX 580, Kokiri Forest, 2026-11-11). Noted at every
+// bind, before the bind skip and the kept descriptors (bind_sig, pb_take), which leave ssbo_info out: noted only there,
+// it was missed once those had warmed up, and the flicker came back after a minute of play.
+// the pipeline's binding list holds a table binding
+static void gpa_reader(const VkPipeInfo *info) {
+    int8_t g = __atomic_load_n(&info->gpa, __ATOMIC_RELAXED);   // the replay workers bind too
+    if (!g) {
+        g = 1;
+        for (uint32_t i = 0; i < info->n_bindings && g == 1; i++) {
+            const VkPipeBinding *b = &info->bindings[i];
+            if (b->kind == GFX_RES_SSBO && b->res && b->res->cbuf_slot == VK_GPA_CB_SLOT) g = 2;
+        }
+        __atomic_store_n(&((VkPipeInfo *)info)->gpa, g, __ATOMIC_RELAXED);
+    }
+    if (g == 2) vk_mem_note_live();
+}
+
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
+    gpa_reader(info);
     DrawCtx *const cx = ex->dc;
     VkWriteDescriptorSet *w = cx->bind_w;
     VkDescSlot *d = cx->bind_d;
@@ -4657,6 +4680,7 @@ static VkWriteDescriptorSet mo_write(const VkPipeBinding *b, const VkDescSlot *d
 // would hold the same); a pushed set is pushed by mo_emit. 0 for a pipeline with storage buffers, images or texel
 // buffers (not drawn again).
 static int mo_desc(VkExec *ex, const VkPipeInfo *info, MoDraw *q) {
+    gpa_reader(info);
     if (info->n_bindings > MAX_BINDINGS || info->pool) return 0;
     uint32_t total = 0;
     for (uint32_t i = 0; i < info->n_bindings; i++) total += info->bindings[i].count ? info->bindings[i].count : 1;

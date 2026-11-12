@@ -880,6 +880,8 @@ typedef struct {
     // mesh stages are compute pipelines of the same layout, vk_pipeline_mesh_emu), and set 0's compute-side template.
     int emu;
     VkDescriptorUpdateTemplate emu_tpl_c;
+    int8_t gpa;                            // vk_exec_draw.c gpa_reader: 0 not known yet, 1 no binding of the device
+                                           // address table, 2 one (its draws read guest memory as the GPU runs)
 } VkPipeInfo;
 // One descriptor of the packed array a descriptor update template reads (VkPipeInfo.tpl), 24 bytes for every type; the
 // bytes a type leaves unused are zero, so equal descriptors compare equal byte for byte.
