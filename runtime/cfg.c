@@ -64,7 +64,7 @@ static const char *const known[] = {
     "POOL_FAST", "POOL_GROUP", "POOL_GROUP_CHECK", "POOL_PRESNAP", "POOL_PRESNAP_RUNS",
     "SUBMIT_FINISH_GPU", "SVC_WAITS", "SNAP_WIDEN", "SUBMIT_FINISH_RESULTS", "SUBMIT_FINISH_KINDS", "FOLIAGE", "MIRROR_STAGE", "FLUSH_SKIP_CLEAN", "MIRROR_HOT", "MESH_EMULATION", "MESH_EMU_MB", "MESH_EMU_TASKS", "MESH_EMU_BATCH", "GUEST_OPT", "LOG_TEX_NEW", "DUMP_KEY", "VEC_INDEX_FIX", "PASS_TIMES",
     "PROFILE_MAIN", "PROFILE_RENDER", "PROMPTS", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REALTIME", "REC_END", "REEXEC",
-    "REFLEX", "RENDER_SCALE", "REPLAY_ASYNC", "REPLAY_PIPE", "REPLAY_RUNS", "REPLAY_WORKERS", "RTSS", "RTSS_ENUM", "SCENE_SHARE",
+    "REFLEX", "RENDER_SCALE", "REPLAY_ASYNC", "REPLAY_PIPE", "REPLAY_RUNS", "TAIL_EARLY", "REPLAY_WORKERS", "RTSS", "RTSS_ENUM", "SCENE_SHARE",
     "PRESNAP_PLACE",
     "REPLAY_CHECK", "RESOLVE_CHECK", "RESTART_WAIT", "ROMFS", "ROMFS_INDEX", "ROMFS_MMAP", "ROMFS_MODS", "ROMFS_PATCHES",
     "ROMFS_PROOF_DIR", "ROMFS_VERIFY", "RSTICK_DEADZONE", "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS", "SHADER_CACHE",
@@ -130,7 +130,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"BIND_RIGHT", "input"}, {"BIND_DOWN", "input"}, {"BIND_LSTICK_LEFT", "input"}, {"BIND_LSTICK_UP", "input"},
     {"BIND_LSTICK_RIGHT", "input"}, {"BIND_LSTICK_DOWN", "input"}, {"BIND_RSTICK_LEFT", "input"},
     {"BIND_RSTICK_UP", "input"}, {"BIND_RSTICK_RIGHT", "input"}, {"BIND_RSTICK_DOWN", "input"}, {"BIND_SHAKE", "input"},
-    {"ASYNC_PREEMPT", "performance"}, {"REPLAY_ASYNC", "performance"}, {"REPLAY_WORKERS", "performance"}, {"REPLAY_PIPE", "performance"},
+    {"ASYNC_PREEMPT", "performance"}, {"REPLAY_ASYNC", "performance"}, {"REPLAY_WORKERS", "performance"}, {"REPLAY_PIPE", "performance"}, {"TAIL_EARLY", "performance"},
     {"FREE_CORES", "performance"},
     {"DYN_RES", "performance"}, {"DYN_RES_TARGET", "performance"}, {"DYN_RES_STEP", "performance"},
     {"RECORDER_CORE", "performance"}, {"RECORDER_PRIO", "performance"}, {"BIND_REUSE", "performance"},
@@ -260,6 +260,7 @@ static const CfgMeta metas[] = {
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
     {"REPLAY_WORKERS", "0", "0..16", RESTART}, {"REPLAY_PIPE", "0", "0..4", RESTART},
+    {"TAIL_EARLY", "0", "0|1", RESTART},   // vk_exec.c "the early tail"
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
     // dynamic resolution (dynres.c): the scene follows the GPU time toward DYN_RES_TARGET milliseconds
     {"DYN_RES", "0", "0|1", LIVE}, {"DYN_RES_TARGET", "16.7", "1..100", LIVE}, {"DYN_RES_STEP", "45", "8..600", LIVE},
