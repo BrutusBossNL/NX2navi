@@ -106,6 +106,12 @@ static volatile int64_t frz_count[4];   // freezes; thaws by a write fault, by m
 static int frz_async = 1;               // the setting, read in mem_init
 typedef struct { uint8_t n; uint16_t run[16][2]; } FrzRuns;   // pages of the region, [first, end)
 static FrzRuns *frz_runs[RT_ADDRESS_LIMIT >> FRZ_SHIFT];      // frz_lock (written at a freeze): NULL or n 0 = not kept
+// vm_lock, a leaf lock held around every write-watch query (written_pages) and around the page calls of a freeze and a
+// thaw: on Windows each kind takes the process's address-space lock, and with both running at once a game thread's
+// thaw waited about 16 ms per page call behind the replay's queries, 100-300 ms for a thaw of several runs (a frame of
+// that length about every second standing in Hyrule Field on an RX 580). Taken in turns here, a thaw waits for one
+// query at most.
+static PlatMutex vm_lock = PLAT_MUTEX_INIT;
 static volatile int64_t frz_async_n;    // thaws done outside the lock, since the start
 static volatile int64_t frz_protect_fails;   // VirtualProtect failures of those thaws, since the start
 
@@ -753,6 +759,12 @@ void mem_lazy_report(uint64_t frame, uint64_t skipped) {
 static void thaw_pages_vm(uint64_t r, int strict);
 
 static void thaw_pages(uint64_t r, int strict) {
+    plat_mutex_lock(&vm_lock);
+    thaw_pages_vm(r, strict);
+    plat_mutex_unlock(&vm_lock);
+}
+
+static void thaw_pages_vm(uint64_t r, int strict) {   // vm_lock held
     uint64_t base = r << FRZ_SHIFT;
     const FrzRuns *k = frz_runs[r];
     if (k && k->n) {
@@ -948,19 +960,22 @@ void mem_thaw(uint64_t a, uint64_t n) {
 // reserved holes (heap pages given back) stay as they are, and thaw_locked finds the read-only runs again.
 static int freeze_locked(uint64_t r) {
     uint64_t a = r << FRZ_SHIFT, end = a + FRZ_SIZE, run[16][2];
-    int n = 0;
-    for (uint64_t x = a, y; x < end; x = y) {
+    int n = 0, ok = 1;
+    plat_mutex_lock(&vm_lock);
+    for (uint64_t x = a, y; x < end && ok; x = y) {
         int st = plat_mem_state(x, end, &y);
         if (st >= PLAT_PROT_NONE) {
-            if (st != PLAT_PROT_RW || n == 16) return 0;
-            run[n][0] = x, run[n][1] = y, n++;
-        } else if (st != PLAT_MEM_RESERVED) return 0;
+            if (st != PLAT_PROT_RW || n == 16) ok = 0;
+            else run[n][0] = x, run[n][1] = y, n++;
+        } else if (st != PLAT_MEM_RESERVED) ok = 0;
     }
-    for (int i = 0; i < n; i++)
+    for (int i = 0; ok && i < n; i++)
         if (!plat_mem_protect(run[i][0], run[i][1] - run[i][0], PLAT_PROT_READ)) {
             while (i--) plat_mem_protect(run[i][0], run[i][1] - run[i][0], PLAT_PROT_RW);
-            return 0;
+            ok = 0;
         }
+    plat_mutex_unlock(&vm_lock);
+    if (!ok) return 0;
     // the runs, for a thaw without VirtualQuery (thaw_pages); kept per region from its first freeze on
     if (n && !frz_runs[r]) frz_runs[r] = calloc(1, sizeof *frz_runs[r]);
     if (frz_runs[r]) {
@@ -1261,7 +1276,10 @@ int mem_start_note(int probe) {
 static uint64_t written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset) {
     if (!max || !size) return 0;
     if (!watched(addr, size)) return UINT64_MAX;
-    return plat_mem_written(addr, size, pages, max, reset);
+    plat_mutex_lock(&vm_lock);
+    uint64_t n = plat_mem_written(addr, size, pages, max, reset);
+    plat_mutex_unlock(&vm_lock);
+    return n;
 }
 
 uint64_t mem_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max) {
