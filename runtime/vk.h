@@ -390,6 +390,10 @@ const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void);
 void vk_headroom_start(void);
 void vk_headroom_stop(void);   // before vmaDestroyAllocator
 uint64_t vk_headroom_held(void);        // bytes the spare blocks' anchors hold
+uint64_t vk_headroom_release(void);     // a refused allocation: the anchors go, none for 30 s; returns their bytes
+// A refused allocation: the staging and snapshot buffers kept for reuse and the headroom's spare blocks go back to the
+// driver before the caller tries once more (vk_memory.c). Returns the bytes.
+uint64_t vk_mem_give_back(void);
 VkDeviceSize vk_vma_block_size(void);   // VMA's block size on heaps over 1 GiB (NX2NAVI_VMA_BLOCK_MB)
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when all of [addr, addr+size) is backed
 // vk_mem_resolve for a caller that reads guest memory itself or only asks what backs it: with shadow storage the pool

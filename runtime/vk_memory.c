@@ -4190,6 +4190,41 @@ void vk_upload_end(void) { plat_rmutex_unlock(&cmd_lock); }
 static VmaPool stg_pool;
 static int stg_pool_tried;
 
+// A staging buffer the driver refused (vk_staging): the buffers kept for reuse go back to the driver before one more
+// try, with the headroom's spare blocks (vk_headroom_release): the staging cache, the arena's free chunks and the
+// write-back snapshot pool, up to some hundred MiB. On an integrated GPU the device-local heap is the machine's RAM and
+// fills before the commit checks see anything; staging buffers of 11 KiB to 16 MiB refused there ended the game in
+// Hyrule Field and on the first scene of play (#465, #567). The replay's transient buffers and descriptor pools do the
+// same (vk_exec_draw.c scratch, alloc_set). Returns the bytes given back.
+uint64_t vk_mem_give_back(void) {
+    VkCtx *c = vk_ctx();
+    uint64_t freed = 0;
+    plat_rmutex_lock(&cmd_lock);
+    for (int i = 0; i < stg_ncache; i++) {
+        freed += stg_cache[i].size;
+        vmaDestroyBuffer(c->vma, stg_cache[i].buf, stg_cache[i].alloc);
+    }
+    stg_ncache = 0, stg_cache_bytes = 0;
+    for (int i = 0; i < narena_free; i++) vmaDestroyBuffer(c->vma, arena_free[i].buf, arena_free[i].alloc);
+    freed += (uint64_t)narena_free * ARENA_CHUNK;
+    narena_free = 0;
+    plat_rmutex_unlock(&cmd_lock);
+    plat_mutex_lock(&snap_pool_lock);
+    for (int i = 0; i < nsnap_pool; i++) vmaDestroyBuffer(c->vma, snap_pool[i].buf, snap_pool[i].alloc);
+    freed += snap_pool_bytes;
+    nsnap_pool = 0, snap_pool_bytes = 0;
+    plat_mutex_unlock(&snap_pool_lock);
+    return freed + vk_headroom_release();
+}
+
+// NX2NAVI_STAGING_FAIL_AT=n (test): the n-th staging buffer the driver makes is taken as refused for memory once, so
+// the give-back runs (vk_mem_give_back).
+static int staging_fail_now(void) {
+    static int64_t at = -1, n;
+    if (at < 0) at = cfg_int("NX2NAVI_STAGING_FAIL_AT");
+    return at > 0 && plat_inc64(&n) == at;
+}
+
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
     VkCtx *c = vk_ctx();
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size ? size : 16,
@@ -4232,6 +4267,21 @@ void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
         // still fit in a default block or another host-visible type. Keep the same mapping requirements.
         aci.pool = NULL;
         r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+    }
+    if (r == VK_SUCCESS && staging_fail_now()) {
+        vmaDestroyBuffer(c->vma, b, a);
+        r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        VkResult first = r;
+        uint64_t freed = vk_mem_give_back();
+        aci.pool = NULL;
+        r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+        static volatile int32_t told;
+        if (plat_inc32(&told) <= 16)
+            rt_log("vk: staging buffer of %llu bytes refused (%d): %.1f MiB of kept buffers and spare blocks given back, "
+                   "%s", (unsigned long long)size, (int)first, freed / 1048576.0,
+                   r == VK_SUCCESS ? "made at the second try" : "refused again");
     }
     if (r != VK_SUCCESS) rt_fatal("vk: staging buffer of %llu bytes failed (%d)", (unsigned long long)size, (int)r);
     vk_texstat_add(VK_TS_STG_NEW, 1, bi.size);

@@ -305,6 +305,15 @@ static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *
                                       .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
         VmaAllocationInfo info;
         VkResult res = vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &c->buf, &c->alloc, &info);
+        if (res == VK_ERROR_OUT_OF_DEVICE_MEMORY || res == VK_ERROR_OUT_OF_HOST_MEMORY) {   // once more after a give-back
+            uint64_t freed = vk_mem_give_back();
+            VkResult again = vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &c->buf, &c->alloc, &info);
+            static volatile int32_t told;
+            if (plat_inc32(&told) <= 16)
+                rt_log("vk: transient buffer of %llu bytes refused (%d): %.1f MiB given back, %s", (unsigned long long)n,
+                       (int)res, freed / 1048576.0, again == VK_SUCCESS ? "made at the second try" : "refused again");
+            res = again;
+        }
         if (res != VK_SUCCESS) rt_fatal("vk: transient buffer of %llu bytes failed (%d)", (unsigned long long)n, (int)res);
         c->map = info.pMappedData, c->size = n, c->used = 0;
         r->nchunks++;
@@ -2814,7 +2823,16 @@ static VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
         plat_mutex_lock(&spare_lock);
         if (nspare_pool) pool = spare_pool[--nspare_pool];
         plat_mutex_unlock(&spare_lock);
-        if (!pool && vkCreateDescriptorPool(c->device, &pi, NULL, &pool) != VK_SUCCESS) rt_fatal("vk: descriptor pool failed");
+        if (!pool) {
+            VkResult res = vkCreateDescriptorPool(c->device, &pi, NULL, &pool);
+            if (res == VK_ERROR_OUT_OF_DEVICE_MEMORY || res == VK_ERROR_OUT_OF_HOST_MEMORY) {   // once more, as scratch
+                uint64_t freed = vk_mem_give_back();
+                res = vkCreateDescriptorPool(c->device, &pi, NULL, &pool);
+                rt_log("vk: descriptor pool refused: %.1f MiB given back, %s", freed / 1048576.0,
+                       res == VK_SUCCESS ? "made at the second try" : "refused again");
+            }
+            if (res != VK_SUCCESS) rt_fatal("vk: descriptor pool failed (%d)", (int)res);
+        }
         r->pools[r->npools++] = pool;
     }
     rt_fatal("vk: descriptor set allocation failed twice");
