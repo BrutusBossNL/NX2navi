@@ -166,7 +166,10 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
     black; integer formats use the float path. Confirm the RX 9070 reports the feature (grass map needs 0.5).
     **OK if supported.**
 12. **Dual-source blend.** `vk_pipeline.c` `blend_factor` maps SRC1 factors; `Program.cs` `QueryGraphicsState` always passes
-    `dualSourceBlendEnable = false`, so no `Index 1` output exists. Log pipelines with SRC1 factors. **Mismatch if used.**
+    `dualSourceBlendEnable = false`, so no `Index 1` output exists in the translation. `vk_pipeline.c` gives a
+    pipeline whose blend state uses a SRC1 factor (`uses_src1`, `GKey.dsb`) a fragment module with the second output
+    at `Index 1` (`spirv_dual_source`) where the device has `dualSrcBlend`. **Fixed** (checked in the code on
+    2026-11-12, not by a capture).
 13. **FMZ / NaN.** Count `FMUL/FFMA/FMUL32I/FFMA32I` words with the `Fmz` field set (`Decoders/InstDecoders.cs:1901`
     bit positions) in `build/v121/shaders/`; FMin/FMax/FClamp NaN results are undefined (3.1). Census (2026-10-22):
     FMZ in 1 instruction of 12397 shaders, FTZ in 12241 shaders, FMNMX in 7457. The translator emits GLSL.std.450
@@ -186,7 +189,10 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
 19. **Viewport / scissor arrays.** Single viewport (`vk_exec_draw.c` `record_fixed`), extra scissors logged. Census: 0 differing. **OK.**
 
 20. **Depth-compare sampling in compute** (VUID-vkCmdDispatch-None-06479): one compute shader samples a 4x4 R32F
-    CPU-written placeholder through an R32_SFLOAT view with compare on, ~1/frame. Needs a D32 copy. **Minor.**
+    CPU-written placeholder through an R32_SFLOAT view with compare on, ~1/frame. Where the driver does not compare
+    the colour format, the dispatch samples a depth twin of the image, copied right before it (`vk_exec_draw.c`,
+    "depth twins"; R32_SFLOAT and R16_UNORM). **Fixed for compute passes**; a draw that samples such an image keeps
+    the colour view.
 21. **Report timestamps: unit and instant.** `write_counter` (`vk_exec_xfer.c`) writes host `ns * 12 / 625` (19.2 MHz
     ticks) at fence completion for every report; `nvnDeviceGetTimestampInNanoseconds` converts back with the same factor
     (`nvn_ext.c`). On the hardware, GPU ticks convert at 625/384 ns (614.4 MHz), TIMESTAMP is written when the ROP has retired
@@ -194,4 +200,8 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
     (a) if the game's consumer scales raw report ticks with its own constant rather than the NVN conversion call, our
     19.2 MHz unit is 32x off from the hardware's; find that consumer before fixing the unit; (b) the delta needs
     `vkCmdWriteTimestamp2` with `TOP_OF_PIPE` for TIMESTAMP_TOP and `BOTTOM_OF_PIPE` for TIMESTAMP, per submission
-    segment, converted to whichever unit (a) shows. **Mismatch (instant); unit unverified.**
+    segment, converted to whichever unit (a) shows. **Mismatch (instant); unit unverified.** What it can change:
+    both differences make the GPU time the game computes shorter than the hardware's (a report written at fence
+    completion spans less than top to bottom of the pipeline, and 19.2 MHz ticks read as 614.4 MHz ones are a
+    thirty-second), so an engine that lowers its resolution or detail under GPU load would stay at its highest
+    here. That is reasoning from the two units, not something measured; no picture difference is tied to it.
