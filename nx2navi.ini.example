@@ -854,6 +854,12 @@
 # last one it finished. Unset: on AMD GPUs (VK_AMD_buffer_marker). 1: also on NVIDIA GPUs
 # (VK_NV_device_diagnostic_checkpoints), which NVIDIA says costs a little. 0: off.
 # pass_crumbs = 1
+# Pipelines built without the video driver's shader optimiser: the same picture, slower shaders in those pipelines.
+# mesh: only the pipelines with task and mesh shaders (terrain, foliage). 1: all. 0: none.
+# Unset (default): mesh on AMD's Windows driver for the RX 5000 and RX 6000 series and older, where the device is lost
+# ("driver timeout") in render passes that start with such a pipeline; 0 on every other driver. On those cards 0 gives
+# the optimised pipelines back.
+# vk_noopt = mesh
 # GPU draw marks, for a GPU crash (device lost) that comes back in the same place on an AMD GPU: inside each render pass
 # a mark is written wherever the shaders change, and after the crash the log names the shaders of the draws the GPU had
 # not finished, not only the pass. It costs a little frame rate, so it is off unless a crash is being tracked down.

@@ -3171,14 +3171,27 @@ static int is_src1(unsigned f) { return f >= NVN_BLEND_FUNC_SRC1_COLOR && f <= N
 // which NX2navi never sets (0 of 876 pipelines in the field and fight saves).
 // NX2NAVI_VK_NOOPT=1: pipelines built without the driver's optimiser, for a driver whose shader compiler crashes on
 // one (the test switch for such a report); slower shaders, the same picture. mesh: only pipelines with task and mesh
-// stages, the foliage's, whose optimiser is the suspect in device losses some minutes into a forest on AMD GPUs.
+// stages, the terrain's and the foliage's. 0: none.
+// Unset: mesh on AMD's Windows driver for RDNA 1 and 2 (vk_caps.amd_sc), 0 elsewhere. That driver loses the device
+// ("No fault detected", a timeout) minutes into play on RX 6600 to RX 6950 XT cards in every version from 0.6.0 to
+// 0.9.2, with the pipeline library on or off and the lazy write-back on or off. Where the reports' pass marks name a
+// pass the GPU was in, twelve logs of five reporters, it is a pass whose first draw is a mesh pipeline (mesh shader
+// ba4302f1 with fragment shader f64a96dd in nine, the one-draw pass of 1bbdb17e with 6cc3a476 in three); the five
+// logs of 0.9.1 and 0.9.2 stop between the compute dispatch before such a pass and the pass. No reporter ran with
+// the optimiser off, so that it is the cause is not shown: it is the one suspect the marks leave, it costs shader
+// speed in those pipelines and not the picture, and NX2NAVI_VK_NOOPT=0 gives the optimised ones back. The flag is
+// part of what the driver's cache keys a pipeline by, so those pipelines are built once more after the change.
 static VkPipelineCreateFlags noopt_flag_for(int mesh) {
     static int on = -1;
     if (on < 0) {
-        const char *v = cfg_value("NX2NAVI_VK_NOOPT");
-        on = !strcmp(v, "mesh") ? 2 : strcmp(v, "0") != 0;
-        if (on) rt_log("vk_pipeline: %s built without the driver's optimiser (NX2NAVI_VK_NOOPT)",
-                       on == 2 ? "pipelines with task and mesh stages" : "pipelines");
+        const char *v = cfg_get("NX2NAVI_VK_NOOPT");
+        int by_driver = !v || !*v;
+        on = by_driver ? (vk_caps.amd_sc ? 2 : 0) : !strcmp(v, "mesh") ? 2 : strcmp(v, "0") != 0;
+        if (on) rt_log("vk_pipeline: %s built without the driver's optimiser (%s)",
+                       on == 2 ? "pipelines with task and mesh stages" : "pipelines",
+                       by_driver ? "the default on AMD's driver for RDNA 1 and 2, where the device is lost in passes "
+                                   "that start with such a pipeline; NX2NAVI_VK_NOOPT=0 builds them optimised"
+                                 : "NX2NAVI_VK_NOOPT");
     }
     return on == 1 || (on == 2 && mesh) ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT : 0;
 }
