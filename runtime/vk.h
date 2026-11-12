@@ -871,6 +871,9 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info);
 // write masks and references; vertex buffers with vkCmdBindVertexBuffers2 (strides NULL when
 // vk_pipeline_vertex_input_dynamic(), else from VkPipeState.vstream).
 void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s);
+// The line width for a draw of lines with the state s (width in pixels as the game set it; 0 = 1): recorded when s
+// draws lines and the device has wide lines, whose pipelines take the width as dynamic state. Nothing otherwise.
+void vk_pipeline_line_width(VkCommandBuffer cb, const VkPipeState *s, float width);
 // Vertex input as vkCmdSetVertexInputEXT takes it (vk_pipeline.c vertex_input).
 typedef struct {
     uint32_t n_attr, n_bind;
