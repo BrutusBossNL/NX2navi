@@ -26,6 +26,8 @@ enum { FLIGHT_TEX_NEW, FLIGHT_TEX_UP, FLIGHT_TEX_REUP, FLIGHT_TEX_RELEASE, FLIGH
                            // 0 nothing, 1 another descriptor at this storage, 2 other storage, 3 a finalized texture)
        FLIGHT_TEX_BLANK,   // a shader sampled a slot that has no image of its own and follows none: its stand-in was
                            // on screen (us: the slot; detail: bit 0 the slot is finalized, bit 1 it is held out)
+       FLIGHT_TEX_TOBLANK, // the pool's entry of a slot went from a texture's view to the stand-in (us: the slot;
+                           // detail: vk_texture_slot_why_locked's bits, what the slot's own texture was then)
        FLIGHT_TEX_N };
 // The texture's flags: a depth or stencil image, mirrored (the CPU writes its storage), bound into pool memory, an ASTC
 // texture, written by the GPU (VkTexImage.gpu_owned).

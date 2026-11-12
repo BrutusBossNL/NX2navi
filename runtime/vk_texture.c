@@ -4256,6 +4256,21 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
     return e;
 }
 
+uint32_t vk_texture_slot_why_locked(int id, uint64_t *addr, uint32_t *format, uint32_t *w, uint32_t *h) {
+    *addr = 0, *format = *w = *h = 0;
+    if (id < 0 || id >= ntslots || !tslots[id].used) return 0;
+    const TexSlot *s = &tslots[id];
+    TexKey k;
+    make_key(&s->t, &k);
+    const Tex *own = nvn_hm_get(&by_key, &k);
+    *addr = k.addr, *format = (uint32_t)s->t.d.format, *w = s->t.d.width, *h = s->t.d.height;
+    return (s->finalized ? 1u : 0) | (own ? 2u : 0) | (own && own->released ? 4u : 0) | (own && own->superseded ? 8u : 0) |
+           (own && own->overwritten ? 16u : 0) | (own && own->uploaded ? 32u : 0) |
+           (s->t.mem && mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size) ? 64u : 0) |
+           (holds.n && nvn_hm_get(&holds, &k) ? 128u : 0) | (tex_mirrored(&s->t) ? 256u : 0) |
+           (own && own->pub.gpu_owned ? 512u : 0) | (own && own->retiring ? 1024u : 0);
+}
+
 void vk_texture_lock(void) { lock(); }
 void vk_texture_unlock(void) { unlock(); }
 uint32_t vk_texture_slots_gen(void) { return slots_gen; }

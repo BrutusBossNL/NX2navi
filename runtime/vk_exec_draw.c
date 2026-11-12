@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
@@ -2446,7 +2447,25 @@ static void pool_unres(uint32_t id, int got) {
     PL.unres[PL.nunres++] = (int)id;
 }
 
+// For the flight recorder: v is one of the stand-in views.
+static int pool_view_blank(VkImageView v) {
+    for (int i = 0; i < DV_COUNT; i++)
+        if (v == Z.img[i].view || v == Z.img[i].sview) return 1;
+    return 0;
+}
+
+// Slot id's entry of a kind went from the view was to now: noted when a texture's view gives way to the stand-in, which
+// every draw of the submission that samples the slot then reads (the set is written with update-after-bind).
+static void pool_note_blank(uint32_t id, VkImageView was, VkImageView now, int *noted) {
+    if (!flight_on || *noted || !was || pool_view_blank(was) || !pool_view_blank(now)) return;
+    uint64_t addr;
+    uint32_t fmt, w, h, why = vk_texture_slot_why_locked((int)id, &addr, &fmt, &w, &h);
+    flight_tex(FLIGHT_TEX_TOBLANK, addr, fmt, w, h, 0, 0, why, id);
+    *noted = 1;
+}
+
 static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
+    int noted = 0;
     vk_texture_create_deferred_locked();
     PoolSlot *ps = &PL.ps[id];
     uint64_t kh = 0;
@@ -2468,7 +2487,10 @@ static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
         for (int k = 0; k < VK_POOL_KINDS; k++) {
             if (!(mask >> k & 1)) continue;
             VkImageView *e = &PL.view[(size_t)k * VK_POOL_TEX + id];
-            if (*e != m->view[k]) *e = m->view[k], pool_write((uint32_t)k, id, m->view[k], VK_NULL_HANDLE);
+            if (*e != m->view[k]) {
+                pool_note_blank(id, *e, m->view[k], &noted);
+                *e = m->view[k], pool_write((uint32_t)k, id, m->view[k], VK_NULL_HANDLE);
+            }
         }
         ps->fmask = ps->stamp == m->stamp ? ps->fmask | mask : mask;
         ps->stamp = m->stamp;
@@ -2482,7 +2504,10 @@ static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
         VkImage img;
         tex_info_full(ex, &r, tok ? id | 1ull << 63 : 0, 0, 1, &ii, &img);
         VkImageView *e = &PL.view[(size_t)k * VK_POOL_TEX + id];
-        if (*e != ii.imageView) *e = ii.imageView, pool_write((uint32_t)k, id, ii.imageView, VK_NULL_HANDLE);
+        if (*e != ii.imageView) {
+            pool_note_blank(id, *e, ii.imageView, &noted);
+            *e = ii.imageView, pool_write((uint32_t)k, id, ii.imageView, VK_NULL_HANDLE);
+        }
     }
     int ok = !vk_texture_create_deferred_locked();
     uint32_t ent = 0;
