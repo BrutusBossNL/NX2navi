@@ -731,13 +731,13 @@
 
 [mods]
 # Folder with the player's mods, one subfolder per mod (<name>/romfs, <name>/exefs, <name>/cheats). A relative folder
-# is under the game's folder. Default: mods next to the game's exe. The setup builds the ExeFS patches and code cheats
-# of the mods folder next to the exe only.
+# is under the game's folder. Default: mods next to the game's exe. The build takes the ExeFS patches and code cheats
+# of the mods folder next to the exe only. The launcher's Mods screen adds mods and puts downloads in order.
 # mods_dir =
 # Load order, top first, names separated by |; a mod not listed goes below the listed ones, by name. The top mod wins a
-# file two mods replace. Set it here: the in-game menu has no Mods tab.
+# file two mods replace. The launcher's Mods screen sets it (Load Order); the in-game menu has no Mods tab.
 # mods_order =
-# Mods switched off, names separated by |.
+# Mods switched off, names separated by |. The launcher's Mods screen sets it.
 # mods_disabled =
 # auto: when an enabled mod has cheats that change the game's code and the game was built without them, the game starts
 # the setup's rebuild at start (a few minutes) and starts again after it. off: the game starts with the code it has.

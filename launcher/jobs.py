@@ -414,6 +414,17 @@ class RebuildJob(Job):
         self.note_scan(self.game_dir)
 
 
+class ModsRebuildJob(RebuildJob):
+    """Play with a mod whose code cheats or ExeFS patches the game was not built with (launcher/mods.py
+    code_waiting): the game is built again with them, compiling only what they change, and then starts (App.play)."""
+    title = 'Building Your Mods In'
+    retune = False
+
+    def __init__(self, ctx, game_dir):
+        super().__init__(ctx, game_dir)
+        self.after = 'play'
+
+
 class UpdateDownloadJob(Job):
     """Before the restart: download, check and stage the release, then switch app/current.txt to it."""
     kind = 'update'
