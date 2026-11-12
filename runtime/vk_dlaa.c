@@ -1816,6 +1816,40 @@ static void release_kept(const struct Size *making, int all) {
                   making->w, making->h, all ? "after a release" : "larger inputs");
 }
 
+// The scene's last column and row after a jitter to the left or up. The jitter moves the scene's viewport by under half a
+// pixel (vk_dlaa_viewport), which keeps every pixel centre inside it, yet on an RX 7900 XT (AMD's Windows driver) the
+// draws of a viewport moved left left the last column out, and of one moved up the last row: the driver evidently limits
+// drawing to the whole pixels inside the viewport. In a frame dump (NX2NAVI_DUMP, Hyrule Field, 3416x1440, FSR 4 Native
+// AA) the depth's last row kept its clear value through every scene pass and the light target held the fog's colour
+// there, which the upscaler blended into a grey line along the bottom and right edges of the picture that flickered with
+// the jitter; with NX2NAVI_DLAA_JITTER=0, and without DLSS or FSR, there was no line. Before DLSS or FSR reads the scene,
+// such a column or row of the light target and of the depth (which the motion vectors are made from) is filled from the
+// one next to it. NX2NAVI_DLAA_EDGE_FILL=0 (test): not filled.
+static void edge_fill(VkCommandBuffer cb, const VkExecTarget *t, const VkExecTarget *z, float jx, float jy) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("DLAA_EDGE_FILL", "1");
+    uint32_t w = t->width, h = t->height;
+    if (!on || w < 2 || h < 2 || (jx >= 0 && jy >= 0)) return;
+    static int told;
+    if (!told++) rt_log("dlaa: the scene's last column or row after a jitter to the left or up is filled from the one before it");
+    // the column first, then the row over the whole width, so the corner comes from the filled column
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass ? jy >= 0 : jx >= 0) continue;
+        VkOffset3D from = pass ? (VkOffset3D){0, (int32_t)h - 2, 0} : (VkOffset3D){(int32_t)w - 2, 0, 0};
+        VkOffset3D to = pass ? (VkOffset3D){0, (int32_t)h - 1, 0} : (VkOffset3D){(int32_t)w - 1, 0, 0};
+        VkExtent3D ext = pass ? (VkExtent3D){w, 1, 1} : (VkExtent3D){1, h, 1};
+        for (int i = 0; i < 2; i++) {
+            const VkExecTarget *g = i ? z : t;
+            if (!g->image || g->width != w || g->height != h) continue;
+            VkImageAspectFlags a = i ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+            VkImageCopy r = {.srcSubresource = {a, g->level, g->base_layer, 1}, .srcOffset = from,
+                             .dstSubresource = {a, g->level, g->base_layer, 1}, .dstOffset = to, .extent = ext};
+            vkCmdCopyImage(cb, g->image, VK_IMAGE_LAYOUT_GENERAL, g->image, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+        }
+        full_barrier(cb);
+    }
+}
+
 // Set when the scene the upscaler runs on has another size than the last one; vk_dlaa_resized_take reads it.
 static volatile int32_t size_changed;
 
@@ -1846,6 +1880,7 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     VkImageView zv = vk_exec_target_view(z->img, z->format, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_DEPTH_BIT, z->level,
                                          z->base_layer, 1, 0);
     float jx = D.jit_used ? D.ux : 0.0f, jy = D.jit_used ? D.uy : 0.0f;
+    edge_fill(cb, t, z, jx, jy);   // before the motion vectors read the depth
     static int no_mv = -1;
     if (no_mv < 0) no_mv = !rt_knob("DLAA_MV", "1");   // NX2NAVI_DLAA_MV=0: zero motion (test)
     int masked = 0, mv = no_mv ? 0 : mv_pass(ex, e, zv, jx, jy, char_bias(), &masked);
