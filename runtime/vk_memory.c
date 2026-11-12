@@ -4150,6 +4150,7 @@ typedef struct {
     StgChunk *chunk;          // arena chunks this batch's uploads took ranges of (vk_staging_at), the last one open
     int nchunk, cap_chunk;
     VkDeviceSize chunk_used;  // bytes of the last chunk handed out
+    uint64_t bytes;   // staging bytes of its buffers (upload_cap)
 } Batch;
 
 enum { DEAD_IMAGE = 1, DEAD_IMAGE_VMA, DEAD_VIEW, DEAD_BUFFER_VMA, DEAD_HOST };
@@ -4222,6 +4223,7 @@ static void free_staging(VkCtx *c, Batch *b) {
         else vmaDestroyBuffer(c->vma, b->chunk[i].buf, b->chunk[i].alloc);
     }
     b->nchunk = 0, b->chunk_used = 0;
+    b->bytes = 0;
 }
 
 // The cached staging buffer that fits n with the least waste: at most four times the request, so a small upload does not
@@ -4391,7 +4393,60 @@ VkCommandBuffer vk_upload_begin(void) {
     return open_b.cb;
 }
 
-void vk_upload_end(void) { plat_rmutex_unlock(&cmd_lock); }
+// NX2NAVI_UPLOAD_BATCH_MB (default 256; 0 = no limit): once the open batch's staging buffers hold that much, the
+// outermost vk_upload_end submits it. A save load made thousands of textures between two replay submissions, and every
+// one of them went into one batch: about 1.5 GB of raw ASTC blocks plus the decoder's work in a single submission,
+// which AMD's 23.10 driver on an RX 580 refused with VK_ERROR_OUT_OF_DEVICE_MEMORY. Submitted early, a batch still
+// precedes the replay submission that uses its textures (the queue keeps order), and its staging is freed as it retires.
+static uint64_t upload_cap = UINT64_MAX - 1;   // UINT64_MAX - 1: not read yet
+static uint64_t n_early;
+
+void vk_upload_end(void) {
+    if (upload_cap == UINT64_MAX - 1) {
+        const char *e = cfg_get("NX2NAVI_UPLOAD_BATCH_MB");
+        long mb = e && *e ? atol(e) : 256;
+        upload_cap = mb > 0 ? (uint64_t)mb << 20 : UINT64_MAX;
+        if (mb > 0) rt_log("vk: upload batches submitted early above %ld MiB of staging (NX2NAVI_UPLOAD_BATCH_MB)", mb);
+        else rt_log("vk: upload batches not limited (NX2NAVI_UPLOAD_BATCH_MB=0)");
+    }
+    if (open_active && open_b.bytes >= upload_cap && cmd_lock.depth == 1) {
+        n_early++;
+        if (n_early <= 4 || !(n_early & (n_early - 1)))
+            rt_log("vk: upload batch submitted early with %.0f MiB of staging in %d buffers and %d arena chunks (%llu so far)",
+                   open_b.bytes / 1048576.0, open_b.nstg, open_b.nchunk, (unsigned long long)n_early);
+        vk_upload_flush(0);
+    }
+    plat_rmutex_unlock(&cmd_lock);
+}
+
+// An out-of-memory failure of a submit: every heap's use against its budget (the driver's numbers with
+// VK_EXT_memory_budget), VMA's blocks and allocations on it, and the upload batches, so the log names what ran out.
+// Takes no lock but the allocator's own: it may run with cmd_lock held.
+void vk_mem_oom_report(const char *what, VkResult r) {
+    if (r != VK_ERROR_OUT_OF_DEVICE_MEMORY && r != VK_ERROR_OUT_OF_HOST_MEMORY) return;
+    VkCtx *c = vk_ctx();
+    if (!c) return;
+    rt_log("vk: %s failed: out of %s memory (%d)", what, r == VK_ERROR_OUT_OF_DEVICE_MEMORY ? "device" : "host", (int)r);
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+                                            .pNext = c->has_memory_budget ? &b : NULL};
+    vkGetPhysicalDeviceMemoryProperties2(c->phys, &p2);
+    VmaBudget vb[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(c->vma, vb);
+    const double M = 1048576.0;
+    for (uint32_t h = 0; h < c->mem_props.memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++)
+        rt_log("vk:   heap %u (%s, %.0f MiB): driver use %.0f of budget %.0f MiB%s; vma %u blocks %.0f MiB, %u allocations "
+               "%.0f MiB", h, c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "device-local" : "host",
+               c->mem_props.memoryHeaps[h].size / M, c->has_memory_budget ? b.heapUsage[h] / M : vb[h].usage / M,
+               c->has_memory_budget ? b.heapBudget[h] / M : vb[h].budget / M,
+               c->has_memory_budget ? "" : " (VMA's estimate)", vb[h].statistics.blockCount,
+               vb[h].statistics.blockBytes / M, vb[h].statistics.allocationCount, vb[h].statistics.allocationBytes / M);
+    uint64_t ib = 0;
+    for (int i = 0; i < ninflight; i++) ib += inflight[i].bytes;
+    rt_log("vk:   upload batch open %d (%d staging buffers, %.0f MiB), %d in flight (%.0f MiB of staging), %llu submitted "
+           "early; VRAM mirrors %lld (%.0f MiB); objects waiting for release %d", open_active, open_b.nstg,
+           open_b.bytes / M, ninflight, ib / M, (unsigned long long)n_early, (long long)m_live_n, m_live_bytes / M, ndead);
+}
 
 // Staging memory comes from a pool of its own that keeps STG_MIN_BLOCKS blocks from its first use (at boot). In the
 // default pools VMA creates a block under the lock of its memory type (VmaBlockVector::Allocate), so a block made by
@@ -4503,6 +4558,7 @@ void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
     else {
         if (open_b.nstg == open_b.cap) grow((void **)&open_b.stg, &open_b.cap, sizeof *open_b.stg);
         open_b.stg[open_b.nstg++] = (Staging){b, a, bi.size};
+        open_b.bytes += bi.size;
     }
     return info.pMappedData;
 }
@@ -4541,6 +4597,7 @@ void *vk_staging_at(VkDeviceSize size, VkBuffer *buf, VkDeviceSize *off) {
         }
         if (open_b.nchunk == open_b.cap_chunk) grow((void **)&open_b.chunk, &open_b.cap_chunk, sizeof *open_b.chunk);
         open_b.chunk[open_b.nchunk++] = k;
+        open_b.bytes += ARENA_CHUNK;   // the staging the batch holds (upload_cap)
         at = 0;
     }
     StgChunk *k = &open_b.chunk[open_b.nchunk - 1];
@@ -4568,6 +4625,7 @@ uint64_t vk_upload_flush(int wait) {
         VkResult r = vkQueueSubmit(c->gfx_queue, 1, &si, open_b.fence);
         vk_queue_unlock();
         if (r != VK_SUCCESS) {
+            vk_mem_oom_report("upload submit", r);
             vk_device_lost_check(r, "the submit of an upload batch");
             rt_fatal("vk: upload submit failed (%d)", (int)r);
         }

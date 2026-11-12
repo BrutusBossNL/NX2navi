@@ -238,6 +238,7 @@ static void hold_flush_locked(VkCtx *c) {
     }
     VkResult r = lost_at_due() ? VK_ERROR_DEVICE_LOST : vkQueueSubmit2(c->gfx_queue, (uint32_t)H.n, H.si, VK_NULL_HANDLE);
     if (r != VK_SUCCESS) {
+        vk_mem_oom_report("replay submit", r);
         vk_device_lost_check(r, "the submit of the replay's command buffers");
         rt_fatal("vk: vkQueueSubmit2 of %d held submissions up to value %llu failed (%d)", H.n,
                  (unsigned long long)H.last, (int)r);

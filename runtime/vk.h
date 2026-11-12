@@ -483,6 +483,7 @@ int vk_astc_time_get(uint32_t bw, uint32_t bh, uint64_t *texels, uint64_t *calls
 void vk_astc_time_summary(void);        // logs the totals
 void vk_astc_release(void);             // vk_device.c, before the device goes: frees the decoder's objects
 void vk_mem_note_submit(uint64_t timeline_value);  // vk_sync.c: after each submit that signals ctx->timeline with this value
+void vk_mem_oom_report(const char *what, VkResult r);   // logs heaps and upload batches after an out-of-memory failure
 void vk_mem_collect(void);                         // frees what has completed
 typedef struct { uint64_t imported_pools, physical_pools, virtual_pools, import_failures, upload_batches; } VkMemStats;
 void vk_mem_stats(VkMemStats *s);
