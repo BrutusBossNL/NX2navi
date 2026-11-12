@@ -131,7 +131,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_LOWEND_RESERVE] = "Video memory kept free",
     [UI_MENU_LOWEND_RESERVE_DESC] = "Room kept free in each video memory heap for what FidelityFX (FSR 3.1, frame generation) and the "
                                   "driver allocate on their own: a heap with less than this left takes no new allocation while "
-                                  "another heap can. Off: video memory can fill up with frame generation on, and the game ends.",
+                                  "another video memory heap can (an RX 580 has two; cards with one are not affected). Off: video "
+                                  "memory can fill up with frame generation on, and the game ends.",
     [UI_MENU_LOWEND_HEAP_LIMIT] = "Video memory heap limit",
     [UI_MENU_LOWEND_HEAP_LIMIT_DESC] = "Auto: on GPUs with a second video memory heap (an RX 580 shows 6 GB and 2 GB), "
                                      "each heap is filled only to its budget before the next one is used, so the "

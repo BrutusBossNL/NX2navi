@@ -12,7 +12,10 @@
 //
 // Here each allocation leaves out the memory types of a device-local heap whose use, as the driver reports it
 // (VK_EXT_memory_budget: VMA's budget, which counts the memory VMA does not see), is within the reserve of its budget,
-// and VMA places it in the other device-local heap, or system memory, as it does past the fixed limits. The reserve
+// and VMA places it in another device-local heap with room. Only there: on a GPU with one device-local heap (an RTX 3050
+// Laptop, 4 GiB) leaving that heap out sent every allocation past the reserve to system memory, more than 4096 of them,
+// and the process's commit with them: with 16 GiB of RAM the system's commit ran out, host memory imports failed and the
+// device was lost. Without another device-local heap with room the allocation is made as asked. The reserve
 // (NX2NAVI_VRAM_RESERVE_MB, 512 with low_end_gpu = 1, else 0, off) is room left for allocations VMA does not make, which can come at
 // once: AMD's contexts are made when the upscaler or the frame generation setting changes. An allocation that finds
 // no room that way is made as asked, as before. Allocations from a VMA pool and those for one memory type alone (the
@@ -53,15 +56,18 @@ static uint32_t budget_bits(VmaAllocator vma, uint32_t bits) {
             b[h].usage + reserve > b[h].budget)
             full |= 1u << h;
     if (!full) return bits;
-    uint32_t out = 0;
+    uint32_t out = 0, dl = 0;   // dl: types of device-local heaps with room among them
     for (uint32_t t = 0; t < mp->memoryTypeCount; t++)
-        if ((bits >> t & 1) && !(full >> mp->memoryTypes[t].heapIndex & 1)) out |= 1u << t;
-    if (!out || out == bits) return bits;
+        if ((bits >> t & 1) && !(full >> mp->memoryTypes[t].heapIndex & 1)) {
+            out |= 1u << t;
+            if (mp->memoryHeaps[mp->memoryTypes[t].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) dl |= 1u << t;
+        }
+    if (!dl || out == bits) return bits;   // no other video memory with room: as asked, not system memory
     uint32_t told = __atomic_fetch_or(&full_seen, full, __ATOMIC_RELAXED);
     for (uint32_t h = 0; h < VK_MAX_MEMORY_HEAPS; h++)
         if ((full >> h & 1) && !(told >> h & 1))
             rt_log("vk: video memory heap %u full: %llu of its %llu MiB budget in use (%llu MiB of it VMA's), less %llu MiB "
-                   "kept free (NX2NAVI_VRAM_RESERVE_MB): new allocations go to the other heaps while it is", h,
+                   "kept free (NX2NAVI_VRAM_RESERVE_MB): new allocations go to the other device-local heaps while it is", h,
                    (unsigned long long)(b[h].usage >> 20), (unsigned long long)(b[h].budget >> 20),
                    (unsigned long long)(b[h].statistics.blockBytes >> 20), (unsigned long long)(reserve >> 20));
     return out;

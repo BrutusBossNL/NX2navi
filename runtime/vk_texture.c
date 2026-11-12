@@ -1140,8 +1140,12 @@ static uint32_t detail_skip(const tex_t *t, const TexKey *k, const TexVkFormat *
 // device-local heap and a 2 GiB device-local, host-visible one. Asked for device-local memory without a budget, VMA
 // took the first heap every time: a save load put 5.6 GiB into it against a budget of 5.1 GiB while the other heap
 // held 69 MiB, and the next submit failed with VK_ERROR_OUT_OF_DEVICE_MEMORY. Each step below allocates within the
-// heaps' budgets (VK_EXT_memory_budget): device-local memory of any heap, then any memory the image allows (system
-// memory, slower to sample); only the last step allocates past the budget, as before.
+// heaps' budgets (VK_EXT_memory_budget): device-local memory of any heap; the second allocates as before, past the
+// budget, where the driver keeps it in video memory or moves it out itself. System memory is never asked for: on a GPU
+// with one device-local heap (an RTX 3050 Laptop, 4 GiB) a step for any memory within the budget put every texture past
+// the budget in system memory, 4096 and more images, which the process's commit then held: with 16 GiB of RAM the
+// system's commit ran out, host memory imports failed, and the GPU wrote through the address of a pool left without a
+// buffer (device lost).
 static uint64_t placed[VK_MAX_MEMORY_HEAPS], n_spilled;
 
 static void note_placement(VkCtx *c, VmaAllocation a, int step) {   // tex_lock held
@@ -1163,17 +1167,16 @@ static void note_placement(VkCtx *c, VmaAllocation a, int step) {   // tex_lock 
 
 static VkResult image_alloc(VkCtx *c, const VkImageCreateInfo *ci, VmaAllocationCreateFlags own, VkImage *img,
                             VmaAllocation *a) {
-    static const struct { VkMemoryPropertyFlags req; VmaAllocationCreateFlags flags; } step[3] = {
+    static const struct { VkMemoryPropertyFlags req; VmaAllocationCreateFlags flags; } step[2] = {
         {VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT},
-        {0, VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT},
         {0, 0}};
     VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
         VmaAllocationCreateInfo ai = {.flags = step[i].flags | own, .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
                                       .requiredFlags = step[i].req};
         r = vmaCreateImage(c->vma, ci, &ai, img, a, NULL);
         if (r == VK_SUCCESS) {
-            note_placement(c, *a, i);
+            note_placement(c, *a, i ? 2 : 0);   // 2: past the budget
             return r;
         }
     }
