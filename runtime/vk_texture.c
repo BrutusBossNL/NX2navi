@@ -4155,6 +4155,30 @@ static int want_take(void) {
 
 void vk_texture_create_budget_locked(int n) { create_budget = n, create_deferred = 0; }
 
+// NX2NAVI_POOL_SHOWN_FIRST (default 1; 0: such a slot waits for the budget like any other): the slot being looked up
+// shows a texture in the pool's set now (vk_exec_draw.c pool_fill). When its own texture is not made, the game has
+// registered the slot with another texture, and the draws that sampled the old one sample this one next: it is made at
+// this lookup, beside the count budget and the frame's creation time, SHOWN_PER_FRAME of them a present. Ocarina
+// streams its textures by detail level and registers about 32 slots with their next level every four or five frames
+// while the player moves (2,300 to 3,800 registrations in 600 frames of two recordings). A refresh made 16 of them and
+// wrote the stand-in into the set for the others until its next round, and the set is read as it is when its
+// submission goes to the queue: an object whose slot was among the others was drawn grey for a frame (three lamp
+// posts, the windows of a house front in the recordings). An area load registers thousands of slots that showed the
+// area before; past the per-present count they wait for the budget as before.
+#define SHOWN_PER_FRAME 64
+static int pool_shown;
+void vk_texture_pool_shown_locked(int shown) { pool_shown = shown; }
+static int shown_take(void) {
+    static int on = -1;
+    static uint64_t frame = ~0ull;
+    static int left;
+    if (on < 0) on = cfg_bool("NX2NAVI_POOL_SHOWN_FIRST");
+    if (!on || !pool_shown) return 0;
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != frame) frame = f, left = SHOWN_PER_FRAME;
+    return left > 0 ? left-- : 0;
+}
+
 // What the pool's lookups have spent making entries (entry_of under the budget) and uploading them the first time,
 // since the last call: the time vk_exec_draw.c pool_create_ns limits in a frame. Texture lock held where it is added.
 static uint64_t pool_make_ns;
@@ -4224,7 +4248,7 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         // was about a thousand slots at once, which vk_exec_draw.c pool_sync_entries took for an area load, several
         // times a second in some places, and each time lifted the count budget and the frame's creation time.
         else if (!mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size)) e = NULL;
-        else if (!create_budget && !(s->cwant && want_take())) create_deferred = 1;
+        else if (!create_budget && !(s->cwant && want_take()) && !shown_take()) create_deferred = 1;
         else {
             uint64_t m0 = kern_now_ns();
             e = entry_of(&s->t);

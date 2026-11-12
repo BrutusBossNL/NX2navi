@@ -157,7 +157,7 @@ static void copy_events(DumpJob *j, uint64_t first) {
 }
 
 static const char *const tex_kind_names[FLIGHT_TEX_N] = {"new", "up", "reup", "release", "takeback", "drop", "bytes",
-                                                         "reg", "blank", "toblank"};
+                                                         "reg", "blank", "toblank", "blanksub"};
 
 // <dir>/events.tsv: one line per texture event of the dump's frames (flight_tex).
 static void write_events(const DumpJob *j) {
@@ -192,10 +192,11 @@ static void write_events(const DumpJob *j) {
             static const char *const was[4] = {"an unused slot", "the slot named another descriptor at this storage",
                                                "the slot named other storage", "the slot named a finalized texture"};
             snprintf(detail, sizeof detail, "slot %u: %s", e->us, was[e->detail & 3]);
-        } else if (e->kind == FLIGHT_TEX_TOBLANK) {
+        } else if (e->kind == FLIGHT_TEX_TOBLANK || e->kind == FLIGHT_TEX_BLANKSUB) {
             static const char *const bit[] = {"finalized", "own entry", "released", "superseded", "overwritten", "uploaded",
                                               "storage readable", "held out", "CPU-written", "GPU-owned", "retiring"};
-            int o = snprintf(detail, sizeof detail, "slot %u lost its picture:", e->us);
+            int o = snprintf(detail, sizeof detail, e->kind == FLIGHT_TEX_TOBLANK ? "slot %u lost its picture:"
+                             : "slot %u had no picture when its submission ended:", e->us);
             for (int b = 0; b < 11 && o < (int)sizeof detail - 20; b++)
                 if (e->detail & 1u << b) o += snprintf(detail + o, sizeof detail - (size_t)o, " %s;", bit[b]);
         } else if (e->kind == FLIGHT_TEX_BLANK)
