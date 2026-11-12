@@ -5860,7 +5860,16 @@ static int me_arena(void) {
     if (vmaCreateBuffer(vk_ctx()->vma, &rbi, &rai, &ME.rb, &ME.rb_alloc, &rinfo) == VK_SUCCESS) ME.rb_map = rinfo.pMappedData;
     else ME.rb = VK_NULL_HANDLE;
     return 1;
+// The access masks also carry the generic MEMORY_WRITE / MEMORY_READ bits. SHADER_STORAGE_READ/WRITE exist only in
+// synchronization2 (bits above 31), and AMD's driver for Polaris (23.10.01, RX 580) did not act on them: the mesh
+// dispatch that reads the {groups, task workgroups, 1} the task stage had just written read zeros and launched no
+// workgroup (mesh.txt: "mesh groups started 0" with the record holding 32 x 12 x 1), so every draw with a task stage
+// (Kokiri's moss foliage, Link's door) drew nothing. Mesh draws without a task stage drew, because their record is
+// read by the draw after a command buffer boundary. The general replay barrier (vk_exec.c barrier_to) uses those bits.
 static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da) {
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = ss,
+                           .srcAccessMask = sa | VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = ds,
+                           .dstAccessMask = da | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &di);
     }
