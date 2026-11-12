@@ -933,8 +933,8 @@ static void init_new(Tex *e) {
 // sun cascades into a 960x960 DEPTH16 2D array of 4 layers and its static shadows into 1440x1440 and 720x720 arrays of 2,
 // whatever the output resolution, and shrinks the cascades under load (872, 848, 800, 480 and so on). Those are made
 // larger here: render passes into them scale the game's viewports and scissors (vk_exec.c resolve_rt, pass_scale),
-// copies scale their regions (vk_exec_xfer.c sub_resolve), and shaders sample them with normalised coordinates, so the
-// game sees nothing of it. A map whose storage the CPU writes (mirrored) or that aliases pool memory keeps its size,
+// copies scale their regions (vk_exec_xfer.c sub_resolve), draws into them scale the game's slope-scaled depth bias
+// (vk_exec_draw.c slope_bias), and shaders sample them with normalised coordinates, so the game sees nothing of it. A map whose storage the CPU writes (mirrored) or that aliases pool memory keeps its size,
 // as its texels must match the guest layout.
 static int shadow_scale(void) {
     static int scale = -1;

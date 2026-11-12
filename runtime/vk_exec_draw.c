@@ -3852,6 +3852,15 @@ static VkViewport draw_viewport(VkExec *ex) {
     return v;
 }
 
+// The slope-scaled depth bias of a draw. The term is the bias per unit of depth slope across one pixel of the target,
+// and a shadow map made k times larger on each side (NX2NAVI_SHADOW_SCALE, vk_texture.c shadow_scale_of, pass_scale)
+// has 1/k of the slope across each of its texels: the game's factor alone gives k times less bias than it asked for
+// on sloped surfaces, which is what shows as acne (stripes of self-shadow over slanted ground and walls). The
+// constant term counts the depth format's smallest steps, which do not change with the size, and keeps its value.
+static float slope_bias(const VkExec *ex) {
+    return ex->pass_scale > 1 ? ex->poly_offset.factor * (float)ex->pass_scale : ex->poly_offset.factor;
+}
+
 static void record_fixed(VkExec *ex) {
     VkCommandBuffer cb = ex->cb;
     if (ex->dirty & VK_EXEC_DIRTY_VIEWPORT) {
@@ -3874,7 +3883,7 @@ static void record_fixed(VkExec *ex) {
             bx = e && *e ? (float)atof(e) : 1.0f;
             if (bx != 1.0f) rt_log("vk: NX2NAVI_DEPTH_BIAS_X: constant depth bias multiplied by %.1f", bx);
         }
-        vkCmdSetDepthBias(cb, ex->poly_offset.units * bx, ex->poly_offset.clamp, ex->poly_offset.factor);
+        vkCmdSetDepthBias(cb, ex->poly_offset.units * bx, ex->poly_offset.clamp, slope_bias(ex));
         ex->recorded++;
     }
     if (ex->dirty & VK_EXEC_DIRTY_BLEND_CONST) {
@@ -5386,7 +5395,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     }
     q->st = (uint32_t)MQ.nst - 1;
     q->v = draw_viewport(ex), q->sc = vk_exec_scissor(ex);
-    q->bias[0] = ex->poly_offset.units, q->bias[1] = ex->poly_offset.clamp, q->bias[2] = ex->poly_offset.factor;
+    q->bias[0] = ex->poly_offset.units, q->bias[1] = ex->poly_offset.clamp, q->bias[2] = slope_bias(ex);
     q->vb = mo_vertex_buffers(ex);
     q->ib = ib, q->ib_off = ib_off;
     q->it = d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
