@@ -545,11 +545,11 @@
 # dlaa_objmv = 1
 # Motion vectors of Link's own for DLSS, FSR 3.1 and frame generation (game 1.1.1): Link and the equipment attached to him are
 # drawn a second time with last frame's pose, so fast turns, attacks and jumps move by their real motion instead of an
-# estimate from colour and depth. 0, the default: the estimate, as before. 1: on, to try; it reads the player's
-# equipment from the game's memory at every submission and has not been played on this version yet. Read at start.
+# estimate from colour and depth. 1, the default; 0: the estimate, as before 0.10.0. It reads the player's equipment
+# from the game's memory at every submission. Read at start.
 # motion_guard_degrees (35, 45 or 60, the default): a part that turns more than this in one frame is checked against
 # last frame's depth before its vector is written.
-# selective_motion = 0
+# selective_motion = 1
 # Characters' trails: where a character, animal or held item moves without motion vectors of its own (all of them with
 # dlaa_objmv = 0), DLSS can drag a faint copy of it. The G-buffer marks those objects; on them and where they were the
 # frame before, DLSS is told to favour the current frame by this percentage (0, 35, 65 or 100; 0 off). Higher removes
