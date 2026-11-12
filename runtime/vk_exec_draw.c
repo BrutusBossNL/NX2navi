@@ -2218,6 +2218,22 @@ static uint64_t pool_create_ns(void) {
     return (uint64_t)(pool_loading && ns ? load_ns : ns);
 }
 static uint32_t pool_defer[VK_POOL_TEX];   // per slot: 1 + the low bits of the frame a refresh left it in
+// The slots a refresh left (pool_refill failed: the creation budget or the frame's time was spent), so that the next
+// refresh of the same submission looks up these and the changed slots (vk_texture_dirty_slots_locked) instead of
+// walking the whole table again. While an area loads, slots are left at every refresh, and each refresh walked the
+// table: about 67,000 slot reads and 1.65 ms of the replay per submission in Kokiri Forest on an RX 580 (2026-11-11),
+// with six submissions a frame. pool_left_all: the list overflowed (or nothing tracks it yet): walk the table.
+static uint32_t pool_left[VK_POOL_TEX], pool_nleft;
+static uint8_t pool_is_left[VK_POOL_TEX];
+static int pool_left_all = 1;
+static void pool_left_add(uint32_t id) {
+    if (id >= VK_POOL_TEX || pool_is_left[id]) return;
+    pool_is_left[id] = 1, pool_left[pool_nleft++] = id;
+}
+static void pool_left_clear(void) {
+    for (uint32_t i = 0; i < pool_nleft; i++) pool_is_left[pool_left[i]] = 0;
+    pool_nleft = 0;
+}
 static VkWriteDescriptorSet pool_w[POOL_WBATCH];
 static VkDescriptorImageInfo pool_ii[POOL_WBATCH];
 static uint32_t pool_nw;
@@ -2603,7 +2619,7 @@ static void pool_dirty_slot(int id, void *arg) {   // vk_texture_dirty_slots_loc
     if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
     else PL.n_by_addr++;
     if (pool_refill(d->ex, (uint32_t)id, d->used, t, d->spent)) PL.tok[id] = t;
-    else d->retry++;
+    else d->retry++, pool_left_add((uint32_t)id);
 }
 
 // Every entry as the slots, kinds and samplers are now (pool_sync_entries has nothing to write).
@@ -2705,7 +2721,7 @@ static void pool_sync_entries(VkExec *ex) {
     if (fresh || gen != PL.gen || ep != PL.epoch || PL.retry) {
         vk_texture_create_budget_locked(spent ? 0 : pool_create_budget());
         PL.n_frame_stops += (uint64_t)spent;
-        // Only a slot change since the last sync (no new kinds, no new submission, nothing left over): the slots that
+        // Only a slot change since the last sync (no new kinds, no new submission): the slots that
         // changed (vk_texture_dirty_slots_locked), not the whole table. With NX2NAVI_POOL_FAST (default on) a new
         // submission too: its freshness check goes through the entries the slots resolved to and the slots that
         // resolved to none (vk_texture_pool_fresh_locked, pool_unres), not every slot.
@@ -2715,8 +2731,32 @@ static void pool_sync_entries(VkExec *ex) {
         int grp = pool_group();
         if (grp && !PL.gmode) vk_texture_groups_unstamp_locked();   // members were refilled one by one meanwhile
         PL.gmode = grp;
-        int walked = !fresh && (!newep || pool_fast()) && !PL.retry && PL.dirty_pos &&
-                     vk_texture_dirty_slots_locked(&PL.dirty_pos, pool_dirty_slot, grp ? pool_dirty_group : NULL, &pd);
+        // With slots left by an earlier refresh (the creation budget or the frame's time spent): those (pool_left)
+        // first, then the changed slots, instead of the walk over every slot. While an area loads, slots are left at
+        // every refresh, and each one walked the table: about 67,000 slot reads and 1.65 ms of the replay per
+        // submission in Kokiri Forest on an RX 580 (0.7.1, 2026-11-11), six submissions a frame. pool_left_all: no
+        // list kept yet (until the first walk): walk.
+        int quick = !fresh && (!newep || pool_fast()) && (!PL.retry || !pool_left_all) && PL.dirty_pos;
+        if (quick && PL.retry) {
+            uint32_t k = 0;
+            for (uint32_t i = 0; i < pool_nleft; i++) {
+                uint32_t id = pool_left[i];
+                uint64_t t = (int)id < n ? vk_texture_slot_token((int)id) : 0;
+                int left = 0;
+                if (t != PL.tok[id]) {
+                    PL.n_refill++;
+                    if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
+                    else PL.n_by_addr++;
+                    if (pool_refill(ex, id, used, t, spent)) PL.tok[id] = t;
+                    else left = 1;
+                }
+                if (left) pool_left[k++] = id;
+                else pool_is_left[id] = 0;
+            }
+            pool_nleft = k;
+            PL.n_slots += (uint64_t)k;
+        }
+        int walked = quick && vk_texture_dirty_slots_locked(&PL.dirty_pos, pool_dirty_slot, grp ? pool_dirty_group : NULL, &pd);
         if (walked) {
             int at = newep ? 0 : 1;
             PL.n_walk[at]++, PL.walk_visit[at] += PL.n_visit - v0, PL.walk_refill[at] += PL.n_refill - f0;
@@ -2750,7 +2790,7 @@ static void pool_sync_entries(VkExec *ex) {
             PL.unres_ns += kern_now_ns() - tu;
             PL.n_ep++, PL.ep_ns += kern_now_ns() - te;
         }
-        if (!walked) PL.dirty_pos = vk_texture_dirty_pos_locked();
+        if (!walked) PL.dirty_pos = vk_texture_dirty_pos_locked(), pool_left_clear(), pool_left_all = 0;
         uint64_t tw = walked ? 0 : kern_now_ns();
         for (int id = 0; id < n && !walked; id++) {   // slots past n were never registered: stand-ins since the first sync
             uint64_t t = vk_texture_slot_token(id);
@@ -2759,7 +2799,7 @@ static void pool_sync_entries(VkExec *ex) {
                 if (t >> 32 != PL.tok[id] >> 32) PL.n_by_reg++;
                 else PL.n_by_addr++;
                 if (pool_refill(ex, (uint32_t)id, used, t, spent)) PL.tok[id] = t;
-                else retry++;
+                else retry++, pool_left_add((uint32_t)id);
             } else if (t && fresh) {
                 pool_fill(ex, (uint32_t)id, fresh, t);
             } else if (t && ep != PL.epoch) {
@@ -2771,10 +2811,11 @@ static void pool_sync_entries(VkExec *ex) {
             PL.n_slots += (uint64_t)n, PL.n_full++, PL.full_ns += kern_now_ns() - tw;
             vk_texture_groups_unstamp_locked();   // the walk over every slot refilled members one by one
         }
+        retry = (int)pool_nleft;   // every slot left, by this refresh or an earlier one not filled since
         vk_texture_create_budget_locked(-1);
     }
     PL.retry = retry != 0;
-    // retry counts the slots this sync left; a sync with slots left walks the whole table, so that is all of them
+    // retry counts every slot left (pool_left: this sync's and the earlier ones' not filled since)
     int backlog = pool_load_backlog();
     if (!pool_loading && backlog > 0 && retry >= backlog) {
         pool_load_made = (uint64_t)retry, pool_load_frame0 = PL.frame;
@@ -3429,6 +3470,7 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // graphics push equal to the last one at its set number, with no other layout or bind between, is not recorded.
 // The descriptors go into one packed array d, a VkDescSlot per descriptor in binding order, which a set's update
 // template reads directly (VkPipeInfo.tpl); write structs are filled only when a set has no template.
+static _Thread_local const VkDescSlot *emu_d;   // set 0's descriptors of the last bind_resources build (mesh emulation)
 static uint32_t emu_d_bytes;
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     DrawCtx *const cx = ex->dc;
