@@ -409,6 +409,13 @@ loss at the same moment end the process with exit code 72, one device report and
 device and opens no window; the device is not really lost, so what a driver answers after a loss is not covered.
 `device_lost_at = <n>` in `nx2navi.ini` ends a real run the same way at its n-th hand-over to the GPU queue.
 
+A change to how a fault ends the process (`runtime/main.c` `crash_handler`, `mode_done`) passes
+`python tests\exit_fault_check.py <game exe>`, which runs two crash probes: a fault inside a library while a mode runs
+is a crash (one FATAL line, exit code 71), and the same fault after the mode has returned, while the process is ending,
+leaves the mode's own exit code and one `exit:` line. The second is what a library another program put into the
+process does when it faults in its detach: an injector's Vulkan layer did so at the end of every shader preparation on
+a player's PC, and the launcher took each finished preparation for a failed one. No game files, no GPU.
+
 A change to the memory gate of the background pipeline builds (`runtime/vk_build_gate.h`, `runtime/vk_pipeline.c`
 `gate_enter`) passes `python tests\build_gate_check.py [<game exe>]`, which builds the header alone and checks what it
 admits and refuses and that builds under way count through their reservations. With the executable it also runs
