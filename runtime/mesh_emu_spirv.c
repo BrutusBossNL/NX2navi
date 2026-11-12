@@ -348,8 +348,12 @@ static void task_epilogue(Em *e, const MeshEmuInfo *info, uint32_t payload, uint
     if_begin(e, ult(e, slot, trecs), &m1);
     {
         uint32_t recw = add(e, cu(e, MESH_EMU_TOFF / 4), mul(e, slot, cu(e, MESH_EMU_TWORDS)));
+        for (uint32_t r = 0; r * T < info->payload_words; r++) {   // the last round's threads past the payload idle
+            uint32_t k = add(e, lid, cu(e, r * T)), mk = 0;
+            if ((r + 1) * T > info->payload_words) if_begin(e, ult(e, k, cu(e, info->payload_words)), &mk);
             uint32_t v = ld(e, m->t_u32, E2(e, OpAccessChain, p_wg_u32, payload, k));
             word_store(e, base, add(e, add(e, recw, cu(e, 1)), k), v);
+            if (mk) if_end(e, mk);
         }
         uint32_t m2;
         if_begin(e, E2(e, OpIEqual, m->t_bool, lid, cu(e, 0)), &m2);
@@ -650,8 +654,12 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
                 uint32_t v3 = nid(m);
                 op(&code, OpCompositeConstruct, 5, m->t_v3u, v3, x, cu(&e, 0), cu(&e, 0));
                 op(&code, OpStore, 2, wgemu, v3);
+                for (uint32_t r = 0; r * info->threads < payload_len; r++) {   // as task_epilogue's copy
+                    uint32_t k = add(&e, lid, cu(&e, r * info->threads)), mk = 0;
+                    if ((r + 1) * info->threads > payload_len) if_begin(&e, ult(&e, k, cu(&e, payload_len)), &mk);
                     uint32_t v = word_load(&e, base, add(&e, add(&e, recw, cu(&e, 1)), k));
                     op(&code, OpStore, 2, E2(&e, OpAccessChain, p_wg_u32, payload, k), v);
+                    if (mk) if_end(&e, mk);
                 }
                 barrier(&e);
             }
