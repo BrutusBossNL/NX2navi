@@ -741,6 +741,9 @@ NVN_API(nvnQueueSubmitCommands) {
     // point). Copies of the data at submit made it worse, a mix of two frames' versions.
     // NX2NAVI_SUBMIT_FINISH=<mask>: bit i waits after the i-th submission of a frame (default 0x1); a plain 1 waits
     // after every submission, 0 never.
+    // Since the staged mirror uploads (vk_memory.c) the copies of guest memory a submission reads are taken while the
+    // replay records it, and the wait ends once the replay has submitted it (vk_sync_recorded_wait); the GPU's wait
+    // below remains for a submission whose GPU reads guest memory itself.
     // The wait (exec_wait, vk_sync.c vk_sync_exec_wait) ends when the GPU has run the submission's passes and the
     // results the game reads once it goes on are in its memory, the last frame's occlusion counts among them; the
     // write-backs and the completion thread's other side effects are not waited for. NX2NAVI_WB_SPLIT=0 makes it

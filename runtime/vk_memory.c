@@ -2622,7 +2622,10 @@ void vk_mem_use(VkMemSpan *sp) {
         return;
     }
     // a refused pool not due for another try stays imported: nearly every pool in the field (two have mirrors)
-    if (r->mstate == MS_REFUSED && !(r->retry_sub && (int32_t)(msub - r->retry_sub) >= 0)) return;
+    if (r->mstate == MS_REFUSED && !(r->retry_sub && (int32_t)(msub - r->retry_sub) >= 0)) {
+        vk_mem_note_live();   // the GPU reads this pool's guest memory as it runs (vk_mem_take_live)
+        return;
+    }
     int lk = vk_exec_shared();
     if (lk) plat_mutex_lock(&use_lock);
     mem_use_locked(sp);
@@ -2638,7 +2641,10 @@ static void mem_use_locked(VkMemSpan *sp) {
         r->mstate = MS_NONE, r->retry_sub = 0;   // refuse sets it again
     }
     if (r->mstate == MS_NONE) mirror_create(r);
-    if (r->mstate != MS_ON) return;
+    if (r->mstate != MS_ON) {   // the GPU reads this pool's guest memory as it runs (staged mirror uploads)
+        vk_mem_note_live();
+        return;
+    }
     if (r->acc_sub != msub) mirror_sync(r);
     r->vd_use_sub = msub;
     sp->buffer = r->mbuf;
@@ -2646,7 +2652,11 @@ static void mem_use_locked(VkMemSpan *sp) {
 
 void vk_mem_pick(VkMemSpan *sp) {
     PoolRec *r = sp->pool;
-    if (!r || r->mstate != MS_ON) return;
+    if (!r) return;
+    if (r->mstate != MS_ON) {   // guest memory itself, read by the GPU when it runs (vk_mem_take_live)
+        vk_mem_note_live();
+        return;
+    }
     if (r->acc_sub != msub) {
         int lk = vk_exec_shared();
         if (lk) plat_mutex_lock(&use_lock);
@@ -3424,11 +3434,13 @@ static void hot_check(void) {
     if (mirror_hot < 0) {
         mirror_hot = p < 0 ? 0 : p > 1000 ? 1000 : p;
         if (mirror_hot) rt_log("mem: pools copied %d%% of their size a frame stay in system memory (NX2NAVI_MIRROR_HOT)", mirror_hot);
+    }
     if (!mirror_hot) return;
     uint64_t fr = mirror_frame;
     if (!hot_frame0 || fr < hot_frame0) {
         hot_frame0 = fr ? fr : 1;
         return;
+    }
     if (fr - hot_frame0 < HOT_FRAMES || npend || nwbl) return;   // nsnl: the previous submission's, recorded already
     double frames = (double)(fr - hot_frame0);
     hot_frame0 = fr;
@@ -3442,6 +3454,7 @@ static void hot_check(void) {
         r->hot_bytes = (uint64_t)per;   // kept for the log line below
             r->hot_bytes = 0, i++;   // !twin with a table record: the table's writes are in the mirror alone (mirror_evict)
             continue;
+        }
         mem_lazy_release(r->import_lo, r->import_hi - r->import_lo);   // what only the mirror holds comes down first
         // as mirror_evict, under the exclusive lock (vk_pool_fini takes pools off the list under it), but for good:
         // MS_REFUSED with no retry (retry_sub 0), so neither vk_mem_use nor the budget retries mirror it again
@@ -3456,6 +3469,7 @@ static void hot_check(void) {
         dead[nout] = r->mbuf, dead_a[nout] = r->malloc_;
         r->mbuf = VK_NULL_HANDLE, r->malloc_ = NULL;
         out[nout++] = r;
+    }
     plat_mutex_unlock(&pool_lock);
     for (int k = 0; k < nout; k++) {
         PoolRec *r = out[k];
@@ -3467,6 +3481,9 @@ static void hot_check(void) {
         if (++n_demoted <= 32)
             rt_log("mem: pool %#llx (%.1f MiB, %s) copied %.1f MiB a frame through its mirror: system memory from now on",
                    (unsigned long long)r->lo, n / 1048576.0, f, per / 1048576.0);
+    }
+}
+
 void vk_mem_mirror_begin(void) {
     if (vk_mirror_on) hot_check();
     if (!vk_mirror_on) {   // import mode: the texture checks' snapshots still skip frozen regions
@@ -3516,26 +3533,49 @@ void vk_mem_mirror_begin(void) {
 
 int vk_mem_mirror_pending(void) { return npend || snl_copied < nsnl; }
 
-// NX2NAVI_MIRROR_CAPTURE_KB (default 0, off): the pages the CPU wrote since a VRAM mirror's last sync are copied out of
-// guest memory by the CPU when the part that needs them is handed to the queue, up to this many KiB a part, into a
-// host buffer the submission owns (a chunk of the snapshot pool, given back at its fence); the prologue copies them
-// from there into the mirror. Without it the prologue copies them from guest memory when the GPU runs it, a frame or
-// more after the game's submit when the GPU is behind: the GPU then reads whatever the game wrote there meanwhile,
-// values meant for a later frame. A pool stays with the GPU-time copy while a write-back of its mirror into guest
-// memory is still on the GPU (the CPU would read guest bytes that write-back has not reached yet and copy them over
-// the mirror's newer ones), and when its device address table writes reach guest memory as well (a twin: what they
-// write is not recorded); so does a range with a page that cannot be read without a fault (mem_copy_readable: a
-// lazily armed range). The whole-pool copy of a mirror's first use is larger than the limit and stays with the GPU.
+// NX2NAVI_MIRROR_CAPTURE_KB: the pages the CPU wrote since a VRAM mirror's last sync are copied out of guest memory by
+// the CPU when the part that needs them is handed to the queue, up to this many KiB a part, into a host buffer the
+// submission owns (a chunk of the snapshot pool, given back at its fence); the prologue copies them from there into
+// the mirror. Without it the prologue copies them from guest memory when the GPU runs it, a frame or more after the
+// game's submit when the GPU is behind: the GPU then reads whatever the game wrote there meanwhile, values meant for a
+// later frame. A pool stays with the GPU-time copy while a write-back of its mirror into guest memory is still on the
+// GPU (the CPU would read guest bytes that write-back has not reached yet and copy them over the mirror's newer ones),
+// and when its device address table writes reach guest memory as well (a twin: what they write is not recorded); so
+// does a range with a page that cannot be read without a fault (mem_copy_readable: a lazily armed range). The
+// whole-pool copy of a mirror's first use is larger than the limit and stays with the GPU.
+// Unset or 0 with NX2NAVI_MIRROR_STAGE=1 (the default here): CAPTURE_STAGE_KB. A submission whose prologue copied
+// everything this way reads nothing of guest memory late, so its submit wait ends once the replay has submitted it
+// (vk_sync_recorded_wait); one with a range left to the GPU-time copy, or a draw that reads a pool without a mirror,
+// is noted (vk_mem_note_live) and its submit wait is the GPU's. The first form of this (0.8.0) copied while the replay
+// recorded and left out neither the write-backs in flight nor the twins.
+#define CAPTURE_STAGE_KB (64 << 10)
+static volatile int32_t mirror_live;   // the submission being recorded had the GPU read guest memory
+
+static int stage_on(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("MIRROR_STAGE", "1") != 0;
+    return on;
+}
+
 static uint64_t capture_cap(void) {
     static int64_t cap = -1;
     if (cap < 0) {
         int kb = cfg_int("NX2NAVI_MIRROR_CAPTURE_KB");
+        if (kb <= 0 && stage_on()) kb = CAPTURE_STAGE_KB;
         cap = kb > 0 ? (int64_t)kb << 10 : 0;
         if (cap)
             rt_log("mem: mirror pages the CPU wrote are copied out of guest memory when their part is handed over, up to "
-                   "%d KiB a part (NX2NAVI_MIRROR_CAPTURE_KB)", kb);
+                   "%d KiB a part (NX2NAVI_MIRROR_CAPTURE_KB, NX2NAVI_MIRROR_STAGE)", kb);
     }
     return (uint64_t)cap;
+}
+
+void vk_mem_note_live(void) { __atomic_store_n(&mirror_live, 1, __ATOMIC_RELAXED); }
+
+int vk_mem_take_live(void) {
+    int live = __atomic_exchange_n(&mirror_live, 0, __ATOMIC_RELAXED);
+    if (!vk_mirror_on || shadow_on || !capture_cap()) live = 1;
+    return live;
 }
 
 static MRange *capm;   // replay: mirror_capture's merged ranges
@@ -3619,6 +3659,7 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb) {
     mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
              VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
     mirror_capture(cb);
+    if (npend) vk_mem_note_live();   // left to the GPU-time copy: the GPU reads guest memory late
     copy_ranges(cb, pend, npend, 1, &mrep.upload_bytes, &mrep.upload_copies);
     if (snl_copied < nsnl) {   // the snapshots read what the uploads above wrote
         if (npend) mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,

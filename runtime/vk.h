@@ -347,6 +347,10 @@ void vk_mem_mirror_begin(void);
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence);
 int vk_mem_mirror_pending(void);
 void vk_mem_mirror_prologue(VkCommandBuffer cb);
+// Staged mirror uploads (vk_memory.c): the GPU of the submission being recorded reads guest memory itself (noted by
+// vk_mem_note_live); vk_mem_take_live returns that and starts the next submission's note.
+void vk_mem_note_live(void);
+int vk_mem_take_live(void);
 void vk_mem_lazy_part_end(void);   // lazy write-back: a part ends (before its prologue), and it is handed over
 void vk_mem_lazy_handed(void);
 void vk_mem_lazy_decide(void);     // once the driver is known (after vk_caps_driver): on or off, with one log line
@@ -606,7 +610,8 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n);   // vk_texture.c: s
 // set and brings it up to date. vk_pool_takes counts the takes whose sync left no slot behind (vk_exec_draw.c pool_sync);
 // once it has moved on by more than VK_POOL_SETS since a pool entry changed, every set holds the change (vk_texture.c
 // retire_sweep). It may count fewer takes than there were, which only delays that.
-#define VK_POOL_SETS 4
+#define VK_POOL_SETS 8   // 4 before: with the game no longer held for the GPU after a frame's first submission, the
+                         // replay waited for a set's GPU work at 15% of the switches
 uint64_t vk_pool_takes(void);
 // Texture lock held: 1 while the texture pool refresh looks its slots up (vk_exec_draw.c pool_sync_entries), 0 after.
 // Those lookups leave out a texture evicted by disuse, and are not counted as the texture being used.
@@ -715,6 +720,7 @@ uint64_t vk_sync_reserve(void);            // asynchronous replay: the value the
 int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns);   // 1 when done; 0 on timeout or a value never submitted
 // The executed timeline (vk_sync.c): a submission's own commands are through the GPU, its write-backs maybe not yet.
 int vk_sync_exec_wait(uint64_t value, uint64_t timeout_ns);
+int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(uint64_t, uint64_t));
 int vk_sync_wb_split(void);                 // NX2NAVI_WB_SPLIT: the write-backs go into a part of their own
 // NX2NAVI_TRACE=perf (vk_sync.c "the executed timeline"): what a wait on that timeline left behind since the last call,
 // whether the completion thread's callback running now belongs to a value whose waiter went on already, and the

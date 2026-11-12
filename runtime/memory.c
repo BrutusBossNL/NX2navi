@@ -518,8 +518,22 @@ int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t h0, int64_t delta, uint64_t o
     return k;
 }
 
+// 0 when no page of [a, a + n) can be inaccessible right now (armed by the lazy write-back or probed), so the CPU can
+// read it without a fault; 1 when one may be.
+int mem_lazy_touches(uint64_t a, uint64_t n) {
+    if (!n) return 0;
+    if (a >= RT_ADDRESS_LIMIT || a + n > RT_ADDRESS_LIMIT || __atomic_load_n(&prb_on, __ATOMIC_RELAXED)) return 1;
+    if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED)) return 0;
+    int any = 0;
+    for (uint64_t r = a >> FRZ_SHIFT; r <= (a + n - 1) >> FRZ_SHIFT && !any; r++) any = __atomic_load_n(&lzr[r], __ATOMIC_ACQUIRE);
+    if (!any) return 0;
+    int hit = 0;
     plat_mutex_lock(&lz_lock);
+    for (int i = 0; i < lz_n && !hit; i++) hit = lzs[i].lo < a + n && lzs[i].hi > a;
     plat_mutex_unlock(&lz_lock);
+    return hit;
+}
+
 // [a, a + n) is armed as a whole still.
 int mem_lazy_armed(uint64_t a, uint64_t n) {
     if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED)) return 0;

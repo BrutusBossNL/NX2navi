@@ -302,8 +302,13 @@ int vk_replay_async(void) {
 }
 
 // With the replay on its own thread a submission's value covers its replay too, and the wait stays the fence's.
-static int vk_be_exec_wait(uint64_t value, uint64_t timeout_ns) {
+static int vk_be_gpu_wait(uint64_t value, uint64_t timeout_ns) {
     return vk_replay_async() ? vk_sync_fence_wait(value, timeout_ns) : vk_sync_exec_wait(value, timeout_ns);
+}
+// The submit wait (nvn_api_core.c NX2NAVI_SUBMIT_FINISH): the GPU's only where the submission reads guest memory on the
+// GPU (vk_sync_recorded_wait).
+static int vk_be_exec_wait(uint64_t value, uint64_t timeout_ns) {
+    return vk_sync_recorded_wait(value, timeout_ns, vk_be_gpu_wait);
 }
 
 // The front end's view (nvn_api_core.c, nvn_api_cmd.c): replay is asynchronous only on this back end.

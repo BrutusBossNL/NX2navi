@@ -48,6 +48,10 @@ static PlatCond cv_work = PLAT_COND_INIT;   // a submission, a callback or stop
 static PlatCond cv_done = PLAT_COND_INIT;   // done advanced
 static uint64_t issued, done;     // newest submitted value; newest value whose side effects ran
 static uint64_t reserved;         // asynchronous replay: newest value handed out before its submission (>= issued)
+// Staged mirror uploads (vk_memory.c "staged mirror uploads"): per submission value, whether its GPU still reads guest
+// memory itself (value << 1 | live), under st_lock. A value not found counts as live.
+#define LIVE_RING 4096
+static uint64_t live_of[LIVE_RING];
 static int stop;
 static Pending *queue;            // side effects in the order they were added
 static int qhead, qn, qcap;
@@ -509,6 +513,7 @@ static void gw_wait(uint64_t value, uint64_t t0, uint64_t t1, uint64_t newest, u
 static void gw_log(uint64_t frame, int frames) {
     plat_mutex_lock(&gw_lock);
     uint64_t n = gw_n, ns = gw_ns, rep = gw_rep_ns, gpu = gw_gpu_ns, lead = gw_lead_ns, age = gw_age, before = gw_before,
+             lr = gw_lat_rep, lg = gw_lat_gpu, ln = gw_lat_n, mx = gw_max_ns, unk = gw_unknown, rn = gw_rec_n,
     gw_n = gw_ns = gw_rep_ns = gw_gpu_ns = gw_lead_ns = gw_age = gw_before = gw_lat_rep = gw_lat_gpu = gw_lat_n = 0;
     plat_mutex_unlock(&gw_lock);
     if (!n) {
@@ -963,6 +968,7 @@ static VkCommandPool pre_pool;
 static CmdSlot *pre_slots;
 static int npre, pre_pair = -1;
 static VkCommandBuffer pre_cb;
+
 VkCommandBuffer vk_sync_pre(void) {
     if (pre_cb) return pre_cb;
     VkCtx *c = vk_ctx();
@@ -1260,9 +1266,15 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     s->fence = sent ? fence : 0;
     vk_mem_note_submit(fence);
     gw_mark(fence, 1);
+    // after the last part's prologue: every staged copy of the submission is taken; a probe's submit leaves the note to
+    // the replay's submission it may have come in the middle of
+    int live = own ? 1 : vk_mem_take_live();
+    int res = own ? 0x1f : vk_exec_take_results();
     plat_mutex_lock(&st_lock);
+    live_of[fence & (LIVE_RING - 1)] = fence << 1 | (uint64_t)(live != 0);
     __atomic_store_n(&issued, fence, __ATOMIC_RELEASE);
     plat_cond_broadcast(&cv_work);
+    plat_cond_broadcast(&cv_done);   // vk_sync_recorded_wait
     plat_mutex_unlock(&st_lock);
     static unsigned subs;
     if (++subs % 4096 == 0) {
@@ -1336,6 +1348,46 @@ static void results_run(uint64_t upto) {
 }
 
 static int fence_wait_impl(uint64_t value, uint64_t timeout_ns);
+
+
+// The game's wait after a frame's first submission (nvn_api_core.c NX2NAVI_SUBMIT_FINISH): until the replay has
+// submitted value, which took every copy of guest memory the submission reads; then also until the GPU has run it when
+// its GPU reads guest memory itself (vk_mem_take_live) or NX2NAVI_SUBMIT_FINISH_GPU=1. 1 when reached.
+int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(uint64_t, uint64_t)) {
+    vk_sync_start();
+    if (gpu < 0) {
+        gpu = rt_knob("SUBMIT_FINISH_GPU", "0") != 0;
+        rt_log("vk: the wait after a frame's first submission ends %s (NX2NAVI_SUBMIT_FINISH_GPU=%d)",
+               gpu ? "when the GPU has run it" : "when the replay has submitted it, or the GPU has run it where it reads guest "
+               "memory itself", gpu);
+    }
+    if (__atomic_load_n(&done, __ATOMIC_ACQUIRE) >= value) return 1;
+    if (gpu) return gpu_wait(value, timeout_ns);
+    uint64_t w0 = plat_now_ns(), newest = __atomic_load_n(&reserved, __ATOMIC_ACQUIRE);
+    uint64_t sent = __atomic_load_n(&issued, __ATOMIC_ACQUIRE);
+    int live = 1, ok = 1;
+    plat_mutex_lock(&st_lock);
+    if (value > issued && value > reserved) ok = 0;   // never handed over
+    while (ok && issued < value && done < value) {
+        if (timeout_ns < (1ull << 62)) {
+            uint64_t el = plat_now_ns() - w0;
+            if (el >= timeout_ns) { ok = 0; break; }
+            plat_cond_wait_ns(&cv_done, &st_lock, timeout_ns - el);
+        } else {
+            plat_cond_wait(&cv_done, &st_lock);
+        }
+    }
+    uint64_t w1 = plat_now_ns();
+    if (w1 > w0) {
+        if (!live) gw_wait(value, w0, w1, newest > sent ? newest : sent, sent);   // a GPU wait counts there
+        plat_mutex_lock(&gw_lock);
+        gw_rec_n++;
+        if (!live) gw_rec_done++;
+        plat_mutex_unlock(&gw_lock);
+    }
+    if (!ok) return 0;
+    return live ? gpu_wait(value, timeout_ns) : 1;
+}
 
 int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns) {
     uint64_t p0 = perf_begin();
