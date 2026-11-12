@@ -351,6 +351,8 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb);
 // vk_mem_note_live); vk_mem_take_live returns that and starts the next submission's note.
 void vk_mem_note_live(void);
 int vk_mem_take_live(void);
+// The submission being recorded hands results to the CPU at its completion (vk_exec_xfer.c): vk_sync_recorded_wait waits
+// for the newest such submission up to the one it waits for.
 void vk_mem_lazy_part_end(void);   // lazy write-back: a part ends (before its prologue), and it is handed over
 void vk_mem_lazy_handed(void);
 void vk_mem_lazy_decide(void);     // once the driver is known (after vk_caps_driver): on or off, with one log line

@@ -62,6 +62,12 @@ static uint32_t max1(uint32_t v) { return v ? v : 1; }
 
 typedef struct { uint64_t addr, size; int back; } Range;   // back: written into a VRAM mirror (vk_mem_mirrored)
 
+// What the GPU work of the submission being recorded hands to the CPU at its completion without a fault to fetch it:
+// event values, counter and occlusion reports, GPU writes of memory no VRAM mirror holds (vk_sync_recorded_wait waits
+// for the newest such submission). Write-backs of the mirrors note it in vk_memory.c; the lazily written ones fetch on
+// the CPU's first access.
+int vk_exec_take_results(void) { return __atomic_exchange_n(&ex_results, 0, __ATOMIC_RELAXED); }
+
 static void guest_written_cb(void *arg) {
     Range *r = arg;
     if (r->back) vk_gpu_written_back(r->addr, r->size);

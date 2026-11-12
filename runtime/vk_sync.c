@@ -52,6 +52,8 @@ static uint64_t reserved;         // asynchronous replay: newest value handed ou
 // memory itself (value << 1 | live), under st_lock. A value not found counts as live.
 #define LIVE_RING 4096
 static uint64_t live_of[LIVE_RING];
+// per value (index & LIVE_RING - 1): the newest value up to it whose completion hands results to the CPU (vk_exec_take_results)
+static uint64_t res_of[LIVE_RING], res_last;
 static int stop;
 static Pending *queue;            // side effects in the order they were added
 static int qhead, qn, qcap;
@@ -514,6 +516,7 @@ static void gw_log(uint64_t frame, int frames) {
     plat_mutex_lock(&gw_lock);
     uint64_t n = gw_n, ns = gw_ns, rep = gw_rep_ns, gpu = gw_gpu_ns, lead = gw_lead_ns, age = gw_age, before = gw_before,
              lr = gw_lat_rep, lg = gw_lat_gpu, ln = gw_lat_n, mx = gw_max_ns, unk = gw_unknown, rn = gw_rec_n,
+             rd = gw_rec_done, rs = gw_rec_self;
     gw_n = gw_ns = gw_rep_ns = gw_gpu_ns = gw_lead_ns = gw_age = gw_before = gw_lat_rep = gw_lat_gpu = gw_lat_n = 0;
     plat_mutex_unlock(&gw_lock);
     if (!n) {
@@ -529,6 +532,10 @@ static void gw_log(uint64_t frame, int frames) {
            (unsigned long long)frame, n / f, ns / 1e6 / f, mx / 1e6, rep / 1e6 / f, (double)before / (double)n,
            gpu / 1e6 / f, (unsigned long long)unk, (double)age / (double)n, lead / 1e6 / (double)n,
            ln ? lr / 1e6 / (double)ln : 0.0, ln ? lg / 1e6 / (double)ln : 0.0);
+    if (rn) rt_log("perf: frame %llu: submit waits: %llu, %llu of them without the GPU's run of the submission itself (%llu of "
+                   "those waited for it anyway: it hands the CPU results), the rest went on to the GPU (the submission's GPU "
+                   "read guest memory itself)", (unsigned long long)frame, (unsigned long long)rn, (unsigned long long)rd,
+                   (unsigned long long)rs);
 }
 
 static int gtl_cmp(const void *a, const void *b) {
@@ -1272,6 +1279,7 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     int res = own ? 0x1f : vk_exec_take_results();
     plat_mutex_lock(&st_lock);
     live_of[fence & (LIVE_RING - 1)] = fence << 1 | (uint64_t)(live != 0);
+    res_of[fence & (LIVE_RING - 1)] = res_last;
     __atomic_store_n(&issued, fence, __ATOMIC_RELEASE);
     plat_cond_broadcast(&cv_work);
     plat_cond_broadcast(&cv_done);   // vk_sync_recorded_wait
@@ -1355,7 +1363,12 @@ static int fence_wait_impl(uint64_t value, uint64_t timeout_ns);
 // its GPU reads guest memory itself (vk_mem_take_live) or NX2NAVI_SUBMIT_FINISH_GPU=1. 1 when reached.
 int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(uint64_t, uint64_t)) {
     vk_sync_start();
+    static int gpu = -1, res_mode = 1;
     if (gpu < 0) {
+        res_mode = rt_knob("SUBMIT_FINISH_RESULTS", "1");
+        rt_log("vk: the wait after a frame's first submission also waits for %s (NX2NAVI_SUBMIT_FINISH_RESULTS=%d)",
+               res_mode == 2 ? "every submission before it" : res_mode ? "the newest submission up to it that hands the "
+               "CPU results at its completion (events, counter reports, write-backs)" : "nothing more", res_mode);
         gpu = rt_knob("SUBMIT_FINISH_GPU", "0") != 0;
         rt_log("vk: the wait after a frame's first submission ends %s (NX2NAVI_SUBMIT_FINISH_GPU=%d)",
                gpu ? "when the GPU has run it" : "when the replay has submitted it, or the GPU has run it where it reads guest "
@@ -1377,12 +1390,26 @@ int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(u
             plat_cond_wait(&cv_done, &st_lock);
         }
     }
+    uint64_t need = 0;   // the newest submission up to value whose completion hands the CPU results
+    if (ok) {
+        live = done < value && live_of[value & (LIVE_RING - 1)] != (value << 1);
+        if (res_mode == 2) need = value - 1;
+                uint64_t el = plat_now_ns() - w0;
+                if (el >= timeout_ns) { ok = 0; break; }
+                plat_cond_wait_ns(&cv_done, &st_lock, timeout_ns - el);
+            } else {
+                plat_cond_wait(&cv_done, &st_lock);
+            }
+        }
+    }
+    plat_mutex_unlock(&st_lock);
     uint64_t w1 = plat_now_ns();
     if (w1 > w0) {
         if (!live) gw_wait(value, w0, w1, newest > sent ? newest : sent, sent);   // a GPU wait counts there
         plat_mutex_lock(&gw_lock);
         gw_rec_n++;
         if (!live) gw_rec_done++;
+        if (!live && need == value) gw_rec_self++;
         plat_mutex_unlock(&gw_lock);
     }
     if (!ok) return 0;
