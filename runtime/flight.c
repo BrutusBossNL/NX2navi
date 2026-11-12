@@ -156,7 +156,8 @@ static void copy_events(DumpJob *j, uint64_t first) {
     }
 }
 
-static const char *const tex_kind_names[FLIGHT_TEX_N] = {"new", "up", "reup", "release", "takeback", "drop"};
+static const char *const tex_kind_names[FLIGHT_TEX_N] = {"new", "up", "reup", "release", "takeback", "drop", "bytes",
+                                                         "reg", "blank"};
 
 // <dir>/events.tsv: one line per texture event of the dump's frames (flight_tex).
 static void write_events(const DumpJob *j) {
@@ -185,6 +186,15 @@ static void write_events(const DumpJob *j) {
         else if (e->kind == FLIGHT_TEX_DROP) snprintf(detail, sizeof detail, "%s", vk_texture_drop_name((int)e->detail));
         else if (e->kind == FLIGHT_TEX_UP || e->kind == FLIGHT_TEX_REUP)
             snprintf(detail, sizeof detail, "%u WriteTexels", e->detail);
+        else if (e->kind == FLIGHT_TEX_BYTES)
+            snprintf(detail, sizeof detail, "probe hash %08x, %u of 64 probes all zero", e->detail, e->us);
+        else if (e->kind == FLIGHT_TEX_REG) {
+            static const char *const was[4] = {"an unused slot", "the slot named another descriptor at this storage",
+                                               "the slot named other storage", "the slot named a finalized texture"};
+            snprintf(detail, sizeof detail, "slot %u: %s", e->us, was[e->detail & 3]);
+        } else if (e->kind == FLIGHT_TEX_BLANK)
+            snprintf(detail, sizeof detail, "slot %u sampled as its stand-in%s%s", e->us, e->detail & 1 ? ", finalized" : "",
+                     e->detail & 2 ? ", held out" : "");
         else detail[0] = 0;
         fprintf(f, "%llu\t%s\t%#llx\t%#x\t%u\t%u\t%u\t%s\t%s\t%u\n", (unsigned long long)e->frame,
                 e->kind < FLIGHT_TEX_N ? tex_kind_names[e->kind] : "?", (unsigned long long)e->addr, e->format, e->w,

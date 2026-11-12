@@ -1734,6 +1734,25 @@ static void flight_ev(const Tex *e, int kind, uint32_t detail, uint32_t us) {
 
 static uint64_t frames_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED); }
 
+// For the flight recorder, after an upload of e: FNV-1a over 64 probes of 64 bytes spread over its storage, and how many
+// of them were all zero. Two uploads of one texture with the same hash read the same bytes at the probes; a first one
+// with zero probes read storage the game had not filled.
+static void flight_bytes(const Tex *e) {
+    if (!flight_on || !e->pub.mirrored || e->t.L.size < 64 * 64) return;
+    if (!mem_read_hold(e->pub.addr, e->t.L.size)) return;
+    const uint8_t *b = (const uint8_t *)(uintptr_t)e->pub.addr;
+    uint64_t step = (e->t.L.size - 64) / 63;
+    uint32_t h = 0x811c9dc5u, zero = 0;
+    for (int i = 0; i < 64; i++) {
+        const uint8_t *p = b + (uint64_t)i * step;
+        uint8_t any = 0;
+        for (int k = 0; k < 64; k++) h = (h ^ p[k]) * 0x01000193u, any |= p[k];
+        zero += !any;
+    }
+    mem_read_release();
+    flight_ev(e, FLIGHT_TEX_BYTES, h, zero);
+}
+
 static uint64_t key_hash(const TexKey *k) {   // FNV-1a; make_key zeroes the key's padding
     uint64_t h = 0xcbf29ce484222325ull;
     const uint8_t *b = (const uint8_t *)k;
@@ -2722,6 +2741,10 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
             followed = 1;
             if (trace) marks_check(p, id, now, 1);
         }
+        if (flight_on && !followed)   // nothing of its own and nothing followed: its stand-in was on screen
+            flight_tex(FLIGHT_TEX_BLANK, k.addr, (uint32_t)s->t.d.format, s->t.d.width, s->t.d.height, 0,
+                       tex_mirrored(&s->t) ? FLIGHT_TF_MIRRORED : 0,
+                       (s->finalized ? 1u : 0) | (holds.n && nvn_hm_get(&holds, &k) ? 2u : 0), id);
         // The slot's own key may be held although an entry at its address took the mark: the slot shows the stand-in
         // then (slot_resolve follows fewer entries than the loop above credits), and only this drop makes its texture
         // again. Left to the case where the loop found nothing, such a slot kept the stand-in for good.
@@ -3348,6 +3371,7 @@ static void upload(Tex *e) {
         n_uploads++, perf_count(PERF_CNT_TEX_UP);
     }
     flight_ev(e, e->uploaded ? FLIGHT_TEX_REUP : FLIGHT_TEX_UP, e->wt_n, (uint32_t)(dt / 1000));
+    flight_bytes(e);
     e->wt_n = 0;
     e->uploaded = 1;
     e->n_up++;
@@ -4073,6 +4097,10 @@ void vk_texture_register(int id, const tex_t *t, const view_t *v) {
         unlock();
         return;
     }
+    if (flight_on && tex_mirrored(t))
+        flight_tex(FLIGHT_TEX_REG, (uint64_t)(uintptr_t)t->mem, (uint32_t)t->d.format, t->d.width, t->d.height, 0,
+                   FLIGHT_TF_MIRRORED,
+                   !s->used ? 0 : s->finalized ? 3 : (uintptr_t)s->t.mem == (uintptr_t)t->mem ? 1 : 2, (uint32_t)id);
     s->t = *t;
     if (!s->used && id < VK_POOL_TEX) pool_slots++;
     s->used = 1;
