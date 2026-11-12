@@ -99,6 +99,12 @@ for updates); an XInput gamepad (d-pad or left stick, A, B, Y) while the window 
 
 `python -m launcher --selftest --shots DIR` draws every screen with made-up states and saves a PNG of each.
 
+Run from a checkout, the launcher and the build use the Python that started it, which needs the packages of
+`tools/requirements-launcher.txt`. At startup the launcher checks that this Python can read zstd files
+(`toolchain.zstd_missing`: Python 3.14's `compression.zstd`, or the `zstandard` package). If it cannot, the first screen
+and the log say so and give the `pip install` line, and Gather Build Tools stops with the same message before it
+unpacks anything.
+
 ## The launcher's folder
 
 ```

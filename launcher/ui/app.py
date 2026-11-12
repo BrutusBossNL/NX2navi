@@ -744,6 +744,8 @@ class App:
             self.ctx.log(f'the stub went back from {a.rolled_back} to {self.layout.version}')
             self.settings['rolled_back'] = versions.display(a.rolled_back)   # never installed again by itself
             self.settings.save()
+        if self.ctx.zstd_missing:   # told at once, not when Begin Installation stops at the build tools
+            self.message = self.ctx.zstd_missing
         for old in self.layout.root.glob('python.old*'):   # the Python an update replaced (launcher/native/nx2navi.c)
             shutil.rmtree(old, ignore_errors=True)
         if gd or self.settings.get('dump'):

@@ -498,6 +498,19 @@ class UninstallTest(Tmp):
 # ---------------------------------------------------------------- toolchain
 
 class ToolchainTest(Tmp):
+    def test_zstd_missing(self):
+        """A Python without compression.zstd and zstandard is named at startup, with the pip line for a checkout."""
+        with mock.patch.dict(sys.modules, {'compression.zstd': None, 'zstandard': mock.MagicMock()}):
+            self.assertEqual(toolchain.zstd_missing(self.layout), '')
+        with mock.patch.dict(sys.modules, {'compression.zstd': None, 'zstandard': None}):
+            msg = toolchain.zstd_missing(self.layout)
+            ctx = Context(self.layout)
+        self.assertIn('zstandard', msg)
+        self.assertIn('-m pip install -r', msg)
+        self.assertIn('requirements-launcher.txt', msg)
+        self.assertEqual(ctx.zstd_missing, msg)
+        self.assertTrue(any(msg in line for line in ctx.log_tail()))
+
     def test_resolve_and_install(self):
         repo = self.tmp / 'repo'
         repo.mkdir()

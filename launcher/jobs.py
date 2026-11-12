@@ -276,6 +276,9 @@ class Job:
     def ensure_tools(self, sid):
         layout = self.ctx.layout
         self.begin(sid)
+        missing = toolchain.zstd_missing(layout)
+        if missing:
+            raise toolchain.ToolchainError(missing)
         lock = toolchain.load_lock(layout, self.ctx.version)
         if toolchain.is_current(layout, lock):
             have_tools = True
