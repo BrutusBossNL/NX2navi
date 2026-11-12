@@ -483,6 +483,34 @@ int mem_lazy_armed(uint64_t a, uint64_t n) {
     return ok;
 }
 
+// Copies each of n ranges of guest memory, src[i] = {address, bytes}, to dst[i] when every page of it can be read
+// without a fault; ok[i] says which were. An armed range, a probed region or a page the game made inaccessible is left
+// out instead of faulting on the caller's thread (vk_memory.c mirror_capture runs inside a submission, where a fetch
+// could not be sent). frz_lock is held over all of them, so nothing is armed or probed meanwhile; a range in regions
+// with neither (lzr, prb: both change under that lock, with the pages' protection) is copied without asking the system
+// for its pages' state. Returns how many were copied.
+int mem_copy_readable(uint8_t *const *dst, const uint64_t (*src)[2], int n, uint8_t *ok) {
+    int got = 0;
+    plat_mutex_lock(&frz_lock);
+    for (int i = 0; i < n; i++) {
+        uint64_t a = src[i][0], len = src[i][1];
+        ok[i] = 0;
+        if (!len || a >= RT_ADDRESS_LIMIT || a + len > RT_ADDRESS_LIMIT) continue;
+        int quick = 1, can = 1;
+        for (uint64_t r = a >> FRZ_SHIFT; quick && r <= (a + len - 1) >> FRZ_SHIFT; r++)
+            quick = !__atomic_load_n(&lzr[r], __ATOMIC_RELAXED) && !__atomic_load_n(&prb[r], __ATOMIC_RELAXED);
+        for (uint64_t x = a, e; !quick && can && x < a + len; x = e) {
+            int st = plat_mem_state(x, a + len, &e);
+            can = (st == PLAT_PROT_RW || st == PLAT_PROT_READ) && e > x;
+        }
+        if (!can) continue;
+        memcpy(dst[i], (const void *)(uintptr_t)a, len);
+        ok[i] = 1, got++;
+    }
+    plat_mutex_unlock(&frz_lock);
+    return got;
+}
+
 // Releases what is armed in [a, a + n): before the buffers a fetch would read go away.
 void mem_lazy_release(uint64_t a, uint64_t n) {
     if (!__atomic_load_n(&lz_on, __ATOMIC_RELAXED) || !n) return;

@@ -68,6 +68,7 @@ typedef struct PoolRec {
     uint8_t pm_cur, pm_prev;           // replay: the places in their frame (vk_sub_in_frame, 7 the rest) of the submissions
                                        // that synced it, in frame pm_frame and in the one before (NX2NAVI_PRESNAP_PLACE)
     uint32_t wb_sub;                   // replay: the last submission that wrote mirror bytes back to guest memory
+    uint64_t wb_fence;                 // replay: that submission's fence (mirror_capture waits for no write-back)
     uint32_t retry_sub;                // replay: a mirror refused for the VRAM budget or a failed allocation is asked
                                        // again from here, 0 never
     uint8_t refused_why;               // replay: the MR_* reason of its refusal, for the counts when it is asked again
@@ -2004,6 +2005,7 @@ typedef struct {
     uint64_t snap_bytes, merge_bytes, merge_dispatches, snap_allocs;   // write-back merge
     uint64_t page_bytes, flush_n, flush_bytes, flush_calls, flush_sum;   // what mirror_sync queues, by source
     uint64_t flush_skipped;   // flush ranges not copied: the write watch covers them
+    uint64_t cap_bytes, cap_ranges, cap_left, cap_t;   // mirror_capture: copied by the CPU, left to the GPU copy, its time
 } MirrorAcc;
 static MirrorAcc mrep;                 // replay: this submission
 static MirrorAcc macc;                 // mirror_stat_lock: since the last summary
@@ -2737,7 +2739,8 @@ static int chunk_new(uint64_t size, int host) {
     plat_mutex_unlock(&snap_pool_lock);
     if (best < 0) {
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = want,
-                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT,   // the source of mirror_capture's copies
                                  .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
         VmaAllocationCreateInfo ai = {.usage = host ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
                                       .flags = host == CHUNK_MARKS ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
@@ -3336,10 +3339,109 @@ void vk_mem_mirror_begin(void) {
 
 int vk_mem_mirror_pending(void) { return npend || snl_copied < nsnl; }
 
+// NX2NAVI_MIRROR_CAPTURE_KB (default 0, off): the pages the CPU wrote since a VRAM mirror's last sync are copied out of
+// guest memory by the CPU when the part that needs them is handed to the queue, up to this many KiB a part, into a
+// host buffer the submission owns (a chunk of the snapshot pool, given back at its fence); the prologue copies them
+// from there into the mirror. Without it the prologue copies them from guest memory when the GPU runs it, a frame or
+// more after the game's submit when the GPU is behind: the GPU then reads whatever the game wrote there meanwhile,
+// values meant for a later frame. A pool stays with the GPU-time copy while a write-back of its mirror into guest
+// memory is still on the GPU (the CPU would read guest bytes that write-back has not reached yet and copy them over
+// the mirror's newer ones), and when its device address table writes reach guest memory as well (a twin: what they
+// write is not recorded); so does a range with a page that cannot be read without a fault (mem_copy_readable: a
+// lazily armed range). The whole-pool copy of a mirror's first use is larger than the limit and stays with the GPU.
+static uint64_t capture_cap(void) {
+    static int64_t cap = -1;
+    if (cap < 0) {
+        int kb = cfg_int("NX2NAVI_MIRROR_CAPTURE_KB");
+        cap = kb > 0 ? (int64_t)kb << 10 : 0;
+        if (cap)
+            rt_log("mem: mirror pages the CPU wrote are copied out of guest memory when their part is handed over, up to "
+                   "%d KiB a part (NX2NAVI_MIRROR_CAPTURE_KB)", kb);
+    }
+    return (uint64_t)cap;
+}
+
+static MRange *capm;   // replay: mirror_capture's merged ranges
+static uint64_t *caps; // replay: the chunk offset of each, UINT64_MAX for one left to the GPU-time copy
+static uint8_t **capd, *capok;   // replay: mem_copy_readable's destinations and results
+static uint64_t (*capsrc)[2];    // replay: and its sources
+static int ccapm, ccaps, ccapd, ccapsrc, ccapok;
+
+// Prologue, before copy_ranges: takes the ranges of pend the CPU copies (capture_cap) out of it and records their
+// copies from the chunk into the mirrors; what is left in pend goes the GPU-time way.
+static void mirror_capture(VkCommandBuffer cb) {
+    uint64_t cap = capture_cap();
+    if (!cap || shadow_on || !npend) return;
+    uint64_t t0 = qpc(), done = vk_sync_fence_done(), total = 0;
+    qsort(pend, (size_t)npend, sizeof *pend, range_cmp);
+    int n = 0;
+    for (int i = 0; i < npend; i++) {   // merged as copy_ranges merges them
+        PoolRec *r = pend[i].r;
+        uint64_t lim = r->import_hi - r->import_lo, lo = pend[i].off, hi = pend[i].off + pend[i].size;
+        if (hi > lim) hi = lim;
+        if (lo >= hi) continue;
+        if (n && capm[n - 1].r == r && lo <= capm[n - 1].off + capm[n - 1].size) {
+            if (hi > capm[n - 1].off + capm[n - 1].size) capm[n - 1].size = hi - capm[n - 1].off;
+            continue;
+        }
+        if (n == ccapm) grow((void **)&capm, &ccapm, sizeof *capm);
+        capm[n++] = (MRange){r, lo, hi - lo};
+    }
+    while (ccaps < ccapm) grow((void **)&caps, &ccaps, sizeof *caps);
+    for (int i = 0; i < n; i++) {
+        const PoolRec *r = capm[i].r;
+        uint64_t sz = (capm[i].size + 15) & ~15ull;
+        caps[i] = UINT64_MAX;
+        if (r->twin || r->wb_fence > done || total + sz > cap) continue;
+        caps[i] = total;
+        total += sz;
+    }
+    int k = total ? chunk_new(total, CHUNK_LIST) : -1;
+    uint8_t *map = NULL;
+    if (k >= 0) {
+        chunks[k].used = UINT64_MAX;   // not a snapshot chunk
+        VmaAllocationInfo info;
+        vmaGetAllocationInfo(vk_ctx()->vma, chunks[k].alloc, &info);
+        map = info.pMappedData;
+    }
+    // the copies out of guest memory, all under one hold of memory.c's freeze lock
+    while (ccapd < ccapm) grow((void **)&capd, &ccapd, sizeof *capd);
+    while (ccapsrc < ccapm) grow((void **)&capsrc, &ccapsrc, sizeof *capsrc);
+    while (ccapok < ccapm) grow((void **)&capok, &ccapok, sizeof *capok);
+    int nc = 0;
+    for (int i = 0; map && i < n; i++)
+        if (caps[i] != UINT64_MAX) {
+            capd[nc] = map + caps[i];
+            capsrc[nc][0] = capm[i].r->import_lo + capm[i].off, capsrc[nc][1] = capm[i].size;
+            nc++;
+        }
+    if (nc) mem_copy_readable(capd, (const uint64_t (*)[2])capsrc, nc, capok);
+    npend = 0;
+    for (int i = 0, c = 0; i < n;) {
+        PoolRec *r = capm[i].r;
+        int nr = 0;
+        for (; i < n && capm[i].r == r; i++) {
+            int got = map && caps[i] != UINT64_MAX && capok[c++];
+            if (got) {
+                if (nr == cregions) grow((void **)&mregions, &cregions, sizeof *mregions);
+                mregions[nr++] = (VkBufferCopy){caps[i], capm[i].off, capm[i].size};
+                mrep.cap_bytes += capm[i].size, mrep.cap_ranges++;
+                continue;
+            }
+            range_add(&pend, &npend, &cpend, r, capm[i].off, capm[i].size);
+            mrep.cap_left += capm[i].size;
+        }
+        if (nr) vkCmdCopyBuffer(cb, chunks[k].buf, r->mbuf, (uint32_t)nr, mregions);
+    }
+    if (map) vmaFlushAllocation(vk_ctx()->vma, chunks[k].alloc, 0, VK_WHOLE_SIZE);
+    mrep.cap_t += qpc() - t0;
+}
+
 void vk_mem_mirror_prologue(VkCommandBuffer cb) {
     if (!npend && snl_copied == nsnl) return;
     mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
              VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    mirror_capture(cb);
     copy_ranges(cb, pend, npend, 1, &mrep.upload_bytes, &mrep.upload_copies);
     if (snl_copied < nsnl) {   // the snapshots read what the uploads above wrote
         if (npend) mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
@@ -3468,6 +3570,7 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
         if (!m) {   // no range list: copy them plainly
             for (int i = 0; i < nsnl; i++) range_add(&wbl, &nwbl, &cwbl, snl[i].r, snl[i].off, snl[i].size);
         }
+        for (int i = 0; i < nsnl; i++) snl[i].r->wb_fence = fence;
         rec += m + 1;
         mbarrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                  VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -3484,7 +3587,7 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     if (nwbl) {
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_READ_BIT);
-        for (int i = 0; i < nwbl; i++) wbl[i].r->wb_sub = msub;
+        for (int i = 0; i < nwbl; i++) wbl[i].r->wb_sub = msub, wbl[i].r->wb_fence = fence;
         vk_gpu_gap_note(VK_GAP_WB_COPY, 0);
         mrep.wb_ranges += (uint64_t)nwbl;
         rec += copy_ranges(cb, wbl, nwbl, 0, &mrep.wb_bytes, &mrep.wb_copies) + 2;
@@ -3605,10 +3708,14 @@ static void mirror_log(uint64_t frame) {
            a.presnap_queries / f, a.presnap_bytes / f / M, a.sync_queries / f, a.prologues / f, qpc_ms(a.presnap_t + a.sync_t) / f,
            qpc_ms(a.presnap_t) / f, qpc_ms(a.sync_t) / f, (long long)m_evicted_n, m_evicted_bytes / M, (long long)m_retries,
            (long long)m_untwinned_n, m_untwinned_bytes / M, ver);
+    char capl[160] = "";
+    if (capture_cap())
+        snprintf(capl, sizeof capl, "; copied by the CPU at hand-over %.3f MiB in %.1f ranges, %.3f ms; left to the GPU "
+                 "copy %.3f MiB", a.cap_bytes / f / M, a.cap_ranges / f, qpc_ms(a.cap_t) / f, a.cap_left / f / M);
     rt_log("mem: mirror frame %llu: upload sources per frame, overlaps counted twice: written pages %.3f MiB; flush ranges "
-           "%.2f, %.3f MiB, from %.1f flushes of %.3f MiB; flushed and not copied (write-watched) %.3f MiB",
+           "%.2f, %.3f MiB, from %.1f flushes of %.3f MiB; flushed and not copied (write-watched) %.3f MiB%s",
            (unsigned long long)frame, a.page_bytes / f / M, a.flush_n / f,
-           a.flush_bytes / f / M, a.flush_calls / f, a.flush_sum / f / M, a.flush_skipped / f / M);
+           a.flush_bytes / f / M, a.flush_calls / f, a.flush_sum / f / M, a.flush_skipped / f / M, capl);
 }
 
 // After vram_log: every heap's usage as the driver reports it (VK_EXT_memory_budget) beside VMA's share of it, VMA by
