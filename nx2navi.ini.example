@@ -198,6 +198,9 @@
 # pipe_binaries_max_mb = 1024
 # Build known pipelines ahead of time.
 # pipe_prebuild = 1
+# Count the shared pipeline list that comes with the release (seed-pipeline-keys.bin) as known pipelines, so a new
+# install builds them at the start instead of at their first draw. 0: only the pipelines this install drew.
+# pipe_seed = 1
 # 1: the start waits until every known pipeline is built. Default 0: with the graphics pipeline library the start
 # builds them for at most 20 seconds and the rest in the background while you play.
 # prewarm_full = 0

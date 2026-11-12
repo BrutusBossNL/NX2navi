@@ -9,7 +9,9 @@ are left out of the picture for its whole compile, 0.2 to 1.1 s.
 
 This tool folds the two files of any number of game folders into one list file. tools/prepare_shaders.py reads the
 list beside the shared shader list: the shader variants it names go into the seed, so the preparation translates them,
-and its pipeline records go next to the game as seed-pipeline-keys.bin, which `nx2navi.exe --prepare-shaders` (and
+and its pipeline records go next to the game as seed-pipeline-keys.bin, which every start of the game counts as
+recorded pipelines beside its own (runtime/vk_pipeline.c keys_open_seed), so a new install builds them before play,
+and which `nx2navi.exe --prepare-shaders` (and
 `--prepare-pipelines` on a folder that is prepared already) builds once into the pipeline cache and the graphics
 driver's own.
 

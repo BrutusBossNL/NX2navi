@@ -3762,8 +3762,73 @@ static void keys_flush(void) {
     plat_mutex_unlock(&K.io);
 }
 
-// Reads the key file into K.file and its record hashes into the set. Caller holds P.lock (ensure_init).
+static void keys_open_seed(void);
+
+// Reads the key file into K.file and its record hashes into the set, then adds the shared list's records
+// (keys_open_seed). Caller holds P.lock (ensure_init).
+static void keys_open_own(void);
 static void keys_open(void) {
+    keys_open_own();
+    if (K.path[0]) keys_open_seed();
+}
+
+static int seen_has(uint64_t h) {   // caller holds P.lock
+    if (!K.seen_cap) return 0;
+    for (uint32_t j = (uint32_t)h & (K.seen_cap - 1); K.seen[j]; j = (j + 1) & (K.seen_cap - 1))
+        if (K.seen[j] == h) return 1;
+    return 0;
+}
+
+// The shared pipeline list as recorded pipelines (NX2NAVI_PIPE_SEED, default 1; 0: this install's own records only).
+// seed-pipeline-keys.bin next to the game holds the list's records (tools/prepare_shaders.py writes it). Before, the boot
+// built only what this install drew, so a new install met every pipeline in play: in Hyrule Field one 600-frame
+// stretch of a first visit had 1,769 draws wait 461 ms in all for their pipelines, the longest frame 88 ms. The list's
+// records now follow the install's own in K.file, so the prewarm counts their pairs in the vertex output unions (and the
+// pipelines it builds from them are the ones draws ask for) and builds them as it builds the install's: the boot for at
+// most PREWARM_PIPE_MS, the pool workers the rest. The preparation builds the same list into the caches
+// (seed_pipelines, NX2NAVI_PREPARE_PIPELINES=all), so that boot finds them there. They are not added to the set or the
+// file: pipeline-keys.bin keeps what this install drew, and a pipeline a draw builds that the prewarm did not still goes
+// into it. A list in another record layout is left out, as the preparation leaves it.
+static void keys_open_seed(void) {
+    if (!cfg_bool("NX2NAVI_PIPE_SEED")) return;
+    char path[sizeof K.path];
+    snprintf(path, sizeof path, "%s", K.path);
+    char *slash = strrchr(path, '\\'), *fslash = strrchr(path, '/');
+    if (fslash > slash) slash = fslash;
+    snprintf(slash ? slash + 1 : path, sizeof path - (size_t)(slash ? slash + 1 - path : 0), "seed-pipeline-keys.bin");
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    KeysHeader h;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    size_t n = len > (long)sizeof h ? ((size_t)len - sizeof h) / sizeof(KeyRec) : 0;
+    KeyRec *seed = NULL;
+    int ok = len >= (long)sizeof h && fread(&h, sizeof h, 1, f) == 1 && !memcmp(h.magic, "NX2NPKEY", 8) &&
+             h.version == KEYS_VERSION && h.rec_size == sizeof(KeyRec) && n && (seed = malloc(n * sizeof *seed)) &&
+             fread(seed, sizeof *seed, n, f) == n;
+    fclose(f);
+    if (!ok) {
+        if (n) rt_log("vk_pipeline: %s is a list for another runtime version (its record layout differs); left out", path);
+        free(seed);
+        return;
+    }
+    KeyRec *all = realloc(K.file, (K.file_n + n) * sizeof(KeyRec));
+    if (!all) {
+        free(seed);
+        return;
+    }
+    K.file = (uint8_t *)all;
+    size_t added = 0;
+    for (size_t i = 0; i < n; i++)   // after the install's own: those met first in play keep coming first
+        if (!seen_has(rec_hash(&seed[i]))) all[K.file_n + added++] = seed[i];
+    K.file_n += added;
+    free(seed);
+    rt_log("vk_pipeline: %s: %zu listed pipelines, %zu of them not recorded by this install; built with its own "
+           "(NX2NAVI_PIPE_SEED)", path, n, added);
+}
+
+static void keys_open_own(void) {
     if (!A.on || !P.cache_path[0]) return;
     snprintf(K.path, sizeof K.path, "%s", P.cache_path);
     char *slash = strrchr(K.path, '\\'), *fslash = strrchr(K.path, '/');
@@ -4796,6 +4861,12 @@ static void prewarm_run(void) {
         }
         VkPipeState s = r[i].s;
         s.vs = vs, s.fs = fs, s.ts = ts;
+        // a mesh pipeline of the shared list (keys_open_seed) on a GPU without mesh shaders, which draws them through
+        // the mesh fallback: none to build, as the preparation skips it (seed_pipelines)
+        if (is_mesh(&s) && !vk_ctx()->has_mesh_shader) {
+            dropped++;
+            continue;
+        }
         GKey k;
         gkey_fill(&s, &k);
         if (!is_mesh(&s)) {   // the stage libraries lb_start prebuilds are for vertex pipelines
@@ -6527,18 +6598,17 @@ static void lb_warm_prepared(const char *dir) {
 // tools/prepare_shaders.py writes the list's key records there, in the layout of pipeline-keys.bin, after putting the
 // shader variants they name into the seed. The preparation builds them once, after the seed is translated: each
 // pipeline goes through the pipeline cache and so into pipeline-cache.bin and the driver's own disk cache, and is
-// dropped with the process. Nothing is added to this folder's pipeline-keys.bin: the boot keeps building only what
-// this install drew, and a listed pipeline costs no start-up time or video memory until a draw meets it. That draw
-// then finds its pipeline in the caches: a few milliseconds for a mesh pipeline, which has no stage libraries and
-// otherwise leaves its draws out of the picture for its whole compile (0.2 to 1.1 s each on a first visit of a forest,
-// 18 of them).
-// NX2NAVI_PREPARE_PIPELINES: mesh (default) builds the list's mesh pipelines only; all, every record; 0, none. A
-// vertex pipeline is linked from its prepared stage libraries in 2 to 6 ms when a draw misses it, and its module
-// depends on the vertex output union of the pairs this install has recorded (vs_outs), so one built here is not
-// certain to be the one a draw asks for. Without the graphics pipeline library (vk_caps_gpl: AMD's Windows driver for
-// RDNA 2 and older) neither holds: a vertex pipeline a draw misses is compiled whole while that draw is left out, and
-// its vertex outputs come from its own pair (no independent layouts), so a listed one is the one the draw asks for.
-// There mesh builds every record too.
+// dropped with the process. Nothing is added to this folder's pipeline-keys.bin; every boot then counts the list as
+// recorded pipelines beside the install's own (keys_open_seed) and builds them before play, from those caches.
+// NX2NAVI_PREPARE_PIPELINES: all (default) builds every record; mesh, the list's mesh pipelines only (and every record
+// without the graphics pipeline library); 0, none. A vertex pipeline's module depends on the vertex output union of
+// the pairs known (vs_outs): here the list's, as at the first boot of a new install, which reads the list and none of
+// its own yet, so a vertex pipeline built here is the one that boot asks for. An install that has drawn more pairs
+// since may need some of them again with wider outputs; the boot builds those. Without the graphics pipeline library
+// (vk_caps_gpl: AMD's Windows driver for RDNA 2 and older) a vertex pipeline's outputs come from its own pair (no
+// independent layouts), so a listed one always is the one a draw asks for. A mesh pipeline, which has no stage
+// libraries, otherwise leaves its draws out of the picture for its whole compile (0.2 to 1.1 s each on a first visit
+// of a forest, 18 of them).
 // A driver whose compiler crashes on one of these would crash at every preparation: seed-pipelines-running.txt marks
 // the step, and a run that finds the marker of a run that died skips the step for good on this folder (the pipelines
 // are then built at their first draw, as without a list) until the marker is deleted.
