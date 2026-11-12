@@ -973,6 +973,39 @@ static int test_textures(pool_t *tpool, pool_t *phys) {
     vk_texture_stats(NULL, NULL, &re1);
 #ifdef _WIN32   // elsewhere an import's pinning can mark pages written again without a CPU write: the count is not exact
     GCHECK(re1 == re0 + 1, "storage rewritten: %llu re-uploads (want 1)", (unsigned long long)(re1 - re0));
+    // The same bytes written again, so that every page of the storage shows a write. The texture is over 64 KiB: with
+    // NX2NAVI_TEX_SAME_BIG it is compared by content and left as it is, without the switch it is uploaded again. Other
+    // bytes upload either way, and the image holds them. After two comparisons in a row that found other bytes its
+    // uploads take no hash any more, so the same bytes written again then upload with the switch too.
+    {
+        int big = rt_knob("TEX_SAME_BIG", "0") == 1;
+        volatile uint8_t *sm = (volatile uint8_t *)t.mem;
+        uint64_t re2, re3, re4, re5;
+        GCHECK(t.L.size > (64u << 10), "the RGBA8 texture's storage is %llu bytes, not over 64 KiB", (unsigned long long)t.L.size);
+        for (uint64_t o = 0; o < t.L.size; o += 0x1000) sm[o] = sm[o];
+        if (read_back(&t, 0, lin, 1, "RGBA8 written again with its own bytes")) return 1;
+        vk_texture_stats(NULL, NULL, &re2);
+        GCHECK(re2 == re1 + (big ? 0 : 1), "the same bytes written again: %llu re-uploads (want %d)",
+               (unsigned long long)(re2 - re1), big ? 0 : 1);
+        if (fill_storage(&t, lin)) return 1;
+        for (unsigned lv = 0; lv < 3; lv++)
+            if (read_back(&t, lv, lin, 1, "RGBA8 rewritten after the comparison")) return 1;
+        vk_texture_stats(NULL, NULL, &re3);
+        GCHECK(re3 == re2 + 1, "other bytes after the comparison: %llu re-uploads (want 1)", (unsigned long long)(re3 - re2));
+        if (fill_storage(&t, lin)) return 1;
+        if (read_back(&t, 0, lin, 1, "RGBA8 rewritten a second time in a row")) return 1;
+        vk_texture_stats(NULL, NULL, &re4);
+        GCHECK(re4 == re3 + 1, "other bytes a second time: %llu re-uploads (want 1)", (unsigned long long)(re4 - re3));
+        for (uint64_t o = 0; o < t.L.size; o += 0x1000) sm[o] = sm[o];
+        if (read_back(&t, 2, lin, 1, "RGBA8 written again with its own bytes after two rewrites")) return 1;
+        vk_texture_stats(NULL, NULL, &re5);
+        GCHECK(re5 == re4 + 1, "the same bytes after two rewrites in a row: %llu re-uploads (want 1: no hash is taken any "
+               "more)", (unsigned long long)(re5 - re4));
+        printf("probe-vkmem: a texture over 64 KiB written again with its own bytes: %s (NX2NAVI_TEX_SAME_BIG=%d); other "
+               "bytes upload, and after two rewrites in a row the same bytes do too\n",
+               big ? "left as it is" : "uploaded again", big);
+        g_gpu_checks += 5;
+    }
 #endif
     if (read_back(&t, 1, lin, 0, "RGBA8 ReadTexels from storage")) return 1;
 

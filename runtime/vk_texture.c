@@ -77,8 +77,9 @@ typedef struct Tex {
     uint8_t listed;               // in owned[]
     uint8_t *snap;                // a texture that fills no page: its storage bytes when the GPU write was recorded
     uint32_t wt_n;                // WriteTexels into the storage since the last upload
-    uint64_t chash;               // content_hash of the storage at its last upload (small textures, CHASH_MAX)
+    uint64_t chash;               // content_hash of the storage at its last upload (chash_wanted)
     uint8_t chash_ok;             // chash holds it
+    uint8_t chash_miss;           // over CHASH_MAX: comparisons in a row that found other bytes (CHASH_MISSES)
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
     ImgKey ik;                    // the image's creation parameters
     uint8_t reusable;             // its image may go to a new texture once it is released (own memory, GPU-only content)
@@ -152,6 +153,9 @@ static uint64_t n_uploads, n_reuploads;
 // Re-uploads since the last perf line (tex_lock): all, and those of textures a WriteTexels wrote since their last upload.
 static uint64_t ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
 static uint64_t ru_same_n, ru_same_bytes;   // re-uploads skipped: the pages were written, the texture's bytes were not
+// The same for textures over CHASH_MAX (NX2NAVI_TEX_SAME_BIG), since the last pool log line: comparisons that found the
+// bytes unchanged and their bytes, comparisons that found others, and uploads that took a hash with their bytes.
+static uint64_t big_same_n, big_same_bytes, big_diff_n, big_hash_n, big_hash_bytes;
 // NX2NAVI_TEX_ALIAS (default on; =0: a new image over live storage starts empty): a new descriptor over the storage of a
 // live image that the GPU wrote gets that image's content (alias_copy). Counts since the last log line.
 static int tex_alias = -1;
@@ -3043,10 +3047,47 @@ static void astc_check(const Tex *e, const uint8_t *raw, const VkAstcRegion *ar,
 // with data the CPU writes, or written with the same bytes), about 420 re-uploads a frame of 1.5 KiB each, and one
 // costs a staging buffer, a copy and a barrier, several microseconds, where hashing 1.5 KiB takes a fraction of one.
 // A CPU write during the hash sets the pages' write bits again, so the next check sees it.
-enum { CHASH_MAX = 64 << 10 };
+//
+// NX2NAVI_TEX_SAME_BIG=1 (default 0; ab): textures up to CHASH_BIG_MAX keep the hash too. While the player runs through
+// a town the game moves about 32 textures to new storage every four or five frames, back to back in one block, and a
+// frame after their first upload every page of the block shows a write again. Of the ones the hash covers, 0 to 4 in a
+// hundred are uploaded again (128x128, 171x171, 256x256 BC1: 9 of 440 in one recording of 600 frames); of the others,
+// whatever their size and format, 75 to 94 in a hundred (256x256 BC3, 341x341 BC1, everything from 512x512 up): 3,034
+// uploads in those 600 frames beside 4,233 first ones, their ASTC ones decoded and encoded on the GPU a second time.
+// The frames of those second uploads take 0.9 to 2.5 ms longer than the frames without uploads and the frames after
+// them wait 0.3 to 1.3 ms longer for the GPU (six recordings of one player, RTX 5090, 2026-11-12).
+// What the hash costs is why the switch is off: the bytes are read once more at the first upload and once at the
+// comparison, 15 to 18 us each for 300 KiB (17 to 20 GB/s, below), together about what the second upload takes on
+// the submitting thread (27 us for 300 KiB). So the gain is the GPU's work and whatever else a second upload costs a
+// frame, and that has not been measured in play. A texture the CPU really rewrites would pay the hash for nothing each
+// time: after CHASH_MISSES comparisons in a row that found other bytes its uploads take no hash any more. An area load
+// takes none either (vk_exec_pool_loading): it uploads gigabytes in a few frames.
+// The pool log's buckets line counts the comparisons and the hashed bytes.
+enum { CHASH_MAX = 64 << 10, CHASH_BIG_MAX = 8 << 20, CHASH_MISSES = 2 };
 static uint64_t content_hash(const void *p, uint64_t n) {
     const uint8_t *b = p;
     uint64_t h = 0x9e3779b97f4a7c15ull ^ n, i = 0;
+    // Eight chains side by side over 64 bytes a step, folded into one: a chain's multiply waits for the one before it,
+    // so the chains, which wait for nothing of each other, read eight times what one reads in the same time. A step is
+    // a bijection of its chain for the word it takes and of the word for the chain, as the single chain's is, and so
+    // is each fold. Measured on textures read from memory (Ryzen 7 9850X3D, clang -O2): one chain 7 GB/s, four 10,
+    // eight 17 to 20, sixteen no more; a copy of the same bytes runs at 70.
+    if (n >= 512) {
+        uint64_t c[8];
+        for (int k = 0; k < 8; k++) c[k] = h ^ (0xc2b2ae3d27d4eb4full * (uint64_t)(k + 1));
+        for (; i + 64 <= n; i += 64) {
+            uint64_t w[8];
+            memcpy(w, b + i, 64);
+            for (int k = 0; k < 8; k++) {
+                c[k] = (c[k] ^ w[k]) * 0xbf58476d1ce4e5b9ull;
+                c[k] ^= c[k] >> 29;
+            }
+        }
+        for (int k = 0; k < 8; k++) {
+            h = (h ^ c[k]) * 0x94d049bb133111ebull;
+            h ^= h >> 29;
+        }
+    }
     for (; i + 8 <= n; i += 8) {
         uint64_t w;
         memcpy(&w, b + i, 8);
@@ -3189,6 +3230,16 @@ static int astc_copy_opaque(const Tex *e, uint8_t *dst, const uint8_t *src, uint
     return ok;
 }
 
+// Whether an upload of e takes the hash of its storage: always up to CHASH_MAX; above it, up to CHASH_BIG_MAX, with
+// NX2NAVI_TEX_SAME_BIG, outside an area load, and while the comparisons have not found other bytes CHASH_MISSES times
+// in a row ("NX2NAVI_TEX_SAME_BIG" above content_hash).
+static int chash_wanted(const Tex *e) {
+    static int mode = -1;
+    if (e->t.L.size <= CHASH_MAX) return 1;
+    if (mode < 0) mode = rt_knob("TEX_SAME_BIG", "0");
+    return RT_KNOB_ON(mode) && e->t.L.size <= CHASH_BIG_MAX && e->chash_miss < CHASH_MISSES && !vk_exec_pool_loading();
+}
+
 static void upload(Tex *e) {
     static volatile int32_t n_bad, n_undecoded, n_split;
     int no_mem = 0;   // a part's ASTC decode had no memory: the texture is uploaded again later
@@ -3205,12 +3256,13 @@ static void upload(Tex *e) {
         e->uploaded = 1;
         return;
     }
-    e->chash_ok = e->t.L.size <= CHASH_MAX;   // the hash of what this upload copies (make_fresh_snap compares it)
+    e->chash_ok = (uint8_t)chash_wanted(e);   // the hash of what this upload copies (make_fresh_snap compares it)
     if (e->chash_ok) {
         // read with the storage held mapped, as the copies below: the game unmaps a texture's memory on its own thread
         if (mem_read_hold(e->pub.addr, e->t.L.size)) {
             e->chash = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
             mem_read_release();
+            if (e->t.L.size > CHASH_MAX) big_hash_n++, big_hash_bytes += e->t.L.size;
         } else {
             e->chash_ok = 0;
         }
@@ -3481,15 +3533,20 @@ static int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
 
 // The pages of an uploaded texture show a write (or are not tracked): whether its own bytes are still those it was
 // uploaded with (upload, content_hash). WriteTexels since the upload always counts as a change.
-static int same_content(const Tex *e) {
+static int same_content(Tex *e) {
     static int on = -1;   // NX2NAVI_TEX_SAME=0: every write to the pages uploads again (diagnosis)
     if (on < 0) { const char *v = cfg_get("NX2NAVI_TEX_SAME"); on = !(v && !strcmp(v, "0")); }
-    if (!on || !e->chash_ok || e->wt_n || e->t.L.size > CHASH_MAX) return 0;
+    if (!on || !e->chash_ok || e->wt_n) return 0;   // chash_ok: the upload took the hash (chash_wanted)
     if (!mem_read_hold(e->pub.addr, e->t.L.size)) return 0;   // unmapped since: not the same; the upload deals with it
     uint64_t h = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
     mem_read_release();
-    if (h != e->chash) return 0;
+    int big = e->t.L.size > CHASH_MAX;
+    if (h != e->chash) {
+        if (big) big_diff_n++, e->chash_miss += e->chash_miss < 255;
+        return 0;
+    }
     ru_same_n++, ru_same_bytes += e->t.L.size;
+    if (big) big_same_n++, big_same_bytes += e->t.L.size, e->chash_miss = 0;
     return 1;
 }
 
@@ -4397,6 +4454,13 @@ void vk_texture_bucket_stats(char *out, size_t n) {
                  (unsigned long long)n_pool_miss[0], (unsigned long long)n_pool_miss[1],
                  (unsigned long long)n_pool_miss[2], (unsigned long long)n_pool_miss[3],
                  (unsigned long long)n_pool_miss[4], (unsigned long long)n_presnap_q, (unsigned long long)n_pool_rel);
+    used = strlen(out);
+    if (used < n && big_hash_n + big_same_n + big_diff_n)   // NX2NAVI_TEX_SAME_BIG
+        snprintf(out + used, n - used, "; textures over 64 KiB: %llu uploads hashed (%.1f MiB), after a write to their "
+                 "pages %llu left as they were (%.1f MiB), %llu uploaded again",
+                 (unsigned long long)big_hash_n, big_hash_bytes / 1048576.0, (unsigned long long)big_same_n,
+                 big_same_bytes / 1048576.0, (unsigned long long)big_diff_n);
+    big_hash_n = big_hash_bytes = big_same_n = big_same_bytes = big_diff_n = 0;
     used = strlen(out);
     if (used < n)
         snprintf(out + used, n - used, "; %d slot groups holding %llu slots", ngrp_live, (unsigned long long)n_grouped);
