@@ -1713,41 +1713,6 @@ int vk_texture_slot_retry_locked(int id) {
 
 static void retire_remove(Tex *e);
 
-static void destroy_tex(Tex *e) {
-    if (e->retiring) retire_remove(e);
-    pool_unlist(e);
-    pool_forget(e);
-    own_remove(e);
-    gwin_remove(e);
-    n_site[0]++;
-    tex_gen_bump(e->key.addr);
-    nvn_hm_del(&by_key, &e->key);
-    Tex *head = nvn_hm_get(&by_addr, &e->key.addr);
-    if (head == e) {
-        if (e->next_at) nvn_hm_put(&by_addr, &e->key.addr, e->next_at);
-        else nvn_hm_del(&by_addr, &e->key.addr);
-    } else {
-        for (Tex *p = head; p; p = p->next_at)
-            if (p->next_at == e) { p->next_at = e->next_at; break; }
-    }
-    if (e->released) nreleased--, rel_unlink(e);
-    if (e->pub.image) vk_exec_image_gone(e->pub.image);   // none when another texture took it (create_tex, reuse)
-    vk_defer_image(e->pub.image, e->alloc);
-    if (e->flat3d) {   // its 3D copy goes the same way
-        vk_exec_image_gone(e->flat3d->image);
-        vk_defer_image(e->flat3d->image, e->flat3d_alloc);
-        e->flat3d->gone = 1;
-        vk_defer_free(e->flat3d);
-    }
-    free(e->snap);
-    // The record goes once the GPU is past the submission being recorded, as its image: the replay keeps &e->pub as a
-    // render target for the rest of a command buffer (vk_exec.c resolve_target) and DLSS for the frame, and this runs on
-    // whichever thread released the texture. Freed here, a pass that began again read the freed record, cached a view of
-    // the dead image (vk_exec_target_view), and a later image given the same handle drew through it into freed memory.
-    e->pub.gone = 1;
-    vk_defer_free(e);
-}
-
 // ---- a flat texture sampled as a 3D one
 // Maxwell samples a texture by its own descriptor, whatever the shader's instruction says: a 2D texture under a 3D
 // sample gives its texel at (u, v), and the third coordinate does nothing. Vulkan has no 3D view of a 2D image, so
@@ -1821,7 +1786,6 @@ const VkTexImage *vk_texture_flat3d_locked(const VkTexImage *img, uint32_t layer
     if (cb) vk_upload_end();
     return e->flat3d;
 }
-
 // ---- origins (NX2NAVI_TRACE=perf; a run without it tests the flag and counts the drops, nothing more)
 // A texture drawn without its content leaves nothing in the log: no call fails and the image exists. What can still be
 // told afterwards is where the entry came from, so each entry keeps how it was made and how its content started
@@ -2042,9 +2006,55 @@ static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
     return k < (int)n ? k : (int)n - 1;
 }
 
+// NX2NAVI_LOG_TEX_NEW=<frame> (diagnostics): from that presented frame on, the first LOG_NEW_MAX textures made are
+// logged with what was at their address and, when the same key was destroyed before, how many frames ago and from
+// where (destroy_tex's caller, an address the map file names: "destroy_tex at" gives the reference). For the steady
+// creations a still scene shows (about seven a frame in Kokiri Forest), each with its image, memory and upload.
+#define LOG_NEW_MAX 400
+#define GONE_N 4096
+static struct { uint64_t h, frame; void *ra; } gone[GONE_N];
+static uint32_t gone_n;
+static long long log_new_at = -2;
+static int log_new_n;
+
+static void log_new(const Tex *e, const TexKey *k) {   // tex_lock held
+    if (log_new_at == -2) {
+        const char *v = cfg_get("NX2NAVI_LOG_TEX_NEW");
+        log_new_at = v && *v ? atoll(v) : -1;
     }
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (log_new_at < 0 || now < (uint64_t)log_new_at || log_new_n >= LOG_NEW_MAX) return;
+    log_new_n++;
+    int live = 0, rel = 0;
+    for (const Tex *p = nvn_hm_get(&by_addr, &k->addr); p; p = p->next_at)
+        if (p != e) p->released ? rel++ : live++;
+    uint64_t h = key_hash(k);
+    char was[160] = "never destroyed before";
+    for (uint32_t i = 0; i < GONE_N && i < gone_n; i++) {
+        uint32_t j = (gone_n - 1 - i) & (GONE_N - 1);
+        if (gone[j].h == h) {
+            snprintf(was, sizeof was, "the same key destroyed %llu frames ago from %p (destroy_tex at %p)",
+                     (unsigned long long)(now - gone[j].frame), gone[j].ra, (void *)destroy_tex);
+            break;
+        }
+    }
+    rt_log("vk: new texture frame %llu: %#llx %ux%ux%u nvn fmt %#x target %d levels %u%s%s; at its address %d live, %d "
+           "released; %s", (unsigned long long)now, (unsigned long long)k->addr, e->pub.width, e->pub.height,
+           e->pub.depth, k->d.format, k->d.target, e->pub.levels, e->pub.mirrored ? ", mirrored" : "",
+           e->alloc ? ", own memory" : "", live, rel, was);
 }
 
+__attribute__((noinline)) static void destroy_tex(Tex *e) {
+    if (log_new_at >= 0) {   // NX2NAVI_LOG_TEX_NEW: who destroyed which key, for the log of new textures
+        uint32_t j = gone_n++ & (GONE_N - 1);
+        gone[j].h = key_hash(&e->key), gone[j].frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        gone[j].ra = __builtin_return_address(0);
+    }
+    if (e->retiring) retire_remove(e);
+    pool_unlist(e);
+    pool_forget(e);
+    own_remove(e);
+    gwin_remove(e);
     rt_remove(e);
     n_site[0]++;
     tex_gen_bump(e->key.addr);
@@ -2056,9 +2066,16 @@ static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
     } else {
         for (Tex *p = head; p; p = p->next_at)
             if (p->next_at == e) { p->next_at = e->next_at; break; }
+    }
     if (e->released) nreleased--, rel_unlink(e);
     if (e->pub.image) vk_exec_image_gone(e->pub.image);   // none when another texture took it (create_tex, reuse)
     vk_defer_image(e->pub.image, e->alloc);
+    if (e->flat3d) {   // its 3D copy goes the same way
+        vk_exec_image_gone(e->flat3d->image);
+        vk_defer_image(e->flat3d->image, e->flat3d_alloc);
+        e->flat3d->gone = 1;
+        vk_defer_free(e->flat3d);
+    }
     free(e->snap);
     // The record goes once the GPU is past the submission being recorded, as its image: the replay keeps &e->pub as a
     // render target for the rest of a command buffer (vk_exec.c resolve_target) and DLSS for the frame, and this runs on
@@ -2132,7 +2149,6 @@ static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
 #define RELEASED_HARD 16384
 #define SWEEP_LOOK 64
 #define SWEEP_UNSAMPLED PRESENTS(120)
-
 static int comes_back_intact(const Tex *e);
 
 static uint64_t stale_after(const Tex *e);
@@ -3999,6 +4015,7 @@ static Tex *entry_of(const tex_t *t) {
         nvn_hm_put(&by_key, &k, e);
         n_site[1]++;
         tex_gen_bump(k.addr);
+        log_new(e, &k);
         vk_texstat_time(VK_TS_CREATE, c0);
         e->samp_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);   // new: not disused before it is drawn
     }
