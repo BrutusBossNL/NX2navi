@@ -18,6 +18,11 @@
 #include "nvn_api.h"
 #include "vk.h"
 
+// vk_pass_mark_cmd also runs on the recorder thread (vk_rec.c R_PassMark), where vk.h's macro would turn the timestamp
+// into a new packet for the part being recorded: a second producer on the ring, which corrupts it ("vk_rec: unknown
+// packet" with NX2NAVI_PASS_TIMES=1 on NVIDIA, where the recorder is on). The command goes straight into cb.
+#undef vkCmdWriteTimestamp
+
 static PFN_vkCmdWriteBufferMarkerAMD write_marker;
 static VkBuffer buf;
 static VmaAllocation alloc;
