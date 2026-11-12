@@ -161,10 +161,14 @@ of them.
    What this step leaves for play, and the shared pipeline list. The step translates every shader's default variant
    and the shader list's variants and builds each one's stage library or compute pipeline. A whole graphics pipeline
    is built ahead at the start of a game folder that has drawn it before (`pipeline-keys.bin`) or whose release
-   listed it (below); a pipeline met for the first time is linked from its stage libraries in 2 to 6 ms, except a mesh
+   listed it (below); a pipeline met for the first time is linked from its stage libraries in 2 to 8 ms, which its
+   first draw waits for (`pipe_link_draw_ms`, 8 ms from the pipeline's first miss; `runtime/vk_exec_draw.c`
+   `link_budget`), except a mesh
    pipeline, which has no libraries and compiles whole (0.2 to 1.1 s, its draws left out of the picture meanwhile),
    and many of them on a first visit add up to hitches. `tools/pipeline_list.py merge` folds the `pipeline-keys.bin`
-   and `shader-answers.bin` of game folders that were played into a pipeline list; `prepare_shaders.py` reads it from
+   and `shader-answers.bin` of game folders that were played, and lists made before, into a pipeline list, with the
+   compute variants those folders dispatched (no pipeline record names a compute shader, and a variant the shader list
+   lacks is translated on the frame that first dispatches it); `prepare_shaders.py` reads it from
    `tools\data\pipeline_list.bin` (`data\pipeline_list.bin` in a release folder, or `--pipeline-list`), adds the
    shader variants it names to the seed and writes its records next to the game as `seed-pipeline-keys.bin`, and
    `--prepare-shaders` builds every one of them into the pipeline cache and the driver's (`runtime/vk_pipeline.c`

@@ -3829,7 +3829,7 @@ static int pipe_skip_mode(void) {
     return mode;
 }
 
-// NX2NAVI_PIPE_LINK_MS (default 6; 0 = off): how long the draws of one presented frame may wait, in all, for the fast
+// NX2NAVI_PIPE_LINK_MS (default 16; 0 = off): how long the draws of one presented frame may wait, in all, for the fast
 // link of a pipeline that is missing, LINK_DRAW_MS at most each. A draw into a per-frame pass used to be skipped at
 // once and for as long as its pipeline built, also when its stage libraries were in the driver's cache and the link
 // took under a millisecond: geometry seen for the first time (ground, a wall, a character) was missing for a frame or
@@ -3837,6 +3837,13 @@ static int pipe_skip_mode(void) {
 // cold it runs out after a few draws and the rest are skipped as before, so a burst of cold pipelines costs a frame
 // this much and no more. Measured on an RX 7900 XT, first walk through a village with no pipeline recorded: 2,349
 // draws skipped without the budget, with the libraries warm in both runs.
+// NX2NAVI_PIPE_LINK_DRAW_MS (default 8): the wait for one pipeline, counted from its first miss and shared by all its
+// draws (prepare_draw_ex), so a pipeline whose libraries the driver has to compile costs its first frame this much and
+// the frames after it nothing. It was 3 ms for each draw, in every frame, 6 ms a frame: just under what a pipeline
+// takes with its two shader libraries in the driver's cache. On a new install's first visits (RTX 5090, the
+// libraries prepared, 67 pipelines the install's list did not hold) 44 were usable under 4 ms after their miss, 17
+// after 4 to 8 ms and 6 later, and of 87 draws that waited for a fast link 66 were skipped at the end of their 3 ms:
+// each of those frames paid the wait and was then not shown, the previous picture staying for one frame more.
 // NX2NAVI_PIPE_FRAME_WAIT_MS (default 50; 0 to 500): the wait pool of one presented frame. Its full-screen draws and
 // its one-shot draws (NX2NAVI_ONESHOT_BUDGET) wait for their shaders and pipelines from it, each for what the ones
 // before left, and are skipped once it is spent, so the pipelines of one frame hold the replay thread this long in
@@ -4239,9 +4246,16 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             if (linking) t0 = kern_now_ns();
             else w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;
             vk_exec_ahead(ex);
+            // The fast link's wait is one for each pipeline, counted from its first miss (link_budget): what that left
+            // unbuilt is a compile, and its later draws, in this frame and the next ones, wait for nothing.
+            double building = wait_ms && linking ? vk_pipeline_building_ms(&s) : 0;
+            if (wait_ms && linking) {
+                uint32_t left = building >= LINK_DRAW_MS ? 0 : LINK_DRAW_MS - (uint32_t)building;
+                if (wait_ms > left) wait_ms = left;
+            }
             // A mesh pipeline that is known to be compiling gets no fast link, so the few milliseconds a draw waits
             // for one are lost in every frame that meets it until the compile ends, 0.2 to 1.1 s later (MESH_WAIT_MS).
-            if (wait_ms && linking && mesh && !fb && vk_pipeline_building_ms(&s) > MESH_WAIT_MS) wait_ms = 0;
+            if (wait_ms && linking && mesh && !fb && building > MESH_WAIT_MS) wait_ms = 0;
             if (wait_ms) p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
         }
         if (t0 && budget) {

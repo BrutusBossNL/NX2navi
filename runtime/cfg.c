@@ -261,8 +261,8 @@ static const CfgMeta metas[] = {
     {"CACHE_DIE", "1", "0|1|ab", RESTART}, {"ONE_PER_CORE", "0", "0|1|ab", RESTART},   // perf.c cpu_placement
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "any", "strict|any|fullscreen", RESTART},
-    {"PIPE_LINK_MS", "6", "0..100", RESTART},   // vk_exec_draw.c link_budget
-    {"PIPE_LINK_DRAW_MS", "3", "1..50", RESTART},   // vk_exec_draw.c link_draw_ms
+    {"PIPE_LINK_MS", "16", "0..100", RESTART},   // vk_exec_draw.c link_budget
+    {"PIPE_LINK_DRAW_MS", "8", "1..50", RESTART},   // vk_exec_draw.c link_draw_ms
     {"PIPE_FRAME_WAIT_MS", "50", "0..500", RESTART},   // vk_exec_draw.c frame_wait
     {"PIPE_SKIP_STEADY", "1", "0|1", RESTART},  // vk_exec.c steady_on
     {"PREPARE_PIPELINES", "all", "0|mesh|all", RESTART},   // vk_pipeline.c seed_pipelines
