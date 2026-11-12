@@ -358,6 +358,14 @@ frame, uneven frame times one steady step, and game time follows the clock. It c
 sites do: at 144 fps each of 64 water objects gets its ripple steps and the day its seconds, and a step of one frame
 gives what the game computes. No game files.
 
+A change to how the mixer applies volumes (`runtime/audio_mixer.c` `accumulate_ramp`, the voice and splitter paths
+of `audio_mixer_render`) passes `python tests\audio_mixer_check.py`, which builds `audio_mixer.c` with the rest of
+the runtime stubbed and mixes voices of one constant sample, so a mix buffer shows the gain sample by sample: a
+volume stepped from 0 to 1 rises in equal steps across the next 5 ms frame and holds after it, for a voice into a mix,
+a voice into a splitter destination and a submix into one; a voice that starts, was silent in the frame before or was
+moved to another mix, a destination that is new or was moved, and the first frame after the renderer starts take the
+new volume at once; `NX2NAVI_AUDIO_RAMP=0` applies every volume at once. No game files and no audio device.
+
 A change to the mouse camera (`runtime/mouse_direct.c`, the mouse path of `runtime/input.c`, the set `mouse_direct` of
 `recomp/patches-v111.txt` or `patches-v143.txt`) passes `python tests\mouse_direct_check.py --cc <clang> --deps
 <ucrt64>\include`, which builds `mouse_direct.c`, and `input.c` with `--deps`, with the rest of the runtime stubbed and

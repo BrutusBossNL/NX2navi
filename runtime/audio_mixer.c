@@ -5,7 +5,8 @@
 //
 // Per 5 ms frame the render thread (audren.c, renderer lock held) decodes every started voice (PCM8/16/24/32, float,
 // DSP-ADPCM) along the sample path the voice clock consumes, resamples it linearly, runs the voice biquads, scales it
-// into its destination mix, folds the submixes, runs the mix effects and writes the device sink's mix (stereo, or 5.1
+// into its destination mix (a volume the game changed is reached in equal steps across the frame's samples,
+// accumulate_ramp), folds the submixes, runs the mix effects and writes the device sink's mix (stereo, or 5.1
 // with NX2NAVI_AUDIO_CHANNELS, output_channels) into a single-producer single-consumer ring. The SDL audio thread drains
 // that ring without taking any lock: an empty ring
 // plays silence and never blocks the render thread or the guest. NX2NAVI_AUDIO=none (or NX2NAVI_AUDIO_OFF) mixes without a
@@ -41,8 +42,15 @@
 #define SPLITTER_UNUSED 0xffffffffu
 #define dm_guest_write_prepare(p, n) ((void)(p), (void)(n))   // guest memory is plain host memory on Windows
 
-typedef struct { float vol[24]; int32_t dest; uint8_t used; AudrenBiquadFloat biquads[2]; float state[2][2]; } SplitDest;
+typedef struct {
+    float vol[24]; int32_t dest; uint8_t used; AudrenBiquadFloat biquads[2]; float state[2][2];
+    // volume ramps (audio_mixer_render): the volumes it had in the render pass before, the mix it went to and how many
+    // of that mix's buffers; prev_ok 0 when that pass did not use it
+    float prev[24]; int32_t prev_dest, prev_buffers; uint8_t prev_ok;
+} SplitDest;
 typedef struct { int32_t ndest; int32_t *ids; } SplitInfo;
+// volume ramps: a mix in the render pass before: its volume, the splitter it went to, its buffer count, whether in use
+typedef struct { float volume; uint32_t splitter; int32_t buffers; uint8_t ok; } MixPrev;
 typedef struct {
     Reverb3d *reverb; Reverb3dParam param; int pending;
     float *delay, detector[6], compression[6], peak[6], minimum[6]; int position[6], delay_max, channels;
@@ -73,6 +81,10 @@ typedef struct Mixer {
     double level_sum, level_peak; uint64_t level_count, level_frames; int first_sound_logged;
     double input_sum[6];                           // NX2NAVI_TRACE=audio: the device sink's inputs, squared and summed
     int prefill;                                   // render blocks
+    int ramp;                                      // NX2NAVI_AUDIO_RAMP: volumes ramp across a frame (accumulate_ramp)
+    int snap;                                      // the next pass has no pass before it to ramp from (open, start)
+    MixPrev *mix_prev;                             // each mix in the pass before
+    uint64_t ramps, ramp_passes;                   // ramps made; render passes with at least one (audio_mixer_ramp_stats)
     uint64_t trace_pass, trace_seen[1024];         // NX2NAVI_TRACE=audio: render passes; the pass each voice was last mixed in
     uint64_t trace_buf[1024];                      // and the wave buffer address it read in that pass
     uint64_t trace_pair[1024];                     // the last shared-buffer pair logged for each voice (other voice, address)
@@ -571,7 +583,8 @@ void audio_mixer_open(AudioRenderer *r) {
     m->ndest = r->param.splitter_destination_count;
     m->split = calloc((size_t)(m->nsplit ? m->nsplit : 1), sizeof *m->split);
     m->dest = calloc((size_t)(m->ndest ? m->ndest : 1), sizeof *m->dest);
-    if (!m->buf || !m->offset || !m->split || !m->dest) rt_fatal("audio mixer tables");
+    m->mix_prev = calloc((size_t)r->param.submix_count + 1, sizeof *m->mix_prev);
+    if (!m->buf || !m->offset || !m->split || !m->dest || !m->mix_prev) rt_fatal("audio mixer tables");
     m->effect = calloc((size_t)(r->param.effect_count ? r->param.effect_count : 1), sizeof *m->effect);
     m->effect_order = calloc((size_t)(r->param.effect_count ? r->param.effect_count : 1), sizeof *m->effect_order);
     if (!m->effect || !m->effect_order) rt_fatal("audio effect tables");
@@ -590,6 +603,10 @@ void audio_mixer_open(AudioRenderer *r) {
         m->prefill = PREFILL_DEFAULT_MS / 5;
     }
     m->channels = output_channels();
+    m->ramp = cfg_bool("NX2NAVI_AUDIO_RAMP");
+    m->snap = 1;
+    rt_log("audio: NX2NAVI_AUDIO_RAMP=%d: a changed volume %s", m->ramp,
+           m->ramp ? "is reached in equal steps across the frame" : "applies to the whole frame at once");
     r->mixer = m;
     atomic_store(&m->playing, r->state == 0);
     output_open(m, r->param.sample_rate);
@@ -601,6 +618,8 @@ void audio_mixer_set_running(AudioRenderer *r, int running) {
     if (!running) {
         atomic_store_explicit(&m->flush_until, atomic_load_explicit(&m->wr, memory_order_acquire), memory_order_release);
         atomic_fetch_add_explicit(&m->stop_epoch, 1, memory_order_release);
+    } else {
+        m->snap = 1;   // what was mixed before the stop is not the sample before the next pass's first
     }
     atomic_store_explicit(&m->playing, running, memory_order_release);
 }
@@ -627,6 +646,7 @@ void audio_mixer_close(AudioRenderer *r) {
     free(m->effect_order);
     free(m->buf);
     free(m->offset);
+    free(m->mix_prev);
     free(m->split);
     free(m->dest);
     free(m);
@@ -844,6 +864,29 @@ static void accumulate(Mixer *m, int buffer, const float *src, float vol, int fr
     if (vol == 0 || buffer < 0 || buffer >= m->nbuf) return;
     float *d = mixbuf(m, buffer); for (int k = 0; k < frames; k++) d[k] += src[k] * vol;
 }
+// Volume ramps (NX2NAVI_AUDIO_RAMP, default 1). The game sets volumes once per audio update, and a volume applied to a
+// whole frame as one constant makes the level jump at the frame's first sample whenever the game moves it (a fade, a
+// pan, a sound going past the camera): a step in the waveform, heard as a click. The console's renderer goes from the
+// volume of the frame before to the new one across the frame's samples, and so does this: `from` is the gain the same
+// source went into this buffer with in the render pass before, sample k gets from + k (to - from) / frames, and the
+// next pass, which starts at `to`, continues the line. Equal gains take accumulate's constant path, and so does a gain
+// that is not a finite number (NaN also marks "no gain in the pass before").
+static void accumulate_ramp(Mixer *m, int buffer, const float *src, float from, float to, int frames) {
+    if (from == to || !isfinite(from) || !isfinite(to)) { accumulate(m, buffer, src, to, frames); return; }
+    if (buffer < 0 || buffer >= m->nbuf) return;
+    const float step = (to - from) / (float)frames;
+    float *d = mixbuf(m, buffer), gain = from;
+    for (int k = 0; k < frames; k++) { d[k] += src[k] * gain; gain += step; }
+    m->ramps++;
+}
+// A splitter destination ramps when the pass before used it and sent it to the same mix: one that is new or was moved
+// starts at its new volumes.
+static int dest_ramps(const SplitDest *d) { return d->prev_ok && d->prev_dest == d->dest; }
+void audio_mixer_ramp_stats(const AudioRenderer *r, uint64_t *passes, uint64_t *ramps) {
+    const Mixer *m = r->mixer;
+    *passes = m ? m->ramp_passes : 0;
+    *ramps = m ? m->ramps : 0;
+}
 static int mix_valid(AudioRenderer *r, int32_t id) { return id >= 0 && id <= r->param.submix_count && r->mixes[id].in_use; }
 static int mix_depth(AudioRenderer *r, int id) {
     int d = 0;
@@ -1046,6 +1089,10 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
 
     float (*vs)[MAX_FRAME]=m->voice_scratch,*filtered=m->filter_scratch;
     m->trace_pass++;
+    // A pass ramps from the pass before it. The first one after the mixer opened or the renderer started has none.
+    const int ramp = m->ramp && !m->snap;
+    const uint64_t ramps_before = m->ramps;
+    m->snap = 0;
     for (int i = 0; i < r->param.voice_count; i++) {
         ServerVoice *v = &r->voices[i];
         if (!v->in.in_use || v->state != SV_STARTED || !v->in.sample_rate || !v->valid[v->index]) continue;
@@ -1089,21 +1136,50 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
                 }
             }
         }
+        // The voice ramps when the pass before mixed it, with as many channels and into the same mix or splitter. One
+        // that has just started (voice_reset in audren.c; or stopped, paused or out of wave buffers in that pass) and
+        // one the game moved to another destination start at their new volumes.
+        const int vramp = ramp && v->ramp_pass == r->elapsed_frames && v->ramp_channels == (uint32_t)cc &&
+                          v->ramp_mix == v->in.mix_id && v->ramp_splitter == v->in.splitter_id;
+        int routed = 0;
         if (v->in.splitter_id != SPLITTER_UNUSED && v->in.splitter_id < (uint32_t)m->nsplit) {
             const SplitInfo *s = &m->split[v->in.splitter_id];
             for (int c = 0; c < cc; c++) for (int k = c; k < s->ndest; k += cc) {
                 SplitDest *d = &m->dest[s->ids[k]];
                 if (!d->used || !mix_valid(r, d->dest)) continue;
                 const float *source=splitter_filter(d,vs[c],filtered,frames);
-                for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) accumulate(m, m->offset[d->dest] + b, source, d->vol[b] * v->in.volume, frames);
+                // from the destination's volumes and the voice's volume of the pass before, whose product is the gain
+                // that pass mixed with (the destination's are kept once per pass: other voices may feed it too)
+                const int from_prev = vramp && dest_ramps(d);
+                for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) {
+                    const float to = d->vol[b] * v->in.volume;
+                    accumulate_ramp(m, m->offset[d->dest] + b, source, from_prev && b < d->prev_buffers ? d->prev[b] * v->ramp_volume : to, to, frames);
+                }
             }
+            routed = 1;
         } else if (mix_valid(r, v->in.mix_id)) {
+            const int nb = r->mixes[v->in.mix_id].buffer_count < 24 ? r->mixes[v->in.mix_id].buffer_count : 24;
             for (int c = 0; c < cc; c++) {
-                int32_t id = v->in.channel_ids[c]; if (id < 0 || id >= r->param.voice_count * 6) continue;
+                int32_t id = v->in.channel_ids[c];
+                if (id < 0 || id >= r->param.voice_count * 6) {   // nothing goes in: no gain for the next pass to ramp from
+                    for (int b = 0; b < nb; b++) v->ramp_gain[c][b] = NAN;
+                    continue;
+                }
                 const AudrenChannelIn *ch = &r->channels[id];
-                for (int b = 0; b < r->mixes[v->in.mix_id].buffer_count && b < 24; b++) accumulate(m, m->offset[v->in.mix_id] + b, vs[c], ch->mix[b] * v->in.volume, frames);
+                for (int b = 0; b < nb; b++) {
+                    const float to = ch->mix[b] * v->in.volume;
+                    accumulate_ramp(m, m->offset[v->in.mix_id] + b, vs[c], vramp && b < v->ramp_buffers ? v->ramp_gain[c][b] : to, to, frames);
+                    v->ramp_gain[c][b] = to;
+                }
             }
+            v->ramp_buffers = nb;
+            routed = 1;
         }
+        v->ramp_pass = routed ? r->elapsed_frames + 1 : 0;   // audren.c render_thread counts the pass after this render
+        v->ramp_channels = (uint32_t)cc;
+        v->ramp_mix = v->in.mix_id;
+        v->ramp_splitter = v->in.splitter_id;
+        v->ramp_volume = v->in.volume;
     }
     if (rt_trace & RT_TRACE_AUDIO) {
         // Voices mixed in the last pass and not in this one, and why; then voices that read the same wave buffer memory
@@ -1139,17 +1215,38 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
         const AudrenMixIn *x = &r->mixes[order[a]]; int src = m->offset[order[a]];
         if (x->dest_splitter_id != SPLITTER_UNUSED && x->dest_splitter_id < (uint32_t)m->nsplit) {
             const SplitInfo *s = &m->split[x->dest_splitter_id];
+            // a mix into a splitter ramps like a voice into one: from the destination's volumes and the mix's volume
+            // of the pass before, when that pass had the mix with as many buffers on the same splitter
+            const MixPrev *xp = &m->mix_prev[order[a]];
+            const int xramp = ramp && xp->ok && xp->splitter == x->dest_splitter_id && xp->buffers == x->buffer_count;
             for (int c = 0; c < x->buffer_count && c < 24; c++) for (int k = c; k < s->ndest; k += x->buffer_count) {
                 SplitDest *d = &m->dest[s->ids[k]];
                 if (!d->used || !mix_valid(r, d->dest)) continue;
                 const float *source=splitter_filter(d,mixbuf(m,src+c),filtered,frames);
-                for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) accumulate(m, m->offset[d->dest] + b, source, d->vol[b] * x->volume, frames);
+                const int from_prev = xramp && dest_ramps(d);
+                for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) {
+                    const float to = d->vol[b] * x->volume;
+                    accumulate_ramp(m, m->offset[d->dest] + b, source, from_prev && b < d->prev_buffers ? d->prev[b] * xp->volume : to, to, frames);
+                }
             }
         } else if (mix_valid(r, x->dest_mix_id)) {
             for (int c = 0; c < x->buffer_count && c < 24; c++)
                 for (int b = 0; b < r->mixes[x->dest_mix_id].buffer_count && b < 24; b++) accumulate(m, m->offset[x->dest_mix_id] + b, mixbuf(m, src + c), x->mix[c][b] * x->volume, frames);
         }
     }
+    // What every splitter destination and every mix went in with, for the next pass's ramps: kept here, once per pass,
+    // after every voice and mix that feeds a destination has read the values of the pass before.
+    for (int i = 0; i < m->ndest; i++) {
+        SplitDest *d = &m->dest[i];
+        d->prev_ok = d->used && mix_valid(r, d->dest);
+        if (!d->prev_ok) continue;
+        memcpy(d->prev, d->vol, sizeof d->prev);
+        d->prev_dest = d->dest;
+        d->prev_buffers = r->mixes[d->dest].buffer_count;
+    }
+    for (int i = 1; i < mc; i++)
+        m->mix_prev[i] = (MixPrev){r->mixes[i].volume, r->mixes[i].dest_splitter_id, r->mixes[i].buffer_count, r->mixes[i].in_use != 0};
+    if (m->ramps != ramps_before) m->ramp_passes++;
     if (r->mixes[0].in_use) mix_effects(r, 0);
     /* device sink */
     const AudrenSinkIn *sink = NULL;int circular=0;

@@ -713,6 +713,10 @@
 # Host priority of the game's audio thread: 0 leaves it alone, 1 raises it to the highest while its audio update is
 # read (the audio render thread waits for that), 2 also keeps it above normal. Takes effect at the next start.
 # audio_game_prio = 0
+# When the game changes a sound's volume, go from the old volume to the new one across the 5 ms of sound that follow,
+# as the console does (1, the default). 0 applies the new volume at once, which clicks when a volume moves quickly (a
+# fade, a sound passing by). Takes effect at the next start.
+# audio_ramp = 1
 # Volume in percent (0 to 100), on top of the game's own. Changes while the game runs take effect at once.
 # volume = 100
 # Speakers: stereo, 5.1 or auto (5.1 when the Windows speaker setup has six or more channels, stereo otherwise). The

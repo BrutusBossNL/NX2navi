@@ -47,6 +47,7 @@ typedef struct AudrenStats {
         upd_hold_max_ns;
     // voices (under the lock)
     uint64_t dry, late[3], late_max;   // next buffer late by 1-2 passes, 3-8, 9-AS_LATE_PASSES
+    uint64_t ramp_passes, ramps;       // the mixer's volume ramp counts at the window's start (audio_mixer_ramp_stats)
     int events;
     uint64_t voices_ns;                // the game's update (under the lock): the last voice census line
     int voices_most;                   // the most voices in use a census found
@@ -132,6 +133,7 @@ static void voice_reset(ServerVoice *v) {
     memset(&v->adpcm, 0, sizeof v->adpcm);
     memset(v->biquad_state, 0, sizeof v->biquad_state);
     v->dry_pass = 0;
+    v->ramp_pass = 0;   // a new voice starts at its volumes: no ramp from what the slot's last voice was mixed with
 }
 
 static void update_voice(AudioRenderer *r, const AudrenVoiceIn *in) {
@@ -471,7 +473,9 @@ static void stats_report(AudioRenderer *r, uint64_t now, uint64_t lock_ns, uint6
     int dev = audio_mixer_out_stats(r, &o);
     char event[320] = "";
     int window = 0;
+    uint64_t ramp_passes, ramps;
     plat_mutex_lock(&r->lock);
+    audio_mixer_ramp_stats(r, &ramp_passes, &ramps);
     if (dev && o.pull_gap_max_ns > st->pull_gap_max_ns) st->pull_gap_max_ns = o.pull_gap_max_ns;
     if (dev && o.underruns > st->seen_underruns) {
         if (st->events < AS_EVENTS) {
@@ -490,6 +494,7 @@ static void stats_report(AudioRenderer *r, uint64_t now, uint64_t lock_ns, uint6
         st->window_ns = now;
         st->out_underruns = o.underruns, st->out_missing = o.missing_frames, st->out_skipped = o.skipped_frames;
         st->out_overruns = o.overruns;
+        st->ramp_passes = ramp_passes, st->ramps = ramps;
     }
     if (now - st->window_ns >= AS_WINDOW_NS) {
         snap = *st;
@@ -500,6 +505,7 @@ static void stats_report(AudioRenderer *r, uint64_t now, uint64_t lock_ns, uint6
         st->queue_min = UINT64_MAX;
         st->out_underruns = o.underruns, st->out_missing = o.missing_frames, st->out_skipped = o.skipped_frames;
         st->out_overruns = o.overruns;
+        st->ramp_passes = ramp_passes, st->ramps = ramps;
         st->upd_n = 0;   // upd_last_ns and upd_pass_last stay: the next gap is measured from the last update
         st->upd_gap_max_ns = st->upd_gap_frame = st->upd_gaps_over = st->upd_passes_max = st->upd_hold_max_ns = 0;
         st->dry = st->late[0] = st->late[1] = st->late[2] = st->late_max = 0;
@@ -516,7 +522,8 @@ static void stats_report(AudioRenderer *r, uint64_t now, uint64_t lock_ns, uint6
            "frames %llu, ring at least %.1f ms, longest device request gap %.1f ms; render passes %llu, gaps over %llu "
            "ms %llu (longest %.1f ms), lock waits over %llu ms %llu (longest %.2f ms); game updates %llu, gaps over "
            "%llu ms %llu (longest %.1f ms at game frame %llu, %llu passes), longest held the lock %.2f ms; voices ran "
-           "dry %llu, next buffer late by 1-2 passes %llu, 3-8 %llu, 9-%d %llu (most %llu)",
+           "dry %llu, next buffer late by 1-2 passes %llu, 3-8 %llu, 9-%d %llu (most %llu); render passes that ramped a "
+           "volume %llu (%llu ramps)",
            (now - snap.window_ns) / 1e9, (unsigned long long)game_frame(), (unsigned long long)under,
            (o.missing_frames - snap.out_missing) * 1000.0 / rate, (o.skipped_frames - snap.out_skipped) * 1000.0 / rate,
            (unsigned long long)(o.overruns - snap.out_overruns),
@@ -527,7 +534,8 @@ static void stats_report(AudioRenderer *r, uint64_t now, uint64_t lock_ns, uint6
            (unsigned long long)snap.upd_gaps_over, snap.upd_gap_max_ns / 1e6, (unsigned long long)snap.upd_gap_frame,
            (unsigned long long)snap.upd_passes_max, snap.upd_hold_max_ns / 1e6, (unsigned long long)snap.dry,
            (unsigned long long)snap.late[0], (unsigned long long)snap.late[1], AS_LATE_PASSES,
-           (unsigned long long)snap.late[2], (unsigned long long)snap.late_max);
+           (unsigned long long)snap.late[2], (unsigned long long)snap.late_max,
+           (unsigned long long)(ramp_passes - snap.ramp_passes), (unsigned long long)(ramps - snap.ramps));
 }
 
 static void render_thread(void *p) {
