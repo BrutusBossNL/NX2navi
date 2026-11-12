@@ -146,6 +146,12 @@ enum {
     VK_GAP_MESH_RING, VK_GAP_BC_BACK, VK_GAP_N
 };
 void vk_gpu_passes_part(VkCommandBuffer cb, int end);
+// Result points (NX2NAVI_GPU_PASSES): the submission whose parts follow (vk_sync.c), a result just recorded (VK_RES_*
+// bits, vk_exec_note_results), a submission the game's wait after a frame's first submission waited for.
+void vk_gpu_passes_fence(uint64_t fence);
+void vk_gpu_passes_result(int kinds);
+void vk_gpu_passes_waited(uint64_t need);
+int vk_sync_result_mask(void);   // NX2NAVI_SUBMIT_FINISH_KINDS as read
 void vk_gpu_gap_note(int kind, uint64_t units);
 // Pass marks wanted and possible (NX2NAVI_PASS_CRUMBS and the extensions): set by vk_crumbs_init.
 extern int vk_pass_marks_on;

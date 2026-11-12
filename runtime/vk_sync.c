@@ -1256,6 +1256,7 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     vk_crumb(s->cb, VK_CRUMB_SUBMIT, fence);
     ts_begin(s->cb);
     rec_begin(s->cb, fence);
+    vk_gpu_passes_fence(fence);   // the submission the parts and results that follow belong to
     vk_gpu_passes_part(s->cb, 0);
     int recorded = 1;
     if (own) own->record(s->cb, own->arg);
@@ -1380,6 +1381,8 @@ static int fence_wait_impl(uint64_t value, uint64_t timeout_ns);
 // The game's wait after a frame's first submission (nvn_api_core.c NX2NAVI_SUBMIT_FINISH): until the replay has
 // submitted value, which took every copy of guest memory the submission reads; then also until the GPU has run it when
 // its GPU reads guest memory itself (vk_mem_take_live) or NX2NAVI_SUBMIT_FINISH_GPU=1. 1 when reached.
+int vk_sync_result_mask(void) { return res_mask; }
+
 int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(uint64_t, uint64_t)) {
     vk_sync_start();
     static int gpu = -1, res_mode = 1;
@@ -1433,6 +1436,7 @@ int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(u
         gw_rec_n++;
         if (!live) gw_rec_done++;
         if (!live && need == value) gw_rec_self++;
+        if (!live && need) vk_gpu_passes_waited(need);
         if (!live && need && need <= value) {
             gw_need_back += value - need, gw_need_n++;
             int k = res_kinds[need & (LIVE_RING - 1)];

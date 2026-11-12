@@ -67,6 +67,10 @@ typedef struct { uint64_t addr, size; int back; } Range;   // back: written into
 // for the newest such submission). Write-backs of the mirrors note it in vk_memory.c; the lazily written ones fetch on
 // the CPU's first access.
 static volatile int32_t ex_results;   // VK_RES_* bits
+void vk_exec_note_results(int kind) {
+    __atomic_fetch_or(&ex_results, kind, __ATOMIC_RELAXED);
+    vk_gpu_passes_result(kind);   // NX2NAVI_GPU_PASSES: where in the submission it is done
+}
 int vk_exec_take_results(void) { return __atomic_exchange_n(&ex_results, 0, __ATOMIC_RELAXED); }
 
 static void guest_written_cb(void *arg) {

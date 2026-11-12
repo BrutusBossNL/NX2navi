@@ -197,6 +197,40 @@ static uint64_t gp_shader_hash(const GfxShader *s) {
 
 static int kind_is_pass(const VkPassMark *m) { return m->kind == VK_MARK_PASS; }
 
+// Result points (gpu_passes): where in a submission's GPU time the results the CPU waits for are done. The replay
+// notes a result (vk_exec_note_results: an event, a counter or occlusion report, a GPU write of unmirrored memory, a
+// mirror write-back) as it records it; the next timestamp the capture writes after it (a pass's or dispatch's start or
+// end, a part's end) is when the GPU is done with it at the latest. The report compares that, for the submissions the
+// game's wait after a frame's first submission waited for (vk_sync_recorded_wait), with the submission's end: how much
+// earlier the wait could end if it ended at the results instead of at the whole submission's completion.
+#define GP_RES 16384
+typedef struct { uint64_t fence; uint32_t q; uint8_t kind; } GpRes;   // q: query in gp_pool, UINT32_MAX until written
+static GpRes gp_res[GP_RES];
+static uint32_t gp_nres, gp_res_open;
+static uint64_t gp_fence, gp_part_fence[GP_SLOTS];
+#define GP_WAITED 256
+static uint64_t gp_waited[GP_WAITED];
+static uint32_t gp_nwaited;   // atomic: the game's threads add
+
+static void gp_resolve(uint32_t q) {
+    for (uint32_t i = gp_res_open; i < gp_nres; i++) gp_res[i].q = q;
+    gp_res_open = gp_nres;
+}
+
+void vk_gpu_passes_fence(uint64_t fence) { gp_fence = fence; }
+
+void vk_gpu_passes_result(int kinds) {
+    if (!gp_capture || gp_part == UINT32_MAX) return;
+    for (int b = 0; b < VK_RES_KINDS && gp_nres < GP_RES; b++)
+        if (kinds >> b & 1) gp_res[gp_nres++] = (GpRes){gp_fence, UINT32_MAX, (uint8_t)b};
+}
+
+void vk_gpu_passes_waited(uint64_t need) {
+    if (!gp_capture) return;
+    uint32_t i = __atomic_fetch_add(&gp_nwaited, 1, __ATOMIC_RELAXED);
+    if (i < GP_WAITED) __atomic_store_n(&gp_waited[i], need, __ATOMIC_RELEASE);
+}
+
 int vk_gpu_passes_capturing(void) { return gp_capture; }
 
 static void gp_gap_close(uint32_t to) {
@@ -216,12 +250,14 @@ void vk_gpu_passes_part(VkCommandBuffer cb, int end) {
         if (!gp_capture || gp_n >= GP_SLOTS) return;
         gp_labels[gp_n] = (GpLabel){.kind = GP_KIND_PART};
         vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gp_pool, gp_n * 2);
+        gp_part_fence[gp_n] = gp_fence;
         gp_part = gp_n++;
         if (!gp_in_mark) gp_gap_from = gp_part * 2;
         return;
     }
     if (gp_part == UINT32_MAX) return;
     vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gp_pool, gp_part * 2 + 1);
+    gp_resolve(gp_part * 2 + 1);
     if (!gp_in_mark) gp_gap_close(gp_part * 2 + 1);
     gp_labels[gp_part].used = 1;
     gp_part = UINT32_MAX, gp_gap_from = UINT32_MAX;
@@ -233,6 +269,7 @@ static void gp_begin(VkCommandBuffer cb, VkPassMark *m) {
     if (gp_part != UINT32_MAX) gp_gap_close(gp_n * 2);   // the gap before this mark ends at its start
     gp_labels[gp_n].used = 0;
     vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gp_pool, gp_n * 2);
+    gp_resolve(gp_n * 2);
     if (gp_prims && kind_is_pass(m)) vkCmdBeginQuery(cb, gp_prims, gp_n, 0);
     if (gp_stats && kind_is_pass(m)) vkCmdBeginQuery(cb, gp_stats, gp_n, 0);
     m->gp = ++gp_n;
@@ -244,6 +281,7 @@ static void gp_end(VkCommandBuffer cb, const VkPassMark *m) {
     if (gp_prims && kind_is_pass(m)) vkCmdEndQuery(cb, gp_prims, i);
     if (gp_stats && kind_is_pass(m)) vkCmdEndQuery(cb, gp_stats, i);
     vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gp_pool, i * 2 + 1);
+    gp_resolve(i * 2 + 1);
     GpLabel *l = &gp_labels[i];
     l->kind = m->kind, l->w = m->w, l->h = m->h, l->d = m->d, l->draws = m->draws == UINT32_MAX ? 0 : m->draws;
     l->layer = m->layer;
@@ -308,6 +346,66 @@ static void gp_report_gaps(double tick_ms, double parts_ms, uint32_t parts) {
         if (gp_kind_n[b])
             rt_log("gpu passes:     %s: %.1f per frame, %.2f M units per frame (bytes of buffers, texels of images)",
                    gp_kind_names[b], (double)gp_kind_n[b] / GP_FRAMES, gp_kind_units[b] / 1e6 / GP_FRAMES);
+}
+
+// The result points of the timed frames (vk_gpu_passes_result), for the submissions the game's wait waited for.
+static void gp_report_results(double tick_ms) {
+    VkCtx *c = vk_ctx();
+    static const char *const names[VK_RES_KINDS] = {"events", "counter reports", "occlusion reports",
+                                                     "unmirrored writes", "mirror write-backs"};
+    uint32_t nw = __atomic_load_n(&gp_nwaited, __ATOMIC_ACQUIRE);
+    if (nw > GP_WAITED) nw = GP_WAITED;
+    uint64_t seen[GP_WAITED];
+    uint32_t ns = 0, subs = 0;
+    double span = 0, last[VK_RES_KINDS] = {0}, cnt[VK_RES_KINDS] = {0}, mask_end = 0, all_end = 0;
+    int mask = vk_sync_result_mask();
+    for (uint32_t w = 0; w < nw; w++) {
+        uint64_t f = __atomic_load_n(&gp_waited[w], __ATOMIC_ACQUIRE);
+        int dup = !f;
+        for (uint32_t k = 0; k < ns && !dup; k++) dup = seen[k] == f;
+        if (dup) continue;
+        seen[ns++] = f;
+        uint64_t t0 = UINT64_MAX, t1 = 0, t;
+        for (uint32_t i = 0; i < gp_n; i++) {   // the submission's parts: its first start, its last end
+            if (gp_labels[i].kind != GP_KIND_PART || !gp_labels[i].used || gp_part_fence[i] != f) continue;
+            if (gp_tick(c, i * 2, &t) && t < t0) t0 = t;
+            if (gp_tick(c, i * 2 + 1, &t) && t > t1) t1 = t;
+        }
+        if (t0 == UINT64_MAX || t1 <= t0) continue;
+        uint64_t lk[VK_RES_KINDS] = {0};
+        int any = 0;
+        for (uint32_t i = 0; i < gp_nres; i++)
+            if (gp_res[i].fence == f && gp_res[i].q != UINT32_MAX && gp_tick(c, gp_res[i].q, &t) && t >= t0) {
+                if (t > lk[gp_res[i].kind]) lk[gp_res[i].kind] = t;
+                any = 1;
+            }
+        if (!any) continue;
+        subs++;
+        span += (double)(t1 - t0) * tick_ms;
+        uint64_t me = t0, ae = t0;
+        for (int b = 0; b < VK_RES_KINDS; b++) {
+            if (!lk[b]) continue;
+            last[b] += (double)(lk[b] - t0) * tick_ms, cnt[b]++;
+            if (lk[b] > ae) ae = lk[b];
+            if (mask >> b & 1 && lk[b] > me) me = lk[b];
+        }
+        mask_end += (double)(me - t0) * tick_ms, all_end += (double)(ae - t0) * tick_ms;
+    }
+    if (!subs) {
+        rt_log("gpu passes:   result points: none of the %u waited-for submissions was timed with its results", ns);
+        return;
+    }
+    char list[400];
+    int o = 0;
+    for (int b = 0; b < VK_RES_KINDS && o < (int)sizeof list - 80; b++)
+        if (cnt[b])
+            o += snprintf(list + o, sizeof list - (size_t)o, "%s%s %.2f ms (%.0f of %u)", o ? ", " : "", names[b],
+                          last[b] / cnt[b], cnt[b], subs);
+    list[o] = 0;
+    rt_log("gpu passes:   result points: %u submissions the game's wait waited for, %.2f ms of GPU time each from their "
+           "start to their end; their last results done at: %s", subs, span / subs, list);
+    rt_log("gpu passes:   result points: the wait could end %.2f ms before the submission's end (the kinds it counts, "
+           "%#x), %.2f ms with every kind", (span - mask_end) / subs, mask, (span - all_end) / subs);
 }
 
 typedef struct { GpLabel l; double ms; uint32_t n; uint64_t draws, prims, frags; } GpSum;
@@ -382,6 +480,7 @@ static void gp_report(uint64_t frame) {
                (double)sum / GP_FRAMES, top, list);
     }
     gp_report_gaps(tick_ms, parts_ms, parts);
+    gp_report_results(tick_ms);
     for (int s = 0; s < n && s < GP_TOP; s++) {
         const GpSum *e = &sums[s];
         if (e->l.kind == VK_MARK_DISPATCH)
@@ -453,6 +552,8 @@ void vk_gpu_passes_frame(uint64_t frame) {
         if (gp_stats) vkResetQueryPool(c->device, gp_stats, 0, GP_SLOTS);
         gp_ngaps = 0, gp_gap_from = UINT32_MAX, gp_gap_kinds = 0, gp_part = UINT32_MAX;
         memset(gp_kind_n, 0, sizeof gp_kind_n), memset(gp_kind_units, 0, sizeof gp_kind_units);
+        gp_nres = gp_res_open = 0;
+        __atomic_store_n(&gp_nwaited, 0, __ATOMIC_RELEASE);
         gp_n = 0, gp_start = frame, gp_capture = 1, gp_phase = 1;
     } else if (gp_phase == 1) {
         if (frame < gp_start + GP_FRAMES) return;
