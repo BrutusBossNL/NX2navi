@@ -361,6 +361,18 @@ static double ocarina_step_s(void) {
     return base * speed / 60.0;
 }
 
+static _Atomic uint64_t guest_presents;   // frame_step_present calls so far (frame_step_flight)
+
+// The flight recorder's view of the step at a host present (flight.c, render thread): the newest step the patch page
+// holds in 60 Hz frames per update (set ostep; -1 without), the game's own step from its time manager in 60 Hz frames
+// (-1 unknown or not free-running), and the game's presents so far, which name the update those two belong to.
+void frame_step_flight(float *page, float *game, uint64_t *presents) {
+    *page = ostep_page ? frame_step_frames() : -1.0f;
+    double s = frame_free_running() ? ocarina_step_s() : -1;
+    *game = s > 0 ? (float)(s * 60.0) : -1.0f;
+    *presents = atomic_load_explicit(&guest_presents, memory_order_relaxed);
+}
+
 // Free-running builds (Ocarina): the game's step follows the display interval (ocarina_step, in 60 Hz frames), written
 // at each present: frames per update on the patch page with the set ostep, else the time manager's base step. The
 // game left it at one 60 Hz frame whatever the frame rate, so at 144 fps it ran 2.4 times too fast.
@@ -605,6 +617,7 @@ static void world_clock(double dt, double step) {
 }
 
 void frame_step_present(uint64_t display_ns, int interval) {
+    atomic_fetch_add_explicit(&guest_presents, 1, memory_order_relaxed);
     game_interval = interval > 0 ? interval : 1;
     frame_limit_live();
     double step = 0, dt = last_ns ? (double)(display_ns - last_ns) * 1e-9 : 0;

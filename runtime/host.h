@@ -394,6 +394,7 @@ int frame_free_running(void);                             // no fps60/realtime p
 double frame_step_limit_hz(void);                         // the frame rate the limit gives (overlay); 0 unknown
 double frame_step_game_hz(void);                          // the rate the game draws at under the limit; 0 unknown
 float frame_step_frames(void);                            // the 60 Hz frames the game steps per update (set ostep), else 1
+void frame_step_flight(float *page, float *game, uint64_t *presents);   // flight.c: the step at a host present
 // rtss_limit.c: RivaTuner Statistics Server takes the frame limit where it runs
 void rtss_limit_want(int64_t mhz);                        // the pacer's limit in millihertz: >0, 0 none, -1 keep RTSS out
 int rtss_limit_active(void);                              // RTSS limits to the wanted rate: the pacer holds no frames

@@ -1,5 +1,5 @@
 // NX2NAVI_FLIGHT=1 flight recorder: a ring of the last NX2NAVI_FLIGHT_FRAMES (600) presents, one record each (interval,
-// render-thread blocked time per perf kind, event counts) and a 320x180 thumbnail each (gfx_present.c, blitted on the
+// render-thread blocked time per perf kind, event counts, the game's time step) and a 320x180 thumbnail each (gfx_present.c, blitted on the
 // GPU by the present thread). A dump goes to <dir>/<YYYYMMDD-HHMMSS>-f<frame>/: events.tsv (the texture events of its
 // frames, flight_tex), f<frame>.png per thumbnail and frames.tsv, written in that order by a background thread. Triggers: F8 while the game window has focus, a frame interval over
 // NX2NAVI_FLIGHT_SPIKE_MS (100; 0 off; at most one dump per 10 s), NX2NAVI_FLIGHT_AT=<frame>[,<frame>...] and
@@ -38,6 +38,8 @@ _Static_assert(PERF_CNT_N == 12, "count_names follows the PERF_CNT_* list");
 typedef struct {
     uint64_t frame, t_ns;
     uint32_t interval_us, blocked_us[PERF_N], n[C_N];
+    float step_page, step_game;   // frame_step_flight: the step in 60 Hz frames on the patch page and in the game
+    uint64_t guest_presents;      // the game's presents so far, which the two steps belong to
 } Rec;
 
 // A texture event (flight_tex). seq is the event's index + 1 once it is written, 0 while a writer fills the slot, so
@@ -365,12 +367,13 @@ static void dump_main(void *arg) {
     fprintf(f, "frame\tt_ms\tinterval_ms");
     for (int k = 0; k < PERF_N; k++) fprintf(f, "\t%s", blocked_names[k]);
     for (int k = 0; k < C_N; k++) fprintf(f, "\t%s", count_names[k]);
-    fprintf(f, "\tthumb\n");
+    fprintf(f, "\tstep_frames\tgame_step_frames\tguest_presents\tthumb\n");
     for (int i = 0; i < j->n; i++) {
         const Rec *r = &j->r[i];
         fprintf(f, "%llu\t%.1f\t%.2f", (unsigned long long)r->frame, r->t_ns / 1e6, r->interval_us / 1000.0);
         for (int k = 0; k < PERF_N; k++) fprintf(f, "\t%.2f", r->blocked_us[k] / 1000.0);
         for (int k = 0; k < C_N; k++) fprintf(f, "\t%u", r->n[k]);
+        fprintf(f, "\t%.4f\t%.4f\t%llu", r->step_page, r->step_game, (unsigned long long)r->guest_presents);
         fprintf(f, "\t%d\n", have ? have[i] : 0);
     }
     fclose(f);
@@ -440,6 +443,7 @@ void flight_frame(uint64_t frame, uint64_t now_ns, uint64_t interval_ns, const u
         r->n[C_PERF0 + k] = (uint32_t)(v - prev_cnt[k]);
         prev_cnt[k] = v;
     }
+    frame_step_flight(&r->step_page, &r->step_game, &r->guest_presents);
     recorded++;
 
     static int key_was;
