@@ -2896,8 +2896,23 @@ typedef struct MeshEmuEnt {
     VkPipeline mesh, task;
     MeshEmuInfo mi, ti;
 } MeshEmuEnt;
+// Each draw of an emulated mesh pipeline looks its entry up (vk_pipeline_mesh_emu), so the lookup takes no lock: an
+// entry is complete before it is published at its bucket's head (release) and is never removed. emu_lock only orders
+// the publishing. The build (two compute pipelines, up to seconds each in the driver on a first run) is done outside
+// it: held across the build, as before, it stopped every draw of the replay that looked up any entry meanwhile, 2.5 s
+// of the replay thread's samples in a first 0.8.0 run in Kokiri Forest on an RX 580 (2026-11-11).
+#define EMU_BUCKETS 256
+static MeshEmuEnt *emu_ents[EMU_BUCKETS];
 static PlatMutex emu_lock = PLAT_MUTEX_INIT;
 
+static uint32_t emu_bucket(const GfxShader *ms, const GfxShader *ts, VkPipelineLayout layout) {
+    uint64_t h = (uint64_t)(uintptr_t)ms * 0x9e3779b97f4a7c15ull ^ (uint64_t)(uintptr_t)ts * 0xc2b2ae3d27d4eb4full ^
+                 (uint64_t)(uintptr_t)layout * 0x165667b19e3779f9ull;
+    return (uint32_t)(h >> 40) % EMU_BUCKETS;
+}
+
+static MeshEmuEnt *emu_find(MeshEmuEnt *e, const GfxShader *ms, const GfxShader *ts, VkPipelineLayout layout) {
+    while (e && !(e->ms == ms && e->ts == ts && e->layout == layout)) e = __atomic_load_n(&e->next, __ATOMIC_ACQUIRE);
     return e;
 }
 
@@ -2915,7 +2930,11 @@ static VkPipeline emu_compute(const uint32_t *w, size_t n, VkPipelineLayout layo
 }
 
 static const MeshEmuEnt *emu_get(const GfxShader *ms, const GfxShader *ts, VkPipelineLayout layout, uint32_t toff, int create) {
+    MeshEmuEnt **head = &emu_ents[emu_bucket(ms, ts, layout)];
+    MeshEmuEnt *e = emu_find(__atomic_load_n(head, __ATOMIC_ACQUIRE), ms, ts, layout);
+    if (e || !create) return e;
     e = calloc(1, sizeof *e);
+    if (!e) return NULL;
     e->ms = ms, e->ts = ts, e->layout = layout;
     const char *why = NULL;
     uint64_t n = 0;
@@ -2938,7 +2957,21 @@ static const MeshEmuEnt *emu_get(const GfxShader *ms, const GfxShader *ts, VkPip
         }
         free(r), free(c);
     }
+    plat_mutex_lock(&emu_lock);
+    MeshEmuEnt *had = emu_find(*head, ms, ts, layout);   // another build of the same stages published first: keep that
+    if (!had) {
+        static int logged;
+        if (!e->ok && logged++ < 16) rt_log("vk_pipeline: mesh emulation: a mesh program is not emulated: %s", why ? why : "?");
+        e->next = *head;
+        __atomic_store_n(head, e, __ATOMIC_RELEASE);
+    }
     plat_mutex_unlock(&emu_lock);
+    if (had) {
+        if (e->mesh) vkDestroyPipeline(P.device, e->mesh, NULL);
+        if (e->task) vkDestroyPipeline(P.device, e->task, NULL);
+        free(e);
+        return had;
+    }
     return e;
 }
 
