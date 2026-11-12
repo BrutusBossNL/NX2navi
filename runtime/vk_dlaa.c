@@ -1475,12 +1475,12 @@ static void hl_destroy(void) {
 // The device is idle here. Release NGX features and parameters before their Vulkan resources, then shut down NGX even
 // if initialization succeeded but the layout check failed. The Linux core's Shutdown1 takes an extra output pointer
 // compared with the SDK's public wrapper; it reports the number of devices still using NGX.
-// ---- the free camera's view of the ground (debug_tools.c dbg_pad). While it flies, nine of the view distances
-// mv_pass wrote (a grid over the lower part of the view, where the ground is) go back to the host, and the camera rises
-// where the closest is nearer than its clearance: flown through a hill, it showed the void below the map. A slot is
-// read FC_SLOTS evaluations after its copy, when the GPU has long been past it.
+// ---- the free camera's view of the ground (debug_tools.c dbg_pad, ground avoidance). While it flies with that on,
+// nine of the view distances mv_pass wrote (a grid over the lower part of the view, where the ground is) go back to
+// the host, which works out how far below the camera the ground is (ground_under). A slot is read FC_SLOTS evaluations
+// after its copy, when the GPU has long been past it.
 int dbg_freecam_flying(void);                          // debug_tools.c
-void dbg_freecam_ground(const float *dist, int n);
+void dbg_freecam_ground(const float *dist, int n, float tan_half_y, float aspect);
 #define FC_N 9
 #define FC_SLOTS 4
 static VkBuffer fc_buf;
@@ -1510,7 +1510,8 @@ static void fcam_probe(VkCommandBuffer cb, const struct Size *e, uint32_t w, uin
     uint32_t s = fc_next++ % FC_SLOTS;
     if (fc_have[s]) {
         vmaInvalidateAllocation(c->vma, fc_mem, s * FC_N * sizeof(float), FC_N * sizeof(float));
-        dbg_freecam_ground(fc_map + s * FC_N, FC_N);
+        dbg_freecam_ground(fc_map + s * FC_N, FC_N, D.fg_cam_ok ? tanf(0.5f * D.fg_cam.fov_y) : 0.0f,
+                           D.fg_cam_ok ? D.fg_cam.aspect : 0.0f);
     }
     // the replay's viewports have negative heights: row 0 is the top of the view
     static const float fx[3] = {0.2f, 0.5f, 0.8f}, fy[3] = {0.6f, 0.78f, 0.96f};
