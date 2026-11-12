@@ -4331,6 +4331,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         cx->B.st = s, cx->B.st_valid = 1;
         if (ex->mark && vk_exec_frame.draws == ex->mark_draws0) ex->mark->first[0] = vs, ex->mark->first[1] = fs;
     }
+    vk_pipeline_line_width(ex->cb, &s, ex->line_width);   // a draw of lines: the game's width; else nothing
     if (!mesh) {
         vk_dlaa_draw(ex);
         vk_mvsurvey_draw(ex);
@@ -6456,6 +6457,7 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
         case 4: memcpy(&ex->pipe.poly, b->bytes, sizeof ex->pipe.poly); break;
         case 5: memcpy(&ex->pipe.ds, b->bytes, sizeof ex->pipe.ds); break;
         case 6: memcpy(&ex->point_size, b->bytes, sizeof ex->point_size); break;
+        case 7: memcpy(&ex->line_width, b->bytes, sizeof ex->line_width); break;
         }
         break;
     }

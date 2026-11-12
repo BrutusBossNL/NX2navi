@@ -84,6 +84,8 @@ static struct {
     int vs_outs_all;                   // NX2NAVI_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src, f_full_subgroups;
+    int wide_lines;                      // the device draws lines of other widths than 1 (vk_pipeline_line_width)
+    float line_w[2], line_gran;          // its range of widths and their step
     int cache_control;                 // pipelineCreationCacheControl: a create can ask for the pipeline caches only
     int feedback;                      // NX2NAVI_PIPE_FEEDBACK: 1 count pipeline cache hits, 2 also log each compute and graphics build
     uint64_t cache_loaded;             // bytes of pipeline-cache.bin the driver took at boot
@@ -958,6 +960,12 @@ static int ensure_init(void) {
     P.f_depth_clamp = f2.features.depthClamp;
     P.f_fill_non_solid = f2.features.fillModeNonSolid;
     P.f_dual_src = f2.features.dualSrcBlend;
+    P.wide_lines = f2.features.wideLines && cfg_bool("NX2NAVI_LINE_WIDTH");
+    P.line_w[0] = c->props.limits.lineWidthRange[0], P.line_w[1] = c->props.limits.lineWidthRange[1];
+    P.line_gran = c->props.limits.lineWidthGranularity;
+    if (!P.wide_lines)
+        rt_log("vk_pipeline: lines are drawn 1 pixel wide whatever width the game sets (%s)",
+               f2.features.wideLines ? "NX2NAVI_LINE_WIDTH=0" : "this device has no wide lines");
 #define PROC(field, name) (P.field = (void *)vk_dpa(c->device, name))
     PROC(push, "vkCmdPushDescriptorSetKHR");
     // Descriptor update templates (core 1.1; the push variant comes with VK_KHR_push_descriptor on 1.1): the driver
@@ -3106,6 +3114,29 @@ static int water_mode(const VkPipeState *s, const GKey *k) {
     return mode == 1 && k->dsb ? 0 : mode;
 }
 
+// ---- line width (NX2NAVI_LINE_WIDTH, default 1; 0: every line 1 pixel wide, as before)
+// The game sets a width for its lines (nvnCommandBufferSetLineWidth, recorded as OP_BIND_STATE kind 7): 4.5 pixels
+// for two line draws a frame into a 144x144 R8 target, which were drawn 1 pixel wide. A pipeline of the line topology
+// class lists the width as dynamic state, in its whole build and in its pre-rasterization library (PrKey.lines), and
+// each draw of lines records the width the game set, held to the device's range. Pipelines of the other classes are
+// built as before, so their entries in the pipeline caches and the driver's stay the ones in use. A polygon mode that
+// draws triangles as lines keeps 1 pixel: the mode can be dynamic state, which no pipeline key tells apart.
+static int key_lines(const GKey *k) { return P.wide_lines && k->topo_class == 1; }
+
+void vk_pipeline_line_width(VkCommandBuffer cb, const VkPipeState *s, float width) {
+    if (!P.wide_lines || is_mesh(s) || topology_class(vk_pipeline_topology(s->prim)) != 1) return;
+    float w = width > 0 ? width : 1.0f;
+    if (P.line_gran > 0) w = P.line_w[0] + P.line_gran * (float)(int)((w - P.line_w[0]) / P.line_gran + 0.5f);
+    w = w < P.line_w[0] ? P.line_w[0] : w > P.line_w[1] ? P.line_w[1] : w;
+    static float logged;
+    if (w != 1.0f && w != logged) {   // one line for each width in a row: the game uses one or two
+        logged = w;
+        rt_log("vk_pipeline: lines drawn %g pixels wide (the game set %g; the device draws %g to %g in steps of %g)",
+               (double)w, (double)width, (double)P.line_w[0], (double)P.line_w[1], (double)P.line_gran);
+    }
+    vkCmdSetLineWidth(cb, w);
+}
+
 static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Layout *l, uint32_t fs_off) {
     VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE;
     uint64_t vw, fw, vm_hash = 0, fm_hash = 0;   // the hashes: of the final modules, for the PIPE_FEEDBACK 2 line
@@ -3244,6 +3275,11 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                            .dynamicStateCount = P.n_dyn, .pDynamicStates = P.dyn};
     VkDynamicState mdyn[sizeof P.dyn / sizeof P.dyn[0] + 1];
+    if (!mesh && key_lines(k)) {   // lines take the game's width per draw (vk_pipeline_line_width)
+        memcpy(mdyn, P.dyn, P.n_dyn * sizeof *mdyn);
+        mdyn[P.n_dyn] = VK_DYNAMIC_STATE_LINE_WIDTH;
+        dy.dynamicStateCount = P.n_dyn + 1, dy.pDynamicStates = mdyn;
+    }
     if (mesh) {   // a mesh pipeline must not list vertex input, topology or primitive restart as dynamic
         uint32_t n = 0;
         for (uint32_t i = 0; i < P.n_dyn; i++)
@@ -3331,7 +3367,9 @@ typedef struct Lib { struct Lib *next; uint64_t hash; VkPipeline pipe; uint32_t 
 static Lib *libs[LIB_BUCKETS];
 
 typedef struct { uint32_t kind, topo_class, attr_fmt[32], attr_off[32]; uint8_t attr_bind[32], rate[17], pad[3]; } ViKey;
-typedef struct { uint32_t kind, missing; const GfxShader *vs; uint8_t clamp, poly_mode, minus_w, water_projective; GfxShaderIo fin[32]; } PrKey;
+typedef struct { uint32_t kind, missing; const GfxShader *vs; uint8_t clamp, poly_mode, minus_w, water_projective;
+                 uint8_t lines;   // key_lines: the library lists the line width as dynamic state
+                 GfxShaderIo fin[32]; } PrKey;
 typedef struct { uint32_t kind; uint8_t dsb, samples, a2c, water_projective; const GfxShader *fs; } FsKey;
 typedef struct { uint32_t kind; uint8_t n_color, samples, a2c, logic_op, blend_en, fbl, pad[2]; uint32_t color[8], depth, stencil, wmask;
                  uint8_t blend[8][6]; } FoKey;   // fbl: GKey.fbl, the feedback loop flags of the library (gpl_feedback)
@@ -3360,6 +3398,12 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
                                            .dynamicStateCount = P.n_dyn, .pDynamicStates = P.dyn};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri,
                                        .flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | noopt_flag(), .pDynamicState = &dy};
+    VkDynamicState ldyn[sizeof P.dyn / sizeof P.dyn[0] + 1];
+    if (kind == LIB_PR && ((const PrKey *)key)->lines) {   // the rasterization state is this library's: as create_graphics
+        memcpy(ldyn, P.dyn, P.n_dyn * sizeof *ldyn);
+        ldyn[P.n_dyn] = VK_DYNAMIC_STATE_LINE_WIDTH;
+        dy.dynamicStateCount = P.n_dyn + 1, dy.pDynamicStates = ldyn;
+    }
     VkShaderModule m = VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo st = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pName = "main"};
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rq;
@@ -3627,6 +3671,7 @@ static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, F
     memset(pk, 0, sizeof *pk);
     GfxShaderIo fin[32];
     pk->kind = LIB_PR, pk->vs = s->vs, pk->clamp = k->clamp, pk->poly_mode = k->poly_mode, pk->minus_w = k->minus_w;
+    pk->lines = (uint8_t)key_lines(k);
     pk->missing = vs_union_missing(s, fin);
     for (int i = 0; i < 32; i++)
         if (pk->missing >> i & 1) pk->fin[i] = fin[i];

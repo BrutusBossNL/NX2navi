@@ -174,7 +174,10 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
     where the driver keeps NaNs (3.13).
 14. **Point size / line width.** Census: `SetLineWidth 4.5` ~1/frame (2 line draws into a 144x144 R8 target),
     `SetPointSize 5` ~14/frame; 4 point VS rely on it. Point size: translator patch 0008 reads it from the support
-    buffer, **fixed**. Line width: 1 px, non-default values logged (`nvn_ext.c`), **mismatch, minor**.
+    buffer, **fixed**. Line width: recorded with the draw state (`nvn_api_cmd.c`, `OP_BIND_STATE` kind 7) and set as
+    dynamic state for draws of the line topology class (`vk_pipeline.c` `vk_pipeline_line_width`), held to the
+    device's `lineWidthRange`; 1 px on a device without `wideLines` and for triangles drawn in the line polygon mode.
+    **Implemented; not compared with the hardware's wide-line coverage.**
 15. **Block height.** `nvn_tex.c` truncates like NVN (2.1); every other step of the layout matches. **OK.**
 16. **Depth mode and clamp.** `vk_pipeline.c` `create_graphics` (`negativeOneToOne` from `nvn_depth_minus_w`, `depthClampEnable`
     from NVN state). Matches the hardware z maths (1.5) and clamp switch (1.6). **OK.**
