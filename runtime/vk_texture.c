@@ -2276,7 +2276,10 @@ static void sweep_released(void) {
             if (!e || now - e->rel_frame < stale) { e = rel_head; break; }   // the rest is younger: from the oldest again
             Tex *next = e->rel_next;
             // an entry the game took back before waits out GAP_TIMES the longest of those releases (stale_after)
-            if ((comes_back_intact(e) || e->overwritten) && now - e->rel_frame >= stale_after(e)) drop_tex(e, DROP_MAX);
+            // nor one a draw or a shader used since (used_lately): a finalized slot may still show it (idle, below)
+            if ((comes_back_intact(e) || e->overwritten) && now - e->rel_frame >= stale_after(e) &&
+                !used_lately(e, now, stale))
+                drop_tex(e, DROP_MAX);
             e = next;
         }
         sweep_at = e;
@@ -2513,8 +2516,14 @@ int vk_texture_commit_low(void) { return __atomic_load_n(&commit_low, __ATOMIC_R
 #define STALE_FRAMES PRESENTS(120)
 #define GPU_STALE_FRAMES PRESENTS(1800)
 #define GAP_TIMES 8
+// Nor is an entry idle that a shader sampled within STALE_FRAMES presents (samp_frame, vk_pool_marks_read): a
+// finalized slot keeps showing its released entry (stale_kept), and the pool's check passes released entries by, so no
+// lookup reaches such an entry while every frame samples it. Counted idle, it was dropped past the released entries'
+// size cap, and the slot showed the stand-in until the game registered it again: in a player's recording of Castle
+// Town, finalized slots lost their picture in the very frames such entries were dropped.
 static int idle(const Tex *e, uint64_t now) {
-    return look_round - e->use_round >= IDLE_ROUNDS && now - e->use_frame >= STALE_FRAMES;
+    return look_round - e->use_round >= IDLE_ROUNDS && now - e->use_frame >= STALE_FRAMES &&
+           now - e->samp_frame >= STALE_FRAMES;
 }
 
 // NX2NAVI_TEX_KEEP_TAKEN (default 1; 0: as before): an entry that comes back intact waits out GAP_TIMES the longest it
