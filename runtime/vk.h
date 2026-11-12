@@ -274,6 +274,10 @@ void vk_pool_fini(pool_t *p);              // drops images cut from the pool; wa
 int  vk_pool_map_virtual(pool_t *v, int n, const void *requests);   // nvn_mapping_t[n], checked by the front end
 void vk_texture_register(int id, const tex_t *t, const view_t *v);  // texture descriptor slot (copied)
 void vk_sampler_register(int id, const samp_par *s);                // sampler descriptor slot (copied)
+// vk_backend.c "registrations in submit order": vk_sync.c submit calls these around the replay of a submission of the
+// game's commands. A registration the game makes in between waits and takes effect at the end.
+void vk_reg_replay_begin(void);
+void vk_reg_replay_end(uint64_t fence);
 void vk_texture_release(const tex_t *t);   // TextureFinalize: the image stays for slots that still name its storage
 void vk_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row, uint64_t img);
 void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row, uint64_t img);

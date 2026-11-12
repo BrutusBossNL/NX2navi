@@ -820,6 +820,9 @@ static void gpu_stats(PerfGpu *g) {
 }
 
 WEAK void vk_exec_mesh_flush(VkCommandBuffer cb) { (void)cb; }   // without vk_exec_draw.c: nothing is queued
+// without vk_backend.c: nothing registers through a back end, so no registration waits for a submission
+WEAK void vk_reg_replay_begin(void) {}
+WEAK void vk_reg_replay_end(uint64_t fence) { (void)fence; }
 
 // Weak stand-in for vk_exec.c's replay: only empty recordings ({OP_BEGIN, OP_END}) can be submitted.
 WEAK int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t fence) {
@@ -1266,8 +1269,10 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     vk_gpu_passes_fence(fence);   // the submission the parts and results that follow belong to
     vk_gpu_passes_part(s->cb, 0);
     int recorded = 1;
+    // The game's registrations made from here to the queue call below take effect after it (vk_backend.c
+    // "registrations in submit order"): the replay writes the submission's texture pool set as it goes.
     if (own) own->record(s->cb, own->arg);
-    else recorded = vk_exec_record(s->cb, handles, n, fence);
+    else vk_reg_replay_begin(), recorded = vk_exec_record(s->cb, handles, n, fence);
     s = &slots[cur_slot];   // the last part (vk_sync_split)
     vk_gpu_passes_part(s->cb, 1);
     if (recorded) ts_end(s->cb, fence);
@@ -1294,6 +1299,7 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
                         .signalSemaphoreInfoCount = both ? 2u : 1u, .pSignalSemaphoreInfos = sig};
     ts_submitted(cbi, ncb);
     queue_submit(c, &si, fence);   // held or handed to the queue (submit batching)
+    if (!own) vk_reg_replay_end(fence);
     vk_mem_lazy_handed();
     s->fence = sent ? fence : 0;
     vk_mem_note_submit(fence);
