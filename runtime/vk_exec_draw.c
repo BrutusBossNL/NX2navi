@@ -5786,8 +5786,18 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
 // and mesh stages as compute pipelines (vk_pipeline_mesh_emu) outside the pass: they write vertices and triangles into
 // the arena (mesh_emu_spirv.h) and the draw record's DrawIndexedIndirect, which the generated vertex shader and the
 // game's fragment shader then draw. The arena's counters are zeroed at the first emulated draw of each submission;
+// the draw records go round a ring of MESH_EMU_DRECS. NX2NAVI_MESH_EMU_MB sizes the arena (default 256 MiB),
+// NX2NAVI_MESH_EMU_TASKS its task records per submission (default 16384, 3 KiB each). Before the counters start over
+// they are copied to a readback ring; the perf log reports the most a submission asked for against the capacities.
+#define ME_RB 64
+    VkBuffer buf, rb;
+    VmaAllocation alloc, rb_alloc;
+    uint32_t *rb_map;
+    uint64_t addr, resets;
+    uint32_t iw, icap, vw, vcap, trecs, epoch, rec;
     int failed;
     uint64_t draws, skipped;
+    uint32_t max[4];
 } ME;
 
     return 1;
@@ -5796,6 +5806,13 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
 static int me_arena(void) {
     if (ME.buf) return 1;
     if (ME.failed) return 0;
+    const char *v = cfg_get("NX2NAVI_MESH_EMU_MB"), *t = cfg_get("NX2NAVI_MESH_EMU_TASKS");
+    int mb = v && atoi(v) >= 32 ? atoi(v) : 256;
+    if (mb > 2048) mb = 2048;
+    ME.trecs = t && atoi(t) >= 256 ? (uint32_t)atoi(t) : 16384;
+    if (ME.trecs > 262144) ME.trecs = 262144;
+    uint64_t tbytes = (uint64_t)MESH_EMU_TOFF + (uint64_t)ME.trecs * MESH_EMU_TWORDS * 4;
+    if (tbytes + (32ull << 20) > ((uint64_t)mb << 20)) mb = (int)((tbytes >> 20) + 64);   // room for vertices and indices
     VkDeviceSize size = (VkDeviceSize)mb << 20;
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
@@ -5803,14 +5820,26 @@ static int me_arena(void) {
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         return 0;
+    }
     if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &ME.buf, &ME.alloc, NULL) != VK_SUCCESS) {
         ME.buf = VK_NULL_HANDLE, ME.failed = 1;
         rt_log("vk: mesh emulation: the %d MiB arena could not be created: mesh draws skipped", mb);
         return 0;
+    }
     VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = ME.buf};
     ME.addr = vkGetBufferDeviceAddress(vk_ctx()->device, &dai);
+    uint64_t ioff = (tbytes + 4095) & ~4095ull, ibytes = ((size - ioff) / 4) & ~4095ull;
     uint64_t voff = ioff + ibytes;
     ME.iw = (uint32_t)(ioff / 4), ME.icap = (uint32_t)(ibytes / 4), ME.vw = (uint32_t)(voff / 16), ME.vcap = (uint32_t)((size - voff) / 16);
+    rt_log("vk: mesh emulation arena: %d MiB, %u task records, %u indices, %u vertex slots (16 bytes)", mb, ME.trecs,
+           ME.icap, ME.vcap);
+    VkBufferCreateInfo rbi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = ME_RB * 16,
+                              .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VmaAllocationCreateInfo rai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo rinfo;
+    if (vmaCreateBuffer(vk_ctx()->vma, &rbi, &rai, &ME.rb, &ME.rb_alloc, &rinfo) == VK_SUCCESS) ME.rb_map = rinfo.pMappedData;
+    else ME.rb = VK_NULL_HANDLE;
     return 1;
 static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da) {
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
@@ -5826,6 +5855,12 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
     MeshEmuInfo mi;
     if (!info || !info->emu || !ex->dc->B.st_valid || !vk_pipeline_mesh_emu(ms, ts, info->layout, &mp, &tp, &mi) || !!ts != !!tp ||
         (info->push && !info->emu_tpl_c) || (!info->push && !ex->dc->B.ds_bound[0])) {
+        static int logged;
+        if (logged++ < 8)
+            rt_log("vk: mesh emulation: a draw of program %llu skipped: %s", ex->prog ? (unsigned long long)ex->prog->serial : 0ull,
+                   !info || !info->emu ? "its pipeline is not an emulated one"
+                   : !mp ? "its stages are not emulated (see vk_pipeline: mesh emulation)"
+                   : "its descriptors cannot be bound for compute");
         ME.skipped++;
         return 0;
     VkPipelineLayout layout = info->layout;
@@ -5833,16 +5868,31 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
     VkDescriptorUpdateTemplate tpl_c = info->emu_tpl_c;
     VkDescriptorSet set0 = ex->dc->B.ds_bound[0];
     }
+        }
     }
     uint32_t ep = vk_texture_epoch();
     if (ep != ME.epoch) {   // the first emulated draw of this submission: the counters start over
         ME.epoch = ep;
+        if (ME.rb && ME.rb_map) {   // the last submission's counters to the readback ring; one 32 resets back is read
+            if (ME.resets >= 32) {
+                vmaInvalidateAllocation(vk_ctx()->vma, ME.rb_alloc, 0, VK_WHOLE_SIZE);
+                const uint32_t *h = ME.rb_map + 4 * ((ME.resets - 32) % ME_RB);
+                for (int k = 0; k < 4; k++)
+                    if (h[k] > ME.max[k]) ME.max[k] = h[k];
+            VkBufferCopy rc = {0, 16 * (ME.resets % ME_RB), 16};
+            vkCmdCopyBuffer(cb, ME.buf, ME.rb, 1, &rc);
+            ME.resets++;
+            me_barrier(cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                       VK_ACCESS_2_TRANSFER_WRITE_BIT);
         me_barrier(cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                    VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
     uint32_t rec = ME.rec++ % MESH_EMU_DRECS;
     VkDeviceSize ro = MESH_EMU_DOFF + (VkDeviceSize)rec * MESH_EMU_DWORDS * 4;
     vkCmdFillBuffer(cb, ME.buf, ro, 4, 0);
     vkCmdFillBuffer(cb, ME.buf, ro + 4, 4, 1);
+    uint32_t pc[8] = {(uint32_t)ME.addr, (uint32_t)(ME.addr >> 32), (uint32_t)(ro / 4), ME.iw, ME.icap, ME.vw, ME.vcap, ME.trecs};
+    }
+    }
     cb = ex->cb;
     vkCmdBindIndexBuffer(cb, ME.buf, (VkDeviceSize)ME.iw * 4, VK_INDEX_TYPE_UINT32);
     vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT, 0, MESH_EMU_PC_BYTES, pc);
@@ -5857,7 +5907,13 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if ((rt_trace & RT_TRACE_PERF) && f / 600 != log_frame / 600) {
         log_frame = f;
+        rt_log("perf: frame %llu: mesh emulation: %llu draws, %llu skipped (not emulated or not ready); most in one submission: "
+               "%u of %u vertex slots, %u of %u indices, %u of %u task records, %u mesh workgroups that did not fit",
+               (unsigned long long)f, (unsigned long long)ME.draws, (unsigned long long)ME.skipped, ME.max[0], ME.vcap,
+               ME.max[1], ME.icap, ME.max[2], ME.trecs, ME.max[3]);
         ME.draws = ME.skipped = 0;
+        memset(ME.max, 0, sizeof ME.max);
+    }
     return 1;
 }
 

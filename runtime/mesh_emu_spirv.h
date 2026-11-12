@@ -15,8 +15,13 @@
 #define MESH_EMU_DWORDS 16u
 #define MESH_EMU_DRECS 4096u
 #define MESH_EMU_TOFF (MESH_EMU_DOFF + MESH_EMU_DRECS * MESH_EMU_DWORDS * 4u)
+// task records: as many as the push constants say (the replay sizes them, NX2NAVI_MESH_EMU_TASKS); the index area
+// follows them
 // Push constants of every emulation stage (compute and the vertex shader), 32 bytes:
 //   u64 arena address; uint draw record (word index); uint index area (word index); uint index capacity;
+//   uint vertex area (16-byte slot index); uint vertex capacity (slots); uint task record capacity
+// Header words 0-2 count what the stages asked for, beyond the capacities too (the replay logs the most per
+// submission); word 3 counts mesh workgroups that did not fit.
 #define MESH_EMU_PC_BYTES 32u
 
 typedef struct MeshEmuInfo {

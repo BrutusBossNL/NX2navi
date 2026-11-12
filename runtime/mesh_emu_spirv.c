@@ -313,6 +313,12 @@ static void task_epilogue(Em *e, const MeshEmuInfo *info, uint32_t payload, uint
     uint32_t t = add(e, wx, add(e, mul(e, wy, nx), mul(e, wz, nxy)));
     uint32_t base = words_base(e), drw = pc_u32(e, 1);
     uint32_t tb = word_load(e, base, add(e, drw, cu(e, 8)));
+    uint32_t trecs = pc_u32(e, 6), slot = add(e, tb, t), m1;
+    uint32_t mz;
+    if_begin(e, E2(e, OpIEqual, m->t_bool, lid, cu(e, 0)), &mz);
+    atomic(e, OpAtomicUMax, base, cu(e, 2), add(e, slot, cu(e, 1)));   // records asked for, past the capacity too
+    if_end(e, mz);
+    if_begin(e, ult(e, slot, trecs), &m1);
     {
         uint32_t recw = add(e, cu(e, MESH_EMU_TOFF / 4), mul(e, slot, cu(e, MESH_EMU_TWORDS)));
             uint32_t v = ld(e, m->t_u32, E2(e, OpAccessChain, p_wg_u32, payload, k));
@@ -331,6 +337,7 @@ static void task_epilogue(Em *e, const MeshEmuInfo *info, uint32_t payload, uint
     {
         uint32_t total = mul(e, nxy, nz);
         // task records past the area are not written: their mesh groups are not dispatched
+        uint32_t room = E3(e, OpSelect, m->t_u32, ult(e, tb, trecs), E2(e, 130 /* OpISub */, m->t_u32, trecs, tb), cu(e, 0));
         uint32_t ty = E3(e, OpSelect, m->t_u32, ult(e, total, room), total, room);
         word_store(e, base, add(e, drw, cu(e, 5)), cu(e, info->max_mesh));
         word_store(e, base, add(e, drw, cu(e, 6)), ty);
@@ -587,6 +594,7 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
                 uint32_t x = E2(&e, OpCompositeExtract, m->t_u32, wg, 0u), y = E2(&e, OpCompositeExtract, m->t_u32, wg, 1u);
                 uint32_t base = words_base(&e), drw = pc_u32(&e, 1);
                 uint32_t tb = word_load(&e, base, add(&e, drw, cu(&e, 8)));
+                uint32_t slot = add(&e, tb, y), ok = ult(&e, slot, pc_u32(&e, 6));
                 uint32_t slotc = E3(&e, OpSelect, m->t_u32, ok, slot, cu(&e, 0));
                 uint32_t recw = add(&e, cu(&e, MESH_EMU_TOFF / 4), mul(&e, slotc, cu(&e, MESH_EMU_TWORDS)));
                 uint32_t cnt = word_load(&e, base, recw);
