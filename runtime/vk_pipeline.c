@@ -5325,8 +5325,12 @@ static void prewarm_run(void) {
         VkPipeState s = r[i].s;
         s.vs = vs, s.fs = fs, s.ts = ts;
         // a mesh pipeline of the shared list (keys_open_seed) on a GPU without mesh shaders, which draws them through
-        // the mesh fallback: none to build, as the preparation skips it (seed_pipelines)
-        if (is_mesh(&s) && !vk_ctx()->has_mesh_shader) {
+        // the mesh fallback: none to build, as the preparation skips it (seed_pipelines). With the mesh emulation
+        // (NX2NAVI_MESH_EMULATION) it is a vertex pipeline and its compute stages (pipe_miss: layout_get_emu), built
+        // here like the others: left to the first draw, each took 113-830 ms on an RX 580 and the draws waiting for it
+        // were skipped (22 of the 48 pipelines missed entering Kokiri Forest, 0.9.1), frames held back or shown without
+        // them.
+        if (is_mesh(&s) && !vk_ctx()->has_mesh_shader && !mesh_emu_on()) {
             dropped++;
             continue;
         }
