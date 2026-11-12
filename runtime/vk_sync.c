@@ -54,6 +54,8 @@ static uint64_t reserved;         // asynchronous replay: newest value handed ou
 static uint64_t live_of[LIVE_RING];
 // per value (index & LIVE_RING - 1): the newest value up to it whose completion hands results to the CPU (vk_exec_take_results)
 static uint64_t res_of[LIVE_RING], res_last;
+static uint8_t res_kinds[LIVE_RING];   // per value: its VK_RES_* kinds
+static int res_mask = 0x1f;            // NX2NAVI_SUBMIT_FINISH_KINDS: the kinds the wait counts
 static int stop;
 static Pending *queue;            // side effects in the order they were added
 static int qhead, qn, qcap;
@@ -472,6 +474,8 @@ typedef struct { uint64_t v, res, iss, done; } GwSub;
 static GwSub gw[GW_RING];
 static PlatMutex gw_lock = PLAT_MUTEX_INIT;
 static uint64_t gw_n, gw_ns, gw_rep_ns, gw_gpu_ns, gw_lead_ns, gw_age, gw_before, gw_lat_rep, gw_lat_gpu, gw_lat_n;
+static uint64_t gw_max_ns, gw_unknown, gw_rec_n, gw_rec_done, gw_rec_self, gw_need_back, gw_need_n;
+static uint64_t gw_need_kind[5], gw_skip_kind[5];   // VK_RES_KINDS   // gw_rec: vk_sync_recorded_wait, those it ended
 
 static GwSub *gw_at(uint64_t v) {   // gw_lock held
     GwSub *e = &gw[v & (GW_RING - 1)];
@@ -518,6 +522,10 @@ static void gw_log(uint64_t frame, int frames) {
              lr = gw_lat_rep, lg = gw_lat_gpu, ln = gw_lat_n, mx = gw_max_ns, unk = gw_unknown, rn = gw_rec_n,
              rd = gw_rec_done, rs = gw_rec_self;
     gw_n = gw_ns = gw_rep_ns = gw_gpu_ns = gw_lead_ns = gw_age = gw_before = gw_lat_rep = gw_lat_gpu = gw_lat_n = 0;
+    uint64_t nb = gw_need_back, nn = gw_need_n, nk[5], sk[5];
+    memcpy(nk, gw_need_kind, sizeof nk), memcpy(sk, gw_skip_kind, sizeof sk);
+    memset(gw_need_kind, 0, sizeof gw_need_kind), memset(gw_skip_kind, 0, sizeof gw_skip_kind);
+    gw_max_ns = gw_unknown = gw_rec_n = gw_rec_done = gw_rec_self = gw_need_back = gw_need_n = 0;
     plat_mutex_unlock(&gw_lock);
     if (!n) {
         rt_log("perf: frame %llu: waits for GPU work outside the replay: none", (unsigned long long)frame);
@@ -536,6 +544,12 @@ static void gw_log(uint64_t frame, int frames) {
                    "those waited for it anyway: it hands the CPU results), the rest went on to the GPU (the submission's GPU "
                    "read guest memory itself)", (unsigned long long)frame, (unsigned long long)rn, (unsigned long long)rd,
                    (unsigned long long)rs);
+    if (nn) rt_log("perf: frame %llu: the submission the submit wait waited for was %.2f submissions before the waited one; "
+                   "its kinds: events %llu, counter reports %llu, occlusion reports %llu, unmirrored writes %llu, write-backs "
+                   "%llu; the submissions after it (left out by the mask): %llu, %llu, %llu, %llu, %llu",
+                   (unsigned long long)frame, (double)nb / (double)nn, (unsigned long long)nk[0], (unsigned long long)nk[1],
+                   (unsigned long long)nk[2], (unsigned long long)nk[3], (unsigned long long)nk[4], (unsigned long long)sk[0],
+                   (unsigned long long)sk[1], (unsigned long long)sk[2], (unsigned long long)sk[3], (unsigned long long)sk[4]);
 }
 
 static int gtl_cmp(const void *a, const void *b) {
@@ -1279,6 +1293,8 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     int res = own ? 0x1f : vk_exec_take_results();
     plat_mutex_lock(&st_lock);
     live_of[fence & (LIVE_RING - 1)] = fence << 1 | (uint64_t)(live != 0);
+    res_kinds[fence & (LIVE_RING - 1)] = (uint8_t)res;
+    if (res & res_mask) res_last = fence;
     res_of[fence & (LIVE_RING - 1)] = res_last;
     __atomic_store_n(&issued, fence, __ATOMIC_RELEASE);
     plat_cond_broadcast(&cv_work);
@@ -1366,6 +1382,8 @@ int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(u
     static int gpu = -1, res_mode = 1;
     if (gpu < 0) {
         res_mode = rt_knob("SUBMIT_FINISH_RESULTS", "1");
+        rt_log("vk: result kinds the submit wait counts: %#x (NX2NAVI_SUBMIT_FINISH_KINDS: 1 events, 2 counter reports, "
+               "4 occlusion reports, 8 GPU writes of unmirrored memory, 16 mirror write-backs)", res_mask);
         rt_log("vk: the wait after a frame's first submission also waits for %s (NX2NAVI_SUBMIT_FINISH_RESULTS=%d)",
                res_mode == 2 ? "every submission before it" : res_mode ? "the newest submission up to it that hands the "
                "CPU results at its completion (events, counter reports, write-backs)" : "nothing more", res_mode);
@@ -1410,6 +1428,15 @@ int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(u
         gw_rec_n++;
         if (!live) gw_rec_done++;
         if (!live && need == value) gw_rec_self++;
+        if (!live && need && need <= value) {
+            gw_need_back += value - need, gw_need_n++;
+            int k = res_kinds[need & (LIVE_RING - 1)];
+            for (int b = 0; b < VK_RES_KINDS; b++) if (k >> b & 1) gw_need_kind[b]++;
+            if (need < value) {   // what the submissions between need and value had that the mask leaves out
+                for (uint64_t v = need + 1; v <= value && v - need < 64; v++)
+                    for (int b = 0; b < VK_RES_KINDS; b++) if (res_kinds[v & (LIVE_RING - 1)] >> b & 1) gw_skip_kind[b]++;
+            }
+        }
         plat_mutex_unlock(&gw_lock);
     }
     if (!ok) return 0;

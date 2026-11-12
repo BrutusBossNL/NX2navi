@@ -353,6 +353,9 @@ void vk_mem_note_live(void);
 int vk_mem_take_live(void);
 // The submission being recorded hands results to the CPU at its completion (vk_exec_xfer.c): vk_sync_recorded_wait waits
 // for the newest such submission up to the one it waits for.
+enum { VK_RES_EVENT = 1, VK_RES_COUNTER = 2, VK_RES_OQ = 4, VK_RES_WRITE = 8, VK_RES_WRITEBACK = 16, VK_RES_KINDS = 5 };
+void vk_exec_note_results(int kind);   // VK_RES_*
+int vk_exec_take_results(void);        // the kinds noted since the last take
 void vk_mem_lazy_part_end(void);   // lazy write-back: a part ends (before its prologue), and it is handed over
 void vk_mem_lazy_handed(void);
 void vk_mem_lazy_decide(void);     // once the driver is known (after vk_caps_driver): on or off, with one log line

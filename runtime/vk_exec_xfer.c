@@ -66,6 +66,7 @@ typedef struct { uint64_t addr, size; int back; } Range;   // back: written into
 // event values, counter and occlusion reports, GPU writes of memory no VRAM mirror holds (vk_sync_recorded_wait waits
 // for the newest such submission). Write-backs of the mirrors note it in vk_memory.c; the lazily written ones fetch on
 // the CPU's first access.
+static volatile int32_t ex_results;   // VK_RES_* bits
 int vk_exec_take_results(void) { return __atomic_exchange_n(&ex_results, 0, __ATOMIC_RELAXED); }
 
 static void guest_written_cb(void *arg) {
@@ -82,6 +83,7 @@ static void note_gpu_write(VkExec *ex, uint64_t addr, uint64_t size) {
     Range *r = malloc(sizeof *r);
     if (!r) rt_fatal("vk: out of memory");
     *r = (Range){addr, size, vk_mem_mirrored(addr, size)};
+    if (!r->back) vk_exec_note_results(VK_RES_WRITE);
     vk_mem_gpu_pending(addr, size);
     vk_completion_add(ex->fence, guest_written_cb, r);
 }
@@ -520,6 +522,7 @@ static void oq_segment(VkExec *ex, uint64_t addr, int reset) {
     if (!s || (oq_nseg && !(s->q = malloc(sizeof *s->q * oq_nseg)))) rt_fatal("vk: out of memory");
     s->cap = oq_nseg;
     s->addr = addr, s->seq = report_seq, s->reset = reset, s->lost = oq_lost, s->n = oq_nseg;
+    if (addr) vk_exec_note_results(VK_RES_OQ);
     if (oq_nseg) memcpy(s->q, oq_seg, sizeof *s->q * oq_nseg);
     if (gs_on >= 0) {   // the front pass: the workers add the queries of the group's ops before it
         __typeof__(GS[0]) *gs = &GS[gs_on];
@@ -734,6 +737,7 @@ static void signal_event(VkExec *ex, const p_signal_event *p) {
             ev_late++, ev_late_subs += vk_exec_submit_seq - ev_open[i].sub;
             ev_open[i] = ev_open[--ev_open_n];
         } else i++;
+    vk_exec_note_results(VK_RES_EVENT);
     EventWrite *e = malloc(sizeof *e);
     if (!e) rt_fatal("vk: out of memory");
     *e = (EventWrite){p->val, p->mode, p->value};
@@ -753,6 +757,7 @@ static void report_counter(VkExec *ex, const p_report_counter *p) {
     vk_mem_count(m.cls, VK_MUSE_GPU_WRITE, sizeof(NVNcounterData));
     if (samples) oq_report(ex, p->addr);
     else {
+        vk_exec_note_results(VK_RES_COUNTER);
         CounterWrite *a = malloc(sizeof *a);
         if (!a) rt_fatal("vk: out of memory");
         *a = (CounterWrite){p->addr, report_seq};

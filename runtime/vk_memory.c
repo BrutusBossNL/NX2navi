@@ -3802,6 +3802,7 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
         memcpy(f->c, chunks, sizeof(SnapChunk) * (size_t)nchunks);
         vk_completion_add(fence, snap_free, f);
     }
+    if (nsnl || nwbl) vk_exec_note_results(VK_RES_WRITEBACK);   // write-backs: guest memory gets the GPU's bytes at the fence
     if (nwbl) {
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_READ_BIT);
