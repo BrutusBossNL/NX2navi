@@ -55,7 +55,8 @@ Customize Launcher (on the home screen) makes the look the player's own:
   scheme's backdrop back.
 - Animations (on by default): the cursor glides from row to row, a new screen slides into place, sparks drift up
   over the backdrop and Navi bobs in the title band with a pulsing halo (`App.animate`). They move by the time that
-  passed, stand still while the window is hidden or minimised, and Off stops them all.
+  passed, stand still while the window is hidden or minimised or another window is in front (the game, when Hide
+  Launcher While Playing is off), and Off stops them all.
 - Sounds (Low by default; Off, Medium or High): two of the game's own interface sounds, the decide and cancel sounds
   of its menus, when a row is chosen or a choice changes and when the player goes back. The launcher decodes them
   from the player's built game or dump into `data/cache/sounds` (`gamefiles.extract_sounds`:

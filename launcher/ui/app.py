@@ -1994,14 +1994,16 @@ class App:
     def animate(self):
         """One step of everything that moves: the cursor on its way to the focused row and its breath, the screen
         sliding into place, the sparks and Navi. Each moves by the time since the last step (the timer comes when
-        Tk gets to it, 16 to 50 ms apart), at most a tenth of a second's worth. With Animations off, and while the
-        window is hidden or minimised (the game is running), nothing moves and the timer runs slowly."""
+        Tk gets to it, 16 to 50 ms apart), at most a tenth of a second's worth. With Animations off, while the
+        window is hidden or minimised, and while another window is in front, nothing moves and the timer runs slowly.
+        The last covers a launcher left open behind the game (Hide Launcher While Playing off): drawing every 15 ms
+        took about 0.6 of a CPU core from the game for a window nobody saw."""
         moving = False
         try:
             now = time.perf_counter()
             dt = min(0.1, max(0.0, now - self.anim_last))
             self.anim_last = now
-            moving = self.animated() and self.root.state() == 'normal'
+            moving = self.animated() and self.root.state() == 'normal' and winsys.in_front(self.root)
             if moving:
                 self.anim_t += dt
                 self.step_slide(dt)
