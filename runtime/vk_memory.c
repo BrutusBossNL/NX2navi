@@ -2042,6 +2042,9 @@ static int cregions;
 static PlatMutex flush_lock = PLAT_MUTEX_INIT;
 static int flush_cap = FLUSH_RANGES;   // ranges a pool keeps; 1 with NX2NAVI_FLUSH_SPAN=1
 static int flush_upload;               // NX2NAVI_FLUSH_UPLOAD=1: flush ranges are copied where the write watch sees them too
+// NX2NAVI_FLUSH_SKIP_CLEAN (flush_clean_bytes in the 0.5.0 and 0.6.0 fixes: flushed ranges upload only the pages the CPU
+// wrote) is this default since 0.6.1: a flush range of a write-watched pool is not copied at all; the key stays known so an
+// nx2navi.ini that sets it reads without a warning, and does nothing.
 
 typedef struct {
     uint64_t subs, syncs, upload_bytes, upload_copies, first_n, first_bytes, wb_bytes, wb_copies, wb_ranges;
