@@ -482,6 +482,12 @@ not queued; the silence before the first prefill and across a stop is not owed, 
 up. The render thread's own timing (`runtime/audren.c` `render_thread`) is not built by it. No game files and no audio
 device.
 
+A change to the sprint button (`runtime/sprint.c`, the set `sprint` of `recomp/patches-v111.txt`, its call in
+`runtime/ov_input.c` `npad_states`) passes `python tests\sprint_check.py`, which builds `sprint.c` with the rest of the
+runtime stubbed and plays frames against a stand-in Link: toggle and hold on each kind of button, the states that keep
+and end a sprint, ZL, the button kept from the game only during play (the bottom button only while Link moves) and a
+Link the player does not control. No game files.
+
 A change to the mouse camera (`runtime/mouse_direct.c`, the mouse path of `runtime/input.c`, the set `mouse_direct` of
 `recomp/patches-v111.txt` or `patches-v143.txt`) passes `python tests\mouse_direct_check.py --cc <clang> --deps
 <ucrt64>\include`, which builds `mouse_direct.c`, and `input.c` with `--deps`, with the rest of the runtime stubbed and
