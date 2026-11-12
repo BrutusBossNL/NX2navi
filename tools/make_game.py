@@ -1681,6 +1681,20 @@ def retune_due(obj, msys):
         return True
 
 
+def write_runtime_map(full, dst):
+    """The linker's map (the build cache's, which tools/prof_report.py reads) without the lines of the lifted game
+    functions (f_<hex>): the runtime's and the libraries' symbols, a few MiB, next to the exe to send with a crash log
+    or a NX2NAVI_PROFILE profile of the render thread."""
+    lifted = re.compile(r'\bf_[0-9a-f]{4,}\b')   # any line naming a lifted function: its symbol or its section
+    try:
+        with open(full, encoding='utf-8', errors='replace') as i, open(dst, 'w', encoding='utf-8') as o:
+            for line in i:
+                if not lifted.search(line):
+                    o.write(line)
+    except OSError:
+        pass
+
+
 def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     """romfs_job: the RomFS step still running beside this one (a first build). Everything that does not include
     romfs_config.h compiles meanwhile; the RomFS index and the few files that include it follow once it is done.
@@ -1794,7 +1808,7 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     stamp = [[o.name, o.stat().st_size, o.stat().st_mtime_ns] for o in objs]
     if prebuilt:
         stamp.append([prebuilt[0].name, prebuilt[0].stat().st_size, sha256_file(prebuilt[0])])
-    link_key = sha256_bytes(json.dumps([LINK_LIBS, ld, cid] + stamp).encode())
+    link_key = sha256_bytes(json.dumps([LINK_LIBS, ld, cid, 'map'] + stamp).encode())
     state_link = cache_dir / 'link.key'
     if exe.is_file() and state_link.is_file() and state_link.read_text(encoding='utf-8') == link_key:
         say(f'  {EXE_NAME} is current, not linked again')
@@ -1814,6 +1828,7 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
         except PermissionError:
             tmp.unlink(missing_ok=True)
             fail(f'{exe} is in use: close the game and try again')
+        write_runtime_map(cache_dir / 'ocarina.map', out / 'nx2navi.map')   # next to the exe, to send with a crash log
         state_link.write_text(link_key, encoding='utf-8')
     copy_if_changed(gen / 'romfs-index.bin', out / 'romfs-index.bin')
     xlate = xlate_source()
