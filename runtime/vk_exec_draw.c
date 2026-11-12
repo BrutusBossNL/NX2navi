@@ -7089,7 +7089,12 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
 #if NX2NAVI_TONEMAP_STANDIN
     // The square decode of the stored picture (vk_tonemap.c). Builds of round 24 lost the device with it: its descriptor
     // push did not go through the recorder (vk_rec.h rec_push; PORT-HANDOFF 7.12 item 11), which it now does.
-    VkImage tm = e5 && dst_view ? vk_tonemap_record(ex->cb, e5, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, dw, dh) : VK_NULL_HANDLE;
+    // Its edge-adaptive filter is for the picture the screen shows: while DLSS or FSR 3.1 runs (vk_dlaa_active) that
+    // upscaler scales the scene itself and vk_dlaa_upscaler below puts its picture over this one, so the pass keeps
+    // its linear filter there, also in the few frames that upscaler misses.
+    VkImage tm = e5 && dst_view ? vk_tonemap_record(ex->cb, e5, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, sw, sh, dw, dh,
+                                                    !vk_dlaa_active())
+                                : VK_NULL_HANDLE;
     if (tm) {   // the tonemapped picture, already at the target's size, then the same blit as below
         ex->dc->B.pipe[1] = VK_NULL_HANDLE;   // the replay must bind its compute pipeline again
         si = tm, sw = dw, sh = dh;

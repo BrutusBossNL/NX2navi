@@ -464,6 +464,12 @@
 # from 0 (off) to 100. Changes while the game runs take effect at once.
 # upscaler = fsr
 # sharpness = 80
+# Scaling of the 3D scene to the game resolution. The game draws its scene smaller than the picture and enlarges it;
+# the console does that with an upscaler of its own, which the port replaces: easu enlarges with an edge-adaptive
+# filter (the one FSR 1 scales with), which keeps edges sharp, and bilinear with the plain filter used before, which
+# is softer and costs a little less GPU time. DLSS and FSR 3.1 (dlaa = 1) scale the scene themselves, so this changes
+# nothing there, and it does not touch the movies. Changes while the game runs take effect at once.
+# standin_filter = easu
 # Picture shape when the window's shape differs from the game resolution's (a 16:9 picture in a 21:9 fullscreen
 # window): fit, the default, keeps the shape, with black bars at the sides or above and below, so a 16:9 game in a wider
 # window is no longer stretched as it used to be; stretch fills the window. Changes while the game runs take effect at

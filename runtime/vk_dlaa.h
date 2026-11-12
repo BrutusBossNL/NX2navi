@@ -68,6 +68,9 @@ void vk_dlaa_pass(VkExec *ex);
 // vk_exec_draw.c untranslated_dispatch_fallback, after the stand-in of the game's own upscaler wrote its output image
 // (in GENERAL, of format fmt and w x h): DLSS or FSR runs there on the armed scene and its picture goes over it.
 void vk_dlaa_upscaler(VkExec *ex, VkImage out, VkFormat fmt, uint32_t w, uint32_t h);
+// 1 while DLSS or FSR 3.1 runs on the scene (the setting is on, the upscaler came up and has not failed): it scales the
+// scene itself, and vk_dlaa_upscaler puts its picture over the stand-in's. The thread that records the frame asks.
+int vk_dlaa_active(void);
 void vk_dlaa_frame(void);
 // 1 once, at the present of the first frame whose scene has a new size after a setting changed (vk_dlaa.c).
 int vk_dlaa_resized_take(void);

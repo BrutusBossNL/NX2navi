@@ -646,6 +646,9 @@ const VkTexImage *vk_dlaa_swap_img;
 VkImageView vk_dlaa_swap_view;
 
 static int dl_active(void) { return N.available && !D.failed && D.on; }
+// The same for vk_exec_draw.c untranslated_dispatch_fallback: while it holds, DLSS or FSR 3.1 scales the scene and the
+// stand-in of the game's own upscaler does not make the picture the screen shows (vk_dlaa_upscaler).
+int vk_dlaa_active(void) { return dl_active(); }
 // The upscaler this frame runs with, as vk_dlaa_frame read it. The menu can set NX2NAVI_TAA to dlss between that and
 // evaluate; read again there while NGX is not up (DLSS starts only after a restart), it sent evaluate to DLSS's path
 // with NGX's functions not loaded, a call to address 0 (issue #325).

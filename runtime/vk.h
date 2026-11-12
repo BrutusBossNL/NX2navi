@@ -655,10 +655,12 @@ uint64_t vk_pool_takes(void);
 void vk_texture_pool_ctx(int on);
 VkDescriptorSetLayout vk_pool_set_layout(void);     // the pools' layout (made on first use)
 VkDescriptorSetLayout vk_empty_set_layout(void);    // set 1 of layouts without one
-// The upscaler stand-in (vk_tonemap.c): src (sampled) scaled to dw x dh and tonemapped into its own RGBA16F image, which
-// it returns for the caller to blit into the target; VK_NULL_HANDLE when it cannot. The caller binds its own compute
-// pipeline again afterwards.
-VkImage vk_tonemap_record(VkCommandBuffer cb, VkImage src, VkFormat sf, uint32_t dw, uint32_t dh);
+// The upscaler stand-in (vk_tonemap.c): src (sampled, sw x sh) scaled to dw x dh and tonemapped into its own RGBA16F
+// image, which it returns for the caller to blit into the target; VK_NULL_HANDLE when it cannot. edge: 1 lets it scale
+// with the edge-adaptive filter (NX2NAVI_STANDIN_FILTER), 0 keeps the linear one (another upscaler's picture replaces
+// this one). The caller binds its own compute pipeline again afterwards.
+VkImage vk_tonemap_record(VkCommandBuffer cb, VkImage src, VkFormat sf, uint32_t sw, uint32_t sh, uint32_t dw,
+                          uint32_t dh, int edge);
 // What vk_texture_by_id(id) returns can change only when this does: the slot is registered again, or a texture entry at
 // its storage address is created, dropped, released or taken back into use. Unlocked; read it before the lookup it
 // guards (a lookup may create an entry). 0 when the slot was never registered: nothing is kept under 0.
