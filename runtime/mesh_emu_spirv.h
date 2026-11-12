@@ -15,6 +15,8 @@
 #define MESH_EMU_DWORDS 16u
 #define MESH_EMU_DRECS 4096u
 #define MESH_EMU_TOFF (MESH_EMU_DOFF + MESH_EMU_DRECS * MESH_EMU_DWORDS * 4u)
+#define MESH_EMU_TWORDS 780u                   // 1 + payloads of up to 776 words (3072 bytes and the 32 the
+                                               // translator adds for the payload header since 0.6.0), padded
 // task records: as many as the push constants say (the replay sizes them, NX2NAVI_MESH_EMU_TASKS); the index area
 // follows them
 // Push constants of every emulation stage (compute and the vertex shader), 32 bytes:
