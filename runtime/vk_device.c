@@ -21,6 +21,10 @@
 PFN_vkGetDeviceProcAddr vk_dpa = vkGetDeviceProcAddr;
 
 static uint32_t g_gfx_queues = 1;   // queues the graphics family offers (pick_device)
+#define QFAM_MAX 16
+static uint32_t g_nqfam;                  // the device's queue families (pick_device): their flags and queue counts
+static VkQueueFlags g_qfam_flags[QFAM_MAX];
+static uint32_t g_qfam_count[QFAM_MAX];
 
 static VkCtx g_vk;
 static int g_ready;
@@ -271,6 +275,8 @@ retry:
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
     g_vk.gfx_family = find_gfx_family(g_vk.phys, qp, nq);
     g_gfx_queues = qp[g_vk.gfx_family].queueCount;
+    g_nqfam = nq < QFAM_MAX ? nq : QFAM_MAX;
+    for (uint32_t i = 0; i < g_nqfam; i++) g_qfam_flags[i] = qp[i].queueFlags, g_qfam_count[i] = qp[i].queueCount;
     g_vk.xfer_family = g_vk.gfx_family;
     for (uint32_t i = 0; i < nq; i++)   // a family that does transfer only (async DMA engine)
         if ((qp[i].queueFlags & VK_QUEUE_TRANSFER_BIT) && !(qp[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))) {
@@ -541,18 +547,44 @@ static int create_device(void) {
                has_fbl && c->fbl.attachmentFeedbackLoopLayout, has_lr && c->lr.dynamicRenderingLocalRead);
     }
 
-    // Frame generation (vk_fg.cpp) presents on a second queue of the graphics family and acquires on a third
-    static const float prio[3] = {1.0f, 1.0f, 1.0f};
+    // Frame generation (vk_fg.cpp) presents on a second queue of the graphics family and acquires on a third. AMD's
+    // swapchain needs a present queue nothing else submits to (FidelityFX: the engine must not use it, or it can
+    // deadlock); the image acquire queue needs no capability. Where the graphics family has one queue (AMD's Windows
+    // driver, an RX 580), both come from another family: a queue of a family that can present for the present, and
+    // a second queue of it, or of any other family, for the acquire (the present queue itself when there is none).
+    // Without them vk_fg_create_swapchain gave up without a word: frame generation set in the menu did nothing.
+    static const float prio[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     uint32_t nq_gfx = vk_fg_queue_count() < g_gfx_queues ? vk_fg_queue_count() : g_gfx_queues;
-    VkDeviceQueueCreateInfo qi[2] = {
-        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family, .queueCount = nq_gfx,
-         .pQueuePriorities = prio}};
-    uint32_t nqi = 1;
-    if (g_vk.xfer_family != g_vk.gfx_family) {
-        qi[1] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                                          .queueFamilyIndex = g_vk.xfer_family, .queueCount = 1, .pQueuePriorities = prio};
-        nqi = 2;
+    uint32_t used[QFAM_MAX] = {0};
+    if (g_vk.gfx_family < QFAM_MAX) used[g_vk.gfx_family] = nq_gfx;
+    if (g_vk.xfer_family != g_vk.gfx_family && g_vk.xfer_family < QFAM_MAX) used[g_vk.xfer_family] = 1;
+    uint32_t fg_pf = UINT32_MAX, fg_pi = 0, fg_af = UINT32_MAX, fg_ai = 0;
+    if (nq_gfx >= 2) {
+        fg_pf = fg_af = g_vk.gfx_family, fg_pi = 1, fg_ai = nq_gfx - 1;
+    } else {
+        for (int pass = 0; pass < 2 && fg_pf == UINT32_MAX; pass++)   // compute families first, then the others
+            for (uint32_t f = 0; f < g_nqfam && fg_pf == UINT32_MAX; f++) {
+                if (f == g_vk.gfx_family || used[f] >= g_qfam_count[f]) continue;
+                if (!(g_qfam_flags[f] & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT))) continue;
+                if (!pass != !!(g_qfam_flags[f] & VK_QUEUE_COMPUTE_BIT)) continue;
+                if (!gfx_window_vk_presentable(g_vk.instance, g_vk.phys, f)) continue;
+                fg_pf = f, fg_pi = used[f]++;
+            }
+        if (fg_pf != UINT32_MAX) {
+            if (used[fg_pf] < g_qfam_count[fg_pf] && used[fg_pf] < 4) fg_af = fg_pf, fg_ai = used[fg_pf]++;
+            for (uint32_t f = 0; f < g_nqfam && fg_af == UINT32_MAX; f++)
+                if (f != g_vk.gfx_family && used[f] < g_qfam_count[f] && used[f] < 4) fg_af = f, fg_ai = used[f]++;
+            if (fg_af == UINT32_MAX) fg_af = fg_pf, fg_ai = fg_pi;
+        }
     }
+    VkDeviceQueueCreateInfo qi[QFAM_MAX];
+    uint32_t nqi = 0;
+    qi[nqi++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                          .queueFamilyIndex = g_vk.gfx_family, .queueCount = nq_gfx, .pQueuePriorities = prio};
+    for (uint32_t f = 0; f < g_nqfam; f++)
+        if (f != g_vk.gfx_family && used[f])
+            qi[nqi++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                                  .queueFamilyIndex = f, .queueCount = used[f], .pQueuePriorities = prio};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &c->f2, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VkResult r = vk_dlssg_create_device(g_vk.instance, g_vk.phys, &di, &g_vk.device);
@@ -564,11 +596,19 @@ static int create_device(void) {
         rt_log("vk: device entry points come through Streamline's interposer (DLSS Frame Generation)");
     }
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
-    if (nq_gfx >= 2) {
+    if (fg_pf != UINT32_MAX) {
         VkQueue present, acquire;
-        vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 1, &present);
-        vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, nq_gfx - 1, &acquire);
-        vk_fg_queues(present, acquire);
+        vkGetDeviceQueue(g_vk.device, fg_pf, fg_pi, &present);
+        vkGetDeviceQueue(g_vk.device, fg_af, fg_ai, &acquire);
+        vk_fg_queues(present, fg_pf, acquire, fg_af);
+        if (fg_pf != g_vk.gfx_family)
+            rt_log("vk: frame generation queues: the graphics family %u has %u queue%s; presents on family %u queue %u, "
+                   "image acquires on family %u queue %u", g_vk.gfx_family, g_gfx_queues, g_gfx_queues == 1 ? "" : "s",
+                   fg_pf, fg_pi, fg_af, fg_ai);
+    } else {
+        rt_log("vk: frame generation queues: none (the graphics family %u has %u queue%s and no other family with a free "
+               "queue can present): AMD FSR 3.1 frame generation cannot run", g_vk.gfx_family, g_gfx_queues,
+               g_gfx_queues == 1 ? "" : "s");
     }
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
