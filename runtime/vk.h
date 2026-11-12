@@ -585,6 +585,7 @@ const VkTexImage *vk_texture_exact_by_id_locked(int id, view_t *view, int *has_v
 uint32_t vk_texture_slots_gen(void);
 int vk_texture_slot_count_locked(void);
 void vk_texture_create_budget_locked(int n);         // slot lookups create at most n entries (mapped storage only); -1 any
+uint64_t vk_texture_pool_make_ns_take(void);         // ns the pool's lookups spent making and first uploading entries since the last call
 int vk_texture_create_deferred_locked(void);        // a lookup since the last call left a creation to the budget             // one past the highest texture slot registered so far (or more)
 int vk_sampler_slot_count_locked(void);
 // Bindless pools (vk_exec_draw.c, "texture and sampler pools"): set 2 of every pipeline layout. Shaders that index
