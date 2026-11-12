@@ -13,7 +13,7 @@
 // Here each allocation leaves out the memory types of a device-local heap whose use, as the driver reports it
 // (VK_EXT_memory_budget: VMA's budget, which counts the memory VMA does not see), is within the reserve of its budget,
 // and VMA places it in the other device-local heap, or system memory, as it does past the fixed limits. The reserve
-// (NX2NAVI_VRAM_RESERVE_MB, default 512, 0 off) is room left for allocations VMA does not make, which can come at
+// (NX2NAVI_VRAM_RESERVE_MB, 512 with low_end_gpu = 1, else 0, off) is room left for allocations VMA does not make, which can come at
 // once: AMD's contexts are made when the upscaler or the frame generation setting changes. An allocation that finds
 // no room that way is made as asked, as before. Allocations from a VMA pool and those for one memory type alone (the
 // headroom's anchors, vk_headroom.c) are made as asked.
@@ -28,7 +28,7 @@ static VkDeviceSize reserve_bytes(void) {
     static int64_t r = -1;
     if (r < 0) {
         const char *e = cfg_get("NX2NAVI_VRAM_RESERVE_MB");
-        long mb = e && *e ? atol(e) : 512;
+        long mb = e && *e ? atol(e) : 0;
         r = (int64_t)(mb < 0 ? 0 : mb) << 20;
     }
     return (VkDeviceSize)r;

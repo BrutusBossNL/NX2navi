@@ -999,7 +999,7 @@ static uint64_t snap_regions(uint64_t r0, uint64_t r1, uint32_t epoch) {
     return calls;
 }
 
-// NX2NAVI_SNAP_WIDEN=<regions> (default 8, 0 off): a texture check that has to query widens the query to up to this
+// NX2NAVI_SNAP_WIDEN=<regions> (8 with low_end_gpu = 1, else 0, off): a texture check that has to query widens the query to up to this
 // many 2 MiB regions on each side, inside the import pool that holds the texture, so the textures of one pool are
 // snapped by one query a submission instead of one each. With freezing off (NX2NAVI_FREEZE_IDLE) an RX 580 in Hyrule
 // Field made about 1,130 texture queries a frame, about 6 MiB each on average incl. repeats, 9.4 ms with the pools'.
@@ -1007,7 +1007,7 @@ static int snap_widen_n(void) {
     static int n = -1;
     if (n < 0) {
         const char *e = cfg_get("NX2NAVI_SNAP_WIDEN");
-        n = e && *e ? atoi(e) : 8;
+        n = e && *e ? atoi(e) : 0;
         if (n < 0) n = 0;
         rt_log("mem: a texture check's write-watch query takes up to %d neighbouring 2 MiB regions of its pool on each "
                "side (NX2NAVI_SNAP_WIDEN)", n);
@@ -3650,7 +3650,7 @@ int vk_mem_mirror_pending(void) { return npend || snl_copied < nsnl; }
 // and when its device address table writes reach guest memory as well (a twin: what they write is not recorded); so
 // does a range with a page that cannot be read without a fault (mem_copy_readable: a lazily armed range). The
 // whole-pool copy of a mirror's first use is larger than the limit and stays with the GPU.
-// Unset or 0 with NX2NAVI_MIRROR_STAGE=1 (the default here): CAPTURE_STAGE_KB. A submission whose prologue copied
+// Unset or 0 with NX2NAVI_MIRROR_STAGE=1 (what low_end_gpu = 1 sets): CAPTURE_STAGE_KB. A submission whose prologue copied
 // everything this way reads nothing of guest memory late, so its submit wait ends once the replay has submitted it
 // (vk_sync_recorded_wait); one with a range left to the GPU-time copy, or a draw that reads a pool without a mirror,
 // is noted (vk_mem_note_live) and its submit wait is the GPU's. The first form of this (0.8.0) copied while the replay
@@ -3660,7 +3660,7 @@ static volatile int32_t mirror_live;   // the submission being recorded had the 
 
 static int stage_on(void) {
     static int on = -1;
-    if (on < 0) on = rt_knob("MIRROR_STAGE", "1") != 0;
+    if (on < 0) on = rt_knob("MIRROR_STAGE", "0") != 0;
     return on;
 }
 
@@ -4676,7 +4676,7 @@ VkCommandBuffer vk_upload_begin(void) {
     return open_b.cb;
 }
 
-// NX2NAVI_UPLOAD_BATCH_MB (default 256; 0 = no limit): once the open batch's staging buffers hold that much, the
+// NX2NAVI_UPLOAD_BATCH_MB (256 with low_end_gpu = 1; 0, the default, = no limit): once the open batch's staging buffers hold that much, the
 // outermost vk_upload_end submits it. A save load made thousands of textures between two replay submissions, and every
 // one of them went into one batch: about 1.5 GB of raw ASTC blocks plus the decoder's work in a single submission,
 // which AMD's 23.10 driver on an RX 580 refused with VK_ERROR_OUT_OF_DEVICE_MEMORY. Submitted early, a batch still
@@ -4687,7 +4687,7 @@ static uint64_t n_early;
 void vk_upload_end(void) {
     if (upload_cap == UINT64_MAX - 1) {
         const char *e = cfg_get("NX2NAVI_UPLOAD_BATCH_MB");
-        long mb = e && *e ? atol(e) : 256;
+        long mb = e && *e ? atol(e) : 0;
         upload_cap = mb > 0 ? (uint64_t)mb << 20 : UINT64_MAX;
         if (mb > 0) rt_log("vk: upload batches submitted early above %ld MiB of staging (NX2NAVI_UPLOAD_BATCH_MB)", mb);
         else rt_log("vk: upload batches not limited (NX2NAVI_UPLOAD_BATCH_MB=0)");

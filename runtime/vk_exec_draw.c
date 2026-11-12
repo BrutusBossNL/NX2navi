@@ -5923,7 +5923,7 @@ static int mesh_emu_draw_prim(VkExec *ex) {
 static int mesh_emu_on(void) {
     static int on = -1;
     if (on < 0) {
-        on = !vk_ctx()->has_mesh_shader && rt_knob("MESH_EMULATION", "1");
+        on = !vk_ctx()->has_mesh_shader && rt_knob("MESH_EMULATION", "0");
         if (on) rt_log("vk: mesh shaders emulated with compute (NX2NAVI_MESH_EMULATION)");
     }
     return on;

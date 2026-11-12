@@ -2847,7 +2847,7 @@ static Layout *layout_get(Bindings *B) {
 // set 0 gets a template per bind point. Caller holds P.lock.
 static int mesh_emu_on(void) {
     static int on = -1;
-    if (on < 0) on = rt_knob("MESH_EMULATION", "1");
+    if (on < 0) on = rt_knob("MESH_EMULATION", "0");
     return on;
 }
 
