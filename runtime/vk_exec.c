@@ -1929,6 +1929,8 @@ static const char *const pw_name[PW_N] = {"next group", "op", "pass hooks", "tur
 static struct {
     int n;                              // workers; 0 off, -1 not read yet
     int pipe;                           // NX2NAVI_REPLAY_PIPE: the groups out at once at most, 0 none
+    int small;                          // NX2NAVI_REPLAY_SMALL: the fewest draws of a group one worker takes whole
+    uint64_t small_groups, small_draws; // such groups and their draws since the last perf line
     void *help_dc;                      // the submitting thread's draw context for chunks it takes while it waits
     RwWorker *w[RW_MAX];
     const op_hdr *skip_to[CALL_DEPTH + 1];   // per call depth: the walk read ahead to this op, a group too small
@@ -2060,6 +2062,10 @@ static void rw_init(void) {
     int pipe = cfg_int("NX2NAVI_REPLAY_PIPE");   // the groups out at once
     RW.pipe = RW.n <= 0 || pipe <= 0 ? 0 : pipe > LIVE_GROUPS ? LIVE_GROUPS : pipe;
     if (RW.pipe) RW.help_dc = vk_exec_draw_ctx_new();
+    RW.small = RW.pipe ? cfg_int("NX2NAVI_REPLAY_SMALL") : 0;
+    if (RW.small > 0)
+        rt_log("vk: a group of %d draws or more goes whole to one replay worker (NX2NAVI_REPLAY_SMALL)", RW.small);
+    else RW.small = 0;
     if (RW.pipe)
         rt_log("vk: groups of %d draws or more are recorded by %d replay worker%s while the submitting thread goes on "
                "past them, %d at once at most (NX2NAVI_REPLAY_WORKERS, NX2NAVI_REPLAY_PIPE)", 2 * CHUNK_DRAWS, RW.n,
@@ -2371,7 +2377,14 @@ static const op_hdr *group_start(VkExec *ex, const op_hdr *h, int depth) {
     int n = (int)(draws / CHUNK_DRAWS);
     if (n > RW.n + 1) n = RW.n + 1;
     if (n > GROUP_CHUNKS) n = GROUP_CHUNKS;
-    if (n < 2 || vk_dump_armed || TL.on || !vk_sync_append_room(n)) {
+    // NX2NAVI_REPLAY_SMALL=N (default 0, with NX2NAVI_REPLAY_PIPE): a group of N draws or more that is too small to cut
+    // goes whole to one worker, and the submitting thread goes on with what follows it without taking the chunk
+    // itself. Kokiri Forest standing, 5 workers, 4 groups out, the early tail on (2026-11-13): about 700 draws a frame
+    // were in such groups, 3.6 ms of the submitting thread; with 16 the replay took 10.2 instead of 11.0 ms a frame
+    // (63.2 against 62.2 fps: the game then waits longer for the GPU, which is busy 83% of the frame there).
+    int small = RW.pipe && RW.small && n < 2 && draws >= (uint32_t)RW.small;
+    if (small) n = 1;
+    if (n < 1 + !small || vk_dump_armed || TL.on || !vk_sync_append_room(n)) {
         RW.skip_to[depth] = end, RW.serial_draws += draws, RW.small_end[why] += draws;
         return h;
     }
@@ -2445,7 +2458,8 @@ static const op_hdr *group_start(VkExec *ex, const op_hdr *h, int depth) {
         // the submitting thread takes chunks too, as the workers wake up, and goes on once none is left to take: the
         // GPU waits for the group's part until its last chunk is done
         rw_behind = 1;
-        group_take(RW.n);
+        if (small) RW.small_groups++, RW.small_draws += draws;   // a worker takes it: this thread goes on at once
+        else group_take(RW.n);
         uint64_t to = kern_now_ns();
         RW.front_ns += tf - t0, RW.own_ns += to - tf, RW.wait_ns += to - t0;
         return end;
@@ -2566,7 +2580,8 @@ static void rec_claim(void) {
 // The tail begins here (the early tail): what was recorded so far waits in the chain, the tail gets a command buffer of
 // its own. Not in a chunk or a continuation, nor with groups still out: the cut needs every piece of the part.
 void vk_exec_tail_begin(VkExec *ex) {
-    if (!tail_enabled() || TL.on || ex != x_cur || rw_chunk || evo_in || Q.drained != Q.out) return;
+    if (!tail_enabled() || TL.on || ex != x_cur || rw_chunk || evo_in) return;
+    if (Q.drained != Q.out) group_drain(ex, PW_OP);   // the cut needs every piece of the part
     if (!vk_sync_wb_split() || !vk_mesh_shader_native() || vk_dump_armed || vk_gpu_passes_capturing()) return;
     if (!vk_sync_tail_ok()) return;
     if (ex->in_pass) vk_exec_pass_end(ex);
@@ -2802,8 +2817,13 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
                 memset(RW.pw_n, 0, sizeof RW.pw_n), memset(RW.pw_ns, 0, sizeof RW.pw_ns);
                 memset(RW.pd_op, 0, sizeof RW.pd_op);
                 RW.behind_ns = 0;
+                if (RW.small)
+                    rt_log("perf: replay workers: groups one worker took whole (NX2NAVI_REPLAY_SMALL): %.2f per "
+                           "submission, %.1f draws each", (double)RW.small_groups / (double)n_subs,
+                           RW.small_groups ? (double)RW.small_draws / (double)RW.small_groups : 0.0);
             }
         }
+        RW.small_groups = RW.small_draws = 0;
         RW.groups = RW.group_draws = RW.chunks = RW.serial_draws = RW.wait_ns = 0;
         evo_held = evo_resumed = evo_forced = evo_switches = 0;
         n_subs = n_parts = n_idle_parts = n_pass_splits = n_cuts = 0;
