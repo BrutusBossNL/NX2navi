@@ -3001,8 +3001,8 @@ static uint32_t vs_union_missing(const VkPipeState *s, GfxShaderIo fin[32]) {
 }
 
 
-// Optional local recipe: both modules are generated privately by projective_recipe.py.
-// The switch reuses the existing local override directory and is inactive unless both files exist.
+// Optional private modules generated from exact local inputs by projective_recipe.py.
+// Mode 1 changes a complete coordinate pair; mode 2 guards one absorption material.
 static const char *water_projective_dir(void) {
     static PlatMutex lock = PLAT_MUTEX_INIT;
     static int checked;
@@ -3011,39 +3011,60 @@ static const char *water_projective_dir(void) {
     if (!checked) {
         checked = 1;
         const char *candidate = cfg_get("NX2NAVI_SPV_OVERRIDE");
-        char v[700], f[700];
-        if (candidate && *candidate) {
-            snprintf(v, sizeof v, "%s/f6d753852c47b0de.spv", candidate);
-            snprintf(f, sizeof f, "%s/3d3a316ab4da3bba.spv", candidate);
-            if (plat_file_exists(v) && plat_file_exists(f)) {
-                dir = candidate;
-                rt_log("water projective: local paired recipe enabled; other shader pairs retain their original calculation");
-            }
-        }
+        if (candidate && *candidate) dir = candidate;
     }
     const char *result = dir;
     plat_mutex_unlock(&lock);
     return result;
 }
 
-static int water_projective_pair(const VkPipeState *s) {
-    if (!P.indep || !s->vs || !s->fs || !water_projective_dir()) return 0;
-    uint64_t vn = 0, fn = 0;
-    const uint32_t *v = gfx_shader_spirv(s->vs, &vn), *f = gfx_shader_spirv(s->fs, &fn);
-    if (!v || !f || fnv(FNV0, v, (size_t)vn * 4) != 0xf6d753852c47b0deull) return 0;
-    uint64_t h = fnv(FNV0, f, (size_t)fn * 4);
-    return h == 0xa39c3d09241441faull;
+static int water_local_module_exists(uint64_t hash) {
+    const char *dir = water_projective_dir();
+    if (!dir) return 0;
+    char path[700];
+    int n = snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)hash);
+    return n > 0 && n < (int)sizeof path && plat_file_exists(path);
 }
 
-static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early, int projective) {
-    if (!projective) return make_module(w, n, early);
+static int water_projective_pair(const VkPipeState *s) {
+    if (!P.indep || !s->fs || !water_projective_dir()) return 0;
+    uint64_t vn = 0, fn = 0;
+    const uint32_t *f = gfx_shader_spirv(s->fs, &fn);
+    if (!f) return 0;
+    uint64_t fh = fnv(FNV0, f, (size_t)fn * 4);
+    // The absorption correction is independent of the coordinate pair.
+    if ((fh == 0xe73dfc0f4c556df8ull && water_local_module_exists(0xabfccea256824a78ull)) ||
+        (fh == 0x061318799d885bcfull && water_local_module_exists(0xb3cec6d0d78ac25aull))) return 2;
+    if (!s->vs) return 0;
+    const uint32_t *v = gfx_shader_spirv(s->vs, &vn);
+    if (!v) return 0;
+    uint64_t vh = fnv(FNV0, v, (size_t)vn * 4);
+    if (vh == 0xf6d753852c47b0deull && fh == 0xa39c3d09241441faull)
+        return water_local_module_exists(vh) && water_local_module_exists(0x3d3a316ab4da3bbaull);
+    if (vh == 0x8d83e3705d790fedull && fh == 0x3c20cb98dbaeb257ull)
+        return water_local_module_exists(vh) && water_local_module_exists(0x216bd323c6b48ee2ull);
+    return 0;
+}
+
+static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early, int mode) {
+    if (!mode) return make_module(w, n, early);
     uint64_t h = fnv(FNV0, w, (size_t)n * 4);
-    int stage = h == 0xf6d753852c47b0deull ? 0 : h == 0x3d3a316ab4da3bbaull ? 4 : -1;
-    if (stage < 0) rt_fatal("water projective: paired module changed before the override; refusing a partial recipe");
+    int stage = -1;
+    if (mode == 2) {
+        // Vertex modules and unrelated fragment translations remain original.
+        if (h != 0xabfccea256824a78ull && h != 0xb3cec6d0d78ac25aull)
+            return make_module(w, n, early);
+        stage = 4;
+    } else {
+        if (h == 0xf6d753852c47b0deull || h == 0x8d83e3705d790fedull) stage = 0;
+        if (h == 0x3d3a316ab4da3bbaull || h == 0x216bd323c6b48ee2ull) stage = 4;
+        if (stage < 0) rt_fatal("water projective: paired module changed; refusing a partial recipe");
+    }
     const char *dir = water_projective_dir();
     if (!dir) rt_fatal("water projective: recipe directory unavailable");
     char path[700];
-    snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)h);
+    int path_len = snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)h);
+    if (path_len < 0 || path_len >= (int)sizeof path) rt_fatal("water projective: module path too long");
     FILE *file = fopen(path, "rb");
     if (!file) rt_fatal("water projective: local module missing: %s", path);
     fseek(file, 0, SEEK_END);

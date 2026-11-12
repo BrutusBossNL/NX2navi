@@ -9,9 +9,16 @@ import argparse
 import json
 import struct
 
-VS_HASH = 0xF6D753852C47B0DE
-FS_HASH = 0xA39C3D09241441FA
-FS_SET1_HASH = 0x3D3A316AB4DA3BBA
+# Known translator outputs: (vertex, fragment, descriptor-set-1 fragment).
+PAIRS = {
+    'AMD': (0xF6D753852C47B0DE, 0xA39C3D09241441FA, 0x3D3A316AB4DA3BBA),
+    'NVIDIA': (0x8D83E3705D790FED, 0x3C20CB98DBAEB257, 0x216BD323C6B48EE2),
+}
+# Exact material profiles: (original, descriptor-set-1 form, distance pointer/value).
+ABSORPTION = {
+    'AMD': (0xE73DFC0F4C556DF8, 0xABFCCEA256824A78, 1965, 8490),
+    'NVIDIA': (0x061318799D885BCF, 0xB3CEC6D0D78AC25A, 1969, 8826),
+}
 
 
 def fnv(data):
@@ -178,36 +185,94 @@ def fragment(data):
     return mod.bytes()
 
 
+def set1(data):
+    mod = Module(data)
+    for op, args in mod.ops:
+        if op == 71 and args[1] == 34:
+            if args[2] not in (0, 1):
+                raise ValueError('Unexpected descriptor set')
+            args[2] = 1
+    return mod.bytes()
+
+
+def pair_profile(vs, fs):
+    hashes = fnv(vs), fnv(fs)
+    matches = [(name, profile) for name, profile in PAIRS.items()
+               if hashes[0] == profile[0] and hashes[1] in profile[1:]]
+    if len(matches) != 1:
+        raise ValueError('Input differs from the narrowly tested shader pairs')
+    return matches[0]
+
+
 def prepare(vs, fs):
-    if fnv(vs) != VS_HASH or fnv(fs) not in (FS_HASH, FS_SET1_HASH):
-        raise ValueError('Input hash differs from the narrowly tested shader pair')
-    if fnv(fs) == FS_HASH:
-        mod = Module(fs)
-        for op, args in mod.ops:
-            if op == 71 and args[1] == 34:
-                if args[2] != 0:
-                    raise ValueError('Unexpected descriptor set')
-                args[2] = 1
-        fs = mod.bytes()
-        if fnv(fs) != FS_SET1_HASH:
-            raise ValueError('Descriptor remapping did not match the recorded module')
+    _, profile = pair_profile(vs, fs)
+    fs = set1(fs)
+    if fnv(fs) != profile[2]:
+        raise ValueError('Descriptor remapping did not match the recorded module')
     return vertex(vs), fragment(fs)
+
+
+def absorption(data):
+    matches = [(name, profile) for name, profile in ABSORPTION.items()
+               if fnv(data) in profile[:2]]
+    if len(matches) != 1:
+        raise ValueError('Input differs from the narrowly tested absorption materials')
+    name, profile = matches[0]
+    data = set1(data)
+    if fnv(data) != profile[1]:
+        raise ValueError('Material descriptor remapping differs')
+    mod = Module(data)
+    if mod.model != 4:
+        raise ValueError('Expected fragment material')
+    pointer, distance = profile[2:]
+    stores = [i for i, (op, args) in enumerate(mod.ops)
+              if op == 62 and args == [pointer, distance]]
+    if len(stores) != 1:
+        raise ValueError('Expected one exact absorption-distance store')
+    definitions = [args for op, args in mod.ops
+                   if op == 133 and len(args) == 4 and args[1] == distance]
+    if len(definitions) != 1 or mod.types[definitions[0][0]] != (22, [32]):
+        raise ValueError('Expected the recorded scalar distance product')
+    scalar = definitions[0][0]
+    imports = [args[0] for op, args in mod.ops
+               if op == 11 and string(args[1:]) == 'GLSL.std.450']
+    if len(imports) != 1:
+        raise ValueError('Expected one GLSL extended-instruction import')
+    zero = mod.constant(scalar, 0)
+    guarded = mod.new()
+    # NMax(distance, 0): negative optical distance must not amplify attenuation.
+    # This targets the distance expression, never a red color or other material.
+    mod.ops[stores[0]:stores[0] + 1] = [
+        (12, [scalar, guarded, imports[0], 80, distance, zero]),
+        (62, [pointer, guarded]),
+    ]
+    mod.install_declarations()
+    return name, profile[1], mod.bytes()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--vertex', required=True, type=Path)
     parser.add_argument('--fragment', required=True, type=Path)
+    parser.add_argument('--material', type=Path, help='Optional exact absorption material')
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    vs, fs = prepare(args.vertex.read_bytes(), args.fragment.read_bytes())
+    vertex_input, fragment_input = args.vertex.read_bytes(), args.fragment.read_bytes()
+    family, profile = pair_profile(vertex_input, fragment_input)
+    vs, fs = prepare(vertex_input, fragment_input)
     args.output.mkdir(parents=True, exist_ok=True)
-    files = {f'{VS_HASH:016x}.spv': vs, f'{FS_SET1_HASH:016x}.spv': fs}
+    files = {f'{profile[0]:016x}.spv': vs, f'{profile[2]:016x}.spv': fs}
+    if args.material:
+        material_family, material_hash, material = absorption(args.material.read_bytes())
+        if material_family != family:
+            raise ValueError('Pair and material must use the same translator profile')
+        files[f'{material_hash:016x}.spv'] = material
     if any((args.output / name).exists() for name in [*files, 'recipe-manifest.json']):
         raise ValueError('Output exists; choose a new ignored build directory')
     for name, data in files.items():
         (args.output / name).write_bytes(data)
-    manifest = {'scope': 'Only the identified vertex/fragment pair, changed together',
+    manifest = {'scope': 'Exact paired coordinates and optional exact-material distance guard',
+                'family': family,
                 'outputs': {name: {'fnv': f'{fnv(data):016x}', 'bytes': len(data)}
                             for name, data in files.items()},
                 'warning': 'Generated modules are game-derived private build output; do not upload them'}
