@@ -1070,9 +1070,13 @@ static void cam_note(int view, int kept) {
 // that jumped: an area load or a spawn moves it 5 to 180 m in one frame. Such a frame now starts a new history, as
 // NVIDIA's DLSS guide asks for a camera cut: a move over 5 m, or a turn over 10 degrees together with a move over 0.5 m,
 // both per 60 Hz frame and scaled by the time since the last camera. Camera traces of play in the Fire Temple
-// (NX2NAVI_MOUSE_TRACE) had a median of 0.05 m and 0.08 degrees a frame; the second test took only the area loads and a
-// swing of the camera through a doorway at 12 to 18 degrees and 0.7 to 1.4 m a frame. A turn alone (the mouse camera,
-// which orbits about 3 m from Link) does not count. Each cut is logged, up to 24.
+// (NX2NAVI_MOUSE_TRACE) had a median of 0.05 m and 0.08 degrees a frame. A turn alone (the mouse camera, which orbits
+// about 3 m from Link) does not count, and the turn with a move counts only from CUT_TURN degrees: a quick swing of the
+// orbiting camera turns 11 to 18 degrees and moves 0.9 to 1.4 m a frame, and taken for a cut at 10 degrees it started a
+// new history at every frame of the swing (nine in a row in Hyrule Field), which at FSR's or DLSS's smaller modes showed
+// the scene at its render size for those frames, blocky and flickering. Its motion vectors carry it as well as any other
+// turn. Each cut is logged, up to 24.
+#define CUT_TURN 30.0
 // v: the Ocarina scene context's rows 0-2, the view (fg_camera).
 static void cam_cut(const float *v) {
     static int on = -1;
@@ -1091,7 +1095,7 @@ static void cam_cut(const float *v) {
         double k = (now - D.cut_ns) / 1e6 / (1000.0 / 60);   // 60 Hz frames since the last camera
         if (k < 0.25) k = 0.25;
         if (k > 4) k = 4;
-        if (move > 5.0 * k || (turn > 10.0 * k && move > 0.5 * k)) {
+        if (move > 5.0 * k || (turn > CUT_TURN * k && move > 0.5 * k)) {
             D.reset = 1, D.cuts++;
             if (D.cut_logged < 24)
                 D.cut_logged++, rt_log("dlaa: frame %llu: camera cut (moved %.2f m, turned %.1f degrees in %.1f ms): new "
@@ -1816,35 +1820,45 @@ static void release_kept(const struct Size *making, int all) {
                   making->w, making->h, all ? "after a release" : "larger inputs");
 }
 
-// The scene's last column and row after a jitter to the left or up. The jitter moves the scene's viewport by under half a
-// pixel (vk_dlaa_viewport), which keeps every pixel centre inside it, yet on an RX 7900 XT (AMD's Windows driver) the
-// draws of a viewport moved left left the last column out, and of one moved up the last row: the driver evidently limits
-// drawing to the whole pixels inside the viewport. In a frame dump (NX2NAVI_DUMP, Hyrule Field, 3416x1440, FSR 4 Native
-// AA) the depth's last row kept its clear value through every scene pass and the light target held the fog's colour
-// there, which the upscaler blended into a grey line along the bottom and right edges of the picture that flickered with
-// the jitter; with NX2NAVI_DLAA_JITTER=0, and without DLSS or FSR, there was no line. Before DLSS or FSR reads the scene,
-// such a column or row of the light target and of the depth (which the motion vectors are made from) is filled from the
-// one next to it. NX2NAVI_DLAA_EDGE_FILL=0 (test): not filled.
-static void edge_fill(VkCommandBuffer cb, const VkExecTarget *t, const VkExecTarget *z, float jx, float jy) {
+// The scene's outer columns and rows in a jittered frame. The jitter moves the scene's viewport by under half a pixel
+// (vk_dlaa_viewport), which keeps every pixel centre inside it, yet on an RX 7900 XT (AMD's Windows driver) the draws of
+// a viewport moved left left the last column out, and of one moved up the last row: the driver evidently limits drawing
+// to the whole pixels inside the viewport. In a frame dump (NX2NAVI_DUMP, Hyrule Field, 3416x1440, FSR 4 Native AA) the
+// depth's last row kept its clear value through every scene pass and the light target held the fog's colour there,
+// which the upscaler blended into a light line along the bottom and right edges of the picture that flickered with the
+// jitter; with NX2NAVI_DLAA_JITTER=0, and without DLSS or FSR, there was no line. Before DLSS or FSR reads the scene, the
+// outermost column and row on each side of the light target and of the depth (which the motion vectors are made from)
+// are filled from the ones next to them, in every jittered frame: filled only after a jitter to the left or up, the line
+// stayed gone in every test run, yet a player's clip at Ultra Performance with HDR still showed the sky's colour in the
+// last row of about half the frames, and another driver may round the near edge instead. A copied edge costs nothing
+// visible: one render pixel at the picture's border, which the upscaler blends with its history.
+// NX2NAVI_DLAA_EDGE_FILL=0 (test): not filled.
+static void edge_fill(VkCommandBuffer cb, const VkExecTarget *t, const VkExecTarget *z, int jittered) {
     static int on = -1;
     if (on < 0) on = rt_knob("DLAA_EDGE_FILL", "1");
     uint32_t w = t->width, h = t->height;
-    if (!on || w < 2 || h < 2 || (jx >= 0 && jy >= 0)) return;
+    if (!on || !jittered || w < 3 || h < 3) return;
     static int told;
-    if (!told++) rt_log("dlaa: the scene's last column or row after a jitter to the left or up is filled from the one before it");
-    // the column first, then the row over the whole width, so the corner comes from the filled column
+    if (!told++) rt_log("dlaa: the scene's outer columns and rows are filled from the ones next to them in each jittered frame");
+    // the columns first, then the rows over the whole width, so the corners come from the filled columns
     for (int pass = 0; pass < 2; pass++) {
-        if (pass ? jy >= 0 : jx >= 0) continue;
-        VkOffset3D from = pass ? (VkOffset3D){0, (int32_t)h - 2, 0} : (VkOffset3D){(int32_t)w - 2, 0, 0};
-        VkOffset3D to = pass ? (VkOffset3D){0, (int32_t)h - 1, 0} : (VkOffset3D){(int32_t)w - 1, 0, 0};
-        VkExtent3D ext = pass ? (VkExtent3D){w, 1, 1} : (VkExtent3D){1, h, 1};
+        VkImageCopy r[2][2];   // [image][side]
+        for (int side = 0; side < 2; side++) {
+            int32_t end = pass ? (int32_t)h - 1 : (int32_t)w - 1, at = side ? end : 0, next = side ? end - 1 : 1;
+            VkOffset3D from = pass ? (VkOffset3D){0, next, 0} : (VkOffset3D){next, 0, 0};
+            VkOffset3D to = pass ? (VkOffset3D){0, at, 0} : (VkOffset3D){at, 0, 0};
+            VkExtent3D ext = pass ? (VkExtent3D){w, 1, 1} : (VkExtent3D){1, h, 1};
+            for (int i = 0; i < 2; i++) {
+                const VkExecTarget *g = i ? z : t;
+                VkImageAspectFlags a = i ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+                r[i][side] = (VkImageCopy){.srcSubresource = {a, g->level, g->base_layer, 1}, .srcOffset = from,
+                                           .dstSubresource = {a, g->level, g->base_layer, 1}, .dstOffset = to, .extent = ext};
+            }
+        }
         for (int i = 0; i < 2; i++) {
             const VkExecTarget *g = i ? z : t;
-            if (!g->image || g->width != w || g->height != h) continue;
-            VkImageAspectFlags a = i ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
-            VkImageCopy r = {.srcSubresource = {a, g->level, g->base_layer, 1}, .srcOffset = from,
-                             .dstSubresource = {a, g->level, g->base_layer, 1}, .dstOffset = to, .extent = ext};
-            vkCmdCopyImage(cb, g->image, VK_IMAGE_LAYOUT_GENERAL, g->image, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+            if (g->image && g->width == w && g->height == h)
+                vkCmdCopyImage(cb, g->image, VK_IMAGE_LAYOUT_GENERAL, g->image, VK_IMAGE_LAYOUT_GENERAL, 2, r[i]);
         }
         full_barrier(cb);
     }
@@ -1880,7 +1894,7 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     VkImageView zv = vk_exec_target_view(z->img, z->format, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_DEPTH_BIT, z->level,
                                          z->base_layer, 1, 0);
     float jx = D.jit_used ? D.ux : 0.0f, jy = D.jit_used ? D.uy : 0.0f;
-    edge_fill(cb, t, z, jx, jy);   // before the motion vectors read the depth
+    edge_fill(cb, t, z, D.jit_used);   // before the motion vectors read the depth
     static int no_mv = -1;
     if (no_mv < 0) no_mv = !rt_knob("DLAA_MV", "1");   // NX2NAVI_DLAA_MV=0: zero motion (test)
     int masked = 0, mv = no_mv ? 0 : mv_pass(ex, e, zv, jx, jy, char_bias(), &masked);
