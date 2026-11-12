@@ -105,6 +105,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                   "its own. Fixes the teal splotches in Kokiri Forest's fog.",
     [UI_MENU_LAMA_MIRROR_HOT] = "Pools copied every frame stay in system memory",
     [UI_MENU_LAMA_MIRROR_HOT_DESC] = "A game memory pool whose copies to and from video memory each frame reach this "
+                                     "percentage of its size is read by the GPU from system memory instead, if the "
+                                     "CPU does not write it (a pool it refills each frame stays in video memory: read "
+                                     "in place, the GPU saw the next frame's data). For GPUs and buses short of "
+                                     "bandwidth; 25 suits an RX 580. 0: off.",
     [UI_MENU_LAMA_RESERVE] = "Video memory kept free",
     [UI_MENU_LAMA_RESERVE_DESC] = "Room kept free in each video memory heap for what FidelityFX (FSR 3.1, frame generation) and the "
                                   "driver allocate on their own: a heap with less than this left takes no new allocation while "

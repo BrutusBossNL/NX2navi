@@ -83,6 +83,7 @@ typedef struct PoolRec {
     int fl_n;                          // flush_lock: ranges in fl; read without the lock to skip an empty list
     uint64_t fl_calls, fl_sum;         // flush_lock: the calls and bytes behind fl, for mirror_sync's statistics
     uint64_t hot_bytes;                // replay: uploads, write-backs and merges since the last hot check (mirror_hot)
+    uint64_t hot_up;                   // of them the uploads: pages the CPU wrote (mirror_hot leaves such pools mirrored)
     // Shadow storage (POOL_IMPORT in shadow mode, "shadow storage" below): buf is a host-visible copy of the guest pages.
     VmaAllocation salloc;
     uint8_t *smap;                     // its mapping; offsets as in buf (from import_lo)
@@ -2532,7 +2533,7 @@ static void mirror_sync(PoolRec *r) {
         for (uint64_t x = a; x < b; x += 1ull << GEN_PAGE_SHIFT)
             if (ch[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] > since) {
                 range_add(&pend, &npend, &cpend, r, x - lo, 1ull << GEN_PAGE_SHIFT), mrep.page_bytes += 1ull << GEN_PAGE_SHIFT;
-                r->st_pages += 1ull << GEN_PAGE_SHIFT;
+                r->st_pages += 1ull << GEN_PAGE_SHIFT, r->hot_bytes += 1ull << GEN_PAGE_SHIFT, r->hot_up += 1ull << GEN_PAGE_SHIFT;
             }
     }
     r->mgen = gen_now;
@@ -2547,6 +2548,7 @@ static void mirror_sync(PoolRec *r) {
         r->fl_n = 0, r->fl_calls = r->fl_sum = 0;
         plat_mutex_unlock(&flush_lock);
         mrep.flush_calls += calls, mrep.flush_sum += sum;
+        r->hot_up += sum;   // the CPU wrote them (mirror_hot)
         for (int i = 0; i < n; i++) {
             uint64_t a = fl[i].lo > lo ? fl[i].lo : lo, b = fl[i].hi < hi ? fl[i].hi : hi;
             if (a >= b) continue;
@@ -3464,6 +3466,13 @@ static void freeze_pass(void) {
 // previous one has queued its write-backs and nothing is pending for the next: the pool leaves the mirrored list, the
 // device address table points at its imported buffer again, and the mirror is freed once the submissions that may still
 // use it are done (vk_defer_buffer, as mirror_evict). Pools under HOT_MIN a frame stay mirrored.
+// Only pools the CPU does not write go: a pool read in place gives the GPU the game's bytes as they are when it reads
+// them, not as they were at the submit (the mirror's copy). The game refills its per-frame pools for the next frame
+// while the replay (asynchronous, up to a frame behind) and the GPU still draw the last one from them: the small grass
+// and moss, drawn from instances in such pools, flickered and slid over the ground as the camera turned, and with
+// 0.8.0's mesh fallback every mesh flashed (RX 580, Kokiri Forest, 2026-11-11; 18 pools of 2-15 MiB had gone, each
+// refilled by the CPU every frame). A pool with more than HOT_UP_MAX of CPU writes a frame stays mirrored.
+#define HOT_UP_MAX (64ull << 10)
 #define HOT_FRAMES 120
 #define HOT_MIN (1ull << 20)
 static int mirror_hot = -1;
@@ -3492,7 +3501,11 @@ static void hot_check(void) {
     plat_mutex_lock(&pool_lock);
     for (int i = 0; i < nm;) {
         PoolRec *r = mlist[i];
+        uint64_t n = r->import_hi - r->import_lo, per = (uint64_t)(r->hot_bytes / frames), up = (uint64_t)(r->hot_up / frames);
         r->hot_bytes = (uint64_t)per;   // kept for the log line below
+        r->hot_up = 0;
+        if (nout == 8 || per < HOT_MIN || per * 100 < n * (uint64_t)mirror_hot || up > HOT_UP_MAX || !r->mbuf ||
+            (!r->twin && r->gpa_rec)) {
             r->hot_bytes = 0, i++;   // !twin with a table record: the table's writes are in the mirror alone (mirror_evict)
             continue;
         }
