@@ -181,7 +181,7 @@ static void write_events(const DumpJob *j) {
         static const char *const flag_names[] = {"depth", "stencil", "mirrored", "bound", "astc", "gpu"};
         for (int b = 0; b < 6; b++)
             if (e->flags & 1u << b) k += snprintf(fl + k, sizeof fl - (size_t)k, "%s%s", k ? "," : "", flag_names[b]);
-        char detail[160];
+        char detail[400];
         if (e->kind == FLIGHT_TEX_NEW) snprintf(detail, sizeof detail, "%s", vk_texture_start_name((int)e->detail));
         else if (e->kind == FLIGHT_TEX_DROP) snprintf(detail, sizeof detail, "%s", vk_texture_drop_name((int)e->detail));
         else if (e->kind == FLIGHT_TEX_UP || e->kind == FLIGHT_TEX_REUP)
@@ -194,10 +194,12 @@ static void write_events(const DumpJob *j) {
             snprintf(detail, sizeof detail, "slot %u: %s", e->us, was[e->detail & 3]);
         } else if (e->kind == FLIGHT_TEX_TOBLANK || e->kind == FLIGHT_TEX_BLANKSUB) {
             static const char *const bit[] = {"finalized", "own entry", "released", "superseded", "overwritten", "uploaded",
-                                              "storage readable", "held out", "CPU-written", "GPU-owned", "retiring"};
+                                              "storage readable", "held out", "CPU-written", "GPU-owned", "retiring",
+                                              "resolves to an entry", "that entry is a volume", "that entry is another descriptor's",
+                                              "no shader reads the pool as a volume"};
             int o = snprintf(detail, sizeof detail, e->kind == FLIGHT_TEX_TOBLANK ? "slot %u lost its picture:"
                              : "slot %u had no picture when its submission ended:", e->us);
-            for (int b = 0; b < 11 && o < (int)sizeof detail - 20; b++)
+            for (int b = 0; b < 15 && o < (int)sizeof detail - 40; b++)
                 if (e->detail & 1u << b) o += snprintf(detail + o, sizeof detail - (size_t)o, " %s;", bit[b]);
         } else if (e->kind == FLIGHT_TEX_BLANK)
             snprintf(detail, sizeof detail, "slot %u sampled as its stand-in%s%s", e->us, e->detail & 1 ? ", finalized" : "",

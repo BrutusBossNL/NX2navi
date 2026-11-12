@@ -2456,6 +2456,10 @@ static int pool_view_blank(VkImageView v) {
     return 0;
 }
 
+// For the flight recorder's blank-slot events: 16384 when no pipeline made so far reads the pool as a volume (kind =
+// depth * 8 + dim * 2 + arrayed, vk.h), so a slot that holds a volume has a stand-in in every kind that is read.
+static uint32_t pool_no_3d(void) { return __atomic_load_n(&vk_pool_kinds_used, __ATOMIC_RELAXED) & 0x3030u ? 0 : 16384u; }
+
 // Slot id's entry of a kind went from the view was to now: noted when a texture's view gives way to the stand-in, which
 // every draw of the submission that samples the slot then reads (the set is written with update-after-bind).
 static uint32_t pool_blanked[512];   // the slots that lost their picture since the last pool_blank_check
@@ -2463,7 +2467,7 @@ static int pool_nblanked;
 static void pool_note_blank(uint32_t id, VkImageView was, VkImageView now, int *noted) {
     if (!flight_on || *noted || !was || pool_view_blank(was) || !pool_view_blank(now)) return;
     uint64_t addr;
-    uint32_t fmt, w, h, why = vk_texture_slot_why_locked((int)id, &addr, &fmt, &w, &h);
+    uint32_t fmt, w, h, why = vk_texture_slot_why_locked((int)id, &addr, &fmt, &w, &h) | pool_no_3d();
     flight_tex(FLIGHT_TEX_TOBLANK, addr, fmt, w, h, 0, 0, why, id);
     if (pool_nblanked < (int)(sizeof pool_blanked / sizeof *pool_blanked)) pool_blanked[pool_nblanked++] = id;
     *noted = 1;
@@ -2483,7 +2487,7 @@ static void pool_blank_check(void) {
         }
         if (real) continue;
         uint64_t addr;
-        uint32_t fmt, w, h, why = vk_texture_slot_why_locked((int)id, &addr, &fmt, &w, &h);
+        uint32_t fmt, w, h, why = vk_texture_slot_why_locked((int)id, &addr, &fmt, &w, &h) | pool_no_3d();
         flight_tex(FLIGHT_TEX_BLANKSUB, addr, fmt, w, h, 0, 0, why, id);
     }
     vk_texture_unlock();
