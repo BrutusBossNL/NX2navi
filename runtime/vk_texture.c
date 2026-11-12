@@ -1057,11 +1057,56 @@ static uint32_t detail_skip(const tex_t *t, const TexKey *k, const TexVkFormat *
     return most >= 2 && levels >= 4 && w >= DETAIL_LOW_MIN && h >= DETAIL_LOW_MIN ? 2 : 1;
 }
 
+// Where texture images go when video memory runs short. An RX 580 (8 GiB, AMD 23.10) shows its memory as a 6 GiB
+// device-local heap and a 2 GiB device-local, host-visible one. Asked for device-local memory without a budget, VMA
+// took the first heap every time: a save load put 5.6 GiB into it against a budget of 5.1 GiB while the other heap
+// held 69 MiB, and the next submit failed with VK_ERROR_OUT_OF_DEVICE_MEMORY. Each step below allocates within the
+// heaps' budgets (VK_EXT_memory_budget): device-local memory of any heap, then any memory the image allows (system
+// memory, slower to sample); only the last step allocates past the budget, as before.
+static uint64_t placed[VK_MAX_MEMORY_HEAPS], n_spilled;
+
+static void note_placement(VkCtx *c, VmaAllocation a, int step) {   // tex_lock held
+    VmaAllocationInfo info;
+    vmaGetAllocationInfo(c->vma, a, &info);
+    uint32_t heap = c->mem_props.memoryTypes[info.memoryType].heapIndex;
+    if (heap >= VK_MAX_MEMORY_HEAPS) return;
+    uint64_t n = ++placed[heap];
+    int first_heap = 1;
+    for (uint32_t h = 0; h < heap; h++)
+        if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) first_heap = 0;
+    if (step == 0 && first_heap && (c->mem_props.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) return;
+    if (step) n_spilled++;
+    if (n <= 4 || !(n & (n - 1)))
+        rt_log("vk: texture memory: %llu images in heap %u (%s)%s", (unsigned long long)n, heap,
+               c->mem_props.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "video memory" : "system memory",
+               step == 2 ? ", past the budget" : "");
+}
+
+static VkResult image_alloc(VkCtx *c, const VkImageCreateInfo *ci, VmaAllocationCreateFlags own, VkImage *img,
+                            VmaAllocation *a) {
+    static const struct { VkMemoryPropertyFlags req; VmaAllocationCreateFlags flags; } step[3] = {
+        {VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT},
+        {0, VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT},
+        {0, 0}};
+    VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    for (int i = 0; i < 3; i++) {
+        VmaAllocationCreateInfo ai = {.flags = step[i].flags | own, .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                                      .requiredFlags = step[i].req};
+        r = vmaCreateImage(c->vma, ci, &ai, img, a, NULL);
+        if (r == VK_SUCCESS) {
+            note_placement(c, *a, i);
+            return r;
+        }
+    }
+    return r;
+}
+
 // A texture whose content the CPU provides (tex_mirrored), up to SUBALLOC_MAX, takes memory from VMA's device blocks:
 // the driver prefers a dedicated allocation for most images, and vmaCreateImage follows that, so a scene load
 // (about 2700 new textures in one frame entering Kokiri Forest) made as many vkAllocateMemory calls, 43% of that
 // 680 ms frame. vmaAllocateMemory with the plain requirements sub-allocates instead, from the blocks the headroom
-// thread keeps ahead (vk_headroom.c). Render targets keep vmaCreateImage and the driver's preference (vma_image).
+// thread keeps ahead (vk_headroom.c), within the budget: past it, the next device-local memory type that has room
+// (image_alloc in vma_image). Render targets keep vmaCreateImage and the driver's preference (vma_image).
 // VK_NULL_HANDLE when the image does not take that memory.
 enum { SUBALLOC_MAX = 32 << 20 };
 static VkImage suballoc_image(VkCtx *c, const VkImageCreateInfo *ci, VmaAllocation *alloc) {
@@ -1073,9 +1118,11 @@ static VkImage suballoc_image(VkCtx *c, const VkImageCreateInfo *ci, VmaAllocati
     VkImageMemoryRequirementsInfo2 ri = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, .image = img};
     vkGetImageMemoryRequirements2(c->device, &ri, &mr2);
     VkMemoryRequirements mr = mr2.memoryRequirements;
-    VmaAllocationCreateInfo ai = {.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+    VmaAllocationCreateInfo ai = {.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
+                                  .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
     int ok = !dr.requiresDedicatedAllocation && mr.size <= SUBALLOC_MAX &&
              vmaAllocateMemory(c->vma, &mr, &ai, alloc, NULL) == VK_SUCCESS;
+    if (ok) note_placement(c, *alloc, 0);
     if (ok && vmaBindImageMemory(c->vma, *alloc, img) != VK_SUCCESS) {
         vmaFreeMemory(c->vma, *alloc);
         ok = 0;
@@ -1087,15 +1134,15 @@ static VkImage suballoc_image(VkCtx *c, const VkImageCreateInfo *ci, VmaAllocati
     return img;
 }
 
-// An image made with vmaCreateImage. One of DEDICATED_MIN or more gets memory of its own: freed inside one of VMA's
-// 256 MiB blocks it left a hole the driver went on counting, with the rest of the block, against the budget and the
-// system's commit (0.5 to 1.8 GiB of such free space in a session at 5120x2160), until the block emptied; its own
-// memory goes back when it does.
+// An image made with vmaCreateImage, by image_alloc's steps. One of DEDICATED_MIN or more gets memory of its own:
+// freed inside one of VMA's 256 MiB blocks it left a hole the driver went on counting, with the rest of the block,
+// against the budget and the system's commit (0.5 to 1.8 GiB of such free space in a session at 5120x2160), until the
+// block emptied; its own memory goes back when it does.
 static VkResult vma_image(VkCtx *c, const VkImageCreateInfo *ci, const ImgKey *ik, VkImage *img, VmaAllocation *alloc) {
-    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     const VkMemoryRequirements *known = nvn_hm_get(&img_reqs, ik);
-    if ((known ? known->size : image_size(ci)) >= DEDICATED_MIN) ai.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-    return vmaCreateImage(c->vma, ci, &ai, img, alloc, NULL);
+    VmaAllocationCreateFlags own = (known ? known->size : image_size(ci)) >= DEDICATED_MIN
+                                       ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0;
+    return image_alloc(c, ci, own, img, alloc);
 }
 
 // defer_init: the caller records the image's first transition (init_image or alias_copy).
