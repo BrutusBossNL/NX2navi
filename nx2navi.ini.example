@@ -296,7 +296,8 @@
 # the game waits less for the GPU (mirror_stage = 1, submit_finish_gpu = 0), frames are prepared on a thread of their
 # own (replay_async = 1, which can show a dark or flickering frame now and then), pools the game refills every frame
 # stay in system memory (mirror_hot = 25), and a texture read after another image was drawn over its memory gets
-# memory of its own (tex_clobber = 1). 0, the default: each of these stays as it was in 0.9.1. Read at start.
+# memory of its own (tex_clobber = 1). 0, the default: each of these stays as it was in 0.9.1, and none of these keys
+# is read. Read at start.
 # low_end_gpu = 0
 # Textures the game released that are kept as they are (1 to 16384); past this count only those that lose nothing
 # when dropped go. Default: one per 2 MB of the video memory budget, 2048 to 8192. Read at start.

@@ -1426,20 +1426,25 @@ def fast_clang(msys, clang, env):
 
 
 def guest_opt_ini(out):
-    """NX2NAVI_GUEST_OPT from nx2navi.ini next to the exe (the menu's Lama patches tab writes it there) when the
-    environment does not set it: the next build of the game folder out takes it."""
+    """NX2NAVI_GUEST_OPT from nx2navi.ini next to the exe (the low-end GPU rows of the menu's Game tab write it there)
+    when the environment does not set it: the next build of the game folder out takes it. Only while low_end_gpu = 1
+    is in the file too: the mode's settings count only with the mode on (runtime/cfg.c LOWEND_ONLY)."""
     if os.environ.get('NX2NAVI_GUEST_OPT', '').strip():
         return
+    found, low = '', False
     try:
         for line in (Path(out) / 'nx2navi.ini').read_text(encoding='utf-8', errors='replace').splitlines():
             key, eq, value = line.partition('=')
             key = key.strip().lower()
-            if eq and key in ('guest_opt', 'nx2navi_guest_opt'):
-                value = value.split('#')[0].split(';')[0].strip().strip('"')
-                if value:
-                    os.environ['NX2NAVI_GUEST_OPT'] = value
+            value = value.split('#')[0].split(';')[0].strip().strip('"')
+            if eq and key in ('guest_opt', 'nx2navi_guest_opt') and value:
+                found = value
+            if eq and key in ('low_end_gpu', 'nx2navi_low_end_gpu'):
+                low = value not in ('', '0')
     except OSError:
         pass
+    if found and low:
+        os.environ['NX2NAVI_GUEST_OPT'] = found
 
 
 def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None, first=()):

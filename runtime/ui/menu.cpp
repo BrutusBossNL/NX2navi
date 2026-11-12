@@ -505,7 +505,7 @@ static int fonts_up(float scale) {
         // what the title face shows in the CJK languages: the menu's title and tabs (Simplified Chinese menu text) and
         // the boot screen's title (the game's language)
         static const UiTextId titles[] = {UI_MENU_TITLE, UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                          UI_MENU_TAB_CONTROLS, UI_MENU_TAB_LAMA, UI_MENU_TAB_COOP, UI_BOOT_TITLE};
+                                          UI_MENU_TAB_CONTROLS, UI_MENU_TAB_COOP, UI_BOOT_TITLE};
         for (int i = 0; i < N; i++) {
             if (!data[i]) continue;
             ImFontGlyphRangesBuilder b;
@@ -573,8 +573,8 @@ extern "C" void menu_vk_release(void) {
 // NX2NAVI_ prefix optional) puts the cursor on that setting's row and scrolls it into view when the row is next drawn
 // (opt_focus_key), so a page's shot shows a row below the first screenful; it does not switch tabs. COOP_PAGE, COOP_JOIN
 // and COOP_ACCEPT_OFFER drive the Co-op tab (ui/coop_page.h coop_test_set).
-// Ocarina of Time: the options this port has, co-op (ui/coop_page.cpp) and the Lama patches tab (the RX 580 patches)
-enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_LAMA, TAB_COOP, TAB_COUNT };   // co-op last: tabs_shown
+// Ocarina of Time: the options this port has, and co-op (ui/coop_page.cpp)
+enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_COOP, TAB_COUNT };   // co-op last: tabs_shown
 enum { TEST_PAGE_FRAMES = 30, TEST_SETS = 16, TEST_OPENS = 8 };
 struct TestSet { uint64_t frame; char key[64], value[64]; };
 static struct {
@@ -1398,14 +1398,14 @@ static void rows_saves(void) {
     if (line[0]) opt_text_str(line, warn);
 }
 
+static void rows_low_end(void);
+
 static void tab_game(float scale) {
     opt_begin("##game", scale);
     row_fps_limit();   // frame_rate.c: Ocarina steps by the clock, so the pacer alone sets its rate
     row_game_lang();
     static const UiTextId mode[] = {UI_MENU_MODE_DOCKED, UI_MENU_MODE_HANDHELD};
     opt_choice("NX2NAVI_OPERATION_MODE", UI_MENU_OPERATION_MODE, mode, 2, UI_MENU_OPERATION_MODE_DESC);
-    // cfg.c LOWEND: the defaults for older graphics cards, read at start
-    opt_toggle("NX2NAVI_LOW_END_GPU", UI_MENU_LOW_END_GPU, UI_MENU_LOW_END_GPU_DESC);
     opt_toggle("NX2NAVI_ASSUME_FOCUS", UI_MENU_ASSUME_FOCUS, UI_MENU_ASSUME_FOCUS_DESC);
     // discord_rpc.c reads the setting on its own thread and connects or clears the status within half a second
     opt_toggle("NX2NAVI_DISCORD_RPC", UI_MENU_DISCORD_RPC, UI_MENU_DISCORD_RPC_DESC);
@@ -1421,6 +1421,12 @@ static void tab_game(float scale) {
                             "of area: keep a copy of the save first.", on))
             opt_apply("NX2NAVI_DEBUG_MENU", on ? "0" : "1");
     }
+    // Last, as its own settings follow it while it is on (rows_low_end). cfg.c LOWEND: the defaults for older graphics
+    // cards, read at start.
+    opt_toggle("NX2NAVI_LOW_END_GPU", UI_MENU_LOW_END_GPU, UI_MENU_LOW_END_GPU_DESC);
+    // the mode's settings are read only while it is on (cfg.c LOWEND_ONLY), so their rows wait for the restart too
+    if (cfg_low_end_active()) rows_low_end();
+    else if (cfg_bool("NX2NAVI_LOW_END_GPU")) opt_text(UI_MENU_LOWEND_RESTART);
     opt_end();
 }
 
@@ -1626,81 +1632,80 @@ static void tab_coop(float scale) {
     coop_after_page(scale);
 }
 
-// ---- the Lama patches tab: the settings the RX 580 patches add (apply_rx580_fix), each read where its patch reads it
-static void tab_lama(float scale) {
-    opt_begin("##lama", scale);
-    opt_text(UI_MENU_LAMA_INTRO);
-    opt_group(UI_MENU_LAMA_MEMORY);
+// ---- the settings of the low-end GPU mode, under its switch in the Game tab while that is on (tab_game): each is read
+// where the code it sets reads it
+static void rows_low_end(void) {
+    opt_text(UI_MENU_LOWEND_INTRO);
+    opt_group(UI_MENU_LOWEND_MEMORY);
     {   // vk_texture.c sweep_released
         static const char *const values[] = {"", "512", "1024", "2048", "4096", "8192"};
         const char *names[] = {menu_text(UI_MENU_AUTO), "512", "1024", "2048", "4096", "8192"};
-        opt_choice_list("NX2NAVI_TEX_RELEASED_MAX", UI_MENU_LAMA_RELEASED, values, names, 6, UI_MENU_LAMA_RELEASED_DESC);
+        opt_choice_list("NX2NAVI_TEX_RELEASED_MAX", UI_MENU_LOWEND_RELEASED, values, names, 6, UI_MENU_LOWEND_RELEASED_DESC);
     }
-    opt_slider("NX2NAVI_MIRROR_HOT", UI_MENU_LAMA_MIRROR_HOT, 0, 100, UI_MENU_LAMA_MIRROR_HOT_DESC, 5, "%.0f %%");
+    opt_slider("NX2NAVI_MIRROR_HOT", UI_MENU_LOWEND_MIRROR_HOT, 0, 100, UI_MENU_LOWEND_MIRROR_HOT_DESC, 5, "%.0f %%");
     {   // vk_device.c vram_heap_limits
         static const char *const values[] = {"auto", "0"};
         const char *names[] = {menu_text(UI_MENU_AUTO), menu_text(UI_MENU_OFF)};
-        opt_choice_list("NX2NAVI_VRAM_HEAP_LIMIT", UI_MENU_LAMA_HEAP_LIMIT, values, names, 2, UI_MENU_LAMA_HEAP_LIMIT_DESC);
+        opt_choice_list("NX2NAVI_VRAM_HEAP_LIMIT", UI_MENU_LOWEND_HEAP_LIMIT, values, names, 2, UI_MENU_LOWEND_HEAP_LIMIT_DESC);
     }
     {   // vk_vma_budget.c reserve_bytes
         static const char *const values[] = {"512", "256", "768", "1024", "0"};
         const char *names[] = {"512 MB", "256 MB", "768 MB", "1024 MB", menu_text(UI_MENU_OFF)};
-        opt_choice_list("NX2NAVI_VRAM_RESERVE_MB", UI_MENU_LAMA_RESERVE, values, names, 5, UI_MENU_LAMA_RESERVE_DESC);
+        opt_choice_list("NX2NAVI_VRAM_RESERVE_MB", UI_MENU_LOWEND_RESERVE, values, names, 5, UI_MENU_LOWEND_RESERVE_DESC);
     }
     {   // vk_memory.c upload_batch_cap
         static const char *const values[] = {"128", "256", "512", "1024", "0"};
-        const char *names[] = {"128 MB", "256 MB", "512 MB", "1024 MB", menu_text(UI_MENU_LAMA_NO_LIMIT)};
-        opt_choice_list("NX2NAVI_UPLOAD_BATCH_MB", UI_MENU_LAMA_UPLOAD_BATCH, values, names, 5, UI_MENU_LAMA_UPLOAD_BATCH_DESC);
+        const char *names[] = {"128 MB", "256 MB", "512 MB", "1024 MB", menu_text(UI_MENU_LOWEND_NO_LIMIT)};
+        opt_choice_list("NX2NAVI_UPLOAD_BATCH_MB", UI_MENU_LOWEND_UPLOAD_BATCH, values, names, 5, UI_MENU_LOWEND_UPLOAD_BATCH_DESC);
     }
-    opt_toggle("NX2NAVI_ASTC_SCRATCH_KEEP", UI_MENU_LAMA_ASTC_KEEP, UI_MENU_LAMA_ASTC_KEEP_DESC);
+    opt_toggle("NX2NAVI_ASTC_SCRATCH_KEEP", UI_MENU_LOWEND_ASTC_KEEP, UI_MENU_LOWEND_ASTC_KEEP_DESC);
     {   // vk_memory.c freeze_pass: submissions a region stays unwritten before it is frozen
         static const char *const values[] = {"1800", "1200", "600", "60", "0"};
         const char *names[] = {"1800", "1200", "600", "60", menu_text(UI_MENU_OFF)};
-        opt_choice_list("NX2NAVI_FREEZE_IDLE", UI_MENU_LAMA_FREEZE, values, names, 5, UI_MENU_LAMA_FREEZE_DESC);
+        opt_choice_list("NX2NAVI_FREEZE_IDLE", UI_MENU_LOWEND_FREEZE, values, names, 5, UI_MENU_LOWEND_FREEZE_DESC);
     }
     {   // vk_sync.c res_mask: the result kinds the submit wait counts (31 all, 30 all but events)
         static const char *const values[] = {"31", "30"};
-        const char *names[] = {menu_text(UI_MENU_LAMA_RESULTS_ALL), menu_text(UI_MENU_LAMA_RESULTS_NO_EVENTS)};
-        opt_choice_list("NX2NAVI_SUBMIT_FINISH_KINDS", UI_MENU_LAMA_RESULTS, values, names, 2, UI_MENU_LAMA_RESULTS_DESC);
+        const char *names[] = {menu_text(UI_MENU_LOWEND_RESULTS_ALL), menu_text(UI_MENU_LOWEND_RESULTS_NO_EVENTS)};
+        opt_choice_list("NX2NAVI_SUBMIT_FINISH_KINDS", UI_MENU_LOWEND_RESULTS, values, names, 2, UI_MENU_LOWEND_RESULTS_DESC);
     }
-    opt_toggle("NX2NAVI_ZSTD_NATIVE", UI_MENU_LAMA_ZSTD, UI_MENU_LAMA_ZSTD_DESC);   // ov_zstd.c trusted
-    opt_group(UI_MENU_LAMA_RENDER);
-    opt_toggle("NX2NAVI_REPLAY_ASYNC", UI_MENU_LAMA_ASYNC, UI_MENU_LAMA_ASYNC_DESC);   // vk_backend.c
+    opt_toggle("NX2NAVI_ZSTD_NATIVE", UI_MENU_LOWEND_ZSTD, UI_MENU_LOWEND_ZSTD_DESC);   // ov_zstd.c trusted
+    opt_group(UI_MENU_LOWEND_RENDER);
+    opt_toggle("NX2NAVI_REPLAY_ASYNC", UI_MENU_LOWEND_ASYNC, UI_MENU_LOWEND_ASYNC_DESC);   // vk_backend.c
     const bool native = vk_mesh_shader_native() != 0;   // vk_exec_draw.c: the emulation only where the GPU lacks them
-    if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
-    opt_toggle("NX2NAVI_MESH_EMULATION", UI_MENU_LAMA_MESH_EMU, UI_MENU_LAMA_MESH_EMU_DESC);
+    if (native) opt_disable_next(UI_MENU_LOWEND_MESH_NATIVE);
+    opt_toggle("NX2NAVI_MESH_EMULATION", UI_MENU_LOWEND_MESH_EMU, UI_MENU_LOWEND_MESH_EMU_DESC);
     {   // vk_exec_draw.c foliage_skip
         static const char *const values[] = {"full", "reduced", "off"};
-        const char *names[] = {menu_text(UI_MENU_LAMA_FOLIAGE_FULL), menu_text(UI_MENU_LAMA_FOLIAGE_REDUCED), menu_text(UI_MENU_OFF)};
-        opt_choice_list("NX2NAVI_FOLIAGE", UI_MENU_LAMA_FOLIAGE, values, names, 3, UI_MENU_LAMA_FOLIAGE_DESC);
+        const char *names[] = {menu_text(UI_MENU_LOWEND_FOLIAGE_FULL), menu_text(UI_MENU_LOWEND_FOLIAGE_REDUCED), menu_text(UI_MENU_OFF)};
+        opt_choice_list("NX2NAVI_FOLIAGE", UI_MENU_LOWEND_FOLIAGE, values, names, 3, UI_MENU_LOWEND_FOLIAGE_DESC);
     }
-    if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
-    opt_slider("NX2NAVI_MESH_EMU_MB", UI_MENU_LAMA_MESH_MB, 64, 2048, UI_MENU_LAMA_MESH_MB_DESC, 64, "%.0f MB");
-    if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
-    opt_slider("NX2NAVI_MESH_EMU_TASKS", UI_MENU_LAMA_MESH_TASKS, 4096, 65536, UI_MENU_LAMA_MESH_TASKS_DESC, 4096, "%.0f");
-    if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
-    opt_toggle("NX2NAVI_MESH_EMU_BATCH", UI_MENU_LAMA_MESH_BATCH, UI_MENU_LAMA_MESH_BATCH_DESC);   // vk_exec_draw.c
-    opt_toggle("NX2NAVI_TEX_CLOBBER", UI_MENU_LAMA_CLOBBER, UI_MENU_LAMA_CLOBBER_DESC);
-    static const UiTextId vec[] = {UI_MENU_OFF, UI_MENU_LAMA_VEC_AUTO, UI_MENU_ON};   // gfx_shader.c patch_vec_index
-    opt_choice("NX2NAVI_VEC_INDEX_FIX", UI_MENU_LAMA_VEC_INDEX, vec, 3, UI_MENU_LAMA_VEC_INDEX_DESC);
-    opt_group(UI_MENU_LAMA_BUILD);
+    if (native) opt_disable_next(UI_MENU_LOWEND_MESH_NATIVE);
+    opt_slider("NX2NAVI_MESH_EMU_MB", UI_MENU_LOWEND_MESH_MB, 64, 2048, UI_MENU_LOWEND_MESH_MB_DESC, 64, "%.0f MB");
+    if (native) opt_disable_next(UI_MENU_LOWEND_MESH_NATIVE);
+    opt_slider("NX2NAVI_MESH_EMU_TASKS", UI_MENU_LOWEND_MESH_TASKS, 4096, 65536, UI_MENU_LOWEND_MESH_TASKS_DESC, 4096, "%.0f");
+    if (native) opt_disable_next(UI_MENU_LOWEND_MESH_NATIVE);
+    opt_toggle("NX2NAVI_MESH_EMU_BATCH", UI_MENU_LOWEND_MESH_BATCH, UI_MENU_LOWEND_MESH_BATCH_DESC);   // vk_exec_draw.c
+    opt_toggle("NX2NAVI_TEX_CLOBBER", UI_MENU_LOWEND_CLOBBER, UI_MENU_LOWEND_CLOBBER_DESC);
+    static const UiTextId vec[] = {UI_MENU_OFF, UI_MENU_LOWEND_VEC_AUTO, UI_MENU_ON};   // gfx_shader.c patch_vec_index
+    opt_choice("NX2NAVI_VEC_INDEX_FIX", UI_MENU_LOWEND_VEC_INDEX, vec, 3, UI_MENU_LOWEND_VEC_INDEX_DESC);
+    opt_group(UI_MENU_LOWEND_BUILD);
     // tools/make_game.py reads it from nx2navi.ini at the next Rebuild the Game (guest_opt_ini)
-    opt_toggle_value("NX2NAVI_GUEST_OPT", UI_MENU_LAMA_GUEST_OPT, UI_MENU_LAMA_GUEST_OPT_DESC, "2", "1",
-                     menu_text(UI_MENU_LAMA_GUEST_OPT_NOTE));
-    opt_group(UI_MENU_LAMA_DIAG);
-    opt_toggle("NX2NAVI_PASS_TIMES", UI_MENU_LAMA_PASS_TIMES, UI_MENU_LAMA_PASS_TIMES_DESC);   // vk_crumbs.c
+    opt_toggle_value("NX2NAVI_GUEST_OPT", UI_MENU_LOWEND_GUEST_OPT, UI_MENU_LOWEND_GUEST_OPT_DESC, "2", "1",
+                     menu_text(UI_MENU_LOWEND_GUEST_OPT_NOTE));
+    opt_group(UI_MENU_LOWEND_DIAG);
+    opt_toggle("NX2NAVI_PASS_TIMES", UI_MENU_LOWEND_PASS_TIMES, UI_MENU_LOWEND_PASS_TIMES_DESC);   // vk_crumbs.c
 #ifdef _WIN32
     {   // vk_dump.c: the keys it knows
         static const char *const values[] = {"", "pause", "scrolllock", "insert", "f12"};
         const char *names[] = {menu_text(UI_MENU_OFF), "Pause", "Scroll Lock", "Insert", "F12"};
-        opt_choice_list("NX2NAVI_DUMP_KEY", UI_MENU_LAMA_DUMP_KEY, values, names, 5, UI_MENU_LAMA_DUMP_KEY_DESC);
+        opt_choice_list("NX2NAVI_DUMP_KEY", UI_MENU_LOWEND_DUMP_KEY, values, names, 5, UI_MENU_LOWEND_DUMP_KEY_DESC);
     }
 #endif
-    opt_end();
 }
 
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_LAMA, UI_MENU_TAB_COOP};
+                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_COOP};
 static int g_tab;               // the tab shown
 
 // The tabs the menu shows: the Co-op tab is a beta, shown only with coop_beta = 1 in nx2navi.ini (NX2NAVI_COOP_BETA),
@@ -1827,7 +1832,6 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
             case TAB_SOUND: tab_sound(scale); break;
             case TAB_CONTROLS: tab_controls(scale); break;
             case TAB_COOP: tab_coop(scale); break;
-            case TAB_LAMA: tab_lama(scale); break;
             }
             ImGui::EndTabItem();
         }

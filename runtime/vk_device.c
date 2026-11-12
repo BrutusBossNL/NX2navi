@@ -861,5 +861,5 @@ int probe_vkdevice(void) {
     return g_errors_total ? 1 : 0;
 }
 
-// The GPU has mesh shaders: the mesh emulation (NX2NAVI_MESH_EMULATION) does nothing there (the menu's Lama patches tab).
+// The GPU has mesh shaders: the mesh emulation (NX2NAVI_MESH_EMULATION) does nothing there (the low-end GPU rows of the menu's Game tab).
 int vk_mesh_shader_native(void) { return g_vk.has_mesh_shader; }

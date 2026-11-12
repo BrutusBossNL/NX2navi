@@ -91,7 +91,7 @@ static const char *const known[] = {
 
 // The nx2navi.ini section a key cfg_set may write goes to when the file lacks it (nx2navi.ini.example's sections).
 static const struct { const char *key, *section; } sections[] = {
-    // the menu's Lama patches tab (ui/menu.cpp tab_lama)
+    // the low-end GPU mode's rows in the menu's Game tab (ui/menu.cpp rows_low_end)
     {"TEX_RELEASED_MAX", "performance"}, {"MIRROR_HOT", "performance"}, {"FREEZE_IDLE", "performance"}, {"SUBMIT_FINISH_KINDS", "performance"}, {"FOLIAGE", "performance"},
     {"ZSTD_NATIVE", "performance"},
     {"VRAM_HEAP_LIMIT", "performance"}, {"VRAM_RESERVE_MB", "performance"}, {"UPLOAD_BATCH_MB", "performance"}, {"MESH_EMULATION", "performance"},
@@ -311,7 +311,7 @@ static const CfgMeta metas[] = {
     // all|<count>: the compute pipelines the boot keeps, those dispatched most recently (vk_pipeline.c, compute-used.bin)
     {"COMPUTE_KEEP", "512", NULL, RESTART},
     {"SHADER_CARRY", "1", "0|1", RESTART},   // gfx_shader.c "Carry": a previous translator's translations until translated again
-    // the menu's Lama patches tab (ui/menu.cpp tab_lama): the settings of the RX 580 patches
+    // the low-end GPU mode's rows in the menu's Game tab (ui/menu.cpp rows_low_end)
     {"TEX_RELEASED_MAX", "", NULL, RESTART},   // vk_texture.c released_max: "" by the video memory budget, else 1..16384
     {"MIRROR_HOT", "0", "0..1000", RESTART}, {"FREEZE_IDLE", "1800", "0..100000", RESTART},
     {"SUBMIT_FINISH_KINDS", "31", "0..31", RESTART},   // vk_sync.c res_mask
@@ -567,13 +567,27 @@ static const char *raw_get(const char *name);
 // texture checks share their write-watch queries (vk_memory.c snap_widen_n), video memory stays within the heaps'
 // budgets (vk_device.c vram_heap_limits, vk_vma_budget.c), large upload batches go to the queue early (vk_memory.c
 // vk_upload_end), frames are prepared on a thread of their own and pools the game refills every frame stay in system
-// memory (vk_backend.c, vk_memory.c hot_check). Without the key each of these keeps what 0.9.1 did, and a player can
-// still set any of them alone.
+// memory (vk_backend.c, vk_memory.c hot_check). Without the key each of these keeps what 0.9.1 did.
 static const struct { const char *key, *value; } LOWEND[] = {
     {"MESH_EMULATION", "1"}, {"TEX_CLOBBER", "1"}, {"MIRROR_STAGE", "1"}, {"SUBMIT_FINISH_GPU", "0"}, {"SNAP_WIDEN", "8"},
     {"VRAM_HEAP_LIMIT", "auto"}, {"VRAM_RESERVE_MB", "512"}, {"UPLOAD_BATCH_MB", "256"}, {"REPLAY_ASYNC", "1"},
     {"MIRROR_HOT", "25"},
 };
+// The keys that count only while the mode is on (LOWEND_ONLY): without it each reads as unset, whatever the settings
+// file or the environment says, so nothing of the mode acts unless a player turned it on. The menu shows their rows
+// only then (ui/menu.cpp rows_low_end). Keys the game had before the mode (replay_async, freeze_idle, zstd_native,
+// tex_released_max, astc_scratch_keep) are not among them.
+static const char *const LOWEND_ONLY[] = {
+    "MESH_EMULATION", "MESH_EMU_MB", "MESH_EMU_TASKS", "MESH_EMU_BATCH", "TEX_CLOBBER", "MIRROR_STAGE", "MIRROR_HOT",
+    "SUBMIT_FINISH_GPU", "SUBMIT_FINISH_RESULTS", "SUBMIT_FINISH_KINDS", "SNAP_WIDEN", "VRAM_HEAP_LIMIT",
+    "VRAM_RESERVE_MB", "UPLOAD_BATCH_MB", "FOLIAGE", "FLUSH_SKIP_CLEAN", "VEC_INDEX_FIX", "GUEST_OPT", "PASS_TIMES",
+    "DUMP_KEY", "LOG_TEX_NEW", "SVC_WAITS",
+};
+static int lowend_only(const char *key) {
+    for (size_t i = 0; i < sizeof LOWEND_ONLY / sizeof *LOWEND_ONLY; i++)
+        if (!strcasecmp(LOWEND_ONLY[i], key)) return 1;
+    return 0;
+}
 static int lowend = -1;
 static int lowend_of(void) {
     int p = __atomic_load_n(&lowend, __ATOMIC_ACQUIRE);
@@ -583,6 +597,7 @@ static int lowend_of(void) {
     __atomic_store_n(&lowend, p, __ATOMIC_RELEASE);
     return p;
 }
+int cfg_low_end_active(void) { return lowend_of(); }
 static const char *lowend_value(const char *key) {
     if (lowend_of())
         for (size_t i = 0; i < sizeof LOWEND / sizeof *LOWEND; i++)
@@ -614,7 +629,9 @@ static const char *raw_get(const char *name) {
 
 static const char *cfg_get_now(const char *name) {
     const char *v = raw_get(name);
-    if (v || strncmp(name, PREFIX, PREFIX_LEN)) return v;
+    if (strncmp(name, PREFIX, PREFIX_LEN)) return v;
+    if (!lowend_of() && lowend_only(name + PREFIX_LEN)) return NULL;   // the mode is off: its settings are not read
+    if (v) return v;
     if (profile_of())
         for (size_t i = 0; i < sizeof DECK / sizeof *DECK; i++)
             if (!strcasecmp(DECK[i].key, name + PREFIX_LEN)) return DECK[i].value;
