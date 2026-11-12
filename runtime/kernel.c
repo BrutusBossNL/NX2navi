@@ -949,10 +949,10 @@ static uint32_t block(RtThread *t, int kind, int64_t ns) {
 }
 
 // ---- long waits (a freeze's first clue)
-// A guest thread that waits NX2NAVI_WAIT_WATCH_S seconds (10; 0 off) for a lock, or for another thread to end, is
-// logged once per wait with the thread it waits for and what that one is doing: a game that stops with nothing in its
-// log then names the chain. Waits on condition variables, events and addresses are left out: idle worker threads wait
-// on them for good.
+// A guest thread that waits NX2NAVI_WAIT_WATCH_S seconds for a lock, or for another thread to end, is logged once per
+// wait with the thread it waits for and what that one is doing: a game that stops with nothing in its log then names
+// the chain. Waits on condition variables, events and addresses are left out: idle worker threads wait on them for
+// good. Off by default (0), as its thread takes the kernel lock every 2 s; 10 is a good value for a hang report.
 #define WAIT_WATCH_LINES 24
 
 static void wait_watch_holder(char *out, size_t cap, const RtThread *h) {

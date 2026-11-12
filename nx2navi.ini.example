@@ -764,8 +764,8 @@
 # trace = perf
 # A game thread that waits this many seconds for a lock, or for another thread to end, is logged once with the thread
 # it waits for and what that one is doing (at most 24 lines a run): a game that stops then leaves the chain in its log.
-# 0: off. Default: 10.
-# wait_watch_s = 10
+# Off by default: its thread takes the game's thread lock every 2 seconds. 10 is a good value for a hang report.
+# wait_watch_s = 0
 # 1: with trace = perf, walks of the process's address space count its private and write-combined memory every 600
 # frames (the "mem: process" line) and where its committed memory lies every 3600 frames (the "commit census" lines).
 # Each walk holds the address-space lock for 100-240 ms and delays the next frame by as much, so they are off unless
