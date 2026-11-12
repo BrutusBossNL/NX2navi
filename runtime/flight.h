@@ -3,8 +3,8 @@
 #pragma once
 #include <stdint.h>
 
-#define FLIGHT_THUMB_W 320
-#define FLIGHT_THUMB_H 180
+#define FLIGHT_THUMB_W 640
+#define FLIGHT_THUMB_H 360
 
 extern int flight_on;
 extern int vk_dump_white;   // vk_dump.c, NX2NAVI_DUMP_WHITE   // NX2NAVI_FLIGHT=1, set once by flight_init before the first present
