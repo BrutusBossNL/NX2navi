@@ -674,6 +674,36 @@ static int tex_reuse_on(void) {
 
 static void destroy_tex(Tex *e);
 
+// NX2NAVI_TEX_REUSE_NAMED (default 0; 1: as before, any released entry's image may go): a registered slot that is not
+// finalized names e's descriptor, so a shader can still sample e through the pool. The game finalizes a texture object
+// while another one it initialized at the same storage with the same parameters stays registered (vk_texture_release
+// leaves that slot current), and the entry they share is released all the same. Its image then went to the next
+// texture of its parameters two frames later (create_tex, reuse), the entry was dropped, and the slot had nothing to
+// show: the pool does not make an entry for storage the CPU cannot read, so the slot kept its stand-in until the game
+// drew into the texture again. Ocarina's 384x384 shadow maps are such textures: in a player's recording four slots of
+// them were sampled as stand-ins in the frame after three of their images had gone to other shadow maps, and the
+// front of a house lost its shadow for that frame. Such an entry keeps its image.
+static uint64_t n_reuse_named;   // released entries left out of the reuse because a current slot names them
+static int slot_names(const Tex *e) {
+    static int off = -1;
+    if (off < 0) off = cfg_bool("NX2NAVI_TEX_REUSE_NAMED");
+    if (off || !sinfo) return 0;
+    for (int id = bucket_head[agen_idx(e->key.addr)]; id >= 0; id = slot_next[id]) {
+        const TexSlot *s = &tslots[id];
+        if (s->finalized || (uintptr_t)s->t.mem != e->key.addr) continue;
+        TexKey sk;
+        make_key(&s->t, &sk);
+        if (memcmp(&sk, &e->key, sizeof sk)) continue;
+        if (!n_reuse_named++ || !(n_reuse_named & (n_reuse_named - 1)))   // the first, then at each power of two
+            rt_log("vk: a released texture keeps its image, a registered slot still names it: %#llx fmt %#x %ux%u, slot "
+                   "%d (%llu so far; NX2NAVI_TEX_REUSE_NAMED=1 lets such an image go to another texture)",
+                   (unsigned long long)e->key.addr, e->t.d.format, e->t.d.width, e->t.d.height, id,
+                   (unsigned long long)n_reuse_named);
+        return 1;
+    }
+    return 0;
+}
+
 // Why an entry was destroyed (drop_tex), in the order of drop_names.
 enum { DROP_NONE, DROP_MAX, DROP_CAP, DROP_COMMIT, DROP_VRAM, DROP_IDLE_VRAM, DROP_IDLE_COMMIT, DROP_DISUSE,
        DROP_OVERWRITTEN, DROP_REPLACED, DROP_REUSED, DROP_RANGE, DROP_EXACT, DROP_SHUTDOWN, DROP_N };
@@ -1244,9 +1274,10 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         for (Tex *q = nvn_hm_get(&reuse, &e->ik); q && n < 128; q = q->ru_next, n++) {
             if (q->rel_epoch == submit_epoch || now - q->rel_frame < 2 || q->key.addr == k->addr) continue;
             uint64_t dist = q->key.addr > k->addr ? q->key.addr - k->addr : k->addr - q->key.addr;
+            // not one a current slot still names (slot_names), asked only of a candidate that would be the best
             if (q->overwritten) {
-                if (dist < best) best = dist, a = q;
-            } else if (dist < best_kept) best_kept = dist, kept = q;
+                if (dist < best && !slot_names(q)) best = dist, a = q;
+            } else if (dist < best_kept && !slot_names(q)) best_kept = dist, kept = q;
         }
         if (!a) a = kept;
         if (a) {
