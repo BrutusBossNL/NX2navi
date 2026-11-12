@@ -199,7 +199,7 @@ static float pose_rotation_trace_limit(void) {
     static int degrees;
     static float limit;
     if (!degrees) {
-        const char *setting = getenv("NX2NAVI_MOTION_GUARD_DEGREES");
+        const char *setting = cfg_get("NX2NAVI_MOTION_GUARD_DEGREES");   // motion_guard_degrees in nx2navi.ini too
         degrees = setting && !strcmp(setting, "35") ? 35 : setting && !strcmp(setting, "45") ? 45 : 60;
         limit = degrees == 60 ? 2.0f : degrees == 45 ? 2.41421356f : 2.63830409f;
         rt_log("motion policy: rotation guard threshold %d degrees per rendered frame", degrees);
