@@ -761,6 +761,7 @@ static VkResult pipe_create(int kind, void *ci, VkPipeline *pipe) {
 // (vk_cache_file.h cache_file_read): a file past 2 GB is read with the limit raised or off, and refused by
 // its real size otherwise.
 static int cache_over_cap;   // the last file cache_data_read was asked for is over the limit
+static int cache_foreign;    // pipeline-cache.bin was written by another device or driver (a driver update)
 static void *cache_data_read(VkCtx *c, const char *path, size_t *size) {
     *size = 0;
     cache_over_cap = 0;
@@ -784,6 +785,7 @@ static void *cache_data_read(VkCtx *c, const char *path, size_t *size) {
         h.deviceID != c->props.deviceID || memcmp(h.pipelineCacheUUID, c->props.pipelineCacheUUID, VK_UUID_SIZE)) {
         rt_log("vk_pipeline: %s (%.1f MB) was written by another device or driver; starting empty", path,
                len / 1048576.0);
+        if (path == P.cache_path) cache_foreign = 1;
         free(data);
         return NULL;
     }
@@ -5458,7 +5460,17 @@ static void prewarm_run(void) {
     __atomic_store_n(&pw_pipe_total, (int64_t)queued, __ATOMIC_RELAXED);
     __atomic_store_n(&pw_phase, 2, __ATOMIC_RELEASE);
     const char *full = cfg_get("NX2NAVI_PREWARM_FULL");
-    K.until = P.gpl && !(full && !strcmp(full, "1")) ? now_ms() + PREWARM_PIPE_MS : 0;   // before the builders start
+    // A cache file of another device or driver (a driver update: cache_data_read) leaves every recorded pipeline to be
+    // built from nothing, and the ones the boot left after PREWARM_PIPE_MS were built beside the game: on an 8-core
+    // integrated GPU that start had 2,141 of 8,122 left after 20 s and took 296 s to finish them, with the game
+    // drawing fewer than 600 frames in its first 11 minutes. The boot waits for all of them then, with its count on
+    // the boot screen, as it does without the library; NX2NAVI_PREWARM_FULL=0 keeps the 20 s.
+    int all = (full && !strcmp(full, "1")) || (cache_foreign && queued && !(full && !strcmp(full, "0")));
+    if (P.gpl && all && cache_foreign && !(full && !strcmp(full, "1")))
+        rt_log("vk_pipeline: prewarm: the pipeline cache was written by another device or driver, so the start waits "
+               "for all %u recorded pipelines and not %d s (NX2NAVI_PREWARM_FULL=0: the rest beside the game)", queued,
+               (int)(PREWARM_PIPE_MS / 1000));
+    K.until = P.gpl && !all ? now_ms() + PREWARM_PIPE_MS : 0;   // before the builders start
     PlatThread *t[64];
     int nt = 0;
     if (queued) warm_builder((void *)1);   // the first alone (warm_builder)
