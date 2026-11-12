@@ -126,6 +126,7 @@ typedef struct {
     uint8_t chas_view, used, has_view, finalized;   // finalized survives eviction of the released Tex entry
     uint8_t cheld;                // ce is NULL as the texture was evicted by disuse, valid while cgen is (held_out)
     uint8_t cwant;                // a shader sampled its stand-in (vk_pool_marks_read): slot_resolve makes it at once
+    uint8_t fresh;                // registered and not resolved to a texture since (vk_texture_register): shown_take
     uint64_t khash;               // hash of the descriptor key and view, 0 for CPU-written textures (vk_texture_slot_khash_locked)
     view_t v;
     tex_t t;
@@ -4138,6 +4139,7 @@ void vk_texture_register(int id, const tex_t *t, const view_t *v) {
     s->finalized = 0;
     s->ce = NULL;
     s->cheld = 0;
+    s->fresh = 1;
     slots_gen++;
     if (!++reg_serial) reg_serial = 1;
     __atomic_store_n(&sinfo[id], (uint64_t)reg_serial << 16 | agen_idx((uintptr_t)t->mem), __ATOMIC_RELEASE);
@@ -4187,9 +4189,13 @@ static int want_take(void) {
 void vk_texture_create_budget_locked(int n) { create_budget = n, create_deferred = 0; }
 
 // NX2NAVI_POOL_SHOWN_FIRST (default 1; 0: such a slot waits for the budget like any other): the slot being looked up
-// shows a texture in the pool's set now (vk_exec_draw.c pool_fill). When its own texture is not made, the game has
-// registered the slot with another texture, and the draws that sampled the old one sample this one next: it is made at
-// this lookup, beside the count budget and the frame's creation time, SHOWN_PER_FRAME of them a present. Ocarina
+// shows a texture in the pool's set now (vk_exec_draw.c pool_fill), or the game has registered it since its last
+// lookup that found a texture (TexSlot.fresh). When its own texture is not made, the game has registered the slot
+// with another texture and draws with it next: it is made at this lookup, beside the count budget and the frame's
+// creation time, SHOWN_PER_FRAME of them a present. A slot that showed nothing when it was registered counts too: the
+// game takes slots whose texture it finalized some time ago for the next ones, and one of those was an effect's
+// texture with a transparent ground: drawn with the stand-in it was a flat grey patch for one frame at each of two
+// rounds of registrations four frames apart, in a spot where the effect is not visible otherwise. Ocarina
 // streams its textures by detail level and registers about 32 slots with their next level every four or five frames
 // while the player moves (2,300 to 3,800 registrations in 600 frames of two recordings). A refresh made 16 of them and
 // wrote the stand-in into the set for the others until its next round, and the set is read as it is when its
@@ -4199,12 +4205,12 @@ void vk_texture_create_budget_locked(int n) { create_budget = n, create_deferred
 #define SHOWN_PER_FRAME 64
 static int pool_shown;
 void vk_texture_pool_shown_locked(int shown) { pool_shown = shown; }
-static int shown_take(void) {
+static int shown_take(const TexSlot *s) {
     static int on = -1;
     static uint64_t frame = ~0ull;
     static int left;
     if (on < 0) on = cfg_bool("NX2NAVI_POOL_SHOWN_FIRST");
-    if (!on || !pool_shown) return 0;
+    if (!on || !(pool_shown || s->fresh)) return 0;
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (f != frame) frame = f, left = SHOWN_PER_FRAME;
     return left > 0 ? left-- : 0;
@@ -4279,14 +4285,14 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         // was about a thousand slots at once, which vk_exec_draw.c pool_sync_entries took for an area load, several
         // times a second in some places, and each time lifted the count budget and the frame's creation time.
         else if (!mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size)) e = NULL;
-        else if (!create_budget && !(s->cwant && want_take()) && !shown_take()) create_deferred = 1;
+        else if (!create_budget && !(s->cwant && want_take()) && !shown_take(s)) create_deferred = 1;
         else {
             uint64_t m0 = kern_now_ns();
             e = entry_of(&s->t);
             pool_made(m0);
             if (create_budget > 0) create_budget--;
         }
-        if (e) s->cwant = 0;
+        if (e) s->cwant = 0, s->fresh = 0;
     }
     if (e && e->retiring) {   // retired by disuse: the pool refresh gets the stand-in, any other lookup takes it back
         if (pool_ctx) e = NULL, resolve_held = 1;
