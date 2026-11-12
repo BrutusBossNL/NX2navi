@@ -1951,14 +1951,26 @@ static int others_at(char *out, size_t n, const Tex *e, const Tex *skip) {
 // the others is bounded by NX2NAVI_TEX_RELEASED_MB (drop_stale).
 // Each call looks at up to SWEEP_LOOK entries from where the last one stopped (sweep_at; rel_unlink moves it off an
 // entry that leaves): with thousands of entries that stay, a walk from the head at every release would cross them all.
-#define RELEASED_MAX 2048
+#define RELEASED_MAX_DEFAULT 2048
 #define RELEASED_HARD 16384
+// NX2NAVI_TEX_RELEASED_MAX (test; default RELEASED_MAX_DEFAULT): the count from which released entries are swept, so a
+// short run reaches the sweep a long session reaches after minutes.
+static int released_max_v = -1;
+#define RELEASED_MAX (released_max_v)
 #define SWEEP_LOOK 64
 #define SWEEP_UNSAMPLED PRESENTS(120)
 
 static int comes_back_intact(const Tex *e);
 
+static uint64_t stale_after(const Tex *e);
+
 static void sweep_released(void) {
+    if (released_max_v < 0) {
+        const char *t = cfg_get("NX2NAVI_TEX_RELEASED_MAX");
+        int v = t && *t ? atoi(t) : 0;
+        released_max_v = v > 0 ? v : RELEASED_MAX_DEFAULT;
+        if (v > 0) rt_log("vk: released textures are swept from %d on (NX2NAVI_TEX_RELEASED_MAX, a test)", v);
+    }
     if (nreleased <= RELEASED_MAX) return;
     {
         uint64_t now = frames_now();
@@ -1967,7 +1979,8 @@ static void sweep_released(void) {
         for (int n = 0; n < SWEEP_LOOK && nreleased > RELEASED_MAX; n++) {
             if (!e || now - e->rel_frame < stale) { e = rel_head; break; }   // the rest is younger: from the oldest again
             Tex *next = e->rel_next;
-            if (comes_back_intact(e) || e->overwritten) drop_tex(e, DROP_MAX);
+            // an entry the game took back before waits out GAP_TIMES the longest of those releases (stale_after)
+            if ((comes_back_intact(e) || e->overwritten) && now - e->rel_frame >= stale_after(e)) drop_tex(e, DROP_MAX);
             e = next;
         }
         sweep_at = e;
@@ -2208,9 +2221,23 @@ static int idle(const Tex *e, uint64_t now) {
     return look_round - e->use_round >= IDLE_ROUNDS && now - e->use_frame >= STALE_FRAMES;
 }
 
+// NX2NAVI_TEX_KEEP_TAKEN (default 1; 0: as before): an entry that comes back intact waits out GAP_TIMES the longest it
+// stayed released before the game took it back, as one whose content lives only in its image does, and not
+// STALE_FRAMES alone. Coming back intact is not free: the descriptor finds no entry, the frame samples its stand-in
+// while the entry is made and uploaded again, and the next frame has it. Kakariko's hazy air is drawn with ASTC
+// textures the game releases and takes back every few hundred frames; with the released entries at RELEASED_MAX the
+// sweep dropped about 30 of them as soon as their 120 presents were up, and the frame that needed them again came out
+// without the haze, darker and sharper, once every few seconds.
+static int keep_taken(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("TEX_KEEP_TAKEN", "1") == 1;
+    return on;
+}
+
 static uint64_t stale_after(const Tex *e) {
-    if (comes_back_intact(e) || e->overwritten) return STALE_FRAMES;
     uint64_t gap = (uint64_t)e->back_gap * GAP_TIMES;
+    if (e->overwritten) return STALE_FRAMES;
+    if (comes_back_intact(e)) return keep_taken() && gap > STALE_FRAMES ? gap : STALE_FRAMES;
     return gap > GPU_STALE_FRAMES ? gap : GPU_STALE_FRAMES;
 }
 
