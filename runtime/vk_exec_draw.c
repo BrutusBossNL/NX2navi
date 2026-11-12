@@ -2934,7 +2934,8 @@ static void pool_sync_entries(VkExec *ex) {
 typedef struct { VkImage src, img; VmaAllocation mem; VkImageView view[2]; uint32_t w, h, layers; VkFormat fmt; } Twin;
 static Twin twins[TWINS];
 static unsigned twin_next;
-// op_dispatch*: the resources being bound are a dispatch's, on this thread (the replay workers record draws meanwhile)
+// op_dispatch*: the resources being bound are a dispatch's, on this thread (the replay workers record draws meanwhile);
+// 2 when the dispatch is a network program's (uses_tensor_ops; net_binding)
 static _Thread_local int twin_dispatch;
 static VkBuffer twin_buf;
 static VmaAllocation twin_buf_mem;
@@ -3082,6 +3083,64 @@ static Twin *twin_update(VkExec *ex, const VkTexImage *img) {
     return t;
 }
 
+// What a network program run natively (NX2NAVI_NATIVE_TENSOR=1, native_tensor) binds at slot h, before its dispatch.
+// Its input picture: the game's scene upscaler samples the post pass's picture through an RGB9E5 texture that lies at
+// the scene target's address. On the console the two are one memory, so the words the post pass stores through the
+// target's integer view are that texture's texels. Here they are two images (raw_9e5_twin), and the RGB9E5 one holds
+// what it was given when it was made: an older picture, or the target's R11G11B10F words read as shared-exponent
+// texels, which is noise up to 65408 that the half-float network turns into infinities. The stand-in reads the
+// target's image for that reason (untranslated_dispatch_fallback); the network's own code samples the texture, so the
+// words are copied into it here (the same texel size: a copy keeps the bits), each written picture once.
+// Its output: an image made without storage use cannot be written, and the dispatch then writes a dummy; logged, as
+// the picture is then lost without another sign. Texture lock held.
+static void net_binding(VkExec *ex, uint64_t h, int storage) {
+    const VkTexImage *t = vk_texture_by_id_locked((int)(h & 0xfffff), NULL, NULL);
+    if (!t) return;
+    if (storage) {
+        static int told;
+        if (!(t->usage & VK_IMAGE_USAGE_STORAGE_BIT) && told++ < 4)
+            rt_log("vk_exec: a network program's output image %ux%u fmt %d at %#llx has no storage use: nothing is written to it",
+                   t->width, t->height, (int)t->format, (unsigned long long)t->addr);
+        return;
+    }
+    if (t->format != VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 || t->type != VK_IMAGE_TYPE_2D || t->samples != 1) return;
+    const VkTexImage *o = raw_9e5_twin(t);
+    if (!o) {
+        static int told;
+        if (!told++)
+            rt_log("vk_exec: a network program samples the RGB9E5 picture %ux%u at %#llx, which nothing wrote this frame or the last",
+                   t->width, t->height, (unsigned long long)t->addr);
+        return;
+    }
+    if (o == t) return;   // written as native texels, later than the target was
+    static struct { VkImage dst; uint64_t seq; } done[4];
+    static unsigned next;
+    uint64_t seq = raw_written(o->image);
+    for (int i = 0; i < 4; i++)
+        if (done[i].dst == t->image && done[i].seq == seq) return;
+    done[next++ % 4] = (typeof(done[0])){t->image, seq};
+    // The target's earlier writes and the texture's earlier readers before the copy, the copy before the dispatch.
+    VkMemoryBarrier2 m0 = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                           .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                           .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT};
+    VkDependencyInfo d0 = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &m0};
+    vkCmdPipelineBarrier2(ex->cb, &d0);
+    VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                      .extent = {t->width, t->height, 1}};
+    vkCmdCopyImage(ex->cb, o->image, VK_IMAGE_LAYOUT_GENERAL, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+    VkMemoryBarrier2 m1 = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo d1 = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &m1};
+    vkCmdPipelineBarrier2(ex->cb, &d1);
+    ex->recorded += 3;
+    static int told;
+    if (!told++)
+        rt_log("vk_exec: network input: the post pass's RGB9E5 words (%ux%u at %#llx) are copied into the texture the network samples",
+               t->width, t->height, (unsigned long long)t->addr);
+}
+
 // The image descriptor of slot h; in a dispatch, a compare-sampled colour image the driver cannot compare is swapped
 // for its depth twin; in a pass larger than it, the scene's light target, once DLSS scaled it this frame, for DLSS's
 // output (vk_dlaa.c).
@@ -3091,6 +3150,7 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
     if (h && !storage && vk_dlaa_swap_img && ex->in_pass && ex->pass_w > vk_dlaa_swap_img->width + 1 &&
         vk_texture_by_id_locked((int)(h & 0xfffff), NULL, NULL) == vk_dlaa_swap_img)
         out->imageView = vk_dlaa_swap_view, out->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (twin_dispatch == 2 && h) net_binding(ex, h, storage);
     if (!twin_dispatch || storage || separate || !h || !(r->type & 0x400)) return;
     VkImageViewType vt = res_view_type(r->type);
     if (vt != VK_IMAGE_VIEW_TYPE_2D && vt != VK_IMAGE_VIEW_TYPE_2D_ARRAY) return;
@@ -6626,7 +6686,7 @@ static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) 
 }
 
 // 1 when the bound compute program uses tensor-core instructions (HMMA 0x23c, IMMA 0x237, LDSM 0x83b): the game's
-// upscalers (the movie's and the 3D scene's), which the translator cannot run and the fallback blit stands in for.
+// upscalers (the movie's and the 3D scene's), which the fallback blit stands in for unless native_tensor runs them.
 // Other untranslated programs (bindless texturing, indirect branches) bind the output image too, and a blit for them
 // pasted G-buffer normals and intermediates over the picture. Kept per program serial.
 static int uses_tensor_ops(const VkExec *ex) {
@@ -6648,8 +6708,12 @@ static int uses_tensor_ops(const VkExec *ex) {
 }
 
 // NX2NAVI_NATIVE_TENSOR=1: tensor-core programs run their translation (HMMA, LDSM and MOVM lowered to warp shuffles in
-// tools/xlate/AmpereLowering.cs Hmma, Ldsm, Movm). Off by default: the lowered networks do not match the hardware yet
-// (Ocarina's scene upscaler wrote infinities and noise), so they take the fallback below as untranslated ones do.
+// tools/xlate/AmpereLowering.cs Hmma, Ldsm, Movm). The lowering gives the hardware's results: its SPIR-V, run by the
+// driver, matches what the same SM86 kernels compute natively, bit for bit, on single instructions and on a network
+// pass over four warps (tests/tensor_gpu_check.py). The infinities and noise the scene upscaler wrote came from its
+// input picture, not from the arithmetic (net_binding). Still off by default: no game run has confirmed the picture
+// since, and each network pipeline takes the driver tens of seconds and about 100 MiB of device memory to build
+// (vk_pipeline.c, compute pipeline prebuild). While off, the programs take the fallback below as untranslated ones do.
 static int native_tensor(const VkExec *ex) {
     static int on = -1;
     if (on < 0) on = rt_knob("NATIVE_TENSOR", "0");
@@ -7034,7 +7098,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     vk_exec_barrier_dispatch(ex);   // ends the pass; earlier writes are visible to the shader
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     cx->c0_dim[0] = (uint32_t)d->x, cx->c0_dim[1] = (uint32_t)d->y, cx->c0_dim[2] = (uint32_t)d->z;
-    twin_dispatch = 1;
+    twin_dispatch = uses_tensor_ops(ex) ? 2 : 1;
     {   // the replay's binding path is the CPU cost the frame profile needs to separate from recording
         uint64_t bt = bt_now();
         bind_resources(ex, info);
@@ -7074,7 +7138,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     cx->c0_dim[0] = cx->c0_dim[1] = cx->c0_dim[2] = 0;
     cx->B.c0_valid[2] = 0;   // a fresh c0 range: the copy below must not change one an earlier dispatch reads
-    twin_dispatch = 1;
+    twin_dispatch = uses_tensor_ops(ex) ? 2 : 1;
     {   // the replay's binding path is the CPU cost the frame profile needs to separate from recording
         uint64_t bt = bt_now();
         bind_resources(ex, info);
