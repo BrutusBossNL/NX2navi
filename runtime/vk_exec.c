@@ -1879,12 +1879,66 @@ static int ser_kind(uint32_t op) {
 static Chunk *chunk_take(void);
 static void chunk_record(Chunk *c, int pool);
 
+// ---- side work (vk_exec_par): the replay thread hands the workers a loop over n items while they have no chunk to
+// record, at a submission's start (vk_usnap.c copy_regions). One job at a time, in a static slot: seq is odd while it
+// runs. A worker counts itself in (PJ.in) and checks seq again before it reads the job, and the caller, once every
+// slice is done, makes seq even and waits until no worker is in, so none reads a job that has ended.
+static struct {
+    void (*fn)(void *, int, int);
+    void *arg;
+    int n, grain;
+    volatile int32_t next, left, in;
+    volatile uint32_t seq;
+} PJ;
+static PlatMutex pj_lock = PLAT_MUTEX_INIT;
+
+static void par_slices(void) {
+    for (;;) {
+        int lo = __atomic_fetch_add(&PJ.next, PJ.grain, __ATOMIC_ACQ_REL);
+        if (lo >= PJ.n) return;
+        int hi = lo + PJ.grain < PJ.n ? lo + PJ.grain : PJ.n;
+        PJ.fn(PJ.arg, lo, hi);
+        __atomic_sub_fetch(&PJ.left, hi - lo, __ATOMIC_ACQ_REL);
+    }
+}
+
+static int par_pending(void) { return __atomic_load_n(&PJ.seq, __ATOMIC_ACQUIRE) & 1; }
+
+static void par_help(void) {
+    uint32_t s = __atomic_load_n(&PJ.seq, __ATOMIC_ACQUIRE);
+    if (!(s & 1)) return;
+    __atomic_add_fetch(&PJ.in, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&PJ.seq, __ATOMIC_SEQ_CST) == s) par_slices();
+    __atomic_sub_fetch(&PJ.in, 1, __ATOMIC_SEQ_CST);
+}
+
+void vk_exec_par(void (*fn)(void *, int, int), void *arg, int n, int grain) {
+    if (grain < 1) grain = 1;
+    if (RW.n <= 0 || n <= grain || Q.drained != Q.out) {
+        if (n > 0) fn(arg, 0, n);
+        return;
+    }
+    plat_mutex_lock(&pj_lock);
+    PJ.fn = fn, PJ.arg = arg, PJ.n = n, PJ.grain = grain;
+    __atomic_store_n(&PJ.next, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&PJ.left, n, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&PJ.seq, 1, __ATOMIC_SEQ_CST);   // odd: running
+    for (int k = 0; k < RW.n; k++)
+        if (__atomic_load_n(&RW.w[k]->sleeping, __ATOMIC_SEQ_CST)) plat_event_set(&RW.w[k]->wake);
+    par_slices();
+    while (__atomic_load_n(&PJ.left, __ATOMIC_ACQUIRE) > 0) plat_pause();
+    __atomic_add_fetch(&PJ.seq, 1, __ATOMIC_SEQ_CST);   // even: ended
+    while (__atomic_load_n(&PJ.in, __ATOMIC_SEQ_CST)) plat_pause();
+    plat_mutex_unlock(&pj_lock);
+}
+
 static void rw_main(void *arg) {
     RwWorker *w = arg;
     plat_thread_priority(PLAT_PRIO_HIGHEST);   // as the recording thread (rec_claim)
     perf_lock_timing_here();   // NX2NAVI_LOCK_TIME, as on the recording thread
     vk_exec_draw_ctx_use(w->dc);
     for (;;) {
+        par_help();
         Chunk *c = chunk_take();
         if (c) {
             chunk_record(c, w->idx);
@@ -1892,13 +1946,16 @@ static void rw_main(void *arg) {
         }
         // spins about 100 us after a chunk (the next group of the frame is usually closer), then sleeps
         uint64_t t0 = kern_now_ns();
-        for (unsigned i = 0; __atomic_load_n(&Q.take, __ATOMIC_SEQ_CST) >= __atomic_load_n(&Q.put, __ATOMIC_SEQ_CST); i++) {
+        for (unsigned i = 0; __atomic_load_n(&Q.take, __ATOMIC_SEQ_CST) >= __atomic_load_n(&Q.put, __ATOMIC_SEQ_CST);
+             i++) {
+            if (par_pending()) break;
             if ((i & 63) || kern_now_ns() - t0 < 100000) {
                 plat_pause();
                 continue;
             }
             __atomic_store_n(&w->sleeping, 1, __ATOMIC_SEQ_CST);
-            if (__atomic_load_n(&Q.take, __ATOMIC_SEQ_CST) >= __atomic_load_n(&Q.put, __ATOMIC_SEQ_CST))
+            if (__atomic_load_n(&Q.take, __ATOMIC_SEQ_CST) >= __atomic_load_n(&Q.put, __ATOMIC_SEQ_CST) &&
+                !par_pending())
                 plat_event_wait_ns(&w->wake, 2000000);
             __atomic_store_n(&w->sleeping, 0, __ATOMIC_RELAXED);
             t0 = kern_now_ns();
