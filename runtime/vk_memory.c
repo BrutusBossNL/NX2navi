@@ -671,7 +671,7 @@ void vk_mem_census(uint64_t frame) {
     mirror_frame = frame;
     static uint64_t window_start;
     if ((rt_trace & RT_TRACE_PERF) && frame % 600 == 0) vram_log(frame), mirror_pool_log(frame);
-    if ((rt_trace & RT_TRACE_PERF) && frame % 60 == 0) outside_watch(frame);
+    if ((rt_trace & RT_TRACE_PERF) && frame % 60 == 0) outside_watch(frame), up_ts_log(frame), vk_gtl_log(frame, 60);
     if ((rt_trace & RT_TRACE_PERF) && !vk_mirror_on) dirty_frame(frame);
     if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
         mirror_log(frame), shadow_log(frame);   // mirror_log also logs the write-watch line
@@ -4228,6 +4228,7 @@ typedef struct {
     VkDeviceSize chunk_used;  // bytes of the last chunk handed out
     uint64_t bytes;   // staging bytes of its buffers (upload_cap)
     int ts;           // its pair of upload timestamps (up_ts_*), -1: not timed
+    uint64_t sub_ns;  // when it was handed to the queue (plat_now_ns), for the GPU timeline (vk_gtl_note)
 } Batch;
 
 enum { DEAD_IMAGE = 1, DEAD_IMAGE_VMA, DEAD_VIEW, DEAD_BUFFER_VMA, DEAD_HOST };
@@ -4241,6 +4242,7 @@ static int open_active;
 static Batch *inflight;
 static int ninflight, cap_inflight;
 static Batch *spare;                  // completed batches whose command buffer and fence are reused
+
 // ---- upload GPU time (NX2NAVI_TRACE=perf): a timestamp at the start and the end of each upload batch, read when it
 // retires. The replay's GPU time (vk_sync.c) times only its own parts; upload batches go to the queue as submissions of
 // their own, with the ASTC decoder's dispatches in them, so their time showed only as GPU idle "with it queued".
@@ -4276,6 +4278,7 @@ static void up_ts_read(VkCtx *c, Batch *b) {   // b retired: its fence signalled
                               VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] >= t[0]) {
         uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * c->props.limits.timestampPeriod);
         up_ts_ns += ns, up_ts_n++;
+        vk_gtl_note(GTL_UPLOAD, b->sub_ns, t[0], t[1]);
         if (ns > up_ts_max_ns) up_ts_max_ns = ns;
     }
     up_ts_busy[b->ts] = 0;
@@ -4755,6 +4758,7 @@ uint64_t vk_upload_flush(int wait) {
         vkEndCommandBuffer(open_b.cb);
         VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &open_b.cb};
         vk_queue_lock();
+        open_b.sub_ns = plat_now_ns();
         VkResult r = vkQueueSubmit(c->gfx_queue, 1, &si, open_b.fence);
         vk_queue_unlock();
         if (r != VK_SUCCESS) {

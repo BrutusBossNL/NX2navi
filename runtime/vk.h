@@ -756,6 +756,12 @@ VkCommandBuffer vk_sync_pre(void);
 // Ends the part being recorded without handing it to the queue (it goes with the next part that does, in order) and
 // returns the command buffer the replay continues in; VK_NULL_HANDLE when no more parts can wait. Replay thread.
 VkCommandBuffer vk_sync_cut(void);
+// The GPU timeline (NX2NAVI_TRACE=perf, vk_sync.c): a timed piece of GPU work of kind GTL_*, handed to the queue at
+// sub_ns (plat_now_ns), its timestamps start and end (ticks of the graphics queue). vk_gtl_log: the gaps of the pieces
+// noted since the last call, over frames frames, in the log.
+enum { GTL_PART, GTL_MIRROR, GTL_PRE, GTL_UPLOAD, GTL_PRESENT, GTL_KINDS };
+void vk_gtl_note(int kind, uint64_t sub_ns, uint64_t start_tick, uint64_t end_tick);
+void vk_gtl_log(uint64_t frame, int frames);
 extern int vk_sub_in_frame;   // replay: the submission being recorded is the frame's n-th (0 the first; vk_backend.c)
 // Runs fn(arg) on the completion thread once fence is done on the GPU (event writes, counter reports, sync state).
 // Callbacks run in the order they were added, after those of earlier values; a value already done runs at once there.

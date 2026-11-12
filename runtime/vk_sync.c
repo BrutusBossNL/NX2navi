@@ -84,6 +84,13 @@ static struct {
     uint64_t batches, subs;           // vkQueueSubmit2 calls and the submissions they carried
 } H;
 static volatile int32_t held_n;       // H.n, for readers without the lock
+// The GPU timeline (vk_gtl_note): the timestamp pairs of the held submissions, stamped with the time they really go to
+// the queue (ts_queue_ns), as a held part waits here and not in the queue. hold_pend: closed by ts_submitted for the
+// submission queue_submit takes next (sub_lock); hold_pairs: those of the held ones (queue lock).
+#define HOLD_PAIRS 512
+static uint32_t hold_pend[HOLD_PAIRS], hold_pairs[HOLD_PAIRS];
+static int nhold_pend, nhold_pairs;
+static uint64_t ts_queue_ns[1024];   // per pair (TS_PAIRS): when its submission went to the queue
 static volatile uint64_t held_t0;     // when the oldest held submission was held (kern_now_ns)
 static volatile uint64_t queued_v;    // the newest timeline value handed to the queue
 static int hold_max = -1;
@@ -248,6 +255,8 @@ static void hold_flush_locked(VkCtx *c) {
                  (unsigned long long)H.last, (int)r);
     }
     if (H.last) __atomic_store_n(&queued_v, H.last, __ATOMIC_RELEASE);
+    for (int k = 0; k < nhold_pairs; k++) ts_queue_ns[hold_pairs[k]] = now;
+    nhold_pairs = 0;
     H.batches++, H.subs += (uint64_t)H.n;
     H.n = 0, H.last = 0;
     __atomic_store_n(&held_n, 0, __ATOMIC_RELEASE);
@@ -274,6 +283,8 @@ static void queue_submit(VkCtx *c, const VkSubmitInfo2 *si, uint64_t value) {
     vk_queue_lock_raw();
     perf_end(PERF_FENCE, p0);
     if (H.n == HOLD_CAP) hold_flush_locked(c);
+    for (int k = 0; k < nhold_pend && nhold_pairs < HOLD_PAIRS; k++) hold_pairs[nhold_pairs++] = hold_pend[k];
+    nhold_pend = 0;
     int i = H.n++;
     H.si[i] = *si;
     if (si->commandBufferInfoCount > SUB_CBS) rt_fatal("vk: a submission of %u command buffers", si->commandBufferInfoCount);
@@ -315,6 +326,7 @@ static void hold_release(uint64_t value, int aged, int try_only) {
 // part's interval to the busy time, counting overlap with the previous part once. Off (one log line) when the queue
 // family has no timestamp bits or the period is 0. Upload batches (vk_memory.c) are not timed.
 #define TS_PAIRS 1024
+_Static_assert(TS_PAIRS == sizeof ts_queue_ns / sizeof ts_queue_ns[0], "ts_queue_ns has a slot per pair");
 static VkQueryPool ts_pool;
 static int ts_state;                       // 0 not set up, 1 on, -1 off
 static double ts_period;                   // ns per tick
@@ -331,13 +343,19 @@ static volatile int64_t ts_busy_all;
 // the previous one had ended (the GPU waited for the CPU: starved) or before (it waited for untimed work or a wait).
 static uint64_t ts_sub_ns[TS_PAIRS];       // CPU time the part was handed to vkQueueSubmit2
 // A pair to read at its value. mirror: the copies of a mirror prologue (vk_sync.c prologue), counted apart as well.
-typedef struct { uint32_t pair; int mirror; uint64_t fence; } TsRead;
-static TsRead *ts_unsent[4];               // closed and not yet submitted (sub_lock)
+// mirror: GTL_PART, GTL_MIRROR or GTL_PRE (the GPU timeline's kinds, below); cb: the command buffer it times.
+typedef struct { uint32_t pair; int mirror; uint64_t fence; VkCommandBuffer cb; } TsRead;
+// closed and not yet submitted (sub_lock): with cuts a submission carries up to SUB_CBS command buffers, each timed;
+// with room for 4 the rest went to the completion queue at once, without a submit time and out of the GPU's order, and
+// their gaps counted as idle "with it queued"
+#define TS_UNSENT (2 * SUB_CBS)
+static TsRead *ts_unsent[TS_UNSENT];
 static int ts_n_unsent;
 static volatile int64_t ts_mirror_ns;     // of ts_busy_ns, the mirror prologues' copies
 static uint64_t ts_last_end_ns;            // completion thread: ts_last_end on the CPU clock
 static volatile int64_t ts_idle_ns, ts_starved_ns, ts_gaps, ts_max_gap_ns, ts_queued_ns;
-static int64_t cal_tick, cal_ns, cal_at;   // completion thread: a calibrated (GPU tick, CPU ns) pair and when it was taken
+static volatile int64_t cal_tick, cal_ns, cal_at;   // completion thread: a calibrated (GPU tick, CPU ns) pair and when
+                                                    // it was taken; the GPU timeline's notes read them from other threads
 static PFN_vkGetCalibratedTimestampsKHR cal_fn;
 
 // On the first submission that wants timing (perf_gpu_timing: NX2NAVI_TRACE=perf or the full performance overlay).
@@ -405,19 +423,114 @@ static void max64(volatile int64_t *m, int64_t v) {
 
 static void ts_read_cb(void *arg);
 
+// ---- the GPU timeline (NX2NAVI_TRACE=perf, vk.h vk_gtl_note): every timed piece of GPU work, with the CPU time it was
+// handed to the queue and its GPU start and end on the CPU clock (calibrated timestamps). The replay's parts, their
+// mirror prologues and pre-pass command buffers come from here, the upload batches from vk_memory.c, the presents from
+// gfx_present.c. Every 60 frames (vk_gtl_log) the pieces are put in GPU order and each gap between them is split:
+// starved, nothing handed to the queue yet, or queued, the next piece handed over and not started; the queued part is
+// summed by the kind of the piece that started after it. A gap with work queued is a wait inside the queue (a
+// semaphore, the present's acquire) or the driver's and the system's delay to start work on an idle GPU.
+#define GTL_N 16384
+typedef struct { int kind; int64_t call, sub, start, end; } GtlEv;   // call: handed to vk_sync's submit; sub: to the queue
+static GtlEv gtl[GTL_N];
+static int gtl_n;
+static uint64_t gtl_dropped;
+static PlatMutex gtl_lock = PLAT_MUTEX_INIT;
+static const char *const gtl_names[GTL_KINDS] = {"replay parts", "mirror prologues", "pre-pass buffers", "upload batches",
+                                                 "presents"};
+
+static void vk_gtl_note_ns(int kind, int64_t call, int64_t sub, int64_t start, int64_t end) {
+    if (!(rt_trace & RT_TRACE_PERF) || kind < 0 || kind >= GTL_KINDS || !sub || end < start) return;
+    plat_mutex_lock(&gtl_lock);
+    if (gtl_n < GTL_N) gtl[gtl_n++] = (GtlEv){kind, call ? call : sub, sub, start, end};
+    else gtl_dropped++;
+    plat_mutex_unlock(&gtl_lock);
+}
+
+void vk_gtl_note(int kind, uint64_t sub_ns, uint64_t start_tick, uint64_t end_tick) {
+    if (!(rt_trace & RT_TRACE_PERF) || ts_state != 1 || !__atomic_load_n(&cal_at, __ATOMIC_ACQUIRE)) return;
+    uint64_t s = start_tick & ts_mask, e = end_tick & ts_mask;
+    if (e < s) return;
+    vk_gtl_note_ns(kind, (int64_t)sub_ns, (int64_t)sub_ns, tick_ns(s), tick_ns(e));
+}
+
+
+}
+
+static int gtl_cmp(const void *a, const void *b) {
+    int64_t x = ((const GtlEv *)a)->start, y = ((const GtlEv *)b)->start;
+    return x < y ? -1 : x > y;
+}
+
+void vk_gtl_log(uint64_t frame, int frames) {
+    static GtlEv ev[GTL_N];
+    plat_mutex_lock(&gtl_lock);
+    int n = gtl_n;
+    memcpy(ev, gtl, sizeof ev[0] * (size_t)n);
+    gtl_n = 0;
+    uint64_t dropped = gtl_dropped;
+    gtl_dropped = 0;
+    plat_mutex_unlock(&gtl_lock);
+    if (n < 2 || frames < 1) return;
+    qsort(ev, (size_t)n, sizeof ev[0], gtl_cmp);
+    double busy = 0, starved = 0, queued = 0, q_by[GTL_KINDS] = {0}, lat[GTL_KINDS] = {0}, gpu[GTL_KINDS] = {0};
+    double held = 0, held_idle = 0;   // replay pieces: held in the submit batching; of it, while the GPU was idle
+    int big[GTL_KINDS] = {0}, nlat[GTL_KINDS] = {0}, cnt[GTL_KINDS] = {0};
+    int64_t end = ev[0].start;
+    for (int i = 0; i < n; i++) {
+        const GtlEv *e = &ev[i];
+        cnt[e->kind]++, gpu[e->kind] += (double)(e->end - e->start);
+        held += (double)(e->sub - e->call);
+        if (e->start > end) {   // a gap before e
+            int64_t gap = e->start - end, s = e->sub > end ? e->sub - end : 0;
+            int64_t h0 = e->call > end ? e->call : end, h1 = e->sub < e->start ? e->sub : e->start;
+            if (h1 > h0) held_idle += (double)(h1 - h0);
+            if (s > gap) s = gap;
+            starved += (double)s, queued += (double)(gap - s), q_by[e->kind] += (double)(gap - s);
+            if (gap - s > 500000) big[e->kind]++;
+            if (e->sub >= end) lat[e->kind] += (double)(e->start - e->sub), nlat[e->kind]++;   // handed to an idle GPU
+        }
+        int64_t from = e->start > end ? e->start : end;
+        if (e->end > from) busy += (double)(e->end - from), end = e->end;
+    }
+    double f = 1e6 * frames;
+    char by[512], la[512], gp[512];
+    int a = 0, b = 0, g = 0;
+    for (int k = 0; k < GTL_KINDS; k++) {
+        if (!cnt[k]) continue;
+        a += snprintf(by + a, sizeof by - (size_t)a, "%s%s %.2f ms (%.1f gaps over 0.5 ms)", a ? ", " : "", gtl_names[k],
+                      q_by[k] / f, (double)big[k] / frames);
+        b += snprintf(la + b, sizeof la - (size_t)b, "%s%s %.2f ms (%d)", b ? ", " : "", gtl_names[k],
+                      nlat[k] ? lat[k] / nlat[k] / 1e6 : 0.0, nlat[k]);
+        g += snprintf(gp + g, sizeof gp - (size_t)g, "%s%s %.1f x %.2f ms", g ? ", " : "", gtl_names[k],
+                      (double)cnt[k] / frames, gpu[k] / f);
+    }
+    rt_log("perf: frame %llu: GPU timeline per frame: busy %.2f ms; idle %.2f ms starved (nothing in the queue; %.2f ms of "
+           "it while the next piece was held in the submit batching) and %.2f ms with work in the queue, before %s; held "
+           "in the submit batching %.2f ms in all", (unsigned long long)frame, busy / f, starved / f, held_idle / f,
+           queued / f, by, held / f);
+    rt_log("perf: frame %llu: GPU timeline: pieces per frame and their GPU time: %s; from hand-over to start on an idle "
+           "GPU, on average: %s; %d pieces, %llu dropped", (unsigned long long)frame, gp, la, n, (unsigned long long)dropped);
+}
+
 // Just before vkQueueSubmit2 (sub_lock held): the parts closed since the last submit leave the CPU now. Their reads
 // are queued in the order the GPU runs them: a mirror prologue is closed after the part it was made for but runs
 // first. Read after its part, its copies counted neither as busy time nor as a gap of their own: they showed up as
 // idle time with work queued, 7-8 ms a frame over PCIe 3.0 in Kokiri Forest, and the frame as CPU-bound.
-static void ts_submitted(void) {
+// cbi: the submission's command buffers in queue order; their pairs are read in that order (a part's pre-pass command
+// buffer and a cut part's are closed in another order than they run).
+static void ts_submitted(const VkCommandBufferSubmitInfo *cbi, uint32_t ncb) {
     uint64_t now = plat_now_ns();
     gfx_tl_note('S', now, cur_fence, 0);
-    for (int pass = 0; pass < 2; pass++)
+    for (uint32_t k = 0; k <= ncb; k++)   // k == ncb: whatever no command buffer named, last
         for (int i = 0; i < ts_n_unsent; i++) {
             TsRead *t = ts_unsent[i];
-            if (!t->mirror != pass) continue;   // the prologues first
+            if (!t || (k < ncb ? t->cb != cbi[k].commandBuffer : 0)) continue;
             ts_sub_ns[t->pair] = now;
+            ts_queue_ns[t->pair] = 0;
+            if (nhold_pend < HOLD_PAIRS) hold_pend[nhold_pend++] = t->pair;
             vk_completion_add(t->fence, ts_read_cb, t);
+            ts_unsent[i] = NULL;
         }
     ts_n_unsent = 0;
 }
@@ -441,12 +554,14 @@ static void ts_read_cb(void *arg) {   // completion thread, in submission order
                 if (sub && sn > sub) plat_add64(&ts_queued_ns, sn - sub);
                 gfx_tl_note('G', (uint64_t)sn, (uint64_t)en, (uint64_t)sub);
                 if (en > ts_last_end_ns) ts_last_end_ns = en;
+                int64_t q = (int64_t)ts_queue_ns[t->pair];
+                vk_gtl_note_ns(t->mirror, sub, q ? q : sub, sn, en);
             }
             uint64_t from = s > ts_last_end ? s : ts_last_end;
             if (e > from) {
                 int64_t ns = (int64_t)((double)(e - from) * ts_period);
                 plat_add64(&ts_busy_ns, ns);
-                if (t->mirror) plat_add64(&ts_mirror_ns, ns);
+                if (t->mirror == GTL_MIRROR) plat_add64(&ts_mirror_ns, ns);
                 plat_add64(&ts_busy_all, ns);
                 perf_gpu_busy((uint64_t)ns);
             }
@@ -564,8 +679,8 @@ static void ts_close(VkCommandBuffer cb, int pair, uint64_t fence, int mirror) {
     ts_sub_ns[pair] = 0;
     TsRead *t = malloc(sizeof *t);
     if (!t) rt_fatal("vk: out of memory");
-    *t = (TsRead){(uint32_t)pair, mirror, fence};
-    if (ts_n_unsent < 4) ts_unsent[ts_n_unsent++] = t;
+    *t = (TsRead){(uint32_t)pair, mirror, fence, cb};
+    if (ts_n_unsent < TS_UNSENT) ts_unsent[ts_n_unsent++] = t;
     else vk_completion_add(fence, ts_read_cb, t);   // more than a part and its prologue between two submits
 }
 
@@ -823,6 +938,7 @@ static int nchain;
 static VkCommandBuffer pre_end(uint64_t fence) {
     VkCommandBuffer cb = pre_cb;
     if (!cb) return VK_NULL_HANDLE;
+    ts_close(cb, pre_pair, fence, GTL_PRE);
     pre_pair = -1;
     vkEndCommandBuffer(cb);
     pre_cb = VK_NULL_HANDLE;
@@ -983,7 +1099,7 @@ static VkCommandBuffer split_part(int exec) {
                                   .value = cur_fence, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
     if (exec && exec_tl && exec_sig < cur_fence)
         si.signalSemaphoreInfoCount = 1, si.pSignalSemaphoreInfos = &esig, exec_sig = cur_fence;
-    ts_submitted();
+    ts_submitted(cbi, ncb);
     queue_submit(c, &si, 0);         // held or handed to the queue (submit batching)
     vk_mem_lazy_handed();
     vk_mem_note_submit(cur_fence);   // objects destroyed from here on may be in use by the part just submitted
@@ -1065,6 +1181,7 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     if (both) exec_sig = fence;
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = ncb, .pCommandBufferInfos = cbi,
                         .signalSemaphoreInfoCount = both ? 2u : 1u, .pSignalSemaphoreInfos = sig};
+    ts_submitted(cbi, ncb);
     queue_submit(c, &si, fence);   // held or handed to the queue (submit batching)
     vk_mem_lazy_handed();
     s->fence = sent ? fence : 0;
