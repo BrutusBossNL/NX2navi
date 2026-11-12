@@ -1165,6 +1165,7 @@ static uint64_t max_rt;              // largest storage size in rts[]
 static nvn_hmap private_keys = {.klen = sizeof(TexKey)};
 static int clobber_fix = -1;
 static volatile int32_t n_unaliased;
+static uint64_t n_unaliased_period, n_unalias_kept;   // since the last perf line: given own memory, left in pool memory
 
 static int rts_lower(uint64_t a) {
     int lo = 0, hi = nrts;
@@ -3975,6 +3976,12 @@ static Tex *entry_of(const tex_t *t) {
         if (pool_ctx) return NULL;
         retire_cancel(e);
     }
+    if (!e && private_keys.n)   // another swizzle of an image that has memory of its own (unalias): the same image
+        for (Tex *p = nvn_hm_get(&by_addr, &k.addr); p; p = p->next_at)
+            if (!p->released && !p->bound_to && nvn_hm_get(&private_keys, &p->key) && same_but_swizzle(&p->key, &k)) {
+                touch(p);
+                return p;
+            }
     if (!e) {
         if (held_out(&k) || create_held(&k)) return NULL;
         uint64_t c0 = kern_now_ns();   // the entry's creation (VK_TS_CREATE): image, memory, first transition
@@ -4434,6 +4441,33 @@ uint32_t vk_sampler_gen(void) { return __atomic_load_n(&samp_gen, __ATOMIC_RELAX
 int vk_texture_slot_count_locked(void) { return ntslots; }
 int vk_sampler_slot_count_locked(void) { return nsslots; }
 
+// e was read while marked clobbered (mark_clobbered). It and the descriptors that differ from it only in swizzle (the
+// same texels: the game renders through one and samples through another) are dropped, and come back as one image in
+// memory of its own (create_tex, entry_of). A live descriptor of another format or geometry over its storage reads
+// those bytes through the pool memory, which an image of its own would no longer update: e then stays in pool memory
+// (the clobbered read is what it was). 1 when e was dropped.
+static int unalias(Tex *e) {
+    e->clobbered = 0;
+    Tex *sib[16];
+    int n = 0;
+    for (Tex *p = nvn_hm_get(&by_addr, &e->key.addr); p; p = p->next_at) {
+        if (p == e || p->released) continue;
+        if (!same_but_swizzle(&p->key, &e->key) || n == 16) {
+            n_unalias_kept++;
+            return 0;
+        }
+        sib[n++] = p;
+    }
+    if (n_unaliased++ < 32)
+        rt_log("vk: texture %#llx (%ux%u nvn fmt %#x) was read after another image drew over its memory: it gets memory "
+               "of its own", (unsigned long long)e->pub.addr, e->pub.width, e->pub.height, e->key.d.format);
+    n_unaliased_period++;
+    nvn_hm_put(&private_keys, &e->key, (void *)1);
+    for (int i = 0; i < n; i++) destroy_tex(sib[i]);
+    destroy_tex(e);   // bumps the address generation: every slot naming it or a sibling resolves again
+    return 1;
+}
+
 const VkTexImage *vk_texture_by_id(int id, view_t *view, int *has_view) {
     lock();
     const VkTexImage *r = vk_texture_by_id_locked(id, view, has_view);
@@ -4465,6 +4499,7 @@ again:;
     // a draw binding: the texture is in use, whether or not the pool's refresh checked it first in this submission
     // (by list that check is no lookup, vk_texture_pool_fresh_locked, so the stamp of the use is left here too)
     if (e && !pool_ctx) touch(e);
+    if (e && e->clobbered && unalias(e)) {   // read after another image overwrote its pool memory: own memory from now on
         s->ce = NULL;
         goto again;
     }
@@ -4536,9 +4571,11 @@ void vk_texture_new_submit(void) {
     if ((rt_trace & RT_TRACE_PERF) && f != log_at && tex_alias > 0) {
         log_at = f;
         rt_log("perf: frame %llu: texture aliases: content copied %llu (%llu from a released texture), filled from storage "
-               "%llu, left uninitialised %llu; taken back with their own content %llu",
+               "%llu, left uninitialised %llu; taken back with their own content %llu; read after an overwrite: given own "
+               "memory %llu, kept in pool memory %llu",
                (unsigned long long)f * 60, (unsigned long long)n_alias_copied, (unsigned long long)n_alias_released,
-               (unsigned long long)n_alias_upload, (unsigned long long)n_alias_uninit, (unsigned long long)n_alias_kept);
+               (unsigned long long)n_alias_upload, (unsigned long long)n_alias_uninit, (unsigned long long)n_alias_kept,
+               (unsigned long long)n_unaliased_period, (unsigned long long)n_unalias_kept);
         n_alias_copied = n_alias_upload = n_alias_uninit = n_alias_kept = n_alias_released = 0;
         if (n_dinit_inline || n_dinit_upload)
             rt_log("perf: frame %llu: new depth images started at the replay's position %llu (%llu ended an open pass), "
@@ -4550,6 +4587,7 @@ void vk_texture_new_submit(void) {
                    "holds dropped by a mark that another entry at the address had taken %llu",
                    (unsigned long long)f * 60, (unsigned long long)n_disuse_shared, (unsigned long long)n_disuse_diverted);
         n_disuse_shared = n_disuse_diverted = 0;
+        n_unaliased_period = n_unalias_kept = 0;
         rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms); "
                "skipped with unchanged bytes %llu (%.1f MiB)",
                (unsigned long long)f * 60, (unsigned long long)ru_n, ru_bytes / 1048576.0, ru_ns / 1e6,
