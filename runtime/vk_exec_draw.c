@@ -33,6 +33,7 @@
 #include "vk_mesh_fb.h"
 #include "platform/platform.h"
 #include "vk_dlaa.h"
+#include "mesh_emu_spirv.h"
 
 #define MAX_BINDINGS 128
 #define MAX_DESC 1024
@@ -3422,10 +3423,12 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // graphics push equal to the last one at its set number, with no other layout or bind between, is not recorded.
 // The descriptors go into one packed array d, a VkDescSlot per descriptor in binding order, which a set's update
 // template reads directly (VkPipeInfo.tpl); write structs are filled only when a set has no template.
+static uint32_t emu_d_bytes;
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     DrawCtx *const cx = ex->dc;
     VkWriteDescriptorSet *w = cx->bind_w;
     VkDescSlot *d = cx->bind_d;
+    emu_d = d;
     VkBufferView *bv = cx->bind_bv;
     if (info->n_bindings > MAX_BINDINGS) rt_fatal("vk: %u descriptor bindings exceed the replay's %d", info->n_bindings, MAX_BINDINGS);
     bind_stats(info);
@@ -3567,6 +3570,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     // An empty set 1 (a fragment stage without resources: depth and shadow draws) starts past the last binding, which
     // the loop never reaches: d0[1] stayed 0 and set 0 was pushed with 0 bytes, so the driver read stale descriptors
     if (n_sets == 2 && lo[1] == hi[1]) d0[1] = nd;
+    emu_d_bytes = (uint32_t)((n_sets > 1 ? d0[1] : nd) * sizeof *d);
     // Under the validation layer, a new graphics layout binds set 1 before set 0 is pushed or bound. The layer (SDK
     // 1.4.363, PipelineLayoutCompatDef::operator==) takes any two INDEPENDENT_SETS layouts as compatible, so
     // vkCmdPushDescriptorSetKHR keeps the push set it made for an earlier layout and drops writes to bindings that
@@ -4126,6 +4130,7 @@ static void prog_lead(const prog_t *p, int mesh) {
                (unsigned long long)PLD.n[m][4], (unsigned long long)PLD.n[m][5]);
 }
 
+static const VkPipeInfo *PD_info;   // the pipeline of the last draw prepare_draw_ex prepared
 // mesh: a mesh draw (op_draw_mesh): the program's mesh and task stages stand in for the vertex stage, and nothing
 // vertex-related (vertex buffers, motion vector bookkeeping of vertex shaders) is bound or noted. 2: a mesh draw of
 // the mesh fallback (mfb_draw): the vertex stage is DrawCtx.mfb_cur_vs, in an ordinary pipeline without vertex input.
@@ -4328,7 +4333,9 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             delta = cfg_bool("NX2NAVI_DYN_DELTA");
             if (!delta) rt_log("vk_exec: every dynamic state recorded after each pipeline bind (NX2NAVI_DYN_DELTA=0)");
         }
-        if (delta) vk_exec_frame.dyn_calls += (uint64_t)vk_pipeline_set_dynamic_delta(ex->cb, &s, &cx->B.dyn, mesh && !fb,
+        // an emulated mesh draw (NX2NAVI_MESH_EMULATION) binds a vertex pipeline: its topology, primitive restart and
+        // vertex input are dynamic and are set as for any vertex draw
+        if (delta) vk_exec_frame.dyn_calls += (uint64_t)vk_pipeline_set_dynamic_delta(ex->cb, &s, &cx->B.dyn, mesh && !fb && !info->emu,
                                                                                        &vk_exec_frame.dyn_left);
         else vk_pipeline_set_dynamic(ex->cb, &s);
         ex->recorded++;
@@ -4359,6 +4366,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     vk_exec_oq_draw(ex);
     DRS.issued[mesh]++;
     draw_stats_tick();
+    PD_info = info;
     return 1;
 }
 
@@ -5561,7 +5569,17 @@ static void mfb_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind) {
     ex->recorded++;
 }
 
+static int mesh_emu_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        if (on) rt_log("vk: mesh shaders emulated with compute (NX2NAVI_MESH_EMULATION)");
+    }
+    return on;
+}
+
 static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
+    PFN_vkCmdDrawMeshTasksEXT fn = draw_mesh_fn();
+    if (!fn && mesh_emu_on()) {
     static int on = -1;
     if (on < 0) on = rt_knob("MESH", "1");   // NX2NAVI_MESH=0: mesh draws are skipped (diagnosis)
     if (!d->count || !on) return;
@@ -5570,8 +5588,7 @@ static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
         mfb_draw(ex, d->count, NULL);
         return;
     }
-    PFN_vkCmdDrawMeshTasksEXT fn = draw_mesh_fn();
-    if (!fn) return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader: skipped");
+    if (!fn) return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader (mesh_emulation = 1 emulates them): skipped");
     ex->dc->c0_binst = 0;
     if (!prepare_draw_ex(ex, NVN_DRAW_PRIMITIVE_TRIANGLES, 0x7fffffff, 0, 1)) return;
     if (d->first) warn_once(W_MESH, "a mesh draw from workgroup %u: drawn from workgroup 0", d->first);
@@ -5690,6 +5707,7 @@ static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan
     vk_exec_barrier(ex);   // ends the pass (the next draw opens it again) and orders the culling's writes before the copy
     vk_gpu_gap_note(VK_GAP_MESH_RING, 12);
     vkCmdFillBuffer(ex->cb, mesh_ring, *at + 4, 8, 1);
+    }
     VkBufferCopy cp = {src->offset, *at, 4};
     vkCmdCopyBuffer(ex->cb, src->buffer, mesh_ring, 1, &cp);
     mesh_count_note(ex, src);
@@ -5719,8 +5737,7 @@ static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan
                            .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
                            .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
-    vkCmdPipelineBarrier2(ex->cb, &di);
-    ex->recorded += 3;
+    vkCmdPipelineBarrier2(cb, &di);
     return 1;
 }
 
@@ -5746,7 +5763,7 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
         return;
     }
     VkDeviceSize at;
-    if (!mesh_ring_entry(ex, d, &ip, &at)) return warn_once(W_MESH, "the indirect mesh ring could not be created: skipped");
+    if (!mesh_ring_entry(ex, ex->cb, d, &ip, &at)) return warn_once(W_MESH, "the indirect mesh ring could not be created: skipped");
     if (!prepare_draw_ex(ex, NVN_DRAW_PRIMITIVE_TRIANGLES, 0x7fffffff, 0, 1)) return;
     vk_exec_frame.draws++;
     static uint32_t n_logged;
@@ -5762,6 +5779,86 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
     vk_dump_mesh_end(ex, q);
     vk_mem_count(ip.cls, VK_MUSE_IND, 4);
     VK_MEM_BOUND(ip);
+}
+
+// ---- NX2NAVI_MESH_EMULATION: mesh draws on GPUs without VK_EXT_mesh_shader
+// Each mesh draw (prepared like one, prepare_draw_ex, for its layout, descriptors and graphics state) runs its task
+// and mesh stages as compute pipelines (vk_pipeline_mesh_emu) outside the pass: they write vertices and triangles into
+// the arena (mesh_emu_spirv.h) and the draw record's DrawIndexedIndirect, which the generated vertex shader and the
+// game's fragment shader then draw. The arena's counters are zeroed at the first emulated draw of each submission;
+    int failed;
+    uint64_t draws, skipped;
+} ME;
+
+    return 1;
+}
+
+static int me_arena(void) {
+    if (ME.buf) return 1;
+    if (ME.failed) return 0;
+    VkDeviceSize size = (VkDeviceSize)mb << 20;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        return 0;
+    if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &ME.buf, &ME.alloc, NULL) != VK_SUCCESS) {
+        ME.buf = VK_NULL_HANDLE, ME.failed = 1;
+        rt_log("vk: mesh emulation: the %d MiB arena could not be created: mesh draws skipped", mb);
+        return 0;
+    VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = ME.buf};
+    ME.addr = vkGetBufferDeviceAddress(vk_ctx()->device, &dai);
+    uint64_t voff = ioff + ibytes;
+    ME.iw = (uint32_t)(ioff / 4), ME.icap = (uint32_t)(ibytes / 4), ME.vw = (uint32_t)(voff / 16), ME.vcap = (uint32_t)((size - voff) / 16);
+    return 1;
+static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da) {
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    }
+    }
+// count: the first stage's workgroups, or ind: a {count, 1, 1} record to dispatch from
+    if (!me_arena()) return 0;
+    ex->dc->c0_binst = 0;
+    const VkPipeInfo *info = PD_info;
+    const GfxShader *ms = ex->dc->B.st.vs, *ts = ex->dc->B.st.ts;
+    VkPipeline mp = VK_NULL_HANDLE, tp = VK_NULL_HANDLE;
+    MeshEmuInfo mi;
+    if (!info || !info->emu || !ex->dc->B.st_valid || !vk_pipeline_mesh_emu(ms, ts, info->layout, &mp, &tp, &mi) || !!ts != !!tp ||
+        (info->push && !info->emu_tpl_c) || (!info->push && !ex->dc->B.ds_bound[0])) {
+        ME.skipped++;
+        return 0;
+    VkPipelineLayout layout = info->layout;
+    int push = info->push, pool = info->pool;
+    VkDescriptorUpdateTemplate tpl_c = info->emu_tpl_c;
+    VkDescriptorSet set0 = ex->dc->B.ds_bound[0];
+    }
+    }
+    uint32_t ep = vk_texture_epoch();
+    if (ep != ME.epoch) {   // the first emulated draw of this submission: the counters start over
+        ME.epoch = ep;
+        me_barrier(cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                   VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    uint32_t rec = ME.rec++ % MESH_EMU_DRECS;
+    VkDeviceSize ro = MESH_EMU_DOFF + (VkDeviceSize)rec * MESH_EMU_DWORDS * 4;
+    vkCmdFillBuffer(cb, ME.buf, ro, 4, 0);
+    vkCmdFillBuffer(cb, ME.buf, ro + 4, 4, 1);
+    cb = ex->cb;
+    vkCmdBindIndexBuffer(cb, ME.buf, (VkDeviceSize)ME.iw * 4, VK_INDEX_TYPE_UINT32);
+    vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT, 0, MESH_EMU_PC_BYTES, pc);
+    vkCmdDrawIndexedIndirect(cb, ME.buf, ro, 1, 20);
+    ex->recorded += 3;
+    vk_exec_frame.draws++;
+    // the index buffer and push constants are the emulation's: the next draw binds everything again
+    vk_exec_draw_new_cb();
+    ex->dirty = VK_EXEC_DIRTY_ALL;
+    ME.draws++;
+    static uint64_t log_frame;
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if ((rt_trace & RT_TRACE_PERF) && f / 600 != log_frame / 600) {
+        log_frame = f;
+        ME.draws = ME.skipped = 0;
+    return 1;
 }
 
 static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType type) {

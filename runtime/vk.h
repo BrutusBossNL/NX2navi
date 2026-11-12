@@ -830,6 +830,10 @@ typedef struct {
     // from the start of the set's descriptors. VK_NULL_HANDLE: the set is written with VkWriteDescriptorSet structs.
     VkDescriptorUpdateTemplate tpl[2];
     int pool;                              // a stage indexes the texture or sampler pool: bind set 2 (the pools)
+    // NX2NAVI_MESH_EMULATION: an emulated mesh pipeline (a generated vertex shader and the fragment stage; the task and
+    // mesh stages are compute pipelines of the same layout, vk_pipeline_mesh_emu), and set 0's compute-side template.
+    int emu;
+    VkDescriptorUpdateTemplate emu_tpl_c;
 } VkPipeInfo;
 // One descriptor of the packed array a descriptor update template reads (VkPipeInfo.tpl), 24 bytes for every type; the
 // bytes a type leaves unused are zero, so equal descriptors compare equal byte for byte.
@@ -866,6 +870,10 @@ typedef struct {
 } VkPrewarmProgress;
 void vk_pipeline_prewarm_progress(VkPrewarmProgress *p);   // any thread, while vk_pipeline_prewarm runs or after
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info);
+// NX2NAVI_MESH_EMULATION: the compute pipelines of an emulated mesh pipeline (built with it); 0 when it has none.
+struct MeshEmuInfo;
+int vk_pipeline_mesh_emu(const GfxShader *ms, const GfxShader *ts, VkPipelineLayout layout, VkPipeline *mesh,
+                         VkPipeline *task, struct MeshEmuInfo *mi);
 // Records every dynamic state that VkPipeState determines, after binding a graphics pipeline: cull mode, front face,
 // topology, depth and stencil tests and ops, depth bias enable, rasterizer discard, vertex input, and, where the GPU
 // has them dynamic, depth clamp, polygon mode, blend enables, equations, write masks and alpha to coverage. The replay

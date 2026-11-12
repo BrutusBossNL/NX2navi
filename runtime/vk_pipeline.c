@@ -43,6 +43,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "mesh_emu_spirv.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_hmap.h"
@@ -130,6 +131,8 @@ typedef struct Layout {
     uint32_t n0;                       // independent layouts: b[0..n0) are set 0, the rest set 1
     VkPipelineLayout half[2];          // GPL libraries: {set 0, null}, {null, set 1} (made on first use)
     VkDescriptorUpdateTemplate tpl[2]; // per set (make_tpl); VK_NULL_HANDLE: written with write structs
+    uint8_t emu;                       // NX2NAVI_MESH_EMULATION: a mesh layout whose task and mesh stages run as compute
+    VkDescriptorUpdateTemplate tpl_c;  // emu: set 0's template for the compute bind point
     VkDescriptorSetLayoutBinding b[];
 } Layout;
 
@@ -2588,8 +2591,8 @@ static int layout_covers(const VkPipeState *s, const Layout *l, uint32_t fs_off,
 // layouts hold the compute stage only). VK_NULL_HANDLE when templates are off, for an empty set, for a push set
 // without vkCmdPushDescriptorSetWithTemplateKHR or when creation fails: the replay then writes the set with write
 // structs.
-static VkDescriptorUpdateTemplate make_tpl(const VkDescriptorSetLayoutBinding *b, uint32_t n, VkDescriptorSetLayout sl,
-                                           int push, VkPipelineLayout pl, uint32_t set) {
+static VkDescriptorUpdateTemplate make_tpl_bp(const VkDescriptorSetLayoutBinding *b, uint32_t n, VkDescriptorSetLayout sl,
+                                              int push, VkPipelineLayout pl, uint32_t set, int bp) {
     if (!P.tpl || !n || (push && !P.tpl_push)) return VK_NULL_HANDLE;
     VkDescriptorUpdateTemplateEntry e[MAX_BINDINGS];
     size_t off = 0;
@@ -2604,7 +2607,8 @@ static VkDescriptorUpdateTemplate make_tpl(const VkDescriptorSetLayoutBinding *b
         .pDescriptorUpdateEntries = e,
         .templateType = push ? VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR : VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET,
         .descriptorSetLayout = sl,
-        .pipelineBindPoint = stages & VK_SHADER_STAGE_COMPUTE_BIT ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .pipelineBindPoint = bp >= 0 ? (VkPipelineBindPoint)bp
+                             : stages & VK_SHADER_STAGE_COMPUTE_BIT ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS,
         .pipelineLayout = pl, .set = set};
     VkDescriptorUpdateTemplate t;
     if (P.tpl_create(P.device, &ci, NULL, &t) != VK_SUCCESS) {
@@ -2612,6 +2616,10 @@ static VkDescriptorUpdateTemplate make_tpl(const VkDescriptorSetLayoutBinding *b
         return VK_NULL_HANDLE;
     }
     return t;
+}
+static VkDescriptorUpdateTemplate make_tpl(const VkDescriptorSetLayoutBinding *b, uint32_t n, VkDescriptorSetLayout sl,
+                                           int push, VkPipelineLayout pl, uint32_t set) {
+    return make_tpl_bp(b, n, sl, push, pl, set, -1);
 }
 
 // Finds or creates the layout of a binding list (sorted here); NULL on failure. Caller holds P.lock.
@@ -2665,6 +2673,124 @@ static Layout *layout_get(Bindings *B) {
     P.stats.layouts++;
     P.stats.push_layouts += (uint64_t)l->push;
     return l;
+}
+
+// NX2NAVI_MESH_EMULATION (GPUs without VK_EXT_mesh_shader): the layout of an emulated mesh pipeline. The task and
+// mesh stages' bindings are visible to the compute stage (they run as compute pipelines of this layout), the
+// fragment stage's stay; push constants (MESH_EMU_PC_BYTES) for the compute stages and the generated vertex shader;
+// set 0 gets a template per bind point. Caller holds P.lock.
+static int mesh_emu_on(void) {
+    static int on = -1;
+    return on;
+}
+
+static Layout *layout_get_emu(Bindings *B) {
+    for (uint32_t i = 0; i < B->n; i++) {
+        VkShaderStageFlags f = B->b[i].stageFlags;
+        if (f & (VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT))
+            f = (f & ~(VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT)) | VK_SHADER_STAGE_COMPUTE_BIT;
+        B->b[i].stageFlags = f;
+        B->pb[i].stages = f;
+    }
+    uint64_t h = fnv(FNV0, "mesh-emu", 8);
+    int64_t total = bindings_sort(B, &h);
+    if (total < 0) return NULL;
+    Layout **head = &layouts[h % LAYOUT_BUCKETS];
+    for (Layout *l = *head; l; l = l->next)
+        if (l->hash == h && l->emu && l->n == B->n && !memcmp(l->b, B->b, B->n * sizeof *B->b)) return l;
+    Layout *l = calloc(1, sizeof *l + B->n * sizeof *B->b);
+    if (!l) return NULL;
+    l->hash = h, l->n = B->n, l->emu = 1;
+    memcpy(l->b, B->b, B->n * sizeof *B->b);
+    l->push = total <= (int64_t)P.max_push;
+    VkDescriptorSetLayoutCreateInfo si = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                          .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
+                                          .bindingCount = l->n, .pBindings = l->b};
+    if (vkCreateDescriptorSetLayout(P.device, &si, NULL, &l->set) != VK_SUCCESS) {
+        free(l);
+        return NULL;
+    }
+    VkDescriptorSetLayout sets3[3] = {l->set, vk_empty_set_layout(), vk_pool_set_layout()};
+    VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT, 0, MESH_EMU_PC_BYTES};
+    VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 3,
+                                     .pSetLayouts = sets3, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
+    if (vkCreatePipelineLayout(P.device, &pi, NULL, &l->layout) != VK_SUCCESS) {
+        vkDestroyDescriptorSetLayout(P.device, l->set, NULL);
+        free(l);
+        return NULL;
+    }
+    l->tpl[0] = make_tpl_bp(l->b, l->n, l->set, l->push, l->layout, 0, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    l->tpl_c = make_tpl_bp(l->b, l->n, l->set, l->push, l->layout, 0, VK_PIPELINE_BIND_POINT_COMPUTE);
+    l->next = *head;
+    *head = l;
+    P.stats.layouts++;
+    return l;
+}
+
+// The compute pipelines of an emulated mesh pipeline, per (mesh, task, layout): made by the pipeline's build
+// (create_graphics, any thread) and found by its draws. ok 0: the stages could not be converted or built.
+typedef struct MeshEmuEnt {
+    struct MeshEmuEnt *next;
+    const GfxShader *ms, *ts;
+    VkPipelineLayout layout;
+    int ok;
+    VkPipeline mesh, task;
+    MeshEmuInfo mi, ti;
+} MeshEmuEnt;
+static PlatMutex emu_lock = PLAT_MUTEX_INIT;
+
+    return e;
+}
+
+static VkPipeline emu_compute(const uint32_t *w, size_t n, VkPipelineLayout layout) {
+    VkShaderModule m = make_module(w, n, 0);
+    if (!m) return VK_NULL_HANDLE;
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                      .layout = layout};
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vkCreateComputePipelines(P.device, P.cache, 1, &ci, NULL, &p) != VK_SUCCESS) p = VK_NULL_HANDLE;
+    vkDestroyShaderModule(P.device, m, NULL);
+    return p;
+}
+
+static const MeshEmuEnt *emu_get(const GfxShader *ms, const GfxShader *ts, VkPipelineLayout layout, uint32_t toff, int create) {
+    e = calloc(1, sizeof *e);
+    e->ms = ms, e->ts = ts, e->layout = layout;
+    const char *why = NULL;
+    uint64_t n = 0;
+    size_t cn = 0;
+    const uint32_t *w = gfx_shader_spirv(ms, &n);
+    uint32_t *c = w ? mesh_emu_compute(w, (size_t)n, &e->mi, &cn, &why) : NULL;
+    if (c && (e->mesh = emu_compute(c, cn, layout))) e->ok = 1;
+    else if (!why) why = "the mesh stage's compute pipeline was not created";
+    free(c);
+    if (e->ok && e->mi.payload_words && !ts) e->ok = 0, why = "a mesh stage that reads a task payload without a task stage";
+    if (e->ok && ts) {
+        w = gfx_shader_spirv(ts, &n);
+        c = w ? mesh_emu_compute(w, (size_t)n, &e->ti, &cn, &why) : NULL;
+        uint32_t *r = c && toff ? spirv_rebind(c, cn, toff) : NULL;   // the task stage's bindings follow the fragment stage's
+        if (c && (e->task = emu_compute(r ? r : c, cn, layout))) {
+            if (e->ti.payload_words != e->mi.payload_words) e->ok = 0, why = "task and mesh payload sizes differ";
+        } else {
+            e->ok = 0;
+            if (!why) why = "the task stage's compute pipeline was not created";
+        }
+        free(r), free(c);
+    }
+    plat_mutex_unlock(&emu_lock);
+    return e;
+}
+
+int vk_pipeline_mesh_emu(const GfxShader *ms, const GfxShader *ts, VkPipelineLayout layout, VkPipeline *mesh,
+                         VkPipeline *task, MeshEmuInfo *mi) {
+    const MeshEmuEnt *e = emu_get(ms, ts, layout, 0, 0);
+    if (!e || !e->ok) return 0;
+    *mesh = e->mesh, *task = e->task;
+    *mi = e->mi;
+    if (ts) mi->max_mesh = e->ti.max_mesh;
+    return 1;
 }
 
 // Independent layouts (P.indep): the vertex stage's bindings in set 0, the fragment stage's in set 1 (empty without a
@@ -2793,6 +2919,7 @@ static Pipe *pipe_add(const void *key, size_t size, uint64_t h, VkPipeline pipel
     p->info.n_sets = l && l->set1 ? 2 : 1;
     p->info.pool = B ? B->pool : 0;
     if (l) p->info.tpl[0] = l->tpl[0], p->info.tpl[1] = l->tpl[1];
+    if (l && l->emu) p->info.emu = 1, p->info.emu_tpl_c = l->tpl_c;
     p->lay = l;
     Pipe **head = &pipes[h % PIPE_BUCKETS];
     p->next = *head;
@@ -3111,11 +3238,28 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     uint64_t vw, fw, vm_hash = 0, fm_hash = 0;   // the hashes: of the final modules, for the PIPE_FEEDBACK 2 line
     const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
     uint32_t *vpatched = NULL, *fpatched = NULL;
-    int mesh = is_mesh(s);
+    int mesh = is_mesh(s), emu = mesh && l->emu;
+    // the water pair's vertex edit is for a translated vertex stage: an emulated mesh draw's generated one has none
     int wmode = mesh || !l->set1 ? 0 : water_mode(s, k);   // the edited fragment modules are in their set 1 form
     uint64_t wn = 0;
     const uint32_t *vwater = water_pair_vertex(vcode, vw, wmode, &wn);
     if (vwater) vcode = vwater, vw = wn;
+    if (emu) {   // NX2NAVI_MESH_EMULATION: the task and mesh stages as compute pipelines, a generated vertex shader here
+        uint32_t toff = fs_off + (s->fs ? binding_span(s->fs) - 1 : 0);
+        const MeshEmuEnt *me = emu_get(s->vs, s->ts, l->layout, toff, 1);
+        if (!me || !me->ok) return VK_NULL_HANDLE;
+        GfxShaderIo fin[32];
+        uint8_t ty[32], cp[32];
+        uint32_t need = s->fs ? gfx_shader_inputs(s->fs, fin) : 0;
+        for (int i = 0; i < 32; i++) {
+            ty[i] = need >> i & 1 && !fin[i].packed && fin[i].type <= GFX_TYPE_UINT ? (uint8_t)fin[i].type : 0;
+            cp[i] = need >> i & 1 && !fin[i].packed && fin[i].comps ? (uint8_t)fin[i].comps : 4;
+        }
+        size_t vn = 0;
+        if (!vpatched) return VK_NULL_HANDLE;
+        vcode = vpatched, vw = vn;
+        mesh = 0;   // a vertex pipeline from here on
+    }
     VkShaderModule tm = VK_NULL_HANDLE;
     if (mesh && s->ts) {   // the task stage's bindings follow the fragment stage's (pipe_miss)
         uint64_t tw;
@@ -3137,14 +3281,15 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     }
     if (s->fs) {
         GfxShaderIo fin[32], vout[32];
-        // a mesh stage's outputs from its module (spirv_mesh_outputs): the translation reflects none
+        // a mesh stage's outputs from its module (spirv_mesh_outputs): the translation reflects none; an emulated one
+        // (mesh_emu) writes what the fragment stage reads
         int points = 0;
         uint32_t need = gfx_shader_inputs(s->fs, fin), missing = 0,
-                 have = mesh ? (vcode ? spirv_mesh_outputs(vcode, vw, &points) : ~0u) : gfx_shader_outputs(s->vs, vout);
+                 have = mesh ? (vcode ? spirv_mesh_outputs(vcode, vw, &points) : ~0u) : emu ? ~0u : gfx_shader_outputs(s->vs, vout);
         for (int i = 0; i < 32; i++) {
             if (!(need >> i & 1) || fin[i].packed) continue;
             if (!(have >> i & 1)) missing |= 1u << i;
-            else if (!mesh && vout[i].type != fin[i].type)
+            else if (!mesh && !emu && vout[i].type != fin[i].type)
                 LOG_ONCE("vk_pipeline: varying %d is type %d in the vertex stage, %d in the fragment stage", i, vout[i].type, fin[i].type);
         }
         if (missing && !l->set1 && !mesh) {
@@ -3193,7 +3338,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rqv, rqf;
     uint64_t sw;
     const uint32_t *scode = gfx_shader_spirv(s->vs, &sw);   // vcode may be a patched copy that is freed by now
-    pin_subgroup32(&stages[0], &rqv, scode, sw);
+    if (!emu) pin_subgroup32(&stages[0], &rqv, scode, sw);
     if (s->fs) pin_subgroup32(&stages[1], &rqf, gfx_shader_spirv(s->fs, &sw), sw);
     VkVertexInputAttributeDescription va[32];
     VkVertexInputBindingDescription vb[17];
@@ -4509,11 +4654,12 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
         // vertex pipelines). They go to the workers like the others: built here, each new one stopped the frame for its
         // whole compile (0.26-0.51 s in Kokiri Forest), and they are recorded for the boot prewarm (keys_note).
         uint32_t fspan = s->fs ? binding_span(s->fs) : 1;
-        if (!vk_ctx()->has_mesh_shader) why = "the GPU has no mesh shaders";
+        int emu = !vk_ctx()->has_mesh_shader && mesh_emu_on();
+        if (!vk_ctx()->has_mesh_shader && !emu) why = "the GPU has no mesh shaders (mesh_emulation = 1 emulates them)";
         else if ((s->fs && gfx_shader_stage(s->fs) != GFX_STAGE_FS) || (s->ts && gfx_shader_stage(s->ts) != GFX_STAGE_TS)) why = "stage mismatch";
         else if (!add_stage(&B, s->vs, 0) || (s->fs && !add_stage(&B, s->fs, span - 1)) ||
                  (s->ts && !add_stage(&B, s->ts, span - 1 + fspan - 1))) why = "too many bindings";
-        else if (!(l = layout_get(&B))) why = "descriptor layout creation failed";
+        else if (!(l = emu ? layout_get_emu(&B) : layout_get(&B))) why = "descriptor layout creation failed";
     } else if (gfx_shader_stage(s->vs) != GFX_STAGE_VS || (s->fs && gfx_shader_stage(s->fs) != GFX_STAGE_FS)) why = "stage mismatch";
     else if (k->topo_class == 3) why = "patches need tessellation stages, which are not translated";
     else if (P.indep) {

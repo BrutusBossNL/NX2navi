@@ -1,0 +1,798 @@
+// Mesh shader emulation: SPIR-V rewriting (mesh_emu_spirv.h). The input is what tools/xlate/MeshSpirv.cs makes: the
+// translator's compute main, called from an entry function that copies its shared-memory stage buffer into the mesh
+// outputs after SetMeshOutputsEXT (mesh), or into the task payload before EmitMeshTasksEXT (task).
+//
+// Mesh -> GLCompute: the output arrays and the task payload move to Workgroup memory; SetMeshOutputsEXT is dropped (its
+// counts are kept); at the entry function's end thread 0 reserves vertex slots and indices in the arena with atomics,
+// and every thread copies vertices and triangles out (indices made absolute vertex slots, relative to the vertex area).
+// With a task stage mesh workgroup (x, y) is mesh group x of task record (task base + y): a prologue returns when x is
+// past the record's count, loads the payload, and the module's WorkgroupId reads become (x, 0, 0).
+// Task -> GLCompute: the payload moves to Workgroup memory; EmitMeshTasksEXT becomes a store of the payload and the
+// mesh group count into the task record, and workgroup 0 writes the mesh dispatch {max_mesh, task workgroups, 1}
+// into the draw record.
+#include "mesh_emu_spirv.h"
+
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+
+enum {
+    OpSourceContinued = 2, OpSource = 3, OpSourceExtension = 4, OpName = 5, OpMemberName = 6, OpString = 7, OpLine = 8,
+    OpExtension = 10, OpExtInstImport = 11, OpExtInst = 12, OpMemoryModel = 14, OpEntryPoint = 15, OpExecutionMode = 16,
+    OpCapability = 17, OpTypeVoid = 19, OpTypeBool = 20, OpTypeInt = 21, OpTypeFloat = 22, OpTypeVector = 23,
+    OpTypeArray = 28, OpTypeRuntimeArray = 29, OpTypeStruct = 30, OpTypePointer = 32, OpTypeFunction = 33,
+    OpConstant = 43, OpConstantComposite = 44, OpFunction = 54, OpFunctionEnd = 56, OpVariable = 59, OpLoad = 61,
+    OpStore = 62, OpAccessChain = 65, OpInBoundsAccessChain = 66, OpDecorate = 71, OpMemberDecorate = 72,
+    OpCompositeConstruct = 80, OpCompositeExtract = 81, OpUConvert = 113, OpConvertUToPtr = 120, OpBitcast = 124,
+    OpIAdd = 128, OpIMul = 132, OpLogicalAnd = 167, OpSelect = 169, OpIEqual = 170, OpINotEqual = 171,
+    OpULessThan = 176, OpULessThanEqual = 178, OpControlBarrier = 224, OpAtomicIAdd = 234, OpAtomicUMax = 239,
+    OpSelectionMerge = 247, OpLabel = 248, OpBranch = 249, OpBranchConditional = 250, OpReturn = 253,
+    OpNoLine = 317, OpModuleProcessed = 330, OpExecutionModeId = 331, OpConstantNull = 46, OpCopyObject = 83,
+    OpEmitMeshTasksEXT = 5294, OpSetMeshOutputsEXT = 5295,
+};
+enum { ScInput = 1, ScOutput = 3, ScWorkgroup = 4, ScPrivate = 6, ScFunction = 7, ScPushConstant = 9,
+       ScPhysicalStorageBuffer = 5349, ScTaskPayload = 5402 };
+enum { DecBlock = 2, DecArrayStride = 6, DecBuiltIn = 11, DecLocation = 30, DecOffset = 35, DecPerPrimitive = 5271 };
+       BiPrimTri = 5296 };
+enum { CapShader = 1, CapInt64 = 11, CapMeshShading = 5283, CapPSBAddresses = 5347 };
+enum { ModelVertex = 0, ModelGLCompute = 5, ModelTask = 5364, ModelMesh = 5365 };
+enum { ModeLocalSize = 17, ModeOutputVertices = 26, ModeOutputPoints = 27, ModeOutputLines = 5269,
+       ModeOutputPrimitives = 5270, ModeOutputTriangles = 5298 };
+enum { GlslUMin = 38 };
+enum { MaxIns = 4096 };
+
+typedef struct { uint32_t *w; size_t n, cap; int bad; } Buf;
+
+static void put(Buf *b, uint32_t x) {
+    if (b->n == b->cap) {
+        size_t c = b->cap ? b->cap * 2 : 1024;
+        uint32_t *w = realloc(b->w, c * sizeof *w);
+        if (!w) { b->bad = 1; return; }
+        b->w = w, b->cap = c;
+    }
+    b->w[b->n++] = x;
+}
+static void putn(Buf *b, const uint32_t *w, size_t n) { for (size_t i = 0; i < n; i++) put(b, w[i]); }
+static void op(Buf *b, uint32_t opc, int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    put(b, (uint32_t)(n + 1) << 16 | opc);
+    for (int i = 0; i < n; i++) put(b, va_arg(ap, uint32_t));
+    va_end(ap);
+}
+static void op_str(Buf *b, uint32_t opc, const uint32_t *pre, int npre, const char *s, const uint32_t *post, int npost) {
+    size_t sl = strlen(s) + 1, sw = (sl + 3) / 4;
+    put(b, (uint32_t)(1 + npre + sw + npost) << 16 | opc);
+    for (int i = 0; i < npre; i++) put(b, pre[i]);
+    for (size_t i = 0; i < sw; i++) {
+        uint32_t x = 0;
+        for (size_t k = 0; k < 4 && i * 4 + k < sl; k++) x |= (uint32_t)(uint8_t)s[i * 4 + k] << (8 * k);
+        put(b, x);
+    }
+    for (int i = 0; i < npost; i++) put(b, post[i]);
+}
+
+// ---- the module
+typedef struct {
+    const uint32_t *w;
+    size_t n;
+    uint32_t bound;
+    uint32_t t_void, t_bool, t_u32, t_u64, t_f32, t_v3u, t_v4u, t_v4f;
+    uint32_t glsl, ep_fn, model, wgid, lii, nwg;
+    int has_int64, has_psb, has_psb_ext;
+    struct { uint32_t id, sc, to; } ptr[4096];
+    int nptr;
+    struct { uint32_t id, type, sc; } var[2048];
+    int nvar;
+    struct { uint32_t id, type, val; } cst[8192];
+    int ncst;
+} Mod;
+
+static uint32_t find_ptr(const Mod *m, uint32_t sc, uint32_t to) {
+    for (int i = 0; i < m->nptr; i++)
+        if (m->ptr[i].sc == sc && m->ptr[i].to == to) return m->ptr[i].id;
+    return 0;
+}
+static uint32_t ptr_to(const Mod *m, uint32_t id) {
+    for (int i = 0; i < m->nptr; i++)
+        if (m->ptr[i].id == id) return m->ptr[i].to;
+    return 0;
+}
+static const uint32_t *find_type(const Mod *m, uint32_t id) {
+    for (size_t i = 5; i < m->n;) {
+        uint32_t o = m->w[i] & 0xffff, len = m->w[i] >> 16;
+        if (!len || o == OpFunction) break;
+        if ((o == OpTypeArray || o == OpTypeRuntimeArray || o == OpTypeVector || o == OpTypeStruct) && m->w[i + 1] == id)
+            return m->w + i;
+        i += len;
+    }
+    return NULL;
+}
+static int const_u32(const Mod *m, uint32_t id, uint32_t *v) {
+    for (int i = 0; i < m->ncst; i++)
+        if (m->cst[i].id == id && m->cst[i].type == m->t_u32) return *v = m->cst[i].val, 1;
+    return 0;
+}
+static int is_debug(uint32_t o) {
+    return o == OpSourceContinued || o == OpSource || o == OpSourceExtension || o == OpName || o == OpMemberName ||
+           o == OpString || o == OpModuleProcessed;
+}
+static int is_annot(uint32_t o) { return o == OpDecorate || o == OpMemberDecorate || o == 73 || o == 74 || o == 75 || o == 332 || o == 5632 || o == 5633; }
+
+static int parse(Mod *m, const uint32_t *w, size_t n, const char **why) {
+    m->w = w, m->n = n;
+    if (n < 5 || w[0] != 0x07230203) return *why = "not SPIR-V", 0;
+    m->bound = w[3];
+    for (size_t i = 5; i < n;) {
+        uint32_t o = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) return *why = "malformed", 0;
+        if (len > MaxIns) return *why = "an instruction too long", 0;
+        const uint32_t *a = w + i + 1;
+        if (o == OpFunction) break;
+        switch (o) {
+        case OpCapability:
+            if (a[0] == CapInt64) m->has_int64 = 1;
+            if (a[0] == CapPSBAddresses) m->has_psb = 1;
+            break;
+        case OpExtension: if (!strcmp((const char *)a, "SPV_KHR_physical_storage_buffer")) m->has_psb_ext = 1; break;
+        case OpExtInstImport: if (!strcmp((const char *)(a + 1), "GLSL.std.450")) m->glsl = a[0]; break;
+        case OpEntryPoint:
+            if (m->ep_fn) return *why = "several entry points", 0;
+            m->model = a[0], m->ep_fn = a[1];
+            break;
+        case OpTypeVoid: if (!m->t_void) m->t_void = a[0]; break;
+        case OpTypeBool: if (!m->t_bool) m->t_bool = a[0]; break;
+        case OpTypeInt:
+            if (a[1] == 32 && !a[2] && !m->t_u32) m->t_u32 = a[0];
+            if (a[1] == 64 && !a[2] && !m->t_u64) m->t_u64 = a[0];
+            break;
+        case OpTypeFloat: if (a[1] == 32 && !m->t_f32) m->t_f32 = a[0]; break;
+        case OpTypeVector:
+            if (a[1] == m->t_u32 && a[2] == 3 && !m->t_v3u) m->t_v3u = a[0];
+            if (a[1] == m->t_u32 && a[2] == 4 && !m->t_v4u) m->t_v4u = a[0];
+            if (a[1] == m->t_f32 && m->t_f32 && a[2] == 4 && !m->t_v4f) m->t_v4f = a[0];
+            break;
+        case OpTypePointer:
+            if (m->nptr == 4096) return *why = "too many pointer types", 0;
+            m->ptr[m->nptr].id = a[0], m->ptr[m->nptr].sc = a[1], m->ptr[m->nptr++].to = a[2];
+            break;
+        case OpVariable:
+            if (m->nvar == 2048) return *why = "too many variables", 0;
+            m->var[m->nvar].id = a[1], m->var[m->nvar].type = a[0], m->var[m->nvar++].sc = a[2];
+            break;
+        case OpConstant:
+            if (len == 4 && m->ncst < 8192) m->cst[m->ncst].id = a[1], m->cst[m->ncst].type = a[0], m->cst[m->ncst++].val = a[2];
+            break;
+        case OpDecorate:
+            if (len >= 4 && a[1] == DecBuiltIn) {
+                if (a[2] == BiWorkgroupId) m->wgid = a[0];
+                if (a[2] == BiLocalInvocationIndex) m->lii = a[0];
+                if (a[2] == BiNumWorkgroups) m->nwg = a[0];
+            }
+            break;
+        }
+        i += len;
+    }
+    if (!m->ep_fn || (m->model != ModelMesh && m->model != ModelTask)) return *why = "not a task or mesh module", 0;
+    if (!m->t_u32 || !m->t_void || !m->glsl || !m->lii || !m->wgid) return *why = "missing basic types or built-ins", 0;
+    return 1;
+}
+
+// ---- emission over new ids
+typedef struct {
+    Mod *m;
+    Buf *types, *annot, *code;
+    uint32_t p_u32_psb, p_v4u_psb, p_words, p_slots, p_pc_u64, p_pc_u32, pc_var, c64_16;
+    struct { uint32_t id, val; } cc[256];
+    int ncc;
+} Em;
+
+static uint32_t nid(Mod *m) { return m->bound++; }
+static uint32_t cu(Em *e, uint32_t v) {
+    for (int i = 0; i < e->m->ncst; i++)
+        if (e->m->cst[i].type == e->m->t_u32 && e->m->cst[i].val == v) return e->m->cst[i].id;
+    for (int i = 0; i < e->ncc; i++)
+        if (e->cc[i].val == v) return e->cc[i].id;
+    uint32_t id = nid(e->m);
+    op(e->types, OpConstant, 3, e->m->t_u32, id, v);
+    if (e->ncc < 256) e->cc[e->ncc].id = id, e->cc[e->ncc++].val = v;
+    return id;
+}
+static uint32_t E1(Em *e, uint32_t o, uint32_t t, uint32_t a) { uint32_t r = nid(e->m); op(e->code, o, 3, t, r, a); return r; }
+static uint32_t E2(Em *e, uint32_t o, uint32_t t, uint32_t a, uint32_t b) { uint32_t r = nid(e->m); op(e->code, o, 4, t, r, a, b); return r; }
+static uint32_t E3(Em *e, uint32_t o, uint32_t t, uint32_t a, uint32_t b, uint32_t c) { uint32_t r = nid(e->m); op(e->code, o, 5, t, r, a, b, c); return r; }
+static uint32_t add(Em *e, uint32_t a, uint32_t b) { return E2(e, OpIAdd, e->m->t_u32, a, b); }
+static uint32_t mul(Em *e, uint32_t a, uint32_t b) { return E2(e, OpIMul, e->m->t_u32, a, b); }
+static uint32_t ult(Em *e, uint32_t a, uint32_t b) { return E2(e, OpULessThan, e->m->t_bool, a, b); }
+static uint32_t ld(Em *e, uint32_t t, uint32_t p) { return E1(e, OpLoad, t, p); }
+static uint32_t pc_u64(Em *e) { return ld(e, e->m->t_u64, E2(e, OpAccessChain, e->p_pc_u64, e->pc_var, cu(e, 0))); }
+static uint32_t pc_u32(Em *e, uint32_t k) { return ld(e, e->m->t_u32, E2(e, OpAccessChain, e->p_pc_u32, e->pc_var, cu(e, k))); }
+static uint32_t words_base(Em *e) { return E1(e, OpConvertUToPtr, e->p_words, pc_u64(e)); }
+static uint32_t word_ptr(Em *e, uint32_t base, uint32_t idx) { return E3(e, OpAccessChain, e->p_u32_psb, base, cu(e, 0), idx); }
+static uint32_t word_load(Em *e, uint32_t base, uint32_t idx) {
+    uint32_t p = word_ptr(e, base, idx), r = nid(e->m);
+    op(e->code, OpLoad, 5, e->m->t_u32, r, p, 2u, 4u);   // Aligned 4
+    return r;
+}
+static void word_store(Em *e, uint32_t base, uint32_t idx, uint32_t v) { op(e->code, OpStore, 4, word_ptr(e, base, idx), v, 2u, 4u); }
+static uint32_t atomic(Em *e, uint32_t o, uint32_t base, uint32_t idx, uint32_t v) {
+    uint32_t p = word_ptr(e, base, idx), r = nid(e->m);
+    op(e->code, o, 6, e->m->t_u32, r, p, cu(e, 1), cu(e, 0), v);   // Device scope, relaxed
+    return r;
+}
+static void barrier(Em *e) { op(e->code, OpControlBarrier, 3, cu(e, 2), cu(e, 2), cu(e, 264)); }   // Workgroup, AcqRel|WorkgroupMemory
+static void if_begin(Em *e, uint32_t cond, uint32_t *merge) {
+    uint32_t t = nid(e->m);
+    *merge = nid(e->m);
+    op(e->code, OpSelectionMerge, 2, *merge, 0u);
+    op(e->code, OpBranchConditional, 3, cond, t, *merge);
+    op(e->code, OpLabel, 1, t);
+}
+static void if_end(Em *e, uint32_t merge) {
+    op(e->code, OpBranch, 1, merge);
+    op(e->code, OpLabel, 1, merge);
+}
+
+
+// The mesh epilogue (replaces the entry function's return)
+static void mesh_epilogue(Em *e, const MeshEmuInfo *info, const OutVar *ov, int nov, uint32_t vcount, uint32_t pcount,
+    Mod *m = e->m;
+    barrier(e);
+    uint32_t lid = ld(e, m->t_u32, m->lii), base = words_base(e);
+    uint32_t mz;
+    if_begin(e, E2(e, OpIEqual, m->t_bool, lid, cu(e, 0)), &mz);
+    {
+        uint32_t vb = atomic(e, OpAtomicIAdd, base, cu(e, 0), vsz);
+        uint32_t iok = E2(e, OpULessThanEqual, m->t_bool, add(e, ib, isz), icap);
+        uint32_t vok = E2(e, OpULessThanEqual, m->t_bool, add(e, vb, vsz), vcap);
+        uint32_t mi;
+        if_begin(e, iok, &mi);
+        atomic(e, OpAtomicIAdd, base, drw, isz);   // the draw record's index count
+        if_end(e, mi);
+        uint32_t all = E2(e, OpLogicalAnd, m->t_bool, iok, vok);
+        atomic(e, OpAtomicIAdd, base, cu(e, 3), E3(e, OpSelect, m->t_u32, all, cu(e, 0), cu(e, 1)));
+        op(e->code, OpStore, 2, sh_vb, E3(e, OpSelect, m->t_u32, vok, vb, cu(e, 0xffffffffu)));
+        op(e->code, OpStore, 2, sh_ib, E3(e, OpSelect, m->t_u32, iok, ib, cu(e, 0xffffffffu)));
+    }
+    if_end(e, mz);
+    barrier(e);
+    uint32_t VB = ld(e, m->t_u32, sh_vb), IB = ld(e, m->t_u32, sh_ib);
+    uint32_t m3;
+    if_begin(e, E2(e, OpINotEqual, m->t_bool, IB, cu(e, 0xffffffffu)), &m3);
+    {
+        uint32_t vbok = E2(e, OpINotEqual, m->t_bool, VB, cu(e, 0xffffffffu));
+        uint32_t m4;
+        if_begin(e, vbok, &m4);
+        {
+            uint32_t vw = pc_u32(e, 4);
+            uint32_t a64 = E2(e, OpIAdd, m->t_u64, pc_u64(e), E2(e, OpIMul, m->t_u64, E1(e, OpUConvert, m->t_u64, vw), e->c64_16));
+            uint32_t sbase = E1(e, OpConvertUToPtr, e->p_slots, a64);
+            for (uint32_t r = 0; r * T < info->max_v; r++) {
+                uint32_t v = add(e, lid, cu(e, r * T)), mv;
+                if_begin(e, ult(e, v, vcount), &mv);
+                uint32_t s0 = add(e, VB, mul(e, v, cu(e, S)));
+                for (int k = 0; k < nov; k++) {
+                    if (ov[k].role == 2) continue;
+                    uint32_t dst = E3(e, OpAccessChain, e->p_v4u_psb, sbase, cu(e, 0), add(e, s0, cu(e, ov[k].slot)));
+                    op(e->code, OpStore, 4, dst, bits, 2u, 16u);
+                }
+                if_end(e, mv);
+            }
+        }
+        if_end(e, m4);
+        uint32_t iw = pc_u32(e, 2), idxv = 0;
+        for (int k = 0; k < nov; k++)
+            if (ov[k].role == 2) idxv = ov[k].var;
+        for (uint32_t r = 0; r * T < info->max_p; r++) {
+            uint32_t p = add(e, lid, cu(e, r * T)), mp;
+            if_begin(e, ult(e, p, pcount), &mp);
+                uint32_t val = E3(e, OpSelect, m->t_u32, vbok, add(e, VB, mul(e, li, cu(e, S))), cu(e, 0));
+                word_store(e, base, add(e, at, cu(e, c)), val);
+            }
+            if_end(e, mp);
+        }
+    }
+    if_end(e, m3);
+    op(e->code, OpReturn, 0);
+}
+
+// The task epilogue (replaces EmitMeshTasksEXT x y z)
+static void task_epilogue(Em *e, const MeshEmuInfo *info, uint32_t payload, uint32_t p_wg_u32, uint32_t nwg,
+                          uint32_t ex, uint32_t ey, uint32_t ez) {
+    Mod *m = e->m;
+    uint32_t T = info->threads;
+    uint32_t cnt = mul(e, ex, mul(e, ey, ez));
+    uint32_t nc = E3(e, OpSelect, m->t_u32, ult(e, cnt, cu(e, info->max_mesh)), cnt, cu(e, info->max_mesh));
+    barrier(e);
+    uint32_t lid = ld(e, m->t_u32, m->lii), wg = ld(e, m->t_v3u, m->wgid), nw = ld(e, m->t_v3u, nwg);
+    uint32_t wx = E2(e, OpCompositeExtract, m->t_u32, wg, 0u), wy = E2(e, OpCompositeExtract, m->t_u32, wg, 1u),
+             wz = E2(e, OpCompositeExtract, m->t_u32, wg, 2u);
+    uint32_t nx = E2(e, OpCompositeExtract, m->t_u32, nw, 0u), ny = E2(e, OpCompositeExtract, m->t_u32, nw, 1u),
+             nz = E2(e, OpCompositeExtract, m->t_u32, nw, 2u);
+    uint32_t nxy = mul(e, nx, ny);
+    uint32_t t = add(e, wx, add(e, mul(e, wy, nx), mul(e, wz, nxy)));
+    uint32_t base = words_base(e), drw = pc_u32(e, 1);
+    uint32_t tb = word_load(e, base, add(e, drw, cu(e, 8)));
+    {
+        uint32_t recw = add(e, cu(e, MESH_EMU_TOFF / 4), mul(e, slot, cu(e, MESH_EMU_TWORDS)));
+            uint32_t v = ld(e, m->t_u32, E2(e, OpAccessChain, p_wg_u32, payload, k));
+            word_store(e, base, add(e, add(e, recw, cu(e, 1)), k), v);
+        }
+        uint32_t m2;
+        if_begin(e, E2(e, OpIEqual, m->t_bool, lid, cu(e, 0)), &m2);
+        word_store(e, base, recw, nc);
+        if_end(e, m2);
+    }
+    if_end(e, m1);
+    uint32_t first = E2(e, OpLogicalAnd, m->t_bool, E2(e, OpIEqual, m->t_bool, lid, cu(e, 0)),
+                        E2(e, OpIEqual, m->t_bool, t, cu(e, 0)));
+    uint32_t m3;
+    if_begin(e, first, &m3);
+    {
+        uint32_t total = mul(e, nxy, nz);
+        // task records past the area are not written: their mesh groups are not dispatched
+        uint32_t ty = E3(e, OpSelect, m->t_u32, ult(e, total, room), total, room);
+        word_store(e, base, add(e, drw, cu(e, 5)), cu(e, info->max_mesh));
+        word_store(e, base, add(e, drw, cu(e, 6)), ty);
+        word_store(e, base, add(e, drw, cu(e, 7)), cu(e, 1));
+    }
+    if_end(e, m3);
+    op(e->code, OpReturn, 0);
+}
+
+uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_t *out_n, const char **why) {
+    static const char *dummy;
+    if (!why) why = &dummy;
+    *why = NULL;
+    Mod *m = calloc(1, sizeof *m);
+    uint32_t *ins = malloc(MaxIns * 4), *ret = NULL;
+    Buf caps = {0}, exts = {0}, imps = {0}, modes = {0}, debug = {0}, annot = {0}, types = {0}, ntypes = {0}, nannot = {0},
+        code = {0}, out = {0};
+    if (!m || !ins) { *why = "out of memory"; goto done; }
+    if (!parse(m, w, n, why)) goto done;
+    memset(info, 0, sizeof *info);
+    int mesh = m->model == ModelMesh;
+    info->task = !mesh;
+    for (size_t i = 5; i < n;) {
+        uint32_t o = w[i] & 0xffff, len = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        if (o == OpFunction) break;
+        if (o == OpExecutionMode && a[0] == m->ep_fn) {
+            if (a[1] == ModeLocalSize) info->threads = a[2] * a[3] * a[4];
+            if (a[1] == ModeOutputVertices) info->max_v = a[2];
+            if (a[1] == ModeOutputPrimitives) info->max_p = a[2];
+            if (a[1] == ModeOutputTriangles) info->prim = 3;
+            if (a[1] == ModeOutputLines) info->prim = 2;
+            if (a[1] == ModeOutputPoints) info->prim = 1;
+        }
+        i += len;
+    }
+    if (!info->threads) { *why = "no LocalSize"; goto done; }
+    if (!m->t_f32 || (mesh && !m->t_v4f)) { *why = "no float types"; goto done; }
+
+    // output variables and the payload
+    OutVar ov[40];
+    int nov = 0;
+    uint32_t payload = 0, payload_len = 0;
+    for (int i = 0; i < m->nvar; i++) {
+        uint32_t sc = m->var[i].sc;
+        if (sc != ScOutput && sc != ScTaskPayload) continue;
+        const uint32_t *arr = find_type(m, ptr_to(m, m->var[i].type));
+        uint32_t len = 0;
+        if (!arr || (arr[0] & 0xffff) != OpTypeArray || !const_u32(m, arr[3], &len)) { *why = "an output or payload is not a sized array"; goto done; }
+        if (sc == ScTaskPayload) {
+            if (arr[2] != m->t_u32) { *why = "a payload that is not uint[]"; goto done; }
+            payload = m->var[i].id, payload_len = len;
+            continue;
+        }
+        if (nov == 40) { *why = "too many outputs"; goto done; }
+        ov[nov] = (OutVar){m->var[i].id, len, 9, 0, 0};
+        for (size_t k = 5; k < n;) {
+            uint32_t o = w[k] & 0xffff, l2 = w[k] >> 16;
+            const uint32_t *a = w + k + 1;
+            if (o == OpFunction) break;
+            if (o == OpDecorate && a[0] == m->var[i].id) {
+                if (a[1] == DecBuiltIn && a[2] == BiPosition) ov[nov].role = 0;
+                else if (a[1] == DecLocation) ov[nov].role = 1, ov[nov].loc = a[2];
+                else if (a[1] == DecBuiltIn) { *why = "an unsupported mesh output built-in"; goto done; }
+                else if (a[1] == DecPerPrimitive) { *why = "per-primitive outputs are not emulated"; goto done; }
+            }
+            k += l2;
+        }
+        if (ov[nov].role == 9) { *why = "an output without a role"; goto done; }
+        nov++;
+    }
+    info->payload_words = payload_len;
+    if (payload_len > MESH_EMU_TWORDS - 1) { *why = "payload too large"; goto done; }
+    if (mesh) {
+        uint32_t locs = 0;
+        int have_pos = 0, have_idx = 0;
+        for (int i = 0; i < nov; i++) {
+            if (ov[i].role == 1) {
+                if (ov[i].loc >= 32 || locs >> ov[i].loc & 1) { *why = "bad generic location"; goto done; }
+                locs |= 1u << ov[i].loc;
+            }
+            have_pos |= ov[i].role == 0, have_idx |= ov[i].role == 2;
+        }
+        if (!have_pos || !have_idx) { *why = "no position or no indices"; goto done; }
+        for (uint32_t l = 0; l < 32; l++)
+            if (locs >> l & 1) info->generic_loc[info->n_generic++] = (uint8_t)l;
+        info->slots = 1 + info->n_generic;
+        for (int i = 0; i < nov; i++) {
+            if (ov[i].role == 0) ov[i].slot = 0;
+            if (ov[i].role == 1)
+                for (uint32_t g = 0; g < info->n_generic; g++)
+                    if (info->generic_loc[g] == ov[i].loc) ov[i].slot = 1 + g;
+        }
+    }
+    uint32_t emit_x = 0, emit_y = 0, emit_z = 0;
+    if (!mesh) {
+        size_t i = 5;
+        while (i < n && (w[i] & 0xffff) != OpFunction) i += w[i] >> 16;
+        for (; i < n; i += w[i] >> 16)
+            if ((w[i] & 0xffff) == OpEmitMeshTasksEXT) emit_x = w[i + 1], emit_y = w[i + 2], emit_z = w[i + 3];
+        if (!emit_x || !payload) { *why = "no EmitMeshTasksEXT or no payload"; goto done; }
+        info->max_mesh = 32;
+        i = 5;
+        while (i < n && (w[i] & 0xffff) != OpFunction) i += w[i] >> 16;
+        for (; i < n; i += w[i] >> 16) {
+            uint32_t v;
+            if ((w[i] & 0xffff) == OpExtInst && (w[i] >> 16) == 7 && w[i + 2] == emit_x && w[i + 3] == m->glsl &&
+                w[i + 4] == GlslUMin && const_u32(m, w[i + 6], &v) && v && v <= 1024)
+                info->max_mesh = v;
+        }
+    }
+
+    // ---- new types, constants and variables
+    Em e = {.m = m, .types = &ntypes, .annot = &nannot, .code = &code};
+    if (!m->t_bool) m->t_bool = nid(m), op(&ntypes, OpTypeBool, 1, m->t_bool);
+    if (!m->t_u64) m->t_u64 = nid(m), op(&ntypes, OpTypeInt, 3, m->t_u64, 64u, 0u);
+    if (!m->t_v3u) m->t_v3u = nid(m), op(&ntypes, OpTypeVector, 3, m->t_v3u, m->t_u32, 3u);
+    if (!m->t_v4u) m->t_v4u = nid(m), op(&ntypes, OpTypeVector, 3, m->t_v4u, m->t_u32, 4u);
+    uint32_t rt_u = nid(m), s_words = nid(m), rt_v4 = nid(m), s_slots = nid(m), pc_struct = nid(m);
+    op(&ntypes, OpTypeRuntimeArray, 2, rt_u, m->t_u32);
+    op(&ntypes, OpTypeStruct, 2, s_words, rt_u);
+    op(&ntypes, OpTypeRuntimeArray, 2, rt_v4, m->t_v4u);
+    op(&ntypes, OpTypeStruct, 2, s_slots, rt_v4);
+    op(&ntypes, OpTypeStruct, 8, pc_struct, m->t_u64, m->t_u32, m->t_u32, m->t_u32, m->t_u32, m->t_u32, m->t_u32);
+    e.p_words = nid(m), op(&ntypes, OpTypePointer, 3, e.p_words, (uint32_t)ScPhysicalStorageBuffer, s_words);
+    e.p_slots = nid(m), op(&ntypes, OpTypePointer, 3, e.p_slots, (uint32_t)ScPhysicalStorageBuffer, s_slots);
+#define NEED_PTR(DST, SC, TO) do { DST = find_ptr(m, SC, TO); if (!DST) { DST = nid(m); op(&ntypes, OpTypePointer, 3, DST, (uint32_t)(SC), TO); \
+        m->ptr[m->nptr].id = DST, m->ptr[m->nptr].sc = SC, m->ptr[m->nptr++].to = TO; } } while (0)
+    NEED_PTR(e.p_u32_psb, ScPhysicalStorageBuffer, m->t_u32);
+    NEED_PTR(e.p_v4u_psb, ScPhysicalStorageBuffer, m->t_v4u);
+    uint32_t p_pc = nid(m);
+    op(&ntypes, OpTypePointer, 3, p_pc, (uint32_t)ScPushConstant, pc_struct);
+    NEED_PTR(e.p_pc_u64, ScPushConstant, m->t_u64);
+    NEED_PTR(e.p_pc_u32, ScPushConstant, m->t_u32);
+    e.pc_var = nid(m), op(&ntypes, OpVariable, 3, p_pc, e.pc_var, (uint32_t)ScPushConstant);
+    e.c64_16 = nid(m), op(&ntypes, OpConstant, 4, m->t_u64, e.c64_16, 16u, 0u);
+    op(&nannot, OpDecorate, 3, rt_u, (uint32_t)DecArrayStride, 4u);
+    op(&nannot, OpDecorate, 2, s_words, (uint32_t)DecBlock);
+    op(&nannot, OpMemberDecorate, 4, s_words, 0u, (uint32_t)DecOffset, 0u);
+    op(&nannot, OpDecorate, 3, rt_v4, (uint32_t)DecArrayStride, 16u);
+    op(&nannot, OpDecorate, 2, s_slots, (uint32_t)DecBlock);
+    op(&nannot, OpMemberDecorate, 4, s_slots, 0u, (uint32_t)DecOffset, 0u);
+    op(&nannot, OpDecorate, 2, pc_struct, (uint32_t)DecBlock);
+    for (uint32_t k = 0; k < 7; k++) op(&nannot, OpMemberDecorate, 4, pc_struct, k, (uint32_t)DecOffset, k ? 4 + 4 * k : 0u);
+
+    // Output and payload pointers become Workgroup pointers: in place when no such pointer exists yet, else mapped
+    struct { uint32_t from, to; } pmap[512];
+    int npmap = 0;
+    for (int i = 0; i < m->nptr; i++) {
+        if (m->ptr[i].sc != ScOutput && m->ptr[i].sc != ScTaskPayload) continue;
+        uint32_t have = find_ptr(m, ScWorkgroup, m->ptr[i].to);
+        if (have) {
+            if (npmap == 512) { *why = "too many pointer types"; goto done; }
+            pmap[npmap].from = m->ptr[i].id, pmap[npmap++].to = have;
+            m->ptr[i].sc = 0xffffffffu;   // dropped
+        } else {
+            m->ptr[i].sc = ScWorkgroup;   // rewritten in place below
+        }
+    }
+    uint32_t p_wg_u32, p_wg_v4f = 0, p_wg_v3u = 0;
+    NEED_PTR(p_wg_u32, ScWorkgroup, m->t_u32);
+    uint32_t sh_vb = 0, sh_ib = 0, wgemu = 0, p_priv_v3 = 0, p_priv_u32 = 0, p_in_u32 = find_ptr(m, ScInput, m->t_u32);
+    if (mesh) {
+        sh_vb = nid(m), op(&ntypes, OpVariable, 3, p_wg_u32, sh_vb, (uint32_t)ScWorkgroup);
+        sh_ib = nid(m), op(&ntypes, OpVariable, 3, p_wg_u32, sh_ib, (uint32_t)ScWorkgroup);
+    }
+    int remap_wg = mesh && payload;
+    if (remap_wg) {
+        NEED_PTR(p_priv_v3, ScPrivate, m->t_v3u);
+        NEED_PTR(p_priv_u32, ScPrivate, m->t_u32);
+        wgemu = nid(m), op(&ntypes, OpVariable, 3, p_priv_v3, wgemu, (uint32_t)ScPrivate);
+    }
+    uint32_t nwg = m->nwg;
+    if (!mesh && !nwg) {
+        uint32_t p_in_v3;
+        NEED_PTR(p_in_v3, ScInput, m->t_v3u);
+        nwg = nid(m), op(&ntypes, OpVariable, 3, p_in_v3, nwg, (uint32_t)ScInput);
+        op(&nannot, OpDecorate, 3, nwg, (uint32_t)DecBuiltIn, (uint32_t)BiNumWorkgroups);
+    }
+#undef NEED_PTR
+
+    // ---- one pass over the module
+    uint32_t moved[48];
+    int nmoved = 0;
+    for (int i = 0; i < nov; i++) moved[nmoved++] = ov[i].var;
+    if (payload) moved[nmoved++] = payload;
+    uint32_t vcount = 0, pcount = 0;
+    int in_fn = 0, in_ep = 0, ep_started = 0, ep_done = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t o = w[i] & 0xffff, len = w[i] >> 16;
+        memcpy(ins, w + i, len * 4);
+        const uint32_t *a = w + i + 1;
+        if (o == OpFunction) in_fn = 1, in_ep = a[1] == m->ep_fn;
+        if (!in_fn) {
+            if (o == OpCapability) { if (a[0] != CapMeshShading) putn(&caps, ins, len); }
+            else if (o == OpExtension) { if (strcmp((const char *)a, "SPV_EXT_mesh_shader")) putn(&exts, ins, len); }
+            else if (o == OpExtInstImport) putn(&imps, ins, len);
+            else if (o == OpMemoryModel || o == OpEntryPoint) {}
+            else if (o == OpExecutionMode || o == OpExecutionModeId) {
+                if (!(o == OpExecutionMode && (a[1] == ModeOutputVertices || a[1] == ModeOutputPrimitives ||
+                                               a[1] == ModeOutputTriangles || a[1] == ModeOutputLines || a[1] == ModeOutputPoints)))
+                    putn(&modes, ins, len);
+            } else if (is_debug(o)) putn(&debug, ins, len);
+            else if (is_annot(o)) {
+                int drop = 0;
+                for (int k = 0; k < nmoved; k++) drop |= o == OpDecorate && a[0] == moved[k];
+                if (!drop) putn(&annot, ins, len);
+            } else {   // types, constants, global variables
+                int drop = 0;
+                if (o == OpTypePointer) {
+                    for (int k = 0; k < npmap; k++) drop |= pmap[k].from == a[0];
+                    if (a[1] == ScOutput || a[1] == ScTaskPayload) ins[2] = ScWorkgroup;
+                }
+                if (o == OpVariable && (a[2] == ScOutput || a[2] == ScTaskPayload)) ins[3] = ScWorkgroup;
+                for (uint32_t k = 1; k < len; k++) {
+                    int idpos = o == OpTypeFunction || o == OpTypeStruct || o == OpTypeArray || o == OpTypeRuntimeArray ||
+                                (o == OpTypePointer && k == 3) || k == 1;
+                    if (o == OpTypePointer && k == 1) idpos = 0;
+                    for (int q = 0; idpos && q < npmap; q++)
+                        if (ins[k] == pmap[q].from) ins[k] = pmap[q].to;
+                }
+                if (!drop) putn(&types, ins, len);
+            }
+            i += len;
+            continue;
+        }
+        // function code
+        if (len >= 2)
+            for (int q = 0; q < npmap; q++)
+                if (ins[1] == pmap[q].from) ins[1] = pmap[q].to;
+        if (remap_wg && len >= 4 && (o == OpLoad || o == OpAccessChain || o == OpInBoundsAccessChain) && ins[3] == m->wgid) {
+            ins[3] = wgemu;
+            if (o != OpLoad) {
+                if (!p_in_u32 || ins[1] != p_in_u32) { *why = "an unexpected WorkgroupId access"; goto done; }
+                ins[1] = p_priv_u32;
+            }
+        } else if (remap_wg) {
+            for (uint32_t k = 1; k < len; k++) {   // id operands only: literals of these instructions may equal the id
+                int lit = (o == OpExtInst && k == 4) || (o == 81 && k >= 4) || (o == 82 && k >= 5) || (o == 79 && k >= 5) ||
+                          (o == OpLoad && k >= 4) || (o == OpStore && k >= 3) || o == 251 /* OpSwitch */ || o == OpSelectionMerge ||
+                          o == 246 /* OpLoopMerge */;
+                if (!lit && ins[k] == m->wgid) { *why = "an unexpected WorkgroupId use"; goto done; }
+            }
+        }
+        if (o == OpFunctionEnd) in_fn = 0, in_ep = 0;
+        if (in_ep && o == OpLabel && !ep_started) {
+            putn(&code, ins, len);
+            size_t j = i + len;   // function variables stay first
+            while (j < n && (w[j] & 0xffff) == OpVariable) putn(&code, w + j, w[j] >> 16), j += w[j] >> 16;
+            ep_started = 1;
+            i = j;
+            if (remap_wg) {
+                uint32_t lid = ld(&e, m->t_u32, m->lii), wg = ld(&e, m->t_v3u, m->wgid);
+                uint32_t x = E2(&e, OpCompositeExtract, m->t_u32, wg, 0u), y = E2(&e, OpCompositeExtract, m->t_u32, wg, 1u);
+                uint32_t base = words_base(&e), drw = pc_u32(&e, 1);
+                uint32_t tb = word_load(&e, base, add(&e, drw, cu(&e, 8)));
+                uint32_t slotc = E3(&e, OpSelect, m->t_u32, ok, slot, cu(&e, 0));
+                uint32_t recw = add(&e, cu(&e, MESH_EMU_TOFF / 4), mul(&e, slotc, cu(&e, MESH_EMU_TWORDS)));
+                uint32_t cnt = word_load(&e, base, recw);
+                uint32_t act = E2(&e, OpLogicalAnd, m->t_bool, ok, ult(&e, x, cnt));
+                uint32_t cont = nid(m), retl = nid(m);
+                op(&code, OpSelectionMerge, 2, cont, 0u);
+                op(&code, OpBranchConditional, 3, act, cont, retl);
+                op(&code, OpLabel, 1, retl);
+                op(&code, OpReturn, 0);
+                op(&code, OpLabel, 1, cont);
+                uint32_t v3 = nid(m);
+                op(&code, OpCompositeConstruct, 5, m->t_v3u, v3, x, cu(&e, 0), cu(&e, 0));
+                op(&code, OpStore, 2, wgemu, v3);
+                    uint32_t v = word_load(&e, base, add(&e, add(&e, recw, cu(&e, 1)), k));
+                    op(&code, OpStore, 2, E2(&e, OpAccessChain, p_wg_u32, payload, k), v);
+                }
+                barrier(&e);
+            }
+            continue;
+        }
+        if (in_ep && o == OpSetMeshOutputsEXT) {
+            vcount = a[0], pcount = a[1];
+            i += len;
+            continue;
+        }
+        if (in_ep && mesh && o == OpReturn) {
+            if (!vcount || ep_done) { *why = "no SetMeshOutputsEXT before the return, or several returns"; goto done; }
+            ep_done = 1;
+            i += len;
+            continue;
+        }
+        if (in_ep && !mesh && o == OpEmitMeshTasksEXT) {
+            task_epilogue(&e, info, payload, p_wg_u32, nwg, emit_x, emit_y, emit_z);
+            ep_done = 1;
+            i += len;
+            continue;
+        }
+        putn(&code, ins, len);
+        i += len;
+    }
+    if (!ep_done) { *why = "the entry function's end was not found"; goto done; }
+
+    // ---- assemble
+    put(&out, 0x07230203);
+    put(&out, w[1] < 0x00010500 ? 0x00010500 : w[1]);   // SPIR-V 1.5: physical storage buffers are core
+    put(&out, w[2]);
+    put(&out, m->bound);
+    put(&out, 0);
+    putn(&out, caps.w, caps.n);
+    if (!m->has_int64) op(&out, OpCapability, 1, (uint32_t)CapInt64);
+    if (!m->has_psb) op(&out, OpCapability, 1, (uint32_t)CapPSBAddresses);
+    putn(&out, exts.w, exts.n);
+    putn(&out, imps.w, imps.n);
+    op(&out, OpMemoryModel, 2, 5348u, 1u);   // PhysicalStorageBuffer64, GLSL450
+    {   // entry point: every global variable
+        Buf ep = {0};
+        uint32_t pre[2] = {ModelGLCompute, m->ep_fn};
+        uint32_t ifc[2048 + 16];
+        int ni = 0;
+        for (int i = 0; i < m->nvar && ni < 2048; i++) {
+            int dropped = 0;
+            if (!dropped && m->var[i].sc != ScFunction) ifc[ni++] = m->var[i].id;
+        }
+        // the new ones: scan ntypes for OpVariable
+        for (size_t i = 0; i < ntypes.n;) {
+            uint32_t o = ntypes.w[i] & 0xffff, len = ntypes.w[i] >> 16;
+            if (o == OpVariable && ni < 2048 + 16) ifc[ni++] = ntypes.w[i + 2];
+            i += len;
+        }
+        op_str(&ep, OpEntryPoint, pre, 2, "main", ifc, ni);
+        putn(&out, ep.w, ep.n);
+        free(ep.w);
+    }
+    putn(&out, modes.w, modes.n);
+    putn(&out, debug.w, debug.n);
+    putn(&out, annot.w, annot.n);
+    putn(&out, nannot.w, nannot.n);
+    putn(&out, types.w, types.n);
+    putn(&out, ntypes.w, ntypes.n);
+    putn(&out, code.w, code.n);
+    out.w[3] = m->bound;
+    if (caps.bad || exts.bad || imps.bad || modes.bad || debug.bad || annot.bad || types.bad || ntypes.bad ||
+        nannot.bad || code.bad || out.bad) { *why = "out of memory"; goto done; }
+    ret = out.w, *out_n = out.n, out.w = NULL;
+done:
+    free(caps.w), free(exts.w), free(imps.w), free(modes.w), free(debug.w), free(annot.w), free(types.w), free(ntypes.w),
+        free(nannot.w), free(code.w), free(out.w);
+    free(m), free(ins);
+    return ret;
+}
+
+// ---- the vertex shader of an emulated mesh pipeline
+    Buf b = {0}, t = {0}, an = {0}, c = {0};
+    uint32_t id = 1;
+#define N() (id++)
+    uint32_t glsl = N(), fn = N(), t_void = N(), t_fn = N(), t_u32 = N(), t_i32 = N(), t_f32 = N(), t_u64 = N(),
+             t_v4u = N(), t_v4f = N(), t_v4i = N(), rt_v4 = N(), s_slots = N(), p_slots = N(), p_v4u_psb = N(),
+             pc_struct = N(), p_pc = N(), pc_var = N(), p_pc_u64 = N(), p_pc_u32 = N(), p_in_i32 = N(),
+    (void)glsl;
+    uint32_t vecs[3][5] = {{0}};   // [type][comps] vector ids (comps 2..4), [type][1] the scalar
+    vecs[0][1] = t_f32, vecs[1][1] = t_i32, vecs[2][1] = t_u32, vecs[0][4] = t_v4f, vecs[1][4] = t_v4i, vecs[2][4] = t_v4u;
+    op(&t, OpTypeVoid, 1, t_void);
+    op(&t, OpTypeFunction, 2, t_fn, t_void);
+    op(&t, OpTypeInt, 3, t_u32, 32u, 0u);
+    op(&t, OpTypeInt, 3, t_i32, 32u, 1u);
+    op(&t, OpTypeFloat, 2, t_f32, 32u);
+    op(&t, OpTypeInt, 3, t_u64, 64u, 0u);
+    op(&t, OpTypeVector, 3, t_v4u, t_u32, 4u);
+    op(&t, OpTypeVector, 3, t_v4f, t_f32, 4u);
+    op(&t, OpTypeVector, 3, t_v4i, t_i32, 4u);
+    for (int ty = 0; ty < 3; ty++)
+        for (int k = 2; k < 4; k++) {
+            vecs[ty][k] = N();
+            op(&t, OpTypeVector, 3, vecs[ty][k], vecs[ty][1], (uint32_t)k);
+        }
+    op(&t, OpTypeRuntimeArray, 2, rt_v4, t_v4u);
+    op(&t, OpTypeStruct, 2, s_slots, rt_v4);
+    op(&t, OpTypePointer, 3, p_slots, (uint32_t)ScPhysicalStorageBuffer, s_slots);
+    op(&t, OpTypePointer, 3, p_v4u_psb, (uint32_t)ScPhysicalStorageBuffer, t_v4u);
+    op(&t, OpTypeStruct, 8, pc_struct, t_u64, t_u32, t_u32, t_u32, t_u32, t_u32, t_u32);
+    op(&t, OpTypePointer, 3, p_pc, (uint32_t)ScPushConstant, pc_struct);
+    op(&t, OpTypePointer, 3, p_pc_u64, (uint32_t)ScPushConstant, t_u64);
+    op(&t, OpTypePointer, 3, p_pc_u32, (uint32_t)ScPushConstant, t_u32);
+    op(&t, OpTypePointer, 3, p_in_i32, (uint32_t)ScInput, t_i32);
+    op(&t, OpTypePointer, 3, p_out_v4f, (uint32_t)ScOutput, t_v4f);
+    op(&t, OpConstant, 3, t_u32, c0, 0u);
+    op(&t, OpConstant, 3, t_u32, c4, 4u);
+    op(&t, OpConstant, 4, t_u64, c16, 16u, 0u);
+    op(&t, OpVariable, 3, p_pc, pc_var, (uint32_t)ScPushConstant);
+    op(&t, OpVariable, 3, p_in_i32, vidx, (uint32_t)ScInput);
+    op(&t, OpVariable, 3, p_out_v4f, pos, (uint32_t)ScOutput);
+    op(&an, OpDecorate, 3, rt_v4, (uint32_t)DecArrayStride, 16u);
+    op(&an, OpDecorate, 2, s_slots, (uint32_t)DecBlock);
+    op(&an, OpMemberDecorate, 4, s_slots, 0u, (uint32_t)DecOffset, 0u);
+    op(&an, OpDecorate, 2, pc_struct, (uint32_t)DecBlock);
+    for (uint32_t k = 0; k < 7; k++) op(&an, OpMemberDecorate, 4, pc_struct, k, (uint32_t)DecOffset, k ? 4 + 4 * k : 0u);
+    op(&an, OpDecorate, 3, vidx, (uint32_t)DecBuiltIn, (uint32_t)BiVertexIndex);
+    op(&an, OpDecorate, 3, pos, (uint32_t)DecBuiltIn, (uint32_t)BiPosition);
+    ifc[ni++] = pc_var, ifc[ni++] = vidx, ifc[ni++] = pos;
+        uint32_t p = N(), v = N();
+        op(&t, OpVariable, 3, p, v, (uint32_t)ScOutput);
+        ifc[ni++] = v;
+    }
+    // code: slot = vertex area + VertexIndex; each output from slot + its index
+    uint32_t lab = N();
+    op(&c, OpFunction, 4, t_void, fn, 0u, t_fn);
+    op(&c, OpLabel, 1, lab);
+    uint32_t e64 = N(), e64p = N(), vw = N(), vwp = N(), vi = N(), viu = N(), s = N(), s64 = N(), off = N(), a = N(), base = N();
+    op(&c, OpAccessChain, 4, p_pc_u64, e64p, pc_var, c0);
+    op(&c, OpLoad, 3, t_u64, e64, e64p);
+    op(&c, OpAccessChain, 4, p_pc_u32, vwp, pc_var, c4);
+    op(&c, OpLoad, 3, t_u32, vw, vwp);
+    op(&c, OpLoad, 3, t_i32, vi, vidx);
+    op(&c, OpBitcast, 3, t_u32, viu, vi);
+    op(&c, OpIAdd, 4, t_u32, s, vw, viu);
+    op(&c, OpUConvert, 3, t_u64, s64, s);
+    op(&c, OpIMul, 4, t_u64, off, s64, c16);
+    op(&c, OpIAdd, 4, t_u64, a, e64, off);
+    op(&c, OpConvertUToPtr, 3, p_slots, base, a);
+    uint32_t slot_of[33];
+    for (int k = 0; k < 33; k++) slot_of[k] = 0xffffffffu;
+    slot_of[32] = 0;   // position
+    for (uint32_t g = 0; g < mi->n_generic; g++) slot_of[mi->generic_loc[g]] = 1 + g;
+        uint32_t val;
+        if (slot_of[l] == 0xffffffffu) {
+            val = 0;
+        } else {
+            uint32_t ci = N(), p = N();
+            val = N();
+            op(&t, OpConstant, 3, t_u32, ci, slot_of[l]);
+            op(&c, OpAccessChain, 5, p_v4u_psb, p, base, c0, ci);
+            op(&c, OpLoad, 5, t_v4u, val, p, 2u, 16u);
+        }
+            uint32_t f = N();
+            op(&c, OpBitcast, 3, t_v4f, f, val);
+            op(&c, OpStore, 2, pos, f);
+            continue;
+        }
+        if (!val) {   // not written by the mesh stage: zero
+            uint32_t z = N();
+            r = N();
+        } else {
+            uint32_t cv = val;
+            if (ty != 2) cv = N(), op(&c, OpBitcast, 3, v4t, cv, val);
+            if (k == 4) r = cv;
+            else {
+                r = N();
+            }
+        }
+    }
+    op(&c, OpReturn, 0);
+    op(&c, OpFunctionEnd, 0);
+    // assemble
+    put(&b, 0x07230203), put(&b, 0x00010500), put(&b, 0), put(&b, id), put(&b, 0);
+    op(&b, OpCapability, 1, (uint32_t)CapShader);
+    op(&b, OpCapability, 1, (uint32_t)CapInt64);
+    op(&b, OpCapability, 1, (uint32_t)CapPSBAddresses);
+    op(&b, OpMemoryModel, 2, 5348u, 1u);
+    uint32_t pre[2] = {ModelVertex, fn};
+    op_str(&b, OpEntryPoint, pre, 2, "main", ifc, (int)ni);
+    putn(&b, an.w, an.n);
+    putn(&b, t.w, t.n);
+    putn(&b, c.w, c.n);
+    b.w[3] = id;
+    int bad = b.bad || t.bad || an.bad || c.bad;
+    free(t.w), free(an.w), free(c.w);
+    if (bad) { free(b.w); return NULL; }
+    *out_n = b.n;
+    return b.w;
