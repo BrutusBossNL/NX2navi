@@ -3046,20 +3046,9 @@ static int water_projective_pair(const VkPipeState *s) {
     return 0;
 }
 
-static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early, int mode) {
-    if (!mode) return make_module(w, n, early);
-    uint64_t h = fnv(FNV0, w, (size_t)n * 4);
-    int stage = -1;
-    if (mode == 2) {
-        // Vertex modules and unrelated fragment translations remain original.
-        if (h != 0xabfccea256824a78ull && h != 0xb3cec6d0d78ac25aull)
-            return make_module(w, n, early);
-        stage = 4;
-    } else {
-        if (h == 0xf6d753852c47b0deull || h == 0x8d83e3705d790fedull) stage = 0;
-        if (h == 0x3d3a316ab4da3bbaull || h == 0x216bd323c6b48ee2ull) stage = 4;
-        if (stage < 0) rt_fatal("water projective: paired module changed; refusing a partial recipe");
-    }
+// The local module that stands for the module of hash h, checked: one entry point, of the stage given (0 vertex,
+// 4 fragment). The caller frees it. A line in the log names each module the first time it is taken.
+static uint32_t *water_local_module(uint64_t h, int stage, uint64_t *words) {
     const char *dir = water_projective_dir();
     if (!dir) rt_fatal("water projective: recipe directory unavailable");
     char path[700];
@@ -3086,9 +3075,56 @@ static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early
         at += len;
     }
     if (entries != 1) rt_fatal("water projective: unexpected entry-point count");
-    VkShaderModule result = make_module(code, (uint64_t)bytes / 4, early);
+    static volatile uint64_t told[8];
+    for (int i = 0; i < 8; i++) {
+        uint64_t was = __atomic_load_n(&told[i], __ATOMIC_RELAXED);
+        if (was == h) break;
+        if (!was && __atomic_compare_exchange_n(&told[i], &was, h, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            rt_log("water projective: %s module %016llx is built from %s", stage ? "fragment" : "vertex",
+                   (unsigned long long)h, path);
+            break;
+        }
+        if (was == h) break;   // another thread took the slot for the same module
+    }
+    *words = (uint64_t)bytes / 4;
+    return code;
+}
+
+// The fragment module of a pipeline in water mode `mode` (water_mode): the local one for the module as it is built (in
+// its descriptor set 1 form), else the module itself.
+static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early, int mode) {
+    if (!mode) return make_module(w, n, early);
+    uint64_t h = fnv(FNV0, w, (size_t)n * 4);
+    if (mode == 2) {
+        // Unrelated fragment translations remain original.
+        if (h != 0xabfccea256824a78ull && h != 0xb3cec6d0d78ac25aull)
+            return make_module(w, n, early);
+    } else if (h != 0x3d3a316ab4da3bbaull && h != 0x216bd323c6b48ee2ull) {
+        rt_fatal("water projective: paired module changed; refusing a partial recipe");
+    }
+    uint64_t words = 0;
+    uint32_t *code = water_local_module(h, 4, &words);
+    VkShaderModule result = make_module(code, words, early);
     free(code);
     return result;
+}
+
+// The vertex stage of a coordinate pair (mode 1): the local module for the translation itself, taken before the
+// outputs the vertex shader's union adds (spirv_add_outputs), which differ from one install to the next and are added
+// to the local module as to any other. NULL in every other case; the caller frees it.
+static uint32_t *water_pair_vertex(const uint32_t *v, uint64_t n, int mode, uint64_t *words) {
+    if (mode != 1 || !v) return NULL;
+    uint64_t h = fnv(FNV0, v, (size_t)n * 4);
+    if (h != 0xf6d753852c47b0deull && h != 0x8d83e3705d790fedull)
+        rt_fatal("water projective: paired module changed; refusing a partial recipe");
+    return water_local_module(h, 0, words);
+}
+
+// water_projective_pair for a pipeline of key k. A coordinate pair blended with dual-source factors keeps its original
+// modules: spirv_dual_source changes the fragment module before its set 1 form, which is then none the recipe knows.
+static int water_mode(const VkPipeState *s, const GKey *k) {
+    int mode = water_projective_pair(s);
+    return mode == 1 && k->dsb ? 0 : mode;
 }
 
 static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Layout *l, uint32_t fs_off) {
@@ -3097,6 +3133,10 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
     uint32_t *vpatched = NULL, *fpatched = NULL;
     int mesh = is_mesh(s);
+    int wmode = mesh ? 0 : water_mode(s, k);
+    uint64_t wn = 0;
+    uint32_t *vwater = water_pair_vertex(vcode, vw, wmode, &wn);
+    if (vwater) vcode = vwater, vw = wn;
     VkShaderModule tm = VK_NULL_HANDLE;
     if (mesh && s->ts) {   // the task stage's bindings follow the fragment stage's (pipe_miss)
         uint64_t tw;
@@ -3153,10 +3193,10 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
             fcode = fpatched = r;
         }
         // A bound colour target outside the shader's output map gets write mask 0 (target_wmask)
-        if (fcode) fm = water_pair_module(fcode, fw, !k->a2c, water_projective_pair(s)), fm_hash = mm_hash;
+        if (fcode) fm = water_pair_module(fcode, fw, !k->a2c, wmode), fm_hash = mm_hash;
     }
-    vm = water_pair_module(vcode, vw, 0, water_projective_pair(s)), vm_hash = mm_hash;
-    free(vpatched), free(fpatched);
+    vm = make_module(vcode, vw, 0), vm_hash = mm_hash;
+    free(vpatched), free(fpatched), free(vwater);
     VkPipeline pipe = VK_NULL_HANDLE;
     if (!vm || (s->fs && !fm) || (mesh && s->ts && !tm)) goto out;
 
@@ -3386,9 +3426,14 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         uint64_t vw, sw, n2 = 0;
         const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw), *scode = vcode;
         sw = vw;
+        uint64_t wn = 0;
+        uint32_t *vwater = water_pair_vertex(vcode, vw, pk->water_projective, &wn);
+        if (vwater) vcode = vwater, vw = wn;
         if (pk->missing && (patched = spirv_add_outputs(vcode, vw, pk->missing, pk->fin, &n2))) vcode = patched, vw = n2;
         else if (pk->missing) LOG_ONCE("vk_pipeline: cannot add missing vertex outputs (mask %#x)", pk->missing);
-        if (!(m = water_pair_module(vcode, vw, 0, pk->water_projective))) goto out;
+        m = make_module(vcode, vw, 0);
+        free(vwater);
+        if (!m) goto out;
         st.stage = VK_SHADER_STAGE_VERTEX_BIT, st.module = m;
         pin_subgroup32(&st, &rq, scode, sw);
         pi.stageCount = 1, pi.pStages = &st, pi.pViewportState = &vp, pi.pRasterizationState = &rs;
@@ -3610,7 +3655,7 @@ static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, F
         if (pk->missing >> i & 1) pk->fin[i] = fin[i];
     memset(fk, 0, sizeof *fk);
     fk->kind = LIB_FS, fk->fs = s->fs, fk->dsb = k->dsb, fk->samples = k->samples, fk->a2c = k->a2c;
-    pk->water_projective = fk->water_projective = (uint8_t)water_projective_pair(s);
+    pk->water_projective = fk->water_projective = (uint8_t)water_mode(s, k);
     memset(ok, 0, sizeof *ok);
     ok->kind = LIB_FO, ok->n_color = k->n_color, ok->samples = k->samples, ok->a2c = k->a2c, ok->logic_op = k->logic_op;
     ok->blend_en = k->blend_en, ok->fbl = k->fbl, ok->depth = k->depth, ok->stencil = k->stencil, ok->wmask = k->wmask;

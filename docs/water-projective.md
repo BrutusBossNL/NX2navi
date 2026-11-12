@@ -45,6 +45,14 @@ Unknown modules retain their original calculation. The runtime requires
 independent stage layouts. Its graphics-library variant byte distinguishes
 original, paired-coordinate and absorption-guard pipelines.
 
+The vertex replacement stands for the translation itself: the outputs an install's
+vertex output union adds are added to the replacement as to any other module, so the
+pair holds whatever other fragment shaders that install has met with the vertex
+shader. A pair blended with dual-source factors keeps its original modules. The log
+names each replacement the first time it is built ("water projective: ... module").
+The translations of game 1.1.1 are the same under the 0.9.0 translator as under
+0.8.0's on NVIDIA (RTX 5090), so the profiles above still apply there.
+
 ## Private local preparation
 
 Use locally held inputs from the same supported translator profile:
