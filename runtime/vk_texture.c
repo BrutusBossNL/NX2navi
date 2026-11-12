@@ -4,7 +4,8 @@
 // and sampler descriptor slots, and VkSamplers.
 //
 // A texture that mirrors its pool memory (tex_mirrored) stops re-uploading once the GPU rendered into it (the
-// "GPU-owned" rule); a finalized slot follows live GPU content but never revives freed CPU-backed storage.
+// "GPU-owned" rule); a finalized slot follows live GPU content or samples its own image as kept, but never revives
+// freed CPU-backed storage.
 // Contains code Copyright (c) 2026 jhaizhou, Copyright (c) 2026 Peiikai (MIT; see THIRD_PARTY_NOTICES.md).
 //
 // Every image lives in VK_IMAGE_LAYOUT_GENERAL. Uploads are recorded into the upload batch of vk_memory.c; the replay
@@ -1550,7 +1551,7 @@ static int resolve_stale;
 // with the same parameters registered with another texture object, which a finalize leaves current
 // (vk_texture_release), and lookups the stale rule answered with the stand-in (slot_resolve). _hm: of them, the
 // terrain's streamed heightmaps (R32F 260x260), whose stand-in draws a chunk of ground at height zero.
-static uint64_t n_fin_own, n_fin_other, n_fin_other_hm, n_stale, n_stale_hm;
+static uint64_t n_fin_own, n_fin_other, n_fin_other_hm, n_stale, n_stale_hm, n_stale_kept;
 static int terrain_heightmap(const tex_t *t) {
     return t->d.format == NVN_FORMAT_R32F && t->d.width == 260 && t->d.height == 260;
 }
@@ -4086,6 +4087,20 @@ static int want_take(void) {
 void vk_texture_create_budget_locked(int n) { create_budget = n, create_deferred = 0; }
 int vk_texture_create_deferred_locked(void) { int d = create_deferred; create_deferred = 0; return d; }
 
+// NX2NAVI_TEX_STALE_KEPT (default 1; 0: the stand-in, as before): a finalized slot of a CPU-written texture resolves to
+// its own entry while that entry holds the texture's content: uploaded or drawn by the GPU, and neither superseded by
+// another descriptor at its address nor overwritten. The game finalizes texture objects on its own thread ahead of the
+// replay, which still draws the frame the game recorded before that; on the console the memory still holds the texels
+// those draws read. Kakariko moves about 30 of its textures to new addresses every four or five frames: each move
+// finalized the old descriptors, the replay's draws of the frame before then met finalized slots, and their stand-ins
+// took the village's haze out of a frame a few times a minute (thousands of stand-in lookups in 60 frames). The image
+// is sampled as it is: the lookup neither takes the entry back nor reads its storage (vk_texture_by_id_locked).
+static int stale_kept(const Tex *own) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("TEX_STALE_KEPT", "1") == 1;
+    return on && own && !own->superseded && !own->overwritten && (own->uploaded || own->pub.gpu_owned);
+}
+
 static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
     *view = s->v;
     *has_view = s->has_view;
@@ -4117,9 +4132,11 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
             if (!any && (!cpu_slot || alias_has_gpu_content(p))) any = p;
         }
         // A finalized CPU descriptor must not recreate its image from freed storage. The slot keeps this state even
-        // after its released image was evicted; registering the descriptor again makes it current.
+        // after its released image was evicted; registering the descriptor again makes it current. While its own
+        // entry still holds the texture (stale_kept), the slot samples that image as it is.
         if (!e && any) e = any;
         else if (!e && !cpu_slot) e = own && own->superseded ? NULL : own;   // a superseded one: entry_of takes it back
+        else if (!e && cpu_slot && s->finalized && stale_kept(own)) e = own, n_stale_kept++;
         else if (!e && cpu_slot && s->finalized) stale = 1, n_stale++, n_stale_hm += terrain_heightmap(&s->t);
     }
     resolve_stale = stale;
@@ -4263,7 +4280,8 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
     // held slot counts as checked for look_round: the textures evicted by disuse are registered slots all the same.
     if ((e || s->cheld) && s->cepoch != submit_epoch) {
         round_checks++;
-        if (e && (!e->uploaded || e->checked != submit_epoch)) {
+        // a released entry here is a finalized slot's own (stale_kept): the storage may be the game's to free or reuse
+        if (e && !e->released && (!e->uploaded || e->checked != submit_epoch)) {
             make_fresh_snap(e);
             e->checked = submit_epoch;
             touch(e);
@@ -4380,10 +4398,10 @@ void vk_texture_new_submit(void) {
         n_mark_empty = n_mark_none = n_drop_wb = 0;
         rt_log("perf: frame %llu: texture finalizes: slots marked %llu; slots of another live texture with the same "
                "parameters at the storage, left current %llu (terrain heightmaps %llu); lookups the stale rule gave the "
-               "stand-in %llu (terrain heightmaps %llu)", (unsigned long long)f * 60, (unsigned long long)n_fin_own,
-               (unsigned long long)n_fin_other, (unsigned long long)n_fin_other_hm, (unsigned long long)n_stale,
-               (unsigned long long)n_stale_hm);
-        n_fin_own = n_fin_other = n_fin_other_hm = n_stale = n_stale_hm = 0;
+               "stand-in %llu (terrain heightmaps %llu), their own kept image %llu (NX2NAVI_TEX_STALE_KEPT)",
+               (unsigned long long)f * 60, (unsigned long long)n_fin_own, (unsigned long long)n_fin_other, (unsigned long long)n_fin_other_hm,
+               (unsigned long long)n_stale, (unsigned long long)n_stale_hm, (unsigned long long)n_stale_kept);
+        n_fin_own = n_fin_other = n_fin_other_hm = n_stale = n_stale_hm = n_stale_kept = 0;
         if (split_mode > 0)
             rt_log("perf: frame %llu: split fill: entries the CPU does not write started with their storage's bytes: "
                    "copied from the released entry they replaced %llu, filled from storage %llu (%.1f MiB, %.2f ms), "
