@@ -44,6 +44,9 @@ uint64_t vk_exec_cs_storage_addr(const VkExec *ex, const GfxShaderRes *r);   // 
 uint64_t vk_exec_storage_addr(const VkExec *ex, int st, const GfxShaderRes *r);   // vk_exec_draw.c
 int vk_exec_raw_9e5(VkImage img, VkFormat f);                               // vk_exec_draw.c
 #include "platform/platform.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define MAX_PASSES 400
 #define PNG_CAP (2ull << 30)
@@ -1162,7 +1165,7 @@ void vk_dump_init(void) {
     if (dump_white || dump_after) {
         dump_frame = UINT64_MAX;
         vk_thumbs_enable(16);
-    } else if (movie_k || key_mode || dump_file[0]) {
+    } else if (movie_k || key_mode || dump_file[0] || dump_key) {
         dump_frame = UINT64_MAX;
     } else if (!e || !*e || !(dump_frame = strtoull(e, NULL, 10))) return;
     const char *lf = cfg_get("NX2NAVI_DUMP_LOG");
@@ -1207,10 +1210,25 @@ void vk_dump_init(void) {
         if (!bd_w || !bd_h) bd_stride = 0;
         snprintf(path, sizeof path, "%s/bufs.txt", dir);
         // a dump named as the run goes opens it with its folder (open_files); a named frame's folder exists already
-        if (bd_size && !dump_white && !movie_k && !key_mode && !dump_file[0] && !(bufs_f = fopen(path, "w"))) bd_size = 0;
+        if (bd_size && !dump_white && !movie_k && !key_mode && !dump_file[0] && !dump_key && !(bufs_f = fopen(path, "w"))) bd_size = 0;
     }
     vk_dump_armed = 1;
     rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
+    else rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
+}
+
+static int key_pressed(void) {
+#ifdef _WIN32
+    static int was;
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    int pressed = down && !was;
+    was = down;
+    return pressed;
+#else
+    return 0;
+#endif
 }
 
 // The thumbnail of frame f is blank white left of the overlay and above the dialogue box: -1 not available, 0 no, 1 yes.
@@ -1279,6 +1297,12 @@ void vk_dump_present(uint64_t frame) {
         dump_frame = frame + 1;
         rt_log("vk_dump: %s found: frame %llu goes to %s", dump_file, (unsigned long long)dump_frame, dir);
     }
+    if (dump_key && dump_frame == UINT64_MAX && key_pressed()) {   // NX2NAVI_DUMP_KEY: our key names the next frame
+        file_more = 0;
+        snprintf(dir, sizeof dir, "%s/f%llu", base_dir, (unsigned long long)(frame + 1));
+        open_files();   // before the frame is named: its passes write to them
+        dump_frame = frame + 1;
+    }
     if (frame != dump_frame) return;
     plat_mutex_lock(&rec_lock);
     finished = 1;
@@ -1294,7 +1318,7 @@ void vk_dump_present(uint64_t frame) {
     passes_f = NULL;
     rt_log("vk_dump: frame %llu: %d passes and dispatches, about %llu MB of PNGs in %s", (unsigned long long)frame, seq,
            (unsigned long long)(png_bytes >> 20), dir);
-    if (dump_white || movie_k || key_mode || dump_file[0]) {   // ready for another dump (vk_dump_present checks a white one's thumbnail 3 presents on)
+    if (dump_white || movie_k || key_mode || dump_file[0] || dump_key) {   // ready for another dump (vk_dump_present checks a white one's thumbnail 3 presents on)
         if (dump_white) white_last = frame;
         plat_mutex_lock(&rec_lock);
         seq = copied = 0, last_targets = 0, pass_skip = NULL, png_bytes = 0;
