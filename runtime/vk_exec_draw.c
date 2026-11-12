@@ -3829,7 +3829,7 @@ static int pipe_skip_mode(void) {
     return mode;
 }
 
-// NX2NAVI_PIPE_LINK_MS (default 16; 0 = off): how long the draws of one presented frame may wait, in all, for the fast
+// NX2NAVI_PIPE_LINK_MS (default 6; 0 = off): how long the draws of one presented frame may wait, in all, for the fast
 // link of a pipeline that is missing, LINK_DRAW_MS at most each. A draw into a per-frame pass used to be skipped at
 // once and for as long as its pipeline built, also when its stage libraries were in the driver's cache and the link
 // took under a millisecond: geometry seen for the first time (ground, a wall, a character) was missing for a frame or
@@ -3837,19 +3837,19 @@ static int pipe_skip_mode(void) {
 // cold it runs out after a few draws and the rest are skipped as before, so a burst of cold pipelines costs a frame
 // this much and no more. Measured on an RX 7900 XT, first walk through a village with no pipeline recorded: 2,349
 // draws skipped without the budget, with the libraries warm in both runs.
-// NX2NAVI_PIPE_LINK_DRAW_MS (default 8): the wait for one pipeline, counted from its first miss and shared by all its
+// NX2NAVI_PIPE_LINK_DRAW_MS (default 3): the wait for one pipeline, counted from its first miss and shared by all its
 // draws (prepare_draw_ex), so a pipeline whose libraries the driver has to compile costs its first frame this much and
-// the frames after it nothing. It was 3 ms for each draw, in every frame, 6 ms a frame: just under what a pipeline
-// takes with its two shader libraries in the driver's cache. On a new install's first visits (RTX 5090, the
-// libraries prepared, 67 pipelines the install's list did not hold) 44 were usable under 4 ms after their miss, 17
-// after 4 to 8 ms and 6 later, and of 87 draws that waited for a fast link 66 were skipped at the end of their 3 ms:
-// each of those frames paid the wait and was then not shown, the previous picture staying for one frame more.
-// A frame that has left a draw out already waits for no fast link (prepare_draw_ex): it is held back or shown without
-// that draw whatever its other pipelines do, and at an area's first frames, with hundreds of pipelines new at once,
-// every frame spent its whole budget that way. A walk through a village with no pipeline recorded (610 missed, the
-// libraries of most in the driver's cache), 3 ms and 6 ms against 8 ms and 16 ms with this rule: the picture stood
-// still 50 times against 15, 73 frames held back against 31, 22 frames shown incomplete against 1, and 17 frames over
-// 25 ms against 15 in the minute of the area's load. Without the rule the longer waits gave 49 frames over 25 ms.
+// the frames after it nothing; it was 3 ms for each draw, in every frame. A frame that has left a draw out already
+// waits for no fast link either (pending_draws): it is held back or shown without that draw whatever its other
+// pipelines do.
+// The 3 ms are just under what a pipeline takes with its two shader libraries in the driver's cache: on a new
+// install's first visits (RTX 5090, the libraries prepared, 67 pipelines the install's list did not hold) 44 were
+// usable under 4 ms after their miss, 17 after 4 to 8 ms and 6 later, and of 87 draws that waited 66 were skipped at
+// the end of the wait, their frame then held back. 8 ms a pipeline and 16 ms a frame were tried for that. A scripted
+// walk through a village with no pipeline recorded (610 missed) had the picture stand still 15 times against 50 and
+// 15 frames over 25 ms against 17, but in play it felt worse to the player than the 3 ms it replaced, in two sessions
+// on the same install: a frame that takes 10 to 14 ms longer showed more than one that is left out. The waits stay
+// short; the settings take longer ones.
 // NX2NAVI_PIPE_FRAME_WAIT_MS (default 50; 0 to 500): the wait pool of one presented frame. Its full-screen draws and
 // its one-shot draws (NX2NAVI_ONESHOT_BUDGET) wait for their shaders and pipelines from it, each for what the ones
 // before left, and are skipped once it is spent, so the pipelines of one frame hold the replay thread this long in
