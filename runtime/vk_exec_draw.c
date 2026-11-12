@@ -151,6 +151,10 @@ typedef struct {
     NVNbufferRange vin[16];              // the ranges they were resolved from, under vk_mem_gen vgen
     uint64_t vgen;
     int vb_valid;
+    VkBuffer ib;                         // index buffer last bound, with its offset and index type (bind_index_buffer)
+    VkDeviceSize ib_off;
+    VkIndexType ib_type;
+    int ib_valid;
     uint8_t support[SUPPORT_BYTES];      // last support buffer and where it lives
     float sup_in[3];                     // the support_fill arguments it was filled from
     VkBuffer sup_buf;
@@ -6590,12 +6594,26 @@ static int mesh_emu_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind, const
     return 1;
 }
 
+// Binds a draw's index buffer unless the command buffer holds that bind already: the same buffer, offset and index
+// type as the indexed draw before, as when a mesh is drawn again with other uniforms or textures. B.ib is cleared with
+// the rest of B wherever the replay goes on in another command buffer or something else has bound into this one
+// (vk_exec_draw_new_cb, cb_res: a new submission or part, a chunk's own command buffer, the draws of mo_emit and
+// mesh_emu_draw, which bind index buffers of their own), so a bind from before those is never taken for held.
+static void bind_index_buffer(VkExec *ex, VkBuffer b, VkDeviceSize o, VkIndexType t) {
+    CbState *held = &ex->dc->B;
+    if (held->ib_valid && held->ib == b && held->ib_off == o && held->ib_type == t) return;
+    vkCmdBindIndexBuffer(ex->cb, b, o, t);
+    ex->recorded++;
+    held->ib = b, held->ib_off = o, held->ib_type = t, held->ib_valid = 1;
+}
+
+// Indices made here (a quad list or line loop as triangles or a strip, byte indices widened), from a place of their own
+// in the submission's transient memory.
 static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType type) {
     VkBuffer b;
     VkDeviceSize o;
     memcpy(scratch(ex, bytes, &b, &o), data, bytes);
-    vkCmdBindIndexBuffer(ex->cb, b, o, type);
-    ex->recorded++;
+    bind_index_buffer(ex, b, o, type);
 }
 
 static void op_draw(VkExec *ex, const p_draw *d) {
@@ -6673,8 +6691,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
         return warn_once(W_INDEX, "index buffer %#llx is not aligned to its index size: draw skipped", (unsigned long long)d->ibuf);
     } else {
         VK_MEM_USE(sp);
-        vkCmdBindIndexBuffer(ex->cb, sp.buffer, sp.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-        ex->recorded++;
+        bind_index_buffer(ex, sp.buffer, sp.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
         vk_mem_count(sp.cls, VK_MUSE_IB, bytes);
         VK_MEM_BOUND(sp);
     }
@@ -6700,9 +6717,9 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     vk_exec_frame.draws++;
     VK_MEM_USE(ip);
     VK_MEM_USE(ib);
-    vkCmdBindIndexBuffer(ex->cb, ib.buffer, ib.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+    bind_index_buffer(ex, ib.buffer, ib.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexedIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndexedIndirectCommand));
-    ex->recorded += 2;
+    ex->recorded++;
     vk_mem_count(ip.cls, VK_MUSE_IND, sizeof(VkDrawIndexedIndirectCommand));
     VK_MEM_BOUND(ip);
     VK_MEM_BOUND(ib);
