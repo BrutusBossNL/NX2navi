@@ -82,6 +82,7 @@ typedef struct PoolRec {
     FlushRange fl[FLUSH_RANGES + 1];   // flush_lock: nvnMemoryPoolFlushMappedRange pages not copied yet (flush_add)
     int fl_n;                          // flush_lock: ranges in fl; read without the lock to skip an empty list
     uint64_t fl_calls, fl_sum;         // flush_lock: the calls and bytes behind fl, for mirror_sync's statistics
+    uint64_t hot_bytes;                // replay: uploads, write-backs and merges since the last hot check (mirror_hot)
     // Shadow storage (POOL_IMPORT in shadow mode, "shadow storage" below): buf is a host-visible copy of the guest pages.
     VmaAllocation salloc;
     uint8_t *smap;                     // its mapping; offsets as in buf (from import_lo)
@@ -3257,6 +3258,7 @@ static void gpu_wrote_range(const VkMemSpan *sp, uint64_t size, int shader) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
     r->vd_wrote_sub = msub, r->vd_wrote_n++;
+    r->hot_bytes += size;
     // A binding to the end of its pool (no size) can span hundreds of MiB: those stay copies.
     uint64_t o = 0;
     if (shader && !(sp->offset & 3) && !(size & 3) && size <= merge_max() && merging())
@@ -3404,7 +3406,68 @@ static void freeze_pass(void) {
     }
 }
 
+// NX2NAVI_MIRROR_HOT (percent, 0 off): a mirrored pool whose copies each frame (CPU pages up, GPU writes back) reach this
+// share of its size goes back to being read and written by the GPU in system memory. On an RX 580 in Kokiri Forest a
+// handful of 6-16 MiB pools the CPU refills every frame and compute shaders write took 66 MiB of uploads and 76 MiB of
+// write-backs a frame through the mirrors, the GPU idle 7.8 ms a frame with those copies queued; read in place, only
+// the bytes the shaders touch cross the bus. Checked every HOT_FRAMES frames at the start of a submission, when the
+// previous one has queued its write-backs and nothing is pending for the next: the pool leaves the mirrored list, the
+// device address table points at its imported buffer again, and the mirror is freed once the submissions that may still
+// use it are done (vk_defer_buffer, as mirror_evict). Pools under HOT_MIN a frame stay mirrored.
+#define HOT_FRAMES 120
+#define HOT_MIN (1ull << 20)
+static int mirror_hot = -1;
+static uint64_t hot_frame0, n_demoted;
+
+static void hot_check(void) {
+    if (mirror_hot < 0) {
+        mirror_hot = p < 0 ? 0 : p > 1000 ? 1000 : p;
+        if (mirror_hot) rt_log("mem: pools copied %d%% of their size a frame stay in system memory (NX2NAVI_MIRROR_HOT)", mirror_hot);
+    if (!mirror_hot) return;
+    uint64_t fr = mirror_frame;
+    if (!hot_frame0 || fr < hot_frame0) {
+        hot_frame0 = fr ? fr : 1;
+        return;
+    if (fr - hot_frame0 < HOT_FRAMES || npend || nwbl) return;   // nsnl: the previous submission's, recorded already
+    double frames = (double)(fr - hot_frame0);
+    hot_frame0 = fr;
+    PoolRec *out[8];
+    VkBuffer dead[8];
+    VmaAllocation dead_a[8];
+    int nout = 0;
+    plat_mutex_lock(&pool_lock);
+    for (int i = 0; i < nm;) {
+        PoolRec *r = mlist[i];
+        r->hot_bytes = (uint64_t)per;   // kept for the log line below
+            r->hot_bytes = 0, i++;   // !twin with a table record: the table's writes are in the mirror alone (mirror_evict)
+            continue;
+        mem_lazy_release(r->import_lo, r->import_hi - r->import_lo);   // what only the mirror holds comes down first
+        // as mirror_evict, under the exclusive lock (vk_pool_fini takes pools off the list under it), but for good:
+        // MS_REFUSED with no retry (retry_sub 0), so neither vk_mem_use nor the budget retries mirror it again
+        mirror_forget(r);   // takes r off mlist: i now names the next pool
+        r->mstate = MS_REFUSED, r->retry_sub = 0;
+        plat_mutex_lock(&flush_lock);   // flushes not copied yet: the pool is read in place from now on
+        __atomic_store_n(&r->fl_n, 0, __ATOMIC_RELEASE);
+        r->fl_calls = r->fl_sum = 0;
+        plat_mutex_unlock(&flush_lock);
+        // the pages name the imported buffer alone again (the twin was that buffer)
+        if (r->gpa_rec) r->gpa_rec = vk_gpa_remap_plain(r->import_lo, r->import_hi, r->gpa_rec, r->buf, r->import_lo);
+        dead[nout] = r->mbuf, dead_a[nout] = r->malloc_;
+        r->mbuf = VK_NULL_HANDLE, r->malloc_ = NULL;
+        out[nout++] = r;
+    plat_mutex_unlock(&pool_lock);
+    for (int k = 0; k < nout; k++) {
+        PoolRec *r = out[k];
+        uint64_t n = r->import_hi - r->import_lo, per = r->hot_bytes;
+        r->hot_bytes = 0;
+        vk_defer_buffer(dead[k], dead_a[k]);   // after the submission being recorded
+        char f[160];
+        flag_names(r->flags, f, sizeof f);
+        if (++n_demoted <= 32)
+            rt_log("mem: pool %#llx (%.1f MiB, %s) copied %.1f MiB a frame through its mirror: system memory from now on",
+                   (unsigned long long)r->lo, n / 1048576.0, f, per / 1048576.0);
 void vk_mem_mirror_begin(void) {
+    if (vk_mirror_on) hot_check();
     if (!vk_mirror_on) {   // import mode: the texture checks' snapshots still skip frozen regions
         if (!freeze_idle) return;
         plat_mutex_lock(&gen_lock);

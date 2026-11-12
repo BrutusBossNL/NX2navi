@@ -284,6 +284,9 @@
 # which game memory gets no copy in video memory (memory = mirror), which costs far more frame time than a texture
 # uploaded again. 0: textures never give way for video memory.
 # tex_vram_pressure = 80
+# Textures the game released that are kept as they are (1 to 16384); past this count only those that lose nothing
+# when dropped go. Default: one per 2 MB of the video memory budget, 2048 to 8192. Read at start.
+# tex_released_max = 4096
 # Megabytes of this process's commit above which the log says so. Windows counts video memory against the commit;
 # with a discrete GPU the video memory in use is left out of the comparison, since it is not in RAM. Textures no longer
 # give way at this bound: dropping one lowers both sides of the comparison alike, so nothing they could do brought the
@@ -414,6 +417,10 @@
 # 3D render scale: the scene's size relative to the game resolution, game (5/6, the game's own 1600x900 at 1080p) or
 # a percentage (25 to 400, at most 4096 pixels a side); above 100 supersamples the scene (anti-aliasing). Read at start.
 # render_scale = game
+# Discrete GPUs: a game memory pool whose copies to and from video memory each frame reach this percentage of its size
+# is read and written by the GPU in system memory instead (0: every pool keeps its video memory copy). For GPUs and
+# buses short of bandwidth; on an RX 580 the pools the game refills every frame cost about 8 ms a frame in copies.
+# mirror_hot = 0
 # Scaling to the window when it is larger than the game resolution: fsr (AMD FSR 1) or bilinear, and FSR's sharpening
 # from 0 (off) to 100. Changes while the game runs take effect at once.
 # upscaler = fsr
