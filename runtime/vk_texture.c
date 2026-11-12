@@ -77,8 +77,9 @@ typedef struct Tex {
     uint8_t listed;               // in owned[]
     uint8_t *snap;                // a texture that fills no page: its storage bytes when the GPU write was recorded
     uint32_t wt_n;                // WriteTexels into the storage since the last upload
-    uint64_t chash;               // content_hash of the storage at its last upload (small textures, CHASH_MAX)
+    uint64_t chash;               // content_hash of the storage at its last upload (chash_wanted)
     uint8_t chash_ok;             // chash holds it
+    uint8_t chash_miss;           // over CHASH_MAX: comparisons in a row that found other bytes (CHASH_MISSES)
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
     ImgKey ik;                    // the image's creation parameters
     uint8_t reusable;             // its image may go to a new texture once it is released (own memory, GPU-only content)
@@ -153,6 +154,9 @@ static uint64_t n_uploads, n_reuploads;
 // Re-uploads since the last perf line (tex_lock): all, and those of textures a WriteTexels wrote since their last upload.
 static uint64_t ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
 static uint64_t ru_same_n, ru_same_bytes;   // re-uploads skipped: the pages were written, the texture's bytes were not
+// The same for textures over CHASH_MAX (NX2NAVI_TEX_SAME_BIG), since the last pool log line: comparisons that found the
+// bytes unchanged and their bytes, comparisons that found others, and uploads that took a hash with their bytes.
+static uint64_t big_same_n, big_same_bytes, big_diff_n, big_hash_n, big_hash_bytes;
 // NX2NAVI_TEX_ALIAS (default on; =0: a new image over live storage starts empty): a new descriptor over the storage of a
 // live image that the GPU wrote gets that image's content (alias_copy). Counts since the last log line.
 static int tex_alias = -1;
@@ -1446,10 +1450,15 @@ static void rel_unlink(Tex *e) {
 // that the check of an entry whose 2 MiB regions took no write since (vk_mem_unchanged_locked, one shared lock for the
 // whole list) touches neither the entry nor the lock: 5,600 entries took 0.77 ms a submission one by one. Texture lock
 // held.
-typedef struct { Tex *e; uint64_t addr, size; uint32_t since; int ok; } PEnt;   // ok: uploaded as of since
+// rel is the entry's released state (mark_released, entry_of's take-back): the check does nothing for a released
+// entry, and with the state here it does not touch the entry to find that out. On a card with room the sweep keeps up
+// to 8,192 released entries, they stay listed, and since stays as it was at their release, so each one whose regions
+// took a write later missed the region check at every submission from then on: 1,000 to 6,300 entries a check in
+// Kakariko and Castle Town, a third to a half of the list.
+typedef struct { Tex *e; uint64_t addr, size; uint32_t since; uint8_t ok, rel; } PEnt;   // ok: uploaded as of since
 static PEnt *pent;
 static int npent, cpent, *pq, cpq;
-static uint64_t n_pool_checks, n_pool_skips;
+static uint64_t n_pool_checks, n_pool_skips, n_pool_rel;
 // The region check's misses (vk_mem_unchanged_why_locked): not uploaded, a region without this epoch's snapshot yet, one
 // untracked, one written since, nothing to check; and the snapshot queries its own pass made (NX2NAVI_POOL_PRESNAP).
 static uint64_t n_pool_miss[5], n_presnap_q;
@@ -1540,7 +1549,7 @@ int vk_texture_pool_note_locked(int id, uint32_t *ent) {
             if (!p || !q) rt_fatal("vk: out of memory for the texture pool's entry list");
             pent = p, pq = q, cpent = cpq = n;
         }
-        pent[npent++] = (PEnt){e, e->pub.addr, e->t.L.size, 0, 0};
+        pent[npent++] = (PEnt){e, e->pub.addr, e->t.L.size, 0, 0, (uint8_t)e->released};
         e->pidx = npent;
     }
     *ent = pool_ref(e);
@@ -1559,6 +1568,14 @@ static int pool_presnap(void) {
     if (mode < 0) mode = rt_knob("POOL_PRESNAP", "1");
     return RT_KNOB_ON(mode);
 }
+// NX2NAVI_POOL_PRESNAP_RUNS=1 (default), 0, ab: those snapshots are taken for the whole list first, one write-watch
+// query per run of adjacent regions (vk_memory.c vk_mem_snap_noted_locked), instead of one per region as the list comes
+// to it. The log's "snapshot queries" of the pool freshness check count either.
+static int pool_presnap_runs(void) {
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("POOL_PRESNAP_RUNS", "1");
+    return RT_KNOB_ON(mode);
+}
 static void pool_made(uint64_t t0);   // below, with the pool's creation budget
 
 // The submission being recorded checked the pool's entries by this list: for the idle clock it walked the pool
@@ -1567,13 +1584,24 @@ static int pool_by_list;
 
 int vk_texture_pool_fresh_locked(void) {
     int nq = 0, ps = pool_presnap();
+    uint64_t rel0 = n_pool_rel;
     pool_by_list = 1;
     if (ps) vk_mem_gen_lock();
     else vk_mem_gen_lock_shared();
+    int by_range = ps;   // each entry's regions are asked for as the list comes to it
+    if (ps && pool_presnap_runs()) {
+        for (int i = 0; i < npent; i++)
+            if (pent[i].ok && !pent[i].rel) vk_mem_snap_note_locked(pent[i].addr, pent[i].size, submit_epoch);
+        n_presnap_q += vk_mem_snap_noted_locked(submit_epoch, &by_range);
+    }
     for (int i = 0; i < npent; i++) {
         const PEnt *p = &pent[i];
+        if (p->rel) {   // released: nothing to check (the loop below would pass it by)
+            n_pool_rel++;
+            continue;
+        }
         if (p->ok) {
-            if (ps) n_presnap_q += vk_mem_snap_range_locked(p->addr, p->size, submit_epoch);
+            if (by_range) n_presnap_q += vk_mem_snap_range_locked(p->addr, p->size, submit_epoch);
             int why = vk_mem_unchanged_why_locked(p->addr, p->size, p->since, submit_epoch);
             if (!why) continue;
             n_pool_miss[why]++;
@@ -1585,6 +1613,7 @@ int vk_texture_pool_fresh_locked(void) {
     if (ps) vk_mem_gen_unlock();
     else vk_mem_gen_unlock_shared();
     n_pool_skips += (uint64_t)(npent - nq);
+    n_pool_skips -= n_pool_rel - rel0;
     for (int k = nq; k-- > 0;) {   // from the end: an entry leaving swaps the last one into its place
         int i = pq[k];
         PEnt *p = &pent[i];
@@ -3051,10 +3080,47 @@ static void astc_check(const Tex *e, const uint8_t *raw, const VkAstcRegion *ar,
 // with data the CPU writes, or written with the same bytes), about 420 re-uploads a frame of 1.5 KiB each, and one
 // costs a staging buffer, a copy and a barrier, several microseconds, where hashing 1.5 KiB takes a fraction of one.
 // A CPU write during the hash sets the pages' write bits again, so the next check sees it.
-enum { CHASH_MAX = 64 << 10 };
+//
+// NX2NAVI_TEX_SAME_BIG=1 (default 0; ab): textures up to CHASH_BIG_MAX keep the hash too. While the player runs through
+// a town the game moves about 32 textures to new storage every four or five frames, back to back in one block, and a
+// frame after their first upload every page of the block shows a write again. Of the ones the hash covers, 0 to 4 in a
+// hundred are uploaded again (128x128, 171x171, 256x256 BC1: 9 of 440 in one recording of 600 frames); of the others,
+// whatever their size and format, 75 to 94 in a hundred (256x256 BC3, 341x341 BC1, everything from 512x512 up): 3,034
+// uploads in those 600 frames beside 4,233 first ones, their ASTC ones decoded and encoded on the GPU a second time.
+// The frames of those second uploads take 0.9 to 2.5 ms longer than the frames without uploads and the frames after
+// them wait 0.3 to 1.3 ms longer for the GPU (six recordings of one player, RTX 5090, 2026-11-12).
+// What the hash costs is why the switch is off: the bytes are read once more at the first upload and once at the
+// comparison, 15 to 18 us each for 300 KiB (17 to 20 GB/s, below), together about what the second upload takes on
+// the submitting thread (27 us for 300 KiB). So the gain is the GPU's work and whatever else a second upload costs a
+// frame, and that has not been measured in play. A texture the CPU really rewrites would pay the hash for nothing each
+// time: after CHASH_MISSES comparisons in a row that found other bytes its uploads take no hash any more. An area load
+// takes none either (vk_exec_pool_loading): it uploads gigabytes in a few frames.
+// The pool log's buckets line counts the comparisons and the hashed bytes.
+enum { CHASH_MAX = 64 << 10, CHASH_BIG_MAX = 8 << 20, CHASH_MISSES = 2 };
 static uint64_t content_hash(const void *p, uint64_t n) {
     const uint8_t *b = p;
     uint64_t h = 0x9e3779b97f4a7c15ull ^ n, i = 0;
+    // Eight chains side by side over 64 bytes a step, folded into one: a chain's multiply waits for the one before it,
+    // so the chains, which wait for nothing of each other, read eight times what one reads in the same time. A step is
+    // a bijection of its chain for the word it takes and of the word for the chain, as the single chain's is, and so
+    // is each fold. Measured on textures read from memory (Ryzen 7 9850X3D, clang -O2): one chain 7 GB/s, four 10,
+    // eight 17 to 20, sixteen no more; a copy of the same bytes runs at 70.
+    if (n >= 512) {
+        uint64_t c[8];
+        for (int k = 0; k < 8; k++) c[k] = h ^ (0xc2b2ae3d27d4eb4full * (uint64_t)(k + 1));
+        for (; i + 64 <= n; i += 64) {
+            uint64_t w[8];
+            memcpy(w, b + i, 64);
+            for (int k = 0; k < 8; k++) {
+                c[k] = (c[k] ^ w[k]) * 0xbf58476d1ce4e5b9ull;
+                c[k] ^= c[k] >> 29;
+            }
+        }
+        for (int k = 0; k < 8; k++) {
+            h = (h ^ c[k]) * 0x94d049bb133111ebull;
+            h ^= h >> 29;
+        }
+    }
     for (; i + 8 <= n; i += 8) {
         uint64_t w;
         memcpy(&w, b + i, 8);
@@ -3197,6 +3263,16 @@ static int astc_copy_opaque(const Tex *e, uint8_t *dst, const uint8_t *src, uint
     return ok;
 }
 
+// Whether an upload of e takes the hash of its storage: always up to CHASH_MAX; above it, up to CHASH_BIG_MAX, with
+// NX2NAVI_TEX_SAME_BIG, outside an area load, and while the comparisons have not found other bytes CHASH_MISSES times
+// in a row ("NX2NAVI_TEX_SAME_BIG" above content_hash).
+static int chash_wanted(const Tex *e) {
+    static int mode = -1;
+    if (e->t.L.size <= CHASH_MAX) return 1;
+    if (mode < 0) mode = rt_knob("TEX_SAME_BIG", "0");
+    return RT_KNOB_ON(mode) && e->t.L.size <= CHASH_BIG_MAX && e->chash_miss < CHASH_MISSES && !vk_exec_pool_loading();
+}
+
 static void upload(Tex *e) {
     static volatile int32_t n_bad, n_undecoded, n_split;
     int no_mem = 0;   // a part's ASTC decode had no memory: the texture is uploaded again later
@@ -3213,12 +3289,13 @@ static void upload(Tex *e) {
         e->uploaded = 1;
         return;
     }
-    e->chash_ok = e->t.L.size <= CHASH_MAX;   // the hash of what this upload copies (make_fresh_snap compares it)
+    e->chash_ok = (uint8_t)chash_wanted(e);   // the hash of what this upload copies (make_fresh_snap compares it)
     if (e->chash_ok) {
         // read with the storage held mapped, as the copies below: the game unmaps a texture's memory on its own thread
         if (mem_read_hold(e->pub.addr, e->t.L.size)) {
             e->chash = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
             mem_read_release();
+            if (e->t.L.size > CHASH_MAX) big_hash_n++, big_hash_bytes += e->t.L.size;
         } else {
             e->chash_ok = 0;
         }
@@ -3489,15 +3566,20 @@ static int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
 
 // The pages of an uploaded texture show a write (or are not tracked): whether its own bytes are still those it was
 // uploaded with (upload, content_hash). WriteTexels since the upload always counts as a change.
-static int same_content(const Tex *e) {
+static int same_content(Tex *e) {
     static int on = -1;   // NX2NAVI_TEX_SAME=0: every write to the pages uploads again (diagnosis)
     if (on < 0) { const char *v = cfg_get("NX2NAVI_TEX_SAME"); on = !(v && !strcmp(v, "0")); }
-    if (!on || !e->chash_ok || e->wt_n || e->t.L.size > CHASH_MAX) return 0;
+    if (!on || !e->chash_ok || e->wt_n) return 0;   // chash_ok: the upload took the hash (chash_wanted)
     if (!mem_read_hold(e->pub.addr, e->t.L.size)) return 0;   // unmapped since: not the same; the upload deals with it
     uint64_t h = content_hash((const void *)(uintptr_t)e->pub.addr, e->t.L.size);
     mem_read_release();
-    if (h != e->chash) return 0;
+    int big = e->t.L.size > CHASH_MAX;
+    if (h != e->chash) {
+        if (big) big_diff_n++, e->chash_miss += e->chash_miss < 255;
+        return 0;
+    }
     ru_same_n++, ru_same_bytes += e->t.L.size;
+    if (big) big_same_n++, big_same_bytes += e->t.L.size, e->chash_miss = 0;
     return 1;
 }
 
@@ -3942,6 +4024,7 @@ static Tex *entry_of(const tex_t *t) {
         uint64_t gap = e->samp_frame - e->rel_frame;
         if (gap > e->back_gap) e->back_gap = gap > UINT32_MAX ? UINT32_MAX : (uint32_t)gap;
         e->released = 0, nreleased--, rel_unlink(e), n_site[2]++, tex_gen_flip(e, e->superseded || e->overwritten);
+        if (e->pidx) pent[e->pidx - 1].rel = 0;   // the pool's check looks at it again
         e->overwritten = 0;
         e->og_backs++, e->og_back_frame = e->samp_frame;
         if (e->superseded) {   // its image may still be in use: the first barrier waits for all earlier work
@@ -4004,6 +4087,7 @@ static int wb_wanted(const Tex *e) { return e->t.L.size <= wb_limit || e->run < 
 static void mark_released(Tex *e) {   // tex_lock held; e is not released
     flight_ev(e, FLIGHT_TEX_RELEASE, 0, 0);
     e->released = 1;
+    if (e->pidx) pent[e->pidx - 1].rel = 1;   // the pool's check passes it by (vk_texture_pool_fresh_locked)
     e->rel_epoch = submit_epoch;
     e->rel_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     nreleased++;
@@ -4398,11 +4482,18 @@ void vk_texture_bucket_stats(char *out, size_t n) {
     if (used < n)
         snprintf(out + used, n - used, "; pool freshness check: %llu entries checked, %llu passed by their regions (missed: "
                  "%llu not uploaded, %llu a region without a snapshot yet, %llu untracked, %llu written since, %llu "
-                 "nothing to check; %llu snapshot queries of NX2NAVI_POOL_PRESNAP)",
+                 "nothing to check; %llu snapshot queries of NX2NAVI_POOL_PRESNAP; %llu released entries passed by)",
                  (unsigned long long)n_pool_checks, (unsigned long long)n_pool_skips,
                  (unsigned long long)n_pool_miss[0], (unsigned long long)n_pool_miss[1],
                  (unsigned long long)n_pool_miss[2], (unsigned long long)n_pool_miss[3],
-                 (unsigned long long)n_pool_miss[4], (unsigned long long)n_presnap_q);
+                 (unsigned long long)n_pool_miss[4], (unsigned long long)n_presnap_q, (unsigned long long)n_pool_rel);
+    used = strlen(out);
+    if (used < n && big_hash_n + big_same_n + big_diff_n)   // NX2NAVI_TEX_SAME_BIG
+        snprintf(out + used, n - used, "; textures over 64 KiB: %llu uploads hashed (%.1f MiB), after a write to their "
+                 "pages %llu left as they were (%.1f MiB), %llu uploaded again",
+                 (unsigned long long)big_hash_n, big_hash_bytes / 1048576.0, (unsigned long long)big_same_n,
+                 big_same_bytes / 1048576.0, (unsigned long long)big_diff_n);
+    big_hash_n = big_hash_bytes = big_same_n = big_same_bytes = big_diff_n = 0;
     used = strlen(out);
     if (used < n)
         snprintf(out + used, n - used, "; %d slot groups holding %llu slots", ngrp_live, (unsigned long long)n_grouped);
@@ -4413,7 +4504,7 @@ void vk_texture_bucket_stats(char *out, size_t n) {
     if (used < n)
         snprintf(out + used, n - used, "; pool slots hold %d entries, %d of them GPU-owned (stamped in each submission "
                  "checked by list)", held, gown);
-    n_bumps = n_undone = n_pool_checks = n_pool_skips = n_presnap_q = 0;
+    n_bumps = n_undone = n_pool_checks = n_pool_skips = n_presnap_q = n_pool_rel = 0;
     memset(n_pool_miss, 0, sizeof n_pool_miss);
     memset(n_site, 0, sizeof n_site);
     memset(bump_count, 0, sizeof bump_count);

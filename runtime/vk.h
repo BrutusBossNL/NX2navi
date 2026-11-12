@@ -670,6 +670,11 @@ int vk_mem_unchanged_why_locked(uint64_t addr, uint64_t size, uint32_t since, ui
 void vk_mem_gen_lock(void);
 void vk_mem_gen_unlock(void);
 uint64_t vk_mem_snap_range_locked(uint64_t addr, uint64_t size, uint32_t epoch);
+// The same snapshot for many ranges, with the lock held exclusively: note each range, then one call queries the noted
+// regions that have no snapshot in epoch, one query per run of adjacent regions (the number of queries). *left: 1
+// when it left regions without one, for vk_mem_snap_range_locked.
+void vk_mem_snap_note_locked(uint64_t addr, uint64_t size, uint32_t epoch);
+uint64_t vk_mem_snap_noted_locked(uint32_t epoch, int *left);
 void vk_sampler_dlss_bias(float bias);           // texture LOD bias added for DLSS upscaling (material samplers)
 void vk_sampler_aniso_live(void);                   // each present: NX2NAVI_ANISO after a settings change (tiled samplers)
 uint32_t vk_sampler_gen(void);                      // changes whenever a sampler slot is registered

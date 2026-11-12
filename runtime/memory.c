@@ -1203,6 +1203,8 @@ uint64_t mem_written_peek(uint64_t addr, uint64_t size, uint64_t *pages, uint64_
     return written_pages(addr, size, pages, max, 0);
 }
 
+int mem_watched(uint64_t addr, uint64_t size) { return size && watched(addr, size); }
+
 static uint64_t image_bytes(void) {
     uint64_t n = 0;
     for (int i = 0; i < ldr_count(); i++) n += ldr_module(i)->size;
