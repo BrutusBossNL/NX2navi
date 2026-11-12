@@ -1058,6 +1058,59 @@ uint64_t vk_mem_snap_range_locked(uint64_t addr, uint64_t size, uint32_t epoch) 
     return 0;
 }
 
+// The snapshot of many ranges at once, for the texture pool's freshness check (vk_texture.c
+// vk_texture_pool_fresh_locked): vk_mem_snap_note_locked notes the regions of a range that have no snapshot in epoch
+// yet, and vk_mem_snap_noted_locked queries what was noted, one query per run of adjacent regions.
+// Asked range by range (vk_mem_snap_range_locked), every such region got a query of its own, because a texture rarely
+// spans two regions and the list is in no address order. While the player runs through a town the game writes about 32
+// textures into new storage every four or five frames, a region the CPU wrote is not frozen again for freeze_idle
+// submissions, and so 100 to 500 regions of the texture pools were queried one by one at every check, 2.7 checks a
+// frame: the check took 0.5 to 1.5 ms against 0.11 ms standing still (5 to 10 queries), about 3 us a query (five
+// sessions of one player, RTX 5090, 2026-11-12). About half of a 2 MiB query is the call itself: in a process of its
+// own, 400 of them took 727 us and one query over the same 800 MiB 360 us, with 0, 8 or 64 pages written.
+// The regions queried and the pages stamped are the same, and every one is stamped before any entry of the list is
+// looked at, as before: each entry's regions were queried ahead of its own look. A run is asked in one query only where
+// it lies inside one watched reservation (mem_watched): a query across the edge of one fails as a whole, so the regions
+// of such a run are left to the queries by range, and *left says that there were some.
+static uint32_t snap_noted[SNAP_REGIONS];   // gen_lock: snap_pass when the region is in snap_want
+static uint32_t snap_pass = 1;
+static uint32_t *snap_want;                 // gen_lock: the regions noted since the last vk_mem_snap_noted_locked
+static int nsnap_want, csnap_want;
+
+void vk_mem_snap_note_locked(uint64_t addr, uint64_t size, uint32_t epoch) {
+    if (!size || !epoch) return;
+    uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull;
+    uint64_t r0 = lo >> SNAP_SHIFT, r1 = (hi - 1) >> SNAP_SHIFT;
+    if (r1 >= SNAP_REGIONS) return;
+    for (uint64_t r = r0; r <= r1; r++) {
+        if (snap_at[r] == epoch || snap_noted[r] == snap_pass) continue;
+        snap_noted[r] = snap_pass;
+        if (nsnap_want == csnap_want) grow((void **)&snap_want, &csnap_want, sizeof *snap_want);
+        snap_want[nsnap_want++] = (uint32_t)r;
+    }
+}
+
+static int snap_want_cmp(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+uint64_t vk_mem_snap_noted_locked(uint32_t epoch, int *left) {
+    uint64_t calls = 0;
+    *left = 0;
+    if (nsnap_want > 1) qsort(snap_want, (size_t)nsnap_want, sizeof *snap_want, snap_want_cmp);
+    for (int i = 0, k; i < nsnap_want; i = k + 1) {
+        for (k = i; k + 1 < nsnap_want && snap_want[k + 1] == snap_want[k] + 1;) k++;
+        uint64_t r0 = snap_want[i], r1 = snap_want[k];
+        if (r1 > r0 && !mem_watched(r0 << SNAP_SHIFT, (r1 - r0 + 1) << SNAP_SHIFT)) *left = 1;
+        else calls += snap_regions(r0, r1, epoch);
+    }
+    nsnap_want = 0;
+    if (!++snap_pass) memset(snap_noted, 0, sizeof snap_noted), snap_pass = 1;
+    n_snap_calls += calls;
+    return calls;
+}
+
 void vk_mem_snap_stats(uint64_t *checks, uint64_t *calls, uint64_t *untracked) {
     *checks = __atomic_exchange_n(&n_snap_checks, 0, __ATOMIC_RELAXED);
     *calls = __atomic_exchange_n(&n_snap_calls, 0, __ATOMIC_RELAXED);

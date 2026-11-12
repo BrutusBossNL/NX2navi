@@ -1440,10 +1440,15 @@ static void rel_unlink(Tex *e) {
 // that the check of an entry whose 2 MiB regions took no write since (vk_mem_unchanged_locked, one shared lock for the
 // whole list) touches neither the entry nor the lock: 5,600 entries took 0.77 ms a submission one by one. Texture lock
 // held.
-typedef struct { Tex *e; uint64_t addr, size; uint32_t since; int ok; } PEnt;   // ok: uploaded as of since
+// rel is the entry's released state (mark_released, entry_of's take-back): the check does nothing for a released
+// entry, and with the state here it does not touch the entry to find that out. On a card with room the sweep keeps up
+// to 8,192 released entries, they stay listed, and since stays as it was at their release, so each one whose regions
+// took a write later missed the region check at every submission from then on: 1,000 to 6,300 entries a check in
+// Kakariko and Castle Town, a third to a half of the list.
+typedef struct { Tex *e; uint64_t addr, size; uint32_t since; uint8_t ok, rel; } PEnt;   // ok: uploaded as of since
 static PEnt *pent;
 static int npent, cpent, *pq, cpq;
-static uint64_t n_pool_checks, n_pool_skips;
+static uint64_t n_pool_checks, n_pool_skips, n_pool_rel;
 // The region check's misses (vk_mem_unchanged_why_locked): not uploaded, a region without this epoch's snapshot yet, one
 // untracked, one written since, nothing to check; and the snapshot queries its own pass made (NX2NAVI_POOL_PRESNAP).
 static uint64_t n_pool_miss[5], n_presnap_q;
@@ -1534,7 +1539,7 @@ int vk_texture_pool_note_locked(int id, uint32_t *ent) {
             if (!p || !q) rt_fatal("vk: out of memory for the texture pool's entry list");
             pent = p, pq = q, cpent = cpq = n;
         }
-        pent[npent++] = (PEnt){e, e->pub.addr, e->t.L.size, 0, 0};
+        pent[npent++] = (PEnt){e, e->pub.addr, e->t.L.size, 0, 0, (uint8_t)e->released};
         e->pidx = npent;
     }
     *ent = pool_ref(e);
@@ -1553,6 +1558,14 @@ static int pool_presnap(void) {
     if (mode < 0) mode = rt_knob("POOL_PRESNAP", "1");
     return RT_KNOB_ON(mode);
 }
+// NX2NAVI_POOL_PRESNAP_RUNS=1 (default), 0, ab: those snapshots are taken for the whole list first, one write-watch
+// query per run of adjacent regions (vk_memory.c vk_mem_snap_noted_locked), instead of one per region as the list comes
+// to it. The log's "snapshot queries" of the pool freshness check count either.
+static int pool_presnap_runs(void) {
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("POOL_PRESNAP_RUNS", "1");
+    return RT_KNOB_ON(mode);
+}
 static void pool_made(uint64_t t0);   // below, with the pool's creation budget
 
 // The submission being recorded checked the pool's entries by this list: for the idle clock it walked the pool
@@ -1561,13 +1574,24 @@ static int pool_by_list;
 
 int vk_texture_pool_fresh_locked(void) {
     int nq = 0, ps = pool_presnap();
+    uint64_t rel0 = n_pool_rel;
     pool_by_list = 1;
     if (ps) vk_mem_gen_lock();
     else vk_mem_gen_lock_shared();
+    int by_range = ps;   // each entry's regions are asked for as the list comes to it
+    if (ps && pool_presnap_runs()) {
+        for (int i = 0; i < npent; i++)
+            if (pent[i].ok && !pent[i].rel) vk_mem_snap_note_locked(pent[i].addr, pent[i].size, submit_epoch);
+        n_presnap_q += vk_mem_snap_noted_locked(submit_epoch, &by_range);
+    }
     for (int i = 0; i < npent; i++) {
         const PEnt *p = &pent[i];
+        if (p->rel) {   // released: nothing to check (the loop below would pass it by)
+            n_pool_rel++;
+            continue;
+        }
         if (p->ok) {
-            if (ps) n_presnap_q += vk_mem_snap_range_locked(p->addr, p->size, submit_epoch);
+            if (by_range) n_presnap_q += vk_mem_snap_range_locked(p->addr, p->size, submit_epoch);
             int why = vk_mem_unchanged_why_locked(p->addr, p->size, p->since, submit_epoch);
             if (!why) continue;
             n_pool_miss[why]++;
@@ -1579,6 +1603,7 @@ int vk_texture_pool_fresh_locked(void) {
     if (ps) vk_mem_gen_unlock();
     else vk_mem_gen_unlock_shared();
     n_pool_skips += (uint64_t)(npent - nq);
+    n_pool_skips -= n_pool_rel - rel0;
     for (int k = nq; k-- > 0;) {   // from the end: an entry leaving swaps the last one into its place
         int i = pq[k];
         PEnt *p = &pent[i];
@@ -3909,6 +3934,7 @@ static Tex *entry_of(const tex_t *t) {
         uint64_t gap = e->samp_frame - e->rel_frame;
         if (gap > e->back_gap) e->back_gap = gap > UINT32_MAX ? UINT32_MAX : (uint32_t)gap;
         e->released = 0, nreleased--, rel_unlink(e), n_site[2]++, tex_gen_flip(e, e->superseded || e->overwritten);
+        if (e->pidx) pent[e->pidx - 1].rel = 0;   // the pool's check looks at it again
         e->overwritten = 0;
         e->og_backs++, e->og_back_frame = e->samp_frame;
         if (e->superseded) {   // its image may still be in use: the first barrier waits for all earlier work
@@ -3971,6 +3997,7 @@ static int wb_wanted(const Tex *e) { return e->t.L.size <= wb_limit || e->run < 
 static void mark_released(Tex *e) {   // tex_lock held; e is not released
     flight_ev(e, FLIGHT_TEX_RELEASE, 0, 0);
     e->released = 1;
+    if (e->pidx) pent[e->pidx - 1].rel = 1;   // the pool's check passes it by (vk_texture_pool_fresh_locked)
     e->rel_epoch = submit_epoch;
     e->rel_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     nreleased++;
@@ -4365,11 +4392,11 @@ void vk_texture_bucket_stats(char *out, size_t n) {
     if (used < n)
         snprintf(out + used, n - used, "; pool freshness check: %llu entries checked, %llu passed by their regions (missed: "
                  "%llu not uploaded, %llu a region without a snapshot yet, %llu untracked, %llu written since, %llu "
-                 "nothing to check; %llu snapshot queries of NX2NAVI_POOL_PRESNAP)",
+                 "nothing to check; %llu snapshot queries of NX2NAVI_POOL_PRESNAP; %llu released entries passed by)",
                  (unsigned long long)n_pool_checks, (unsigned long long)n_pool_skips,
                  (unsigned long long)n_pool_miss[0], (unsigned long long)n_pool_miss[1],
                  (unsigned long long)n_pool_miss[2], (unsigned long long)n_pool_miss[3],
-                 (unsigned long long)n_pool_miss[4], (unsigned long long)n_presnap_q);
+                 (unsigned long long)n_pool_miss[4], (unsigned long long)n_presnap_q, (unsigned long long)n_pool_rel);
     used = strlen(out);
     if (used < n)
         snprintf(out + used, n - used, "; %d slot groups holding %llu slots", ngrp_live, (unsigned long long)n_grouped);
@@ -4380,7 +4407,7 @@ void vk_texture_bucket_stats(char *out, size_t n) {
     if (used < n)
         snprintf(out + used, n - used, "; pool slots hold %d entries, %d of them GPU-owned (stamped in each submission "
                  "checked by list)", held, gown);
-    n_bumps = n_undone = n_pool_checks = n_pool_skips = n_presnap_q = 0;
+    n_bumps = n_undone = n_pool_checks = n_pool_skips = n_presnap_q = n_pool_rel = 0;
     memset(n_pool_miss, 0, sizeof n_pool_miss);
     memset(n_site, 0, sizeof n_site);
     memset(bump_count, 0, sizeof bump_count);

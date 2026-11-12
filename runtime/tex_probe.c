@@ -411,6 +411,51 @@ static int test_import(pool_t *pool) {
     return 0;
 }
 
+// The write-watch snapshot of many ranges at once (vk_memory.c vk_mem_snap_note_locked, vk_mem_snap_noted_locked), as
+// the texture pool's freshness check asks for it: ranges in three adjacent 2 MiB regions of the heap and in one apart,
+// noted in no address order, take one query per run of adjacent regions; afterwards every region has the epoch's
+// snapshot, the regions with a CPU write since `since` say so, the one without does not, and the pages are exact.
+// The bytes written are the ones already there, so the tests after this one find their memory as it was.
+static int test_snap_runs(uint8_t *h) {
+    static const uint32_t off[4] = {0xe10000, 0xa80000, 0x603000, 0x9f0000};   // regions at 14, 10, 6 and 8 MiB
+    uint64_t base = (uintptr_t)h;
+    GCHECK(!(base & 0x1fffff), "the heap at %#llx does not start on a 2 MiB region", (unsigned long long)base);
+    int left = -1;
+    uint32_t g0, now;
+    vk_texture_new_submit();
+    uint32_t ep = vk_texture_epoch();
+    vk_mem_gen_lock();
+    for (int i = 0; i < 4; i++) vk_mem_snap_note_locked(base + off[i], 0x2000, ep);
+    vk_mem_snap_noted_locked(ep, &left);   // what was written before this test
+    vk_mem_gen_unlock();
+    GCHECK(!left, "a run inside the heap was left to the queries by range");
+    vk_mem_changed(base + 0x200000, 0x1000, 0, &g0);
+    volatile uint8_t *w[3] = {h + 0xe10010, h + 0xa80800, h + 0x604000};
+    for (int i = 0; i < 3; i++) *w[i] = *w[i];
+    vk_texture_new_submit();
+    ep = vk_texture_epoch();
+    vk_mem_gen_lock();
+    for (int i = 0; i < 4; i++) vk_mem_snap_note_locked(base + off[i], 0x2000, ep);
+    for (int i = 0; i < 4; i++) vk_mem_snap_note_locked(base + off[i], 0x2000, ep);   // a region noted twice is asked once
+    uint64_t q = vk_mem_snap_noted_locked(ep, &left), again = 0;
+    int why[4];
+    for (int i = 0; i < 4; i++) {
+        why[i] = vk_mem_unchanged_why_locked(base + off[i], 0x2000, g0, ep);
+        again += vk_mem_snap_range_locked(base + off[i], 0x2000, ep);
+    }
+    vk_mem_gen_unlock();
+    GCHECK(q == 2 && !left, "four regions in two runs took %llu queries (left %d)", (unsigned long long)q, left);
+    GCHECK(!again, "%llu regions had no snapshot after the queries by run", (unsigned long long)again);
+    GCHECK(why[0] == 3 && why[1] == 3 && why[2] == 3 && why[3] == 0, "regions written, written, written, not written "
+           "answer %d %d %d %d", why[0], why[1], why[2], why[3]);
+    GCHECK(vk_mem_changed_snap(base + 0x604000, 0x1000, g0, ep, &now) == 1 &&
+           vk_mem_changed_snap(base + 0x603000, 0x1000, g0, ep, &now) == 0 &&
+           vk_mem_changed_snap(base + 0x9f0000, 0x2000, g0, ep, &now) == 0, "the pages written are not reported exactly");
+    printf("probe-vkmem: write-watch snapshot by runs: 4 regions in 2 runs took 2 queries; written regions and pages exact\n");
+    g_gpu_checks += 5;
+    return 0;
+}
+
 // A GPU write is noted on a pool, and the pool is finalized and made again at its address before the write is
 // reported: the report must leave alone what the CPU has written to the new pool since. With shadow storage the new
 // pool's shadow is a copy of guest memory from before those writes and holds no byte of the old write
@@ -1184,7 +1229,7 @@ static int test_gpu(void) {
                    .size = 0x40000, .game_mem = h + 0x800000, .span = 0x40000};
     pool_t virt = {.magic = NVN_POOL_MAGIC, .flags = 0x2a1, .mem = (uint8_t *)(uintptr_t)(RT_GPU_VA_BASE + 0x200000000ull),
                    .size = 0x80000, .span = 0x80000};
-    if (test_import(&pool) || test_readfile(pool.mem + 0x38000) || test_virtual(&phys, &virt)) return 1;
+    if (test_import(&pool) || test_readfile(pool.mem + 0x38000) || test_snap_runs(h) || test_virtual(&phys, &virt)) return 1;
     GCHECK(vk_pool_init(&tpool), "vk_pool_init of the texture pool");
     if (test_textures(&tpool, &phys)) return 1;
     pool_t dpool = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = h + 0x500000, .size = 0x100000, .game_mem = h + 0x500000};
