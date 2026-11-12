@@ -157,6 +157,11 @@
 # of a new area take to build.
 # oneshot_budget = 1
 # oneshot_wait_ms = 30000
+# A draw whose shaders also write memory (a storage buffer, or an image they store into) waits for its pipeline in
+# the same way, also when it draws into a picture the game draws every frame: left out of a frame, it would be drawn
+# again the next frame, but what it was to write would be missing for everything that reads it until then. 0: such a
+# draw is left out like any other while its pipeline is built.
+# draw_writers_wait = 1
 # Build shader stage libraries in the background ahead of time, and the threads for it (1 to 16; default 2). More
 # threads mostly wait on the graphics driver's lock: 16 on NVIDIA spent about 8 cores spinning in the driver.
 # lib_prebuild = 1

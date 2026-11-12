@@ -49,7 +49,8 @@
 #define NVN_STAGE_MESH 7
 // prepare_draw: how long a one-shot draw waits for its shaders and pipeline before it is skipped. Such a draw renders
 // into a target that is neither recent nor steady (vk_target_frames.h: a volume, a lookup table, an icon, a target
-// made new at an area change); skipped, a target the game draws once stays as it was.
+// made new at an area change); skipped, a target the game draws once stays as it was. A draw into per-frame targets
+// whose shaders write memory takes the same wait (writers_wait_on).
 // NX2NAVI_ONESHOT_BUDGET (default 1): the one-shot draws of a presented frame wait from that frame's wait pool
 // (frame_wait, shared with the full-screen draws), a mesh draw MESH_WAIT_MS at most. Until 0.7.1 each waited up to
 // NX2NAVI_ONESHOT_WAIT_MS (30 s) on the replay thread, which is what =0 still does: after a scene load every pass was
@@ -4083,6 +4084,41 @@ static int pipe_skip_mode(void) {
     return mode;
 }
 
+// NX2NAVI_DRAW_WRITERS_WAIT (default 1; 0 = off): a draw whose shaders write memory waits for its shaders and
+// pipeline as a one-shot draw does, whatever its targets. A draw into per-frame targets may be left out while its
+// pipeline builds because the game renders those targets again in the next frame (pipe_skip_mode). A storage buffer
+// its shaders write, or an image they store into, is no such target: the write is a side effect of this draw that
+// later draws and frames read, and with the draw left out that memory keeps what it held. So the draw takes the wait
+// of a draw into targets that are not per-frame (prepare_draw_ex: from the frame's wait pool, or ONESHOT_WAIT_MS with
+// NX2NAVI_ONESHOT_BUDGET=0), and is skipped only at the end of it. draw_stats_tick's line counts the draws that waited
+// by this rule alone.
+static int writers_wait_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = cfg_bool("NX2NAVI_DRAW_WRITERS_WAIT");
+        if (!on) rt_log("vk_exec: a draw whose shaders write memory is skipped like any other while its pipeline builds "
+                        "(NX2NAVI_DRAW_WRITERS_WAIT=0)");
+    }
+    return on;
+}
+
+// 1 when the stage writes a storage buffer or stores into an image (GfxShaderRes.flags, gfx.h).
+static int stage_writes(const GfxShader *s) {
+    const GfxShaderRes *r;
+    if (!s) return 0;
+    for (int i = 0, n = gfx_shader_resources(s, GFX_RES_SSBO, &r); i < n; i++)
+        if (r[i].flags & 1) return 1;
+    for (int i = 0, n = gfx_shader_resources(s, GFX_RES_IMG, &r); i < n; i++)
+        if (r[i].flags & 4) return 1;
+    return 0;
+}
+
+// 1 when a draw with these stages waits because it writes memory (writers_wait_on). A stage that is NULL writes
+// nothing: the program has none, or it is still being translated and has no reflection to ask yet.
+static int draw_writes(const GfxShader *vs, const GfxShader *ts, const GfxShader *fs) {
+    return writers_wait_on() && (stage_writes(vs) || stage_writes(ts) || stage_writes(fs));
+}
+
 // NX2NAVI_PIPE_LINK_MS (default 6; 0 = off): how long the draws of one presented frame may wait, in all, for the fast
 // link of a pipeline that is missing, LINK_DRAW_MS at most each. A draw into a per-frame pass used to be skipped at
 // once and for as long as its pipeline built, also when its stage libraries were in the driver's cache and the link
@@ -4146,11 +4182,13 @@ static uint32_t oneshot_ms(const uint64_t *pool, int mesh, const VkPipeState *s)
 // ---- wait accounting: what the replay thread spent on draws that found their pipeline or a shader missing
 // Counted from the miss to the draw's bind or skip, the look-ahead scan included, by the kind of wait the draw was
 // allowed; left: the draws skipped at the end of it. draw_stats_tick logs the sums with the skipped draws, so a
-// session's log says how much time the pipelines cost on this thread and which rule spent it.
+// session's log says how much time the pipelines cost on this thread and which rule spent it. writers: the draws into
+// per-frame targets that took a one-shot wait because their shaders write memory (draw_writes); they are among the
+// one-shot kinds' counts.
 enum { WK_LINK, WK_FULL, WK_LAST, WK_ONESHOT, WK_ONESHOT_MESH, WK_SHADER, WK_N };
 static const char *const wk_names[WK_N] = {"a fast link", "full-screen", "full-screen with no picture to hold",
                                            "one-shot", "one-shot mesh", "one-shot, for a shader"};
-static struct { uint64_t n[WK_N], ns[WK_N], max_ns[WK_N], left[WK_N], frame_ns, frame_max_ns, frame; } WS;
+static struct { uint64_t n[WK_N], ns[WK_N], max_ns[WK_N], left[WK_N], frame_ns, frame_max_ns, frame, writers; } WS;
 
 static void wait_note(int kind, uint64_t t0, int left) {
     uint64_t ns = kern_now_ns() - t0, f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
@@ -4265,17 +4303,19 @@ static void draw_stats_tick(void) {
     for (int k = 0; k < WK_N; k++) waits += WS.n[k], wait_ns += WS.ns[k];
     static uint64_t steady_logged;
     if (waits || vk_exec_steady_passes != steady_logged) {
-        char line[900];
+        char line[1200];
         int o = snprintf(line, sizeof line, "vk_exec: over %llu frames %llu draws found a shader or pipeline missing and "
                          "held the replay thread %.1f ms in all, %.1f ms in the worst frame; by the wait they were allowed:",
                          (unsigned long long)(f - DRS.frame), (unsigned long long)waits, wait_ns / 1e6, WS.frame_max_ns / 1e6);
-        for (int k = 0; k < WK_N && o < (int)sizeof line - 160; k++)
+        for (int k = 0; k < WK_N && o < (int)sizeof line - 320; k++)   // room for the two counts after the kinds
             if (WS.n[k])
                 o += snprintf(line + o, sizeof line - o, " %s %llu (%.1f ms, longest %.1f ms, %llu skipped at its end);",
                               wk_names[k], (unsigned long long)WS.n[k], WS.ns[k] / 1e6, WS.max_ns[k] / 1e6,
                               (unsigned long long)WS.left[k]);
         snprintf(line + o, sizeof line - o, " %llu lookups found only steady targets and skipped a draw that would have "
-                 "waited as one-shot", (unsigned long long)(vk_exec_steady_passes - steady_logged));
+                 "waited as one-shot; %llu draws into per-frame targets waited as one-shot because their shaders write "
+                 "memory (NX2NAVI_DRAW_WRITERS_WAIT)", (unsigned long long)(vk_exec_steady_passes - steady_logged),
+                 (unsigned long long)WS.writers);
         rt_log("%s", line);
         steady_logged = vk_exec_steady_passes;
         memset(&WS, 0, sizeof WS);
@@ -4426,11 +4466,16 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     if (!has_vs) return draw_skipped(ex, mesh, SK_NO_VERTEX_STAGE);
     // A draw into a target the previous frame did not render (or into none) waits for a pending shader or pipeline:
     // one-shot draws (volumes and LUTs generated once, later only sampled) would leave their target empty for the
-    // session. A draw into per-frame targets is skipped until they are ready and comes back next frame.
+    // session. A draw into per-frame targets is skipped until they are ready and comes back next frame, unless its
+    // shaders write memory: then it waits like a one-shot draw (draw_writes).
     int oneshot = -1, skip = pipe_skip_mode();   // -1: not looked up
+    int writer = 0;                              // the draw waits as one-shot by draw_writes alone
     if (vs_wait || fs_wait || ts_wait) {
         vk_exec_ahead(ex);   // the later draws' shaders and stage libraries are queued while this one waits or is skipped
-        if (!(oneshot = !vk_exec_targets_recent(ex, skip >= 1)))   // skipped until ready
+        oneshot = !vk_exec_targets_recent(ex, skip >= 1);
+        // only the stages that are here can say that they write: one still being translated has no reflection yet
+        if (!oneshot && draw_writes(vs, ts, fs)) oneshot = writer = 1, WS.writers++;
+        if (!oneshot)   // skipped until ready
             return perf_count(PERF_CNT_SHADER_SKIP), draw_skipped(ex, mesh, SK_SHADER_PENDING);
         perf_count(PERF_CNT_ONESHOT_WAIT);
         // from the frame's wait pool (NX2NAVI_ONESHOT_BUDGET=0: until each is translated); a shader the pool does not
@@ -4526,10 +4571,14 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             uint64_t spent = kern_now_ns() - t0;
             *budget = spent < *budget ? *budget - spent : 0;
         }
-        why = oneshot > 0 ? "one-shot, shader" : linking ? NULL : wait_ms ? "full-screen" : NULL;
-        if (pending && oneshot < 0 && !vk_exec_targets_recent(ex, skip >= 1)) {
+        why = writer ? "writes memory, shader" : oneshot > 0 ? "one-shot, shader" : linking ? NULL
+            : wait_ms ? "full-screen" : NULL;
+        // Still pending after the wait any draw gets: a draw into targets that are not per-frame waits as one-shot,
+        // and so does a draw into per-frame targets whose shaders write memory (draw_writes).
+        if (pending && oneshot < 0 && (!vk_exec_targets_recent(ex, skip >= 1) || (writer = draw_writes(vs, ts, fs)))) {
             perf_count(PERF_CNT_ONESHOT_WAIT);
-            why = "one-shot";
+            WS.writers += (uint64_t)writer;
+            why = writer ? "writes memory" : "one-shot";
             kind = mesh ? WK_ONESHOT_MESH : WK_ONESHOT;
             if (!w0) w0 = kern_now_ns();
             if (oneshot_budget_on()) {
