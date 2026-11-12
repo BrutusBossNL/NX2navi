@@ -91,6 +91,7 @@ static const char *const known[] = {
 // The nx2navi.ini section a key cfg_set may write goes to when the file lacks it (nx2navi.ini.example's sections).
 static const struct { const char *key, *section; } sections[] = {
     // the menu's Lama patches tab (ui/menu.cpp tab_lama)
+    {"TEX_RELEASED_MAX", "performance"}, {"MIRROR_HOT", "performance"}, {"FREEZE_IDLE", "performance"}, {"SUBMIT_FINISH_KINDS", "performance"}, {"FOLIAGE", "performance"},
     {"ZSTD_NATIVE", "performance"},
     {"MESH_EMU_MB", "performance"}, {"MESH_EMU_TASKS", "performance"}, {"MESH_EMU_BATCH", "performance"}, {"VEC_INDEX_FIX", "performance"},
     {"GUEST_OPT", "performance"}, {"PASS_TIMES", "diagnostics"}, {"DUMP_KEY", "diagnostics"},
@@ -303,6 +304,7 @@ static const CfgMeta metas[] = {
     {"TEX_RELEASED_MAX", "", NULL, RESTART},   // vk_texture.c released_max: "" by the video memory budget, else 1..16384
     {"MIRROR_HOT", "25", "0..1000", RESTART}, {"FREEZE_IDLE", "1800", "0..100000", RESTART},
     {"SUBMIT_FINISH_KINDS", "31", "0..31", RESTART},   // vk_sync.c res_mask
+    {"FOLIAGE", "full", "full|reduced|off", RESTART},   // vk_exec_draw.c foliage_skip
     {"VRAM_HEAP_LIMIT", "auto", NULL, RESTART},   // vk_device.c vram_heap_limits: auto, 0 or MiB
     {"UPLOAD_BATCH_MB", "256", NULL, RESTART},   // vk_memory.c: MiB of staging before a batch goes early, 0 no limit
     {"MESH_EMULATION", "1", "0|1", RESTART}, {"MESH_EMU_MB", "256", "32..2048", RESTART},

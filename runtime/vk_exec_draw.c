@@ -5775,21 +5775,43 @@ static int mesh_ring_entry(VkExec *ex, VkCommandBuffer cb, const p_draw_mesh_ind
     return 1;
 }
 
+// NX2NAVI_FOLIAGE (full, reduced, off; default full; the Lama patches tab): Ocarina draws its foliage with
+// DrawMeshTasksIndirect, the instances its compute passes culled on the GPU. With a task stage: the small grass and moss
+// that carpet the ground; without one: ferns, leaves, clover and the other plants. Its other mesh draws (DrawMeshTasks
+// with a count: terrain, rocks, buildings, doors) are not foliage. reduced skips the indirect draws with a task stage,
+// off every indirect one, in every pass (their shadows too). In a frame dump of Kokiri Forest on an RX 580
+// (f8118, 2026-11-10) the grass and moss were one draw with task stage 2ddf7b0bf74e5a05; the plants nine without.
+static int foliage_skip(VkExec *ex) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *v = cfg_get("NX2NAVI_FOLIAGE");
+        mode = v && !strcmp(v, "off") ? 2 : v && !strcmp(v, "reduced") ? 1 : 0;
+        rt_log("vk: foliage %s (NX2NAVI_FOLIAGE)", mode == 2 ? "off" : mode ? "reduced: no small grass or moss" : "full");
+    }
+    if (!mode) return 0;
+    if (mode == 2) return 1;
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    return ex->prog && find_stage(ex->dc, ex->prog, NVN_STAGE_TASK, &ctl, &code, &len);
+}
+
 // DrawMeshTasksIndirect: one draw from its ring entry (mesh_ring_entry); x2-x4 of the call vary like leftovers, so they
 // are not read as a count or stride.
 static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
     PFN_vkCmdDrawMeshTasksIndirectEXT fn = draw_mesh_ind_fn();
-    int fallback = vk_ctx()->mesh_fallback;
-    if (!fn && !fallback) return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader: skipped");
+    int emu = !fn && mesh_emu_on(), fallback = !emu && vk_ctx()->mesh_fallback;
+    if (!fn && !emu && !fallback)
+        return warn_once(W_MESH, "mesh draws need VK_EXT_mesh_shader (mesh_emulation = 1 emulates them): skipped");
     static int on = -1;
     if (on < 0) on = rt_knob("MESH", "1");
-    if (!on) return;
+    if (!on || foliage_skip(ex)) return;
     VkMemSpan ip;
     if (!vk_mem_resolve(d->ind, 12, &ip) || ip.offset % 4)
         return warn_once(W_INDIRECT, "indirect mesh draw arguments at %#llx are not backed or not aligned: skipped",
                          (unsigned long long)d->ind);
     ex->dc->c0_binst = 0;
     VK_MEM_USE(ip);
+    if (emu) {   // emulated: a ring entry {count, 1, 1}, made where the stages run, is the first stage's dispatch
         mesh_emu_draw(ex, 0, NULL, &ip);
         vk_mem_count(ip.cls, VK_MUSE_IND, 4);
         VK_MEM_BOUND(ip);
