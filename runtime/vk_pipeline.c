@@ -2209,6 +2209,14 @@ int vk_pool_marks_enabled(void) {
 // its depth, sample mask or stencil reference, or already writes memory does not, as early tests would change what it
 // does. The caller passes early_ok only for a pipeline without alpha to coverage, which also drops samples after the
 // shader (ensure_init keeps alpha to coverage out of the dynamic state while marks are on, so a pipeline knows).
+// A fragment shader's marks are stored where it ends, not where it samples. A store between a sample's coordinates and
+// the sample takes the quad's helper lanes out of the code in between on AMD's driver for Polaris: their coordinates
+// stayed stale, the derivatives at a triangle's edge were garbage, and edge pixels came out dark (the lines along the
+// paths' triangles since 0.7.0). Each access only notes its slot in a Private variable (a register); before each
+// return of the entry function, and before a kill, terminate or demote anywhere, every variable is stored to its slot,
+// a variable no access set going to the spare slot past the pool (vk_exec_draw.c pool_marks_make). An access in a loop
+// or outside the entry function can run more than once with other slots: it notes them in a ring of RING Private
+// variables, so a loop's last RING slots are all marked.
 // *status: 1 marked, 0 no pool texture access to mark, -1 one that could not be marked (*why says what stopped it).
 // NULL unless marked.
 static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, uint64_t *out_n, int *status,
@@ -2219,7 +2227,10 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, ui
            OP_EXECUTION_MODE = 16, OP_EXECUTION_MODE_ID = 331, OP_IMAGE_WRITE = 99, OP_ATOMIC_FIRST = 227,
            OP_ATOMIC_LAST = 242, OP_KILL = 252, OP_TERMINATE_INVOCATION = 4416, OP_DEMOTE_TO_HELPER = 5380,
            EM_EARLY_FRAGMENT_TESTS = 9, BI_SAMPLE_MASK = 20, BI_FRAG_DEPTH = 22, BI_FRAG_STENCIL_REF = 5014,
-           SC_STORAGE_BUFFER = 12, DEC_BLOCK = 2, DEC_ARRAY_STRIDE = 6, DEC_OFFSET_ = 35 };
+           SC_STORAGE_BUFFER = 12, DEC_BLOCK = 2, DEC_ARRAY_STRIDE = 6, DEC_OFFSET_ = 35, OP_TYPE_BOOL = 20,
+           OP_LOAD_ = 61, OP_BITCAST = 124, OP_SELECT_ = 169, OP_INOT_EQUAL = 171, OP_LOOP_MERGE = 246, OP_LABEL_ = 248,
+           OP_RETURN = 253, OP_RETURN_VALUE = 254, SC_PRIVATE = 6, LOOP_DEPTH = 64, OP_TYPE_ARRAY_ = 28, OP_IADD = 128,
+           OP_BITWISE_AND = 199, OP_ULESS_THAN = 176, OP_BRANCH = 249, OP_BRANCH_CONDITIONAL = 250, OP_PHI = 245 };
     *status = 0, *why = NULL;
     if (n < 5) return NULL;
     uint32_t bound = w[3];
@@ -2228,11 +2239,19 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, ui
     uint8_t *set2 = calloc(bound, 1);
     if (!bind || !set2) return free(bind), free(set2), *status = -1, *why = "no memory", NULL;
     uint64_t ann_end = 0, fn_start = 0, em_end = 0;   // em_end: past the entry points and execution modes
-    uint32_t uint_t = 0, c0 = 0, c1 = 0, ptr_u = 0, fs_entry = 0;
+    uint32_t uint_t = 0, c0 = 0, c1 = 0, ptr_u = 0, fs_entry = 0, int_t = 0, bool_t = 0;
     int vertex_stage = 0, fragment_stage = 0, entries = 0, early = early_ok;
+    uint32_t *rtype = calloc(bound, sizeof *rtype);   // per id: its result type, where the defer path needs it
+    uint8_t *is_type = calloc(bound, 1);
+    if (!rtype || !is_type)
+        return free(bind), free(set2), free(rtype), free(is_type), *status = -1, *why = "no memory", NULL;
+#define POOL_MARK_FREE() (free(bind), free(set2), free(rtype), free(is_type), free(site_def))
+    // per site: 0 stored in place; else deferred, bit 1 the index is signed (a bitcast), bit 2 a ring (in a loop or
+    // outside the entry function)
+    uint8_t *site_def = NULL;
     for (uint64_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
-        if (!l || i + l > n) return free(bind), free(set2), *status = -1, *why = "an instruction past the module's end", NULL;
+        if (!l || i + l > n) return POOL_MARK_FREE(), *status = -1, *why = "an instruction past the module's end", NULL;
         if (op == SPV_OP_FUNCTION) { fn_start = i; break; }
         if (op == SPV_OP_ENTRY_POINT || op == OP_EXECUTION_MODE || op == OP_EXECUTION_MODE_ID) em_end = i + l;
         if (op == SPV_OP_ENTRY_POINT && l >= 3) {
@@ -2251,6 +2270,10 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, ui
             early = 0;   // the guest's own storage buffers: its stores would change under early tests
         } else if (op == SPV_OP_TYPE_INT && l == 4 && w[i + 2] == 32 && w[i + 3] == 0) {
             uint_t = w[i + 1];
+        } else if (op == SPV_OP_TYPE_INT && l == 4 && w[i + 2] == 32 && w[i + 3] == 1) {
+            int_t = w[i + 1];
+        } else if (op == OP_TYPE_BOOL && l == 2) {
+            bool_t = w[i + 1];
         } else if (op == SPV_OP_CONSTANT && l == 4 && uint_t && w[i + 1] == uint_t) {
             if (w[i + 3] == 0 && !c0) c0 = w[i + 2];
             if (w[i + 3] == 1 && !c1) c1 = w[i + 2];
@@ -2260,50 +2283,95 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, ui
         if (op == SPV_OP_DECORATE || op == OP_MEMBER_DECORATE_ || op == OP_DECORATION_GROUP || op == OP_GROUP_DECORATE ||
             op == OP_GROUP_MEMBER_DECORATE || op == OP_DECORATE_ID || op == OP_DECORATE_STRING || op == OP_MEMBER_DECORATE_STRING)
             ann_end = i + l;
+        if (op >= 19 && op <= 39 && l >= 2 && w[i + 1] < bound) is_type[w[i + 1]] = 1;   // OpTypeVoid .. OpTypeForwardPointer
+        else if (op == SPV_OP_CONSTANT && l >= 4 && w[i + 2] < bound) rtype[w[i + 2]] = w[i + 1];
         i += l;
     }
     // pool texture variables: set 2, a binding below VK_POOL_KINDS (spirv_pool_rebind); one already at the marks
     // binding means the module was marked before
-    uint64_t sites = 0;
+    enum { RING = 8 };
+    uint64_t sites = 0, deferred = 0, rings = 0, exits = 0;
     int marked = 0;
     for (uint32_t id = 0; id < bound; id++)
         if (set2[id] && bind[id] == VK_POOL_MARK_BINDING + 1) marked = 1;
+    site_def = fn_start && !marked ? calloc((n - fn_start) / 5 + 1, 1) : NULL;   // an access chain is 5 words or more
+    if (fn_start && !marked && !site_def) return POOL_MARK_FREE(), *status = -1, *why = "no memory", NULL;
+    uint32_t loops[LOOP_DEPTH], fn = 0;
+    int depth = 0;
     for (uint64_t i = fn_start; fn_start && !marked && i < n;) {
         uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
         if (!l || i + l > n) break;
+        if (l >= 3 && w[i + 1] < bound && is_type[w[i + 1]] && w[i + 2] < bound) rtype[w[i + 2]] = w[i + 1];
+        if (op == SPV_OP_FUNCTION && l >= 3) fn = w[i + 2], depth = 0;
+        else if (op == OP_LOOP_MERGE && l >= 3) depth < LOOP_DEPTH ? (void)(loops[depth++] = w[i + 1]) : (void)depth++;
+        else if (op == OP_LABEL_ && l >= 2 && depth > 0 && depth <= LOOP_DEPTH && loops[depth - 1] == w[i + 1]) depth--;
         if ((op == OP_ACCESS_CHAIN_ || op == OP_IN_BOUNDS_ACCESS_CHAIN) && l >= 5 && w[i + 3] < bound && set2[w[i + 3]] &&
-            bind[w[i + 3]] && bind[w[i + 3]] - 1 < VK_POOL_KINDS)
+            bind[w[i + 3]] && bind[w[i + 3]] - 1 < VK_POOL_KINDS) {
+            uint32_t ix = w[i + 4], t = ix < bound ? rtype[ix] : 0;
+            if (fragment_stage && entries == 1 && fs_entry && t && (t == uint_t || t == int_t)) {
+                int ring = fn != fs_entry || depth;
+                site_def[sites] = (uint8_t)(1 | (t == int_t ? 2 : 0) | (ring ? 4 : 0));
+                ring ? rings++ : deferred++;
+            }
             sites++;
-        else if (op == OP_KILL || op == OP_TERMINATE_INVOCATION || op == OP_DEMOTE_TO_HELPER || op == OP_IMAGE_WRITE ||
-                 (op >= OP_ATOMIC_FIRST && op <= OP_ATOMIC_LAST))
+        } else if (op == OP_KILL || op == OP_TERMINATE_INVOCATION || op == OP_DEMOTE_TO_HELPER || op == OP_IMAGE_WRITE ||
+                   (op >= OP_ATOMIC_FIRST && op <= OP_ATOMIC_LAST))
             early = 0;
+        if (op == OP_KILL || op == OP_TERMINATE_INVOCATION || op == OP_DEMOTE_TO_HELPER ||
+            (fn == fs_entry && (op == OP_RETURN || op == OP_RETURN_VALUE)))
+            exits++;
         i += l;
     }
-    if (marked || !sites) return free(bind), free(set2), NULL;
+    if (marked || !sites) return POOL_MARK_FREE(), NULL;
+    uint64_t stores = deferred + rings;   // what each way out stores: a variable, or a ring's entries in a loop
+    if (stores && (!exits || exits * (deferred + 3 * rings) > 8192))   // no way out to store at, or code that would grow
+        memset(site_def, 0, sites), deferred = rings = stores = 0;           // too much
     *why = w[1] < 0x00010300 || w[1] > 0x00010600 ? "a SPIR-V version before 1.3 or after 1.6"
          : !ann_end || !fn_start              ? "no decorations or no function"
          : vertex_stage && !marks_vs_ok       ? "the GPU allows no stores in vertex-pipeline shaders"
          : fragment_stage && !marks_fs_ok     ? "the GPU allows no stores in fragment shaders"
                                               : NULL;
-    if (*why) return free(bind), free(set2), *status = -1, NULL;
+    if (*why) return POOL_MARK_FREE(), *status = -1, NULL;
     early = early && fragment_stage && entries == 1 && em_end && em_end < ann_end;
     // From SPIR-V 1.4 on an entry point lists every global variable its functions use, not only the inputs and outputs
     // (the translator's mesh shaders are 1.4): each entry point gets the marks variable, a word more.
     int iface = w[1] >= 0x00010400;
-    // the mode, a word per entry point, decorations, at most 30 words of new types and the variable, 9 a site
-    uint64_t on = n + 3 + (uint64_t)entries + 20 + 30 + 9 * sites;
+    // the mode, a word per entry point, decorations, at most 30 words of new types and the variable, 9 a site; deferred:
+    // a word per entry point and variable, 80 words of types and constants, then per site its variables and the store of
+    // its slot (ring: 10 + 29), and per way out 29 words a variable and 8 * 29 a ring (its loop is 83)
+    uint64_t on = n + 3 + (uint64_t)entries * (1 + deferred + 2 * rings) + 20 + 30 + 9 * sites + 80 + deferred * 12 +
+                  rings * 40 + (deferred * 29 + rings * RING * 29) * exits;
     uint32_t *o = malloc(on * 4);
-    if (!o) return free(bind), free(set2), *status = -1, *why = "no memory", NULL;
+    if (!o) return POOL_MARK_FREE(), *status = -1, *why = "no memory", NULL;
     uint32_t next = bound;
     uint32_t new_uint = uint_t ? 0 : (uint_t = next++), new_c0 = c0 ? 0 : (c0 = next++), new_c1 = c1 ? 0 : (c1 = next++);
     uint32_t rta = next++, st = next++, ptr_st = next++, var = next++, new_ptr_u = ptr_u ? 0 : (ptr_u = next++);
+    // deferred: the types, constants and variables (pv0: one per site; ra0, rc0: a ring and its count per ring site)
+    uint32_t new_bool = 0, ptr_pv = 0, c_none = 0, c_spare = 0, pv0 = 0, ring_t = 0, ptr_ring = 0, ring_none = 0,
+             cr[RING] = {0}, c_ring = 0, ra0 = 0, rc0 = 0;
+    if (stores) {
+        new_bool = bool_t ? 0 : (bool_t = next++);
+        ptr_pv = next++, c_none = next++, c_spare = next++, pv0 = next, next += (uint32_t)deferred;
+        if (rings) {
+            ring_t = next++, ptr_ring = next++, ring_none = next++, c_ring = next++;
+            for (int j = 0; j < RING; j++) cr[j] = next++;
+            ra0 = next, next += (uint32_t)rings, rc0 = next, next += (uint32_t)rings;
+        }
+    }
     uint64_t p = 5;
     memcpy(o, w, 5 * 4);
     for (uint64_t i = 5; i < ann_end;) {   // the header up to the annotations' end: entry points widened, the mode added
         uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
         if (early && i == em_end) o[p++] = 3u << 16 | OP_EXECUTION_MODE, o[p++] = fs_entry, o[p++] = EM_EARLY_FRAGMENT_TESTS;
         memcpy(o + p, w + i, l * 4);
-        if (iface && op == SPV_OP_ENTRY_POINT && l >= 3) o[p] = (l + 1) << 16 | op, o[p + l] = var, p++;
+        if (iface && op == SPV_OP_ENTRY_POINT && l >= 3) {
+            uint32_t nv = 0, *at = o + p + l + 1;   // the marks buffer, then pv0.., ra0.. and rc0..
+            o[p] = (uint32_t)(l + 1 + deferred + 2 * rings) << 16 | op, o[p + l] = var, p++;
+            for (uint32_t k = 0; k < deferred; k++) at[nv++] = pv0 + k;
+            for (uint32_t k = 0; k < rings; k++) at[nv++] = ra0 + k;
+            for (uint32_t k = 0; k < rings; k++) at[nv++] = rc0 + k;
+            p += nv;
+        }
         p += l;
         i += l;
     }
@@ -2321,19 +2389,109 @@ static uint32_t *spirv_pool_mark(const uint32_t *w, uint64_t n, int early_ok, ui
     o[p++] = 4u << 16 | SPV_OP_TYPE_POINTER, o[p++] = ptr_st, o[p++] = SC_STORAGE_BUFFER, o[p++] = st;
     if (new_ptr_u) o[p++] = 4u << 16 | SPV_OP_TYPE_POINTER, o[p++] = ptr_u, o[p++] = SC_STORAGE_BUFFER, o[p++] = uint_t;
     o[p++] = 4u << 16 | SPV_OP_VARIABLE, o[p++] = ptr_st, o[p++] = var, o[p++] = SC_STORAGE_BUFFER;
+    if (stores) {
+        if (new_bool) o[p++] = 2u << 16 | OP_TYPE_BOOL, o[p++] = bool_t;
+        o[p++] = 4u << 16 | SPV_OP_TYPE_POINTER, o[p++] = ptr_pv, o[p++] = SC_PRIVATE, o[p++] = uint_t;
+        o[p++] = 4u << 16 | SPV_OP_CONSTANT, o[p++] = uint_t, o[p++] = c_none, o[p++] = 0xffffffffu;
+        o[p++] = 4u << 16 | SPV_OP_CONSTANT, o[p++] = uint_t, o[p++] = c_spare, o[p++] = VK_POOL_TEX;
+        if (rings) {
+            for (int j = 0; j < RING; j++) o[p++] = 4u << 16 | SPV_OP_CONSTANT, o[p++] = uint_t, o[p++] = cr[j], o[p++] = (uint32_t)j;
+            o[p++] = 4u << 16 | SPV_OP_CONSTANT, o[p++] = uint_t, o[p++] = c_ring, o[p++] = RING;
+            o[p++] = 4u << 16 | OP_TYPE_ARRAY_, o[p++] = ring_t, o[p++] = uint_t, o[p++] = c_ring;
+            o[p++] = 4u << 16 | SPV_OP_TYPE_POINTER, o[p++] = ptr_ring, o[p++] = SC_PRIVATE, o[p++] = ring_t;
+            o[p++] = (3u + RING) << 16 | SPV_OP_CONSTANT_COMPOSITE, o[p++] = ring_t, o[p++] = ring_none;
+            for (int j = 0; j < RING; j++) o[p++] = c_none;
+        }
+        for (uint32_t k = 0; k < deferred; k++)
+            o[p++] = 5u << 16 | SPV_OP_VARIABLE, o[p++] = ptr_pv, o[p++] = pv0 + k, o[p++] = SC_PRIVATE, o[p++] = c_none;
+        for (uint32_t k = 0; k < rings; k++)
+            o[p++] = 5u << 16 | SPV_OP_VARIABLE, o[p++] = ptr_ring, o[p++] = ra0 + k, o[p++] = SC_PRIVATE, o[p++] = ring_none;
+        for (uint32_t k = 0; k < rings; k++)
+            o[p++] = 5u << 16 | SPV_OP_VARIABLE, o[p++] = ptr_pv, o[p++] = rc0 + k, o[p++] = SC_PRIVATE, o[p++] = c0;
+    }
+    uint64_t site = 0;
+    uint32_t k_def = 0, k_ring = 0, cur = 0;   // cur: the label of the block being copied
+    fn = 0;
     for (uint64_t i = fn_start; i < n;) {
         uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        if (op == SPV_OP_FUNCTION && l >= 3) fn = w[i + 2];
+        if (op == OP_LABEL_ && l >= 2) cur = w[i + 1];
+        if (stores && (op == OP_KILL || op == OP_TERMINATE_INVOCATION || op == OP_DEMOTE_TO_HELPER ||
+                       (fn == fs_entry && (op == OP_RETURN || op == OP_RETURN_VALUE)))) {
+            // marks[the slot, or the spare when none was noted] = 1
+#define POOL_MARK_STORE(from)                                                                                         \
+    do {                                                                                                              \
+        uint32_t v_ = next++, ok_ = next++, ix_ = next++, at_ = next++;                                              \
+        o[p++] = 4u << 16 | OP_LOAD_, o[p++] = uint_t, o[p++] = v_, o[p++] = (from);                                 \
+        o[p++] = 5u << 16 | OP_INOT_EQUAL, o[p++] = bool_t, o[p++] = ok_, o[p++] = v_, o[p++] = c_none;              \
+        o[p++] = 6u << 16 | OP_SELECT_, o[p++] = uint_t, o[p++] = ix_, o[p++] = ok_, o[p++] = v_, o[p++] = c_spare;  \
+        o[p++] = 6u << 16 | OP_ACCESS_CHAIN_, o[p++] = ptr_u, o[p++] = at_, o[p++] = var, o[p++] = c0, o[p++] = ix_; \
+        o[p++] = 3u << 16 | OP_STORE_, o[p++] = at_, o[p++] = c1;                                                    \
+    } while (0)
+            for (uint32_t k = 0; k < deferred; k++) POOL_MARK_STORE(pv0 + k);
+            for (uint32_t r = 0; r < rings; r++) {
+                if (op == OP_DEMOTE_TO_HELPER) {   // not the block's end: every entry, without a loop
+                    for (int j = 0; j < RING; j++) {
+                        uint32_t from = next++;
+                        o[p++] = 5u << 16 | OP_ACCESS_CHAIN_, o[p++] = ptr_pv, o[p++] = from, o[p++] = ra0 + r, o[p++] = cr[j];
+                        POOL_MARK_STORE(from);
+                    }
+                    continue;
+                }
+                // the block ends here (a return, kill or terminate), so it can end in a loop over the entries noted:
+                // for (j = 0; j < min(count, RING); j++) mark ring[j]
+                uint32_t cnt = next++, lt = next++, lim = next++, hd = next++, j = next++, mg = next++, ct = next++,
+                         cond = next++, body = next++, from = next++, jn = next++;
+                o[p++] = 4u << 16 | OP_LOAD_, o[p++] = uint_t, o[p++] = cnt, o[p++] = rc0 + r;
+                o[p++] = 5u << 16 | OP_ULESS_THAN, o[p++] = bool_t, o[p++] = lt, o[p++] = cnt, o[p++] = c_ring;
+                o[p++] = 6u << 16 | OP_SELECT_, o[p++] = uint_t, o[p++] = lim, o[p++] = lt, o[p++] = cnt, o[p++] = c_ring;
+                o[p++] = 2u << 16 | OP_BRANCH, o[p++] = hd;
+                o[p++] = 2u << 16 | OP_LABEL_, o[p++] = hd;
+                o[p++] = 7u << 16 | OP_PHI, o[p++] = uint_t, o[p++] = j, o[p++] = c0, o[p++] = cur, o[p++] = jn, o[p++] = ct;
+                o[p++] = 5u << 16 | OP_ULESS_THAN, o[p++] = bool_t, o[p++] = cond, o[p++] = j, o[p++] = lim;
+                o[p++] = 4u << 16 | OP_LOOP_MERGE, o[p++] = mg, o[p++] = ct, o[p++] = 0;
+                o[p++] = 4u << 16 | OP_BRANCH_CONDITIONAL, o[p++] = cond, o[p++] = body, o[p++] = mg;
+                o[p++] = 2u << 16 | OP_LABEL_, o[p++] = body;
+                o[p++] = 5u << 16 | OP_ACCESS_CHAIN_, o[p++] = ptr_pv, o[p++] = from, o[p++] = ra0 + r, o[p++] = j;
+                POOL_MARK_STORE(from);
+                o[p++] = 2u << 16 | OP_BRANCH, o[p++] = ct;
+                o[p++] = 2u << 16 | OP_LABEL_, o[p++] = ct;
+                o[p++] = 5u << 16 | OP_IADD, o[p++] = uint_t, o[p++] = jn, o[p++] = j, o[p++] = c1;
+                o[p++] = 2u << 16 | OP_BRANCH, o[p++] = hd;
+                o[p++] = 2u << 16 | OP_LABEL_, o[p++] = mg;
+                cur = mg;
+            }
+#undef POOL_MARK_STORE
+        }
         memcpy(o + p, w + i, l * 4), p += l;
         if ((op == OP_ACCESS_CHAIN_ || op == OP_IN_BOUNDS_ACCESS_CHAIN) && l >= 5 && w[i + 3] < bound && set2[w[i + 3]] &&
             bind[w[i + 3]] && bind[w[i + 3]] - 1 < VK_POOL_KINDS) {
-            uint32_t at = next++;   // marks[slot] = 1, slot being the pool index of this access
-            o[p++] = 6u << 16 | OP_ACCESS_CHAIN_, o[p++] = ptr_u, o[p++] = at, o[p++] = var, o[p++] = c0, o[p++] = w[i + 4];
-            o[p++] = 3u << 16 | OP_STORE_, o[p++] = at, o[p++] = c1;
+            uint8_t d = site_def[site++];
+            if (d) {   // the slot noted for the stores at the end
+                uint32_t ix = w[i + 4];
+                if (d & 2) o[p++] = 4u << 16 | OP_BITCAST, o[p++] = uint_t, o[p++] = next, o[p++] = ix, ix = next++;
+                if (d & 4) {   // ring[count % RING] = slot, count + 1
+                    uint32_t ra = ra0 + k_ring, rc = rc0 + k_ring++, cnt = next++, j = next++, at = next++, inc = next++;
+                    o[p++] = 4u << 16 | OP_LOAD_, o[p++] = uint_t, o[p++] = cnt, o[p++] = rc;
+                    o[p++] = 5u << 16 | OP_BITWISE_AND, o[p++] = uint_t, o[p++] = j, o[p++] = cnt, o[p++] = cr[RING - 1];
+                    o[p++] = 5u << 16 | OP_ACCESS_CHAIN_, o[p++] = ptr_pv, o[p++] = at, o[p++] = ra, o[p++] = j;
+                    o[p++] = 3u << 16 | OP_STORE_, o[p++] = at, o[p++] = ix;
+                    o[p++] = 5u << 16 | OP_IADD, o[p++] = uint_t, o[p++] = inc, o[p++] = cnt, o[p++] = c1;
+                    o[p++] = 3u << 16 | OP_STORE_, o[p++] = rc, o[p++] = inc;
+                } else {
+                    o[p++] = 3u << 16 | OP_STORE_, o[p++] = pv0 + k_def++, o[p++] = ix;
+                }
+            } else {
+                uint32_t at = next++;   // marks[slot] = 1, slot being the pool index of this access
+                o[p++] = 6u << 16 | OP_ACCESS_CHAIN_, o[p++] = ptr_u, o[p++] = at, o[p++] = var, o[p++] = c0, o[p++] = w[i + 4];
+                o[p++] = 3u << 16 | OP_STORE_, o[p++] = at, o[p++] = c1;
+            }
         }
         i += l;
     }
     o[3] = next;
-    free(bind), free(set2);
+    POOL_MARK_FREE();
+#undef POOL_MARK_FREE
     *out_n = p;
     *status = 1;
     return o;

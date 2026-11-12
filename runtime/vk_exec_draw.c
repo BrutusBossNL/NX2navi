@@ -2068,13 +2068,15 @@ static VkDescriptorSetLayout pool_layout_make(void) {
 
 static void pool_marks_make(void) {
     VkCtx *c = vk_ctx();
-    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)VK_POOL_TEX * 4,
+    // a uint past the slots: the spare that a fragment shader's marks of accesses it did not reach go to
+    // (vk_pipeline.c spirv_pool_mark); it is never read back
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)(VK_POOL_TEX + 1) * 4,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                       VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     if (vmaCreateBuffer(c->vma, &bi, &ai, &PL.marks, &PL.marks_alloc, NULL) != VK_SUCCESS)
         rt_fatal("vk: the texture pool marks buffer failed");
-    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.size = (VkDeviceSize)VK_POOL_TEX * 4, bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     VmaAllocationCreateInfo hi = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
     for (int i = 0; i < MARKS_RB; i++) {
