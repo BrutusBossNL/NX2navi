@@ -276,6 +276,15 @@ extern "C" void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt,
     else if (!hudless) F.no_hudless++;
     else if (!on) F.paused++;
     F.frame++;
+    // Every 600 frames, whether this one generates or not: what kept frames from being generated, and how many frames
+    // AMD's swapchain presented (generated ones included). Logged only from a generating frame, as before, a run whose
+    // frames never generated (the menu open at the swapchain's second frame, no inputs, no HUD-less picture) said nothing.
+    if (F.frame == 120 || F.frame % 600 == 0)
+        rt_log("fg: %llu frames, %llu generated (%llu with the HUD kept out), %llu presents by the swapchain; not generated: "
+               "%llu menu open, %llu without depth and motion, %llu without the HUD-less picture",
+               (unsigned long long)F.frame, (unsigned long long)F.generated, (unsigned long long)F.hudless,
+               (unsigned long long)vk_fg_presents(sc), (unsigned long long)F.paused, (unsigned long long)F.no_inputs,
+               (unsigned long long)F.no_hudless);
     ffxConfigureDescFrameGeneration cfg = {};
     cfg.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
     cfg.swapChain = (void *)sc;
@@ -319,11 +328,6 @@ extern "C" void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt,
     p.motionVectors = image(&mv);
     r = vk_ffx_dispatch(&F.fg, &p.header);
     if (r != FFX_API_RETURN_OK) return fail("frame generation preparation", r);
-    if (F.frame == 2 || F.frame % 3600 == 0)
-        rt_log("fg: %llu frames presented, %llu generated (%llu with the HUD kept out); paused %llu (menu), %llu without depth "
-               "and motion, %llu without the HUD-less picture", (unsigned long long)F.frame, (unsigned long long)F.generated,
-               (unsigned long long)F.hudless, (unsigned long long)F.paused, (unsigned long long)F.no_inputs,
-               (unsigned long long)F.no_hudless);
 }
 
 extern "C" void vk_fg_release(void) {
