@@ -32,7 +32,11 @@ static int owner_on;
 
 static void owner_init(void *unused) {
     (void)unused;
-    owner_on = RT_V111 && rt_knob("SELECTIVE_MOTION", "1");
+    // NX2NAVI_SELECTIVE_MOTION (selective_motion; default 0, 1 on): off until it has been played. On, every guest
+    // submission walks the player's actor, equipment and models in guest memory (motion_owner_capture), each scene
+    // draw is looked up in that list (vk_fg_pose.inc pose_owner), and the player's meshes are drawn a second time
+    // into the motion vectors DLSS, FSR 3.1 and frame generation read.
+    owner_on = RT_V111 && rt_knob("SELECTIVE_MOTION", "0");
 }
 int motion_owner_enabled(void) {
     plat_once(&owner_once, owner_init, NULL);
