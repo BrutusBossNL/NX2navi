@@ -976,3 +976,8 @@
 # those second writes cost about 3 ms of GPU time a frame. 0 (default): every mirror sends them. A pool that needs them
 # and is left without shows as foliage stretched into columns or flickering.
 # gpa_twin_max_kb = 0
+# 1 (default): shaders that follow the game's pointers read a memory pool's new copy in video memory only once that
+# copy has been filled; until then they read the game's own memory. 0: they read the new copy at once, as up to 0.9.2,
+# where a card over its video memory budget could lose the device at an area load (a GPU read fault at the first byte
+# of the new copy).
+# gpa_late = 1

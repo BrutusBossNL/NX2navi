@@ -61,6 +61,8 @@ typedef struct PoolRec {
     // VRAM mirror (POOL_IMPORT, "VRAM mirror" below). mstate and mbuf change on the replay thread only.
     uint8_t mstate;                    // MS_NONE until the first buffer use, then MS_ON or MS_REFUSED
     uint32_t gpa_rec;                  // POOL_IMPORT: its record in the device address table (vk_gpa.c), 0 none
+    uint64_t gpa_at;                   // pool_lock: the submission after which the table reads the mirror (gpa_switch);
+                                       // 0 when it does already, or there is no mirror
     struct GpaMap { uint64_t lo, hi; uint32_t rec; } *vmaps;   // POOL_VIRT: its mapped ranges in the table
     int nvmaps, cvmaps;
     VkBuffer mbuf;                     // MS_ON: device-local copy of [import_lo, import_hi), same offsets as buf
@@ -2756,6 +2758,52 @@ static int twin_wanted(const PoolRec *r) {
     return !twin_max || (int64_t)(r->import_hi - r->import_lo) <= twin_max;
 }
 
+// ---- when the device address table starts reading a new mirror (NX2NAVI_GPA_LATE, default 1; 0 = at once, as before)
+// A mirror is made while the replay records a submission, and its first copy of the pool is in that submission's
+// prologue. The table is memory the shaders read as they run, so with its pages moved to the mirror at once, every
+// part already handed to the queue (the submissions before, and the earlier parts of this one) read the mirror through
+// the table before that copy had run: memory nothing had written yet, and on a card over its budget a block the
+// driver had not made resident for those parts. A GTX 1650 4 GB lost its device that way at area loads in every
+// session: six reports of a GPU read fault at byte 0 of a mirror made in the faulting submission, each the first byte
+// of a new 2 MiB-aligned block, with mirrors being made over the budget; with the table kept empty the same routes ran
+// without a loss.
+// Now the pages keep reading the imported buffer and name the mirror as their twin (vk_gpa_remap_writes): what shaders
+// write through the table goes to both, so the mirror misses nothing, and what they read is guest memory, as before
+// the mirror existed. Once the GPU has finished the submission whose prologue holds the copy, the pages move to the
+// mirror with the imported buffer as the twin (gpa_switch, at the start of a later submission). In between, a shader
+// that reads through the table what another wrote through a buffer binding sees guest memory, which gets such a write
+// at the write-back; data written through the table itself, as the game's foliage, instance and light records are,
+// is read where it was written.
+static int n_gpa_wait;                 // pool_lock: mirrors whose pages still read the imported buffer (PoolRec.gpa_at)
+static uint64_t n_gpa_late;            // replay: pages moved to their mirror after its first copy, so far
+
+static int gpa_late(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = rt_knob("GPA_LATE", "1") == 1;
+        rt_log("mem: the device address table reads a new VRAM mirror %s (NX2NAVI_GPA_LATE)",
+               on ? "once the mirror's first copy has run" : "at once, as before");
+    }
+    return on;
+}
+
+// Replay thread, at the start of a submission: the mirrors whose first copy the GPU has finished take the table's reads.
+static void gpa_switch(void) {
+    if (!__atomic_load_n(&n_gpa_wait, __ATOMIC_RELAXED)) return;
+    uint64_t done = vk_sync_fence_done();
+    plat_mutex_lock(&pool_lock);
+    for (int i = 0; i < nm && n_gpa_wait; i++) {
+        PoolRec *r = mlist[i];
+        if (!r->gpa_at || done < r->gpa_at) continue;
+        r->gpa_at = 0, n_gpa_wait--;
+        if (!r->gpa_rec || !r->mbuf) continue;
+        r->gpa_rec = r->twin ? vk_gpa_remap(r->import_lo, r->import_hi, r->gpa_rec, r->mbuf, r->import_lo)
+                             : vk_gpa_remap_plain(r->import_lo, r->import_hi, r->gpa_rec, r->mbuf, r->import_lo);
+        n_gpa_late++;
+    }
+    plat_mutex_unlock(&pool_lock);
+}
+
 // Replay thread: the pool's mirror on its first buffer use.
 static void mirror_create(PoolRec *r) {
     VkCtx *c = vk_ctx();
@@ -2848,16 +2896,28 @@ static void mirror_create(PoolRec *r) {
     r->acc_sub = msub;
     r->mstate = MS_ON;
     r->asked_room = 0;
-    // The device address table names the mirror from now on: the GPU's writes go there, and the sync copies the CPU's.
-    // With a twin they also go to the imported buffer; without one (twin_wanted) the record names the mirror twice.
+    // The device address table names the mirror: the GPU's writes go there, and the sync copies the CPU's. With a
+    // twin they also go to the imported buffer; without one (twin_wanted) the record names the mirror twice. Reads
+    // move to the mirror once its first copy has run (gpa_late, below).
     r->twin = (uint8_t)twin_wanted(r);
     if (!r->twin) {
         plat_inc64(&m_untwinned_n);
         plat_add64(&m_untwinned_bytes, (int64_t)n);
     }
-    if (r->gpa_rec)
-        r->gpa_rec = r->twin ? vk_gpa_remap(r->import_lo, r->import_hi, r->gpa_rec, r->mbuf, r->import_lo)
-                             : vk_gpa_remap_plain(r->import_lo, r->import_hi, r->gpa_rec, r->mbuf, r->import_lo);
+    if (r->gpa_rec) {
+        plat_mutex_lock(&pool_lock);
+        uint32_t late = gpa_late() ? vk_gpa_remap_writes(r->import_lo, r->import_hi, r->gpa_rec, r->mbuf, r->import_lo) : 0;
+        if (late) {
+            uint64_t f = vk_exec_recording_fence();
+            r->gpa_rec = late;
+            r->gpa_at = f ? f : vk_sync_issued() + 1;   // the submission being recorded: its prologue holds the copy
+            n_gpa_wait++;
+        } else {
+            r->gpa_rec = r->twin ? vk_gpa_remap(r->import_lo, r->import_hi, r->gpa_rec, r->mbuf, r->import_lo)
+                                 : vk_gpa_remap_plain(r->import_lo, r->import_hi, r->gpa_rec, r->mbuf, r->import_lo);
+        }
+        plat_mutex_unlock(&pool_lock);
+    }
     range_add(&pend, &npend, &cpend, r, 0, n);
     mrep.first_n++, mrep.first_bytes += n;
     plat_inc64(&m_live_n);
@@ -2866,6 +2926,7 @@ static void mirror_create(PoolRec *r) {
 
 static void mirror_forget(PoolRec *r) {
     __atomic_add_fetch(&mirror_gen, 1, __ATOMIC_RELEASE);
+    if (r->gpa_at) r->gpa_at = 0, n_gpa_wait--;   // the caller takes the table's pages off the mirror
     for (int i = 0; i < nm; i++)
         if (mlist[i] == r) {
             memmove(mlist + i, mlist + i + 1, (size_t)(nm - i - 1) * sizeof *mlist);
@@ -3932,7 +3993,7 @@ static void hot_check(void) {
 }
 
 void vk_mem_mirror_begin(void) {
-    if (vk_mirror_on) hot_check();
+    if (vk_mirror_on) gpa_switch(), hot_check();
     if (!vk_mirror_on) {   // import mode: the texture checks' snapshots still skip frozen regions
         if (!freeze_idle) return;
         plat_mutex_lock(&gen_lock);
@@ -4387,6 +4448,10 @@ static void mirror_log(uint64_t frame) {
            "%.2f, %.3f MiB, from %.1f flushes of %.3f MiB; flushed and not copied (write-watched) %.3f MiB%s",
            (unsigned long long)frame, a.page_bytes / f / M, a.flush_n / f,
            a.flush_bytes / f / M, a.flush_calls / f, a.flush_sum / f / M, a.flush_skipped / f / M, capl);
+    if (n_gpa_late || __atomic_load_n(&n_gpa_wait, __ATOMIC_RELAXED))
+        rt_log("mem: mirror frame %llu: the device address table took up %llu mirrors after their first copy so far, %d "
+               "wait for theirs (NX2NAVI_GPA_LATE)", (unsigned long long)frame, (unsigned long long)n_gpa_late,
+               __atomic_load_n(&n_gpa_wait, __ATOMIC_RELAXED));
 }
 
 // After vram_log: every heap's usage as the driver reports it (VK_EXT_memory_budget) beside VMA's share of it, VMA by

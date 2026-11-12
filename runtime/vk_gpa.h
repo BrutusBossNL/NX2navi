@@ -24,5 +24,9 @@ uint32_t vk_gpa_remap(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, 
 // The same without the twin: the pages name buf alone (a pool whose VRAM mirror is evicted goes back to its imported
 // buffer).
 uint32_t vk_gpa_remap_plain(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, uint64_t buf_lo);
+// The pages of [lo, hi) that name old_rec keep reading old_rec's buffer and get buf as their twin: shaders read the
+// pool where they did and write buf too (a VRAM mirror until its first copy has run, vk_memory.c mirror_create).
+// Returns the new record, or 0 when there is none to give or twins are off (old_rec then stays as it is).
+uint32_t vk_gpa_remap_writes(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, uint64_t buf_lo);
 void vk_gpa_report(void);
 void vk_gpa_shutdown(void);
