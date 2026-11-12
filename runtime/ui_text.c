@@ -139,6 +139,17 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                     "of -O1: the game's own threads run faster on a slower CPU. The build takes "
                                     "several times longer.",
     [UI_MENU_LAMA_GUEST_OPT_NOTE] = "at the next rebuild",
+    [UI_MENU_LAMA_FREEZE] = "Freeze idle memory after",
+    [UI_MENU_LAMA_FREEZE_DESC] = "Submissions a memory region stays unwritten before it is made read-only, so the write "
+                                 "tracking can skip it. 1800 (about 15 s): few thaws and small tracking queries. 60: "
+                                 "the game thaws regions all the time and every thaw stalls a frame. Off: no stalls, but "
+                                 "the tracking scans all memory every frame.",
+    [UI_MENU_LAMA_ZSTD] = "Native data decompression",
+    [UI_MENU_LAMA_ZSTD_DESC] = "Decompresses the game's zstd data with the PC's libzstd instead of the game's own "
+                               "decoder translated from the console. Lighter streaming while you move.",
+    [UI_MENU_LAMA_ASYNC] = "Asynchronous replay",
+    [UI_MENU_LAMA_ASYNC_DESC] = "Translates the game's GPU commands on a thread of their own instead of the game's, so "
+                                "the game prepares the next frame meanwhile.",
     [UI_MENU_LAMA_PASS_TIMES] = "Pass times in the log",
     [UI_MENU_LAMA_PASS_TIMES_DESC] = "GPU time of every render pass and dispatch goes to the log, with the largest "
                                      "viewport each kind of pass draws with. Costs a little frame time.",

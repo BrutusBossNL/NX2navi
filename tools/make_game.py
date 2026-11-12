@@ -1448,6 +1448,7 @@ def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None, first=()):
     and its command, which is part of its objects' keys, stays as it was. NX2NAVI_GUEST_OPT (an environment variable,
     or guest_opt in nx2navi.ini) 1 builds the lifted code at -O1; by default -O2: the game's own threads run it and
     bound the frame on a slower CPU; the build takes several times longer."""
+    guest_opt = '-O1' if os.environ.get('NX2NAVI_GUEST_OPT', '').strip() == '1' else '-O2'   # -O2 unless guest_opt = 1
     def cmd_for(src, dst):
         cpp = src.suffix in ('.cpp', '.cxx')
         # the lifted code at -O1 (its size makes -O2 slow to build), the runtime at -O2; neither may assume strict

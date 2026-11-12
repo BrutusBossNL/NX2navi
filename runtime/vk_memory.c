@@ -3471,6 +3471,8 @@ static uint64_t hot_frame0, n_demoted;
 
 static void hot_check(void) {
     if (mirror_hot < 0) {
+        const char *v = cfg_value("NX2NAVI_MIRROR_HOT");   // the settings row's default (25) when unset
+        int p = v && *v ? atoi(v) : 25;
         mirror_hot = p < 0 ? 0 : p > 1000 ? 1000 : p;
         if (mirror_hot) rt_log("mem: pools copied %d%% of their size a frame stay in system memory (NX2NAVI_MIRROR_HOT)", mirror_hot);
     }

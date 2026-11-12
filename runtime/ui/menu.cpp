@@ -1633,6 +1633,7 @@ static void tab_lama(float scale) {
         static const char *const values[] = {"", "512", "1024", "2048", "4096", "8192"};
         const char *names[] = {menu_text(UI_MENU_AUTO), "512", "1024", "2048", "4096", "8192"};
         opt_choice_list("NX2NAVI_TEX_RELEASED_MAX", UI_MENU_LAMA_RELEASED, values, names, 6, UI_MENU_LAMA_RELEASED_DESC);
+    }
     opt_slider("NX2NAVI_MIRROR_HOT", UI_MENU_LAMA_MIRROR_HOT, 0, 100, UI_MENU_LAMA_MIRROR_HOT_DESC, 5, "%.0f %%");
     {   // vk_device.c vram_heap_limits
         static const char *const values[] = {"auto", "0"};
@@ -1643,7 +1644,13 @@ static void tab_lama(float scale) {
         const char *names[] = {"128 MB", "256 MB", "512 MB", "1024 MB", menu_text(UI_MENU_LAMA_NO_LIMIT)};
         opt_choice_list("NX2NAVI_UPLOAD_BATCH_MB", UI_MENU_LAMA_UPLOAD_BATCH, values, names, 5, UI_MENU_LAMA_UPLOAD_BATCH_DESC);
     opt_toggle("NX2NAVI_ASTC_SCRATCH_KEEP", UI_MENU_LAMA_ASTC_KEEP, UI_MENU_LAMA_ASTC_KEEP_DESC);
+    {   // vk_memory.c freeze_pass: submissions a region stays unwritten before it is frozen
+        static const char *const values[] = {"1800", "1200", "600", "60", "0"};
+        const char *names[] = {"1800", "1200", "600", "60", menu_text(UI_MENU_OFF)};
+        opt_choice_list("NX2NAVI_FREEZE_IDLE", UI_MENU_LAMA_FREEZE, values, names, 5, UI_MENU_LAMA_FREEZE_DESC);
+    opt_toggle("NX2NAVI_ZSTD_NATIVE", UI_MENU_LAMA_ZSTD, UI_MENU_LAMA_ZSTD_DESC);   // ov_zstd.c trusted
     opt_group(UI_MENU_LAMA_RENDER);
+    opt_toggle("NX2NAVI_REPLAY_ASYNC", UI_MENU_LAMA_ASYNC, UI_MENU_LAMA_ASYNC_DESC);   // vk_backend.c
     const bool native = vk_mesh_shader_native() != 0;   // vk_exec_draw.c: the emulation only where the GPU lacks them
     if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
     opt_toggle("NX2NAVI_MESH_EMULATION", UI_MENU_LAMA_MESH_EMU, UI_MENU_LAMA_MESH_EMU_DESC);
