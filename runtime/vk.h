@@ -519,6 +519,9 @@ typedef struct {
                                    // the GPU is past the submission being recorded (vk_defer_free), as the replay and DLSS
                                    // keep pointers to render targets across a command buffer; no view of it is cached
 } VkTexImage;
+// A 2D texture a shader samples as a 3D one: its one-slice 3D copy, refreshed when its content changed (vk_texture.c);
+// NULL when it does not qualify. Texture lock held.
+const VkTexImage *vk_texture_flat3d_locked(const VkTexImage *img, uint32_t layer);
 // The window texture the backend presents (vk_backend.c): *image and *format become the float picture the game copied
 // into it, when the last draw into it was that copy and the swapchain is HDR10.
 void vk_hdr_present_source(const VkTexImage *win, VkImage *image, VkFormat *format);

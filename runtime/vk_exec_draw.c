@@ -754,7 +754,13 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     switch (vt) {
     case VK_IMAGE_VIEW_TYPE_1D:
     case VK_IMAGE_VIEW_TYPE_1D_ARRAY: ok = img->type == VK_IMAGE_TYPE_1D; break;
-    case VK_IMAGE_VIEW_TYPE_3D: ok = img->type == VK_IMAGE_TYPE_3D; break;
+    case VK_IMAGE_VIEW_TYPE_3D:
+        ok = img->type == VK_IMAGE_TYPE_3D;
+        if (!ok && !storage && !ms && img->type == VK_IMAGE_TYPE_2D) {   // a flat texture under a 3D sample: its 3D copy
+            const VkTexImage *f = vk_texture_flat3d_locked(img, hv && v->set_layers ? v->min_layer : 0);
+            if (f) img = f, ok = 1;
+        }
+        break;
     case VK_IMAGE_VIEW_TYPE_CUBE:
     case VK_IMAGE_VIEW_TYPE_CUBE_ARRAY:
         ok = img->type == VK_IMAGE_TYPE_2D && (img->view_type == VK_IMAGE_VIEW_TYPE_CUBE || img->view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY);

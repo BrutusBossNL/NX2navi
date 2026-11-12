@@ -107,6 +107,10 @@ typedef struct Tex {
     uint64_t og_frame;            // gfx_counters.frames when it was made
     uint64_t og_drop_frame;       // gfx_counters.frames of the drop og_drop names
     uint64_t og_back_frame;       // gfx_counters.frames when it was last taken back
+    VkTexImage *flat3d;           // sampled as a 3D texture: its one-slice 3D copy (vk_texture_flat3d_locked), else NULL
+    VmaAllocation flat3d_alloc;
+    uint32_t flat3d_up, flat3d_layer;   // n_up and the layer of the copy's last refresh
+    uint64_t flat3d_wr;           // wr_fence then
 } Tex;
 
 // A slot keeps what vk_texture_by_id resolved for it, so a draw binding skips the key lookup and the address chain: the
@@ -1580,6 +1584,12 @@ static void destroy_tex(Tex *e) {
     if (e->released) nreleased--, rel_unlink(e);
     if (e->pub.image) vk_exec_image_gone(e->pub.image);   // none when another texture took it (create_tex, reuse)
     vk_defer_image(e->pub.image, e->alloc);
+    if (e->flat3d) {   // its 3D copy goes the same way
+        vk_exec_image_gone(e->flat3d->image);
+        vk_defer_image(e->flat3d->image, e->flat3d_alloc);
+        e->flat3d->gone = 1;
+        vk_defer_free(e->flat3d);
+    }
     free(e->snap);
     // The record goes once the GPU is past the submission being recorded, as its image: the replay keeps &e->pub as a
     // render target for the rest of a command buffer (vk_exec.c resolve_target) and DLSS for the frame, and this runs on
@@ -1587,6 +1597,80 @@ static void destroy_tex(Tex *e) {
     // the dead image (vk_exec_target_view), and a later image given the same handle drew through it into freed memory.
     e->pub.gone = 1;
     vk_defer_free(e);
+}
+
+// ---- a flat texture sampled as a 3D one
+// Maxwell samples a texture by its own descriptor, whatever the shader's instruction says: a 2D texture under a 3D
+// sample gives its texel at (u, v), and the third coordinate does nothing. Vulkan has no 3D view of a 2D image, so
+// get_view (vk_exec_draw.c) found no view for such a binding and the draw sampled a stand-in. Such a texture now gets a
+// 3D image of one slice with its texels, all of its levels, made in the upload batch and copied again when the texture
+// was uploaded or drawn into since (n_up, wr_fence) or another layer is asked for; a 3D view of that gives the 2D
+// texel for any w. The copy is recorded in the upload batch, which runs before the part that samples it, so a texture
+// the GPU draws every frame is sampled as it was a part or a frame before. Small plain colour textures only:
+// FLAT3D_MAX texels, one sample, not block-compressed (BC rejects 3D on some drivers). NX2NAVI_TEX_FLAT3D=0: the
+// stand-in, as before. Texture lock held; NULL when the texture does not qualify or the image cannot be made.
+#define FLAT3D_MAX (1024u * 1024u)
+static volatile int32_t n_flat3d;
+
+const VkTexImage *vk_texture_flat3d_locked(const VkTexImage *img, uint32_t layer) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("TEX_FLAT3D", "1") == 1;
+    Tex *e = (Tex *)img;   // pub is the first member
+    if (!on || img->gone || !img->image || img->type != VK_IMAGE_TYPE_2D || img->samples > 1 ||
+        img->aspect != VK_IMAGE_ASPECT_COLOR_BIT || img->block_views || format_compressed(img->format) ||
+        (uint64_t)img->width * img->height > FLAT3D_MAX || layer >= img->layers || img->levels > 16)
+        return NULL;
+    VkCtx *c = vk_ctx();
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    if (!e->flat3d) {
+        VkTexImage *f = malloc(sizeof *f);
+        if (!f) return NULL;
+        *f = *img;
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_3D,
+                                .format = img->format, .extent = {img->width, img->height, 1}, .mipLevels = img->levels,
+                                .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(c->vma, &ci, &ai, &f->image, &e->flat3d_alloc, NULL) != VK_SUCCESS) {
+            free(f);
+            return NULL;
+        }
+        f->type = VK_IMAGE_TYPE_3D, f->view_type = VK_IMAGE_VIEW_TYPE_3D, f->depth = 1, f->layers = 1;
+        f->usage = ci.usage, f->bound = 0, f->block_views = 0, f->fb_usage = 0, f->fb_learned = 0, f->gone = 0;
+        e->flat3d = f;
+        e->flat3d_up = ~0u;
+        cb = vk_upload_begin();
+        VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                    .srcStageMask = VK_PIPELINE_STAGE_2_NONE, .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                                    .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = f->image,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, 1}};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                               .pImageMemoryBarriers = &ib};
+        vkCmdPipelineBarrier2(cb, &di);
+        log_limited(&n_flat3d, "texture %#llx (%ux%u, %u levels, format %d) is sampled as a 3D texture: a one-slice 3D "
+                    "copy of it is made", (unsigned long long)img->addr, img->width, img->height, img->levels,
+                    (int)img->format);
+    }
+    if (e->flat3d_up != e->n_up || e->flat3d_wr != e->wr_fence || e->flat3d_layer != layer) {
+        if (!cb) cb = vk_upload_begin();
+        VkImageCopy rg[16];
+        for (uint32_t l = 0; l < img->levels; l++) {
+            uint32_t w = img->width >> l, h = img->height >> l;
+            rg[l] = (VkImageCopy){.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, layer, 1},
+                                  .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1},
+                                  .extent = {w ? w : 1, h ? h : 1, 1}};
+        }
+        barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vkCmdCopyImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, e->flat3d->image, VK_IMAGE_LAYOUT_GENERAL, img->levels, rg);
+        barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+        e->flat3d_up = e->n_up, e->flat3d_wr = e->wr_fence, e->flat3d_layer = layer;
+    }
+    if (cb) vk_upload_end();
+    return e->flat3d;
 }
 
 // ---- origins (NX2NAVI_TRACE=perf; a run without it tests the flag and counts the drops, nothing more)
