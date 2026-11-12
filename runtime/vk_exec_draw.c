@@ -2456,12 +2456,46 @@ static int pool_view_blank(VkImageView v) {
 
 // Slot id's entry of a kind went from the view was to now: noted when a texture's view gives way to the stand-in, which
 // every draw of the submission that samples the slot then reads (the set is written with update-after-bind).
+static uint32_t pool_blanked[512];   // the slots that lost their picture since the last pool_blank_check
+static int pool_nblanked;
 static void pool_note_blank(uint32_t id, VkImageView was, VkImageView now, int *noted) {
     if (!flight_on || *noted || !was || pool_view_blank(was) || !pool_view_blank(now)) return;
     uint64_t addr;
     uint32_t fmt, w, h, why = vk_texture_slot_why_locked((int)id, &addr, &fmt, &w, &h);
     flight_tex(FLIGHT_TEX_TOBLANK, addr, fmt, w, h, 0, 0, why, id);
+    if (pool_nblanked < (int)(sizeof pool_blanked / sizeof *pool_blanked)) pool_blanked[pool_nblanked++] = id;
     *noted = 1;
+}
+
+// A submission's first sync, before it changes anything: the slots that lost their picture during the submission
+// before and have none in any kind now went to the queue with their stand-ins. Texture lock taken here.
+static void pool_blank_check(void) {
+    if (!pool_nblanked) return;
+    vk_texture_lock();
+    for (int i = 0; i < pool_nblanked; i++) {
+        uint32_t id = pool_blanked[i];
+        int real = 0;
+        for (int k = 0; k < VK_POOL_KINDS && !real; k++) {
+            VkImageView v = PL.view[(size_t)k * VK_POOL_TEX + id];
+            real = v && !pool_view_blank(v);
+        }
+        if (real) continue;
+        uint64_t addr;
+        uint32_t fmt, w, h, why = vk_texture_slot_why_locked((int)id, &addr, &fmt, &w, &h);
+        flight_tex(FLIGHT_TEX_BLANKSUB, addr, fmt, w, h, 0, 0, why, id);
+    }
+    vk_texture_unlock();
+    pool_nblanked = 0;
+}
+
+// Whether slot id's entry of a kind in mask is a texture's view now (vk_texture_pool_shown_locked).
+static int pool_slot_shown(uint32_t id, uint32_t mask) {
+    for (int k = 0; k < VK_POOL_KINDS; k++) {
+        if (!(mask >> k & 1)) continue;
+        VkImageView v = PL.view[(size_t)k * VK_POOL_TEX + id];
+        if (v && !pool_view_blank(v)) return 1;
+    }
+    return 0;
 }
 
 static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
@@ -2496,6 +2530,7 @@ static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
         ps->stamp = m->stamp;
         return 1;
     }
+    vk_texture_pool_shown_locked(tok && pool_slot_shown(id, mask));
     for (int k = 0; k < VK_POOL_KINDS; k++) {
         if (!(mask >> k & 1)) continue;
         GfxShaderRes r = {0};
@@ -2509,6 +2544,7 @@ static int pool_fill(VkExec *ex, uint32_t id, uint32_t mask, uint64_t tok) {
             *e = ii.imageView, pool_write((uint32_t)k, id, ii.imageView, VK_NULL_HANDLE);
         }
     }
+    vk_texture_pool_shown_locked(0);
     int ok = !vk_texture_create_deferred_locked();
     uint32_t ent = 0;
     int got = vk_texture_pool_note_locked((int)id, &ent);
@@ -2579,6 +2615,7 @@ static void pool_sync(VkExec *ex) {
     if (!PL.layout) vk_pool_set_layout();
     uint64_t from = 0, pre = PL.logn;
     int took = PL.cur_fence != ex->fence;
+    if (took && flight_on) pool_blank_check();   // what the submission before went to the queue with
     int switched = pool_take_set(ex, &from);   // every submission its own set, before the shortcut
     if (PL.sealed) return;   // current when checked: a change since waits for the next sync, which takes a new set
     uint64_t t0 = kern_now_ns(), f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);

@@ -589,6 +589,9 @@ void vk_texture_create_budget_locked(int n);         // slot lookups create at m
 // descriptor exists, 4 that entry is released, 8 superseded, 16 overwritten, 32 uploaded, 64 the storage is readable,
 // 128 held out by disuse, 256 CPU-written, 512 GPU-owned, 1024 retiring), with the slot's storage and size.
 uint32_t vk_texture_slot_why_locked(int id, uint64_t *addr, uint32_t *format, uint32_t *w, uint32_t *h);
+// The pool's next lookup is of a slot whose entry in the set is a texture's view now (1) or a stand-in (0): a slot on
+// screen whose texture is not made is made by that lookup beside the creation budget (vk_texture.c slot_resolve).
+void vk_texture_pool_shown_locked(int shown);
 uint64_t vk_texture_pool_make_ns_take(void);         // ns the pool's lookups spent making and first uploading entries since the last call
 int vk_texture_create_deferred_locked(void);        // a lookup since the last call left a creation to the budget             // one past the highest texture slot registered so far (or more)
 int vk_sampler_slot_count_locked(void);
