@@ -1721,6 +1721,8 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     cid, cid_old = compiler_ids(clang, env)   # fast_clang's compiler writes the same objects: not part of the key
     now = cpu_level(clang, env)
     level = lifted_level(obj, now, update)
+    if os.environ.get('NX2NAVI_GUEST_OPT', '').strip() == '2':   # runtime_cmd's guest_opt
+        say('  lifted code at -O2 (NX2NAVI_GUEST_OPT): a long build')
     if level == now:
         say(f'  the lifted code is built for x86-64-v{level}, this processor\'s level' if level else
             '  the lifted code is built for generic x86-64: the processor\'s level could not be read')
