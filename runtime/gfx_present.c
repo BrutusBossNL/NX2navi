@@ -19,6 +19,7 @@
 #include "cfg.h"
 #include "coop.h"
 #include "flight.h"
+#include "flight_flash.h"
 #include "fs.h"
 #include "gfx.h"
 #include "gfx_wsys.h"
@@ -655,6 +656,18 @@ int vk_thumbs_read(uint64_t frame, uint8_t *rgba) {
             rgba[i] = rgba[i + 2], rgba[i + 2] = t;
         }
     return ok != 0;
+}
+
+// The flight recorder's flash trigger (flight.c flight_cells) gets the cell means of frame's thumbnail, which has just
+// completed in its ring slot (g_pl held). flash_cells reads a quarter of the slot's pixels, about 15 us measured on
+// ordinary memory (tests/flight_flash_check.py time); the ring is mapped host memory allocated for random access
+// (ensure_thumbs), which is cached memory where the device has it, as vk_thumbs_read's copy of a whole slot relies on.
+static void thumb_cells(uint64_t frame) {
+    unsigned ring = (unsigned)(frame % (uint64_t)g_th_n);
+    uint8_t cells[FLASH_CELLS];
+    vmaInvalidateAllocation(vk_ctx()->vma, g_th_alloc, TH_BYTES * ring, TH_BYTES);
+    flash_cells(g_th_ptr + TH_BYTES * ring, FLIGHT_THUMB_W, FLIGHT_THUMB_H, cells);
+    flight_cells(frame, cells);
 }
 
 void vk_present_capture(int on) {
@@ -1451,8 +1464,10 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     vkResetFences(c->device, 1, &g_fence[slot]);
     if (g_sc_hdr) vk_hdr_metadata(g_sc, 0);   // a changed peak or white goes to the display
     if (g_th_pending[slot]) {   // that fence has signalled: the thumbnail its submission wrote is complete
-        g_th_tag[g_th_pending[slot] % (uint64_t)g_th_n] = g_th_pending[slot];
+        uint64_t done = g_th_pending[slot];
+        g_th_tag[done % (uint64_t)g_th_n] = done;
         g_th_pending[slot] = 0;
+        if (flight_flash_on && g_th_ptr) thumb_cells(done);
     }
 
     int cx = 0, cy = 0, cw = w, ch = h;

@@ -1,5 +1,6 @@
 // NX2NAVI_FLIGHT=1 flight recorder (flight.c): the last frames' timing and event counts plus a thumbnail each, written to
-// disk on F8 or after a slow frame, so a glitch or stutter seen in play can be read after the fact.
+// disk on F8, after a slow frame or after a one-frame flash, so a glitch or stutter seen in play can be read after the
+// fact.
 #pragma once
 #include <stdint.h>
 
@@ -51,3 +52,9 @@ void vk_thumbs_frame(uint64_t frame);    // the present thread names the frame o
 // Copies frame's thumbnail as RGBA when the ring still holds it complete; 0 when it was never written, is still in
 // flight or was overwritten. Takes the present lock for one slot copy (about 20 us); any thread.
 int vk_thumbs_read(uint64_t frame, uint8_t *rgba);
+
+// The flash trigger (flight_flash.h): while flight_flash_on (set once by flight_init), gfx_present.c hands in the cell
+// means (flash_cells, FLASH_CELLS bytes) of each thumbnail when it completes, on the present thread, in frame order.
+// flight_cells judges the frame before and leaves a flash for flight_frame to dump.
+extern int flight_flash_on;
+void flight_cells(uint64_t frame, const uint8_t *cells);

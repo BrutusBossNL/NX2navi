@@ -858,6 +858,15 @@
 # takes longer than flight_spike_ms (0 to 60000).
 # flight = 0
 # flight_spike_ms = 100
+# The flight recorder also saves them after a one-frame flash: a frame whose picture differs from the frame before and
+# the frame after while those two are alike (0: not). The three pictures are compared as 16x9 cells of mean
+# brightness: at least flight_flash_cells cells (1 to 144) must be more than flight_flash_diff (4 to 255, of 255)
+# brighter or darker than in both other frames. Lower values catch smaller and fainter flashes and take more of the
+# game's own effects for one. At most one such save every 30 seconds; a flash the game means (lightning) counts
+# too, and one while the camera turns fast does not. It needs the recorder's thumbnails. Read at start.
+# flight_flash = 1
+# flight_flash_diff = 24
+# flight_flash_cells = 3
 # GPU pass marks: after a GPU crash (device lost) the log names the render pass or dispatch the GPU had started and the
 # last one it finished. Unset: on AMD GPUs (VK_AMD_buffer_marker). 1: also on NVIDIA GPUs
 # (VK_NV_device_diagnostic_checkpoints), which NVIDIA says costs a little. 0: off.

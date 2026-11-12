@@ -486,6 +486,13 @@ A change to which frames FSR 3.1 frame generation is told are camera cuts (`runt
 frame id gets its own frame's cut, that an id never noted or no longer held counts as a cut, and that a slot rewritten
 on another thread never answers an old id with a newer frame's value. No GPU, no game files.
 
+A change to which frames the flight recorder takes for a one-frame flash (`runtime/flight_flash.h`, `runtime/flight.c`
+`flight_cells`) passes `python tests\flight_flash_check.py`, which builds the header alone, draws pictures of the
+thumbnails' size and checks that a patch or a whole frame shown once is a flash, that a camera cut, a fade, a pan and
+shapes crossing the picture at any speed are none, where each of the test's rules decides, and that a frame beside one
+without a thumbnail is not judged. With `time` it prints what the cell means of one thumbnail cost. No GPU, no game
+files.
+
 The lifter (`recomp/`) and the CPU headers (`runtime/cpu.h`, `runtime/simd.h`) are checked against Unicorn. Every lifter
 change passes these, all run with `.venv`:
 

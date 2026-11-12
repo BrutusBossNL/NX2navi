@@ -4,7 +4,8 @@
 // frames, flight_tex), f<frame>.png per thumbnail and frames.tsv, written in that order by a background thread. Triggers: F8 while the game window has focus, a frame interval over
 // NX2NAVI_FLIGHT_SPIKE_MS (100; 0 off; at most one dump per 10 s), NX2NAVI_FLIGHT_AT=<frame>[,<frame>...] and
 // NX2NAVI_FLIGHT_EVERY=<n> (every n-th frame: with n under the ring's length the dumps of a run hold every frame of it
-// but the last n). A dump holds the frames up to FLIGHT_POST presents after the trigger, so the aftermath is in it
+// but the last n), and a one-frame flash (NX2NAVI_FLIGHT_FLASH, 1; at most one dump per 30 s; "The flash trigger"
+// below). A dump holds the frames up to FLIGHT_POST presents after the trigger, so the aftermath is in it
 // too. tools/flight_view.py reads it.
 //
 // Records come from perf_present (prof_win.c) on the render thread; the counts are differences of the NX2NAVI_TRACE=perf
@@ -15,6 +16,7 @@
 
 #include "cfg.h"
 #include "flight.h"
+#include "flight_flash.h"
 #include "gfx.h"
 #include "host.h"
 #include "input.h"
@@ -24,6 +26,7 @@
 
 #define FLIGHT_POST 30                 // presents recorded after the trigger before the dump starts
 #define FLIGHT_SPIKE_GAP_NS 10000000000ull
+#define FLIGHT_FLASH_GAP_NS 30000000000ull   // a flash dump at most this often
 
 // Record columns after frame, time and interval: blocked time per PERF_* kind (us), then the counts.
 enum { C_SUBMITS, C_PASSES, C_DRAWS, C_DRAWS_SEEN, C_CLEARS, C_COPIES, C_DISPATCHES, C_XLATED, C_PERF0, C_N = C_PERF0 + PERF_CNT_N };
@@ -77,6 +80,25 @@ static volatile uint64_t cost_ns, cost_max_ns;   // render-thread time in flight
 static TexEv *tex_ring;
 static volatile uint64_t tex_n;    // texture events written so far
 
+// The flash trigger: a frame whose picture differs strongly from the frame before and the frame after while those two
+// agree, which is what a one-frame flicker looks like (flight_flash.h has the test and what it leaves out). The
+// present thread hands in each thumbnail's cell means as the thumbnail completes (gfx_present.c thumb_cells), a few
+// presents after its frame, and flight_cells judges the frame before it there, once both its neighbours are known: a
+// frame beside one without a thumbnail is not judged. A flash found is left in flash_found for the render thread, whose
+// flight_frame starts the dump: named for the flash's frame, some presents back by then, and no more often than
+// FLIGHT_FLASH_GAP_NS. Only with thumbnails kept; NX2NAVI_FLIGHT_FLASH=0 turns it off, NX2NAVI_FLIGHT_FLASH_DIFF and
+// NX2NAVI_FLIGHT_FLASH_CELLS are the test's two thresholds. Their defaults (24 of 255, 3 cells) were tried on the
+// thumbnails of earlier dumps, 48000 frames of scripted runs. In the runs of builds that showed the scene white for
+// single frames they flagged about 980 frames; the ones looked at were such white frames (68 to 133 cells each) and
+// one frame with other lighting than its neighbours (9 cells). In the 16000 frames of the runs without that fault
+// they flagged nothing, and neither did a threshold of 10. Play with more effects on screen than those runs had is
+// not measured.
+int flight_flash_on;
+static int flash_diff, flash_min_cells;
+static FlashTrack flash_track;            // the present thread's
+static volatile uint64_t flash_found;     // (frame << 8 | cells counted) of the newest flash, 0 once flight_frame took it
+static uint64_t last_flash_ns, flash_n;   // the render thread's: the last flash dump's time, flashes found so far
+
 static unsigned env_u(const char *name, unsigned def) {
     const char *e = cfg_get(name);
     return e && *e ? (unsigned)strtoul(e, NULL, 10) : def;
@@ -108,6 +130,13 @@ void flight_init(void) {
     if (!plat_full_path(tmp, base_dir, sizeof base_dir)) snprintf(base_dir, sizeof base_dir, "%s", tmp);
     thumbs_on = env_u("NX2NAVI_FLIGHT_THUMBS", 1) != 0;
     if (thumbs_on) vk_thumbs_enable(ring_n);
+    if (thumbs_on && cfg_bool("NX2NAVI_FLIGHT_FLASH")) {
+        flash_diff = cfg_int("NX2NAVI_FLIGHT_FLASH_DIFF");
+        flash_diff = flash_diff < 4 ? 4 : flash_diff > 255 ? 255 : flash_diff;
+        flash_min_cells = cfg_int("NX2NAVI_FLIGHT_FLASH_CELLS");
+        flash_min_cells = flash_min_cells < 1 ? 1 : flash_min_cells > FLASH_CELLS ? FLASH_CELLS : flash_min_cells;
+        flight_flash_on = 1;
+    }
     if (!(tex_ring = calloc(TEX_RING, sizeof *tex_ring))) rt_log("flight: no memory for the texture events, none kept");
     flight_on = 1;
     rt_log("flight: on: last %d frames, %s; dump on F8, on a frame over %llu ms (one per 10 s)%s, to %s", ring_n,
@@ -117,6 +146,18 @@ void flight_init(void) {
         rt_log("flight: memory: records %llu KB, thumbnail ring %llu MB (host-visible)",
                (unsigned long long)((size_t)ring_n * sizeof *ring >> 10),
                (unsigned long long)((uint64_t)ring_n * FLIGHT_THUMB_W * FLIGHT_THUMB_H * 4 >> 20));
+    if (flight_flash_on)
+        rt_log("flight: dump on a one-frame flash too (one per 30 s): at least %d of %d cells of the picture more than "
+               "%d of 255 brighter or darker than in the frames before and after, which agree (NX2NAVI_FLIGHT_FLASH=0: "
+               "off)", flash_min_cells, FLASH_CELLS, flash_diff);
+    else
+        rt_log("flight: no dump on a one-frame flash (%s)", thumbs_on ? "NX2NAVI_FLIGHT_FLASH=0" : "it needs the thumbnails");
+}
+
+void flight_cells(uint64_t frame, const uint8_t *cells) {
+    int n = flash_note(&flash_track, frame, cells, flash_diff, flash_min_cells);
+    // the frame judged is the one before; a flash not yet taken gives way to the newer one
+    if (n) __atomic_store_n(&flash_found, (frame - 1) << 8 | (uint64_t)n, __ATOMIC_RELEASE);
 }
 
 void flight_tex(int kind, uint64_t addr, uint32_t format, uint32_t w, uint32_t h, uint32_t layers, uint32_t flags,
@@ -435,6 +476,17 @@ static void trigger(uint64_t frame, uint64_t interval_ns, const char *why) {
     dump_at = frame + (FLIGHT_POST < ring_n / 4 ? FLIGHT_POST : (uint64_t)ring_n / 4);
 }
 
+// The interval recorded for `frame` in ns, 0 when the ring no longer holds it; the newest records are looked at first.
+static uint64_t interval_of(uint64_t frame) {
+    uint64_t n = recorded < (uint64_t)ring_n ? recorded : (uint64_t)ring_n;
+    for (uint64_t k = 1; k <= n; k++) {
+        const Rec *r = &ring[(recorded - k) % (uint64_t)ring_n];
+        if (r->frame == frame) return (uint64_t)r->interval_us * 1000;
+        if (r->frame < frame) break;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------- per frame (render thread)
 void flight_frame(uint64_t frame, uint64_t now_ns, uint64_t interval_ns, const uint64_t blocked_ns[],
                   const volatile int64_t counts[]) {
@@ -478,6 +530,21 @@ void flight_frame(uint64_t frame, uint64_t now_ns, uint64_t interval_ns, const u
     if (spike_ns && interval_ns > spike_ns && recorded > 30 && (!last_spike_ns || now_ns - last_spike_ns >= FLIGHT_SPIKE_GAP_NS)) {
         if (!dump_at) last_spike_ns = now_ns;
         trigger(frame, interval_ns, "spike");
+    }
+    // A flash flight_cells found since the last present. Its frame is a few presents back (the thumbnails complete
+    // late): the dump carries that frame's number and interval, and like any other ends FLIGHT_POST presents after it.
+    uint64_t fl = flight_flash_on ? __atomic_exchange_n(&flash_found, 0, __ATOMIC_ACQ_REL) : 0;
+    if (fl) {
+        flash_n++;
+        if (!last_flash_ns || now_ns - last_flash_ns >= FLIGHT_FLASH_GAP_NS) {
+            if (!dump_at) {   // else a dump is pending already, and its frames hold this one
+                last_flash_ns = now_ns;
+                rt_log("flight: frame %llu looks like a one-frame flash: %u of %d cells unlike the frames before and "
+                       "after, which agree (flash %llu of this run)", (unsigned long long)(fl >> 8), (unsigned)(fl & 255),
+                       FLASH_CELLS, (unsigned long long)flash_n);
+            }
+            trigger(fl >> 8, interval_of(fl >> 8), "flash");
+        }
     }
     if (dump_at && frame >= dump_at) {
         start_dump();
