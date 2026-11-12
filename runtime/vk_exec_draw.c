@@ -1876,6 +1876,24 @@ static void tex_info_lookup(VkExec *ex, const GfxShaderRes *r, uint64_t h, int s
 }
 
 // Returns whether the image bound was made without its top mip levels (texture detail, VkTexImage.skip).
+// For the flight recorder: a draw's own binding of slot id resolved to no view, so the draw samples the stand-in. The
+// pool's entries are noted where they change (pool_note_blank); a binding written into a draw's own set is not, and it
+// keeps what it got. Noted once per slot and frame, for the first 256 slots of a frame. Texture lock held.
+static void direct_blank(uint32_t id) {
+    static uint32_t seen[256];
+    static uint64_t frame = ~0ull;
+    static int n;
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != frame) frame = f, n = 0;
+    for (int i = 0; i < n; i++)
+        if (seen[i] == id) return;
+    if (n == (int)(sizeof seen / sizeof *seen)) return;
+    seen[n++] = id;
+    uint64_t addr;
+    uint32_t fmt, w, h, why = vk_texture_slot_why_locked((int)id, &addr, &fmt, &w, &h);
+    flight_tex(FLIGHT_TEX_DIRECT, addr, fmt, w, h, 0, 0, why, id);
+}
+
 static int tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate,
                          VkDescriptorImageInfo *out, VkImage *image) {
     int ms = (r->type & 0x200) != 0, reduced = 0;
@@ -1906,6 +1924,7 @@ static int tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int stor
         }
     }
     if (!view) {
+        if (h && !(h >> 63) && !storage && flight_on) direct_blank((uint32_t)(h & 0xfffff));
         int di = dummy_index(res_view_type(r->type), ms);
         view = storage ? storage_dummy(di, r->format) : Z.img[di].view;
     }

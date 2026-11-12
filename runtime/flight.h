@@ -30,6 +30,9 @@ enum { FLIGHT_TEX_NEW, FLIGHT_TEX_UP, FLIGHT_TEX_REUP, FLIGHT_TEX_RELEASE, FLIGH
                            // detail: vk_texture_slot_why_locked's bits, what the slot's own texture was then)
        FLIGHT_TEX_BLANKSUB,// a slot that lost its picture during a submission still had none when the next one began:
                            // the submission's draws read its stand-in (us and detail as TOBLANK)
+       FLIGHT_TEX_DIRECT,  // a draw's own texture binding (not the pool's) named a slot and got the stand-in: that draw
+                           // samples it whatever the slot resolves to later (us and detail as TOBLANK; once a frame)
+       FLIGHT_TEX_UNREG,   // a shader sampled a pool slot that is not registered when its marks are read (us: the slot)
        FLIGHT_TEX_N };
 // The texture's flags: a depth or stencil image, mirrored (the CPU writes its storage), bound into pool memory, an ASTC
 // texture, written by the GPU (VkTexImage.gpu_owned).

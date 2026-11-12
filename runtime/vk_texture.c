@@ -2968,7 +2968,11 @@ void vk_pool_marks_read(const uint32_t *marks, uint32_t n) {
     if (n > (uint32_t)ntslots) n = (uint32_t)ntslots;
     uint32_t marked = 0;
     for (uint32_t id = 0; id < n; id++) {
-        if (!marks[id] || !tslots[id].used) continue;
+        if (!marks[id]) continue;
+        if (!tslots[id].used) {   // sampled, and not a registered slot now: what it showed is not known here
+            if (flight_on) flight_tex(FLIGHT_TEX_UNREG, 0, 0, 0, 0, 0, 0, 0, id);
+            continue;
+        }
         marked++;
         TexSlot *s = &tslots[id];
         if (s->ce && s->cgen == agen[sinfo[id] & 0xffff]) {   // what the slot resolves to now

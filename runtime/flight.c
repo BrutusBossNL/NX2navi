@@ -157,7 +157,7 @@ static void copy_events(DumpJob *j, uint64_t first) {
 }
 
 static const char *const tex_kind_names[FLIGHT_TEX_N] = {"new", "up", "reup", "release", "takeback", "drop", "bytes",
-                                                         "reg", "blank", "toblank", "blanksub"};
+                                                         "reg", "blank", "toblank", "blanksub", "direct", "unreg"};
 
 // <dir>/events.tsv: one line per texture event of the dump's frames (flight_tex).
 static void write_events(const DumpJob *j) {
@@ -192,12 +192,15 @@ static void write_events(const DumpJob *j) {
             static const char *const was[4] = {"an unused slot", "the slot named another descriptor at this storage",
                                                "the slot named other storage", "the slot named a finalized texture"};
             snprintf(detail, sizeof detail, "slot %u: %s", e->us, was[e->detail & 3]);
-        } else if (e->kind == FLIGHT_TEX_TOBLANK || e->kind == FLIGHT_TEX_BLANKSUB) {
+        } else if (e->kind == FLIGHT_TEX_UNREG) {
+            snprintf(detail, sizeof detail, "slot %u sampled, not registered now", e->us);
+        } else if (e->kind == FLIGHT_TEX_TOBLANK || e->kind == FLIGHT_TEX_BLANKSUB || e->kind == FLIGHT_TEX_DIRECT) {
             static const char *const bit[] = {"finalized", "own entry", "released", "superseded", "overwritten", "uploaded",
                                               "storage readable", "held out", "CPU-written", "GPU-owned", "retiring",
                                               "resolves to an entry", "that entry is a volume", "that entry is another descriptor's",
                                               "no shader reads the pool as a volume"};
             int o = snprintf(detail, sizeof detail, e->kind == FLIGHT_TEX_TOBLANK ? "slot %u lost its picture:"
+                             : e->kind == FLIGHT_TEX_DIRECT ? "slot %u bound by a draw got its stand-in:"
                              : "slot %u had no picture when its submission ended:", e->us);
             for (int b = 0; b < 15 && o < (int)sizeof detail - 40; b++)
                 if (e->detail & 1u << b) o += snprintf(detail + o, sizeof detail - (size_t)o, " %s;", bit[b]);
