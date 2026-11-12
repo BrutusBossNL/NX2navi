@@ -3068,6 +3068,41 @@ static void commit_evict(void) {   // tex_lock held, the commit is low and the r
     if (freed < COMMIT_EVICT_STEP) evict_disused(COMMIT_EVICT_STEP - freed);
 }
 
+// The released entries hold more than their bound (released_cap_bytes) after drop_stale took what it may: one line that
+// says what keeps the rest, at most every REL_CENSUS_SUBS submissions and REL_CENSUS_LINES times a run. The bound is
+// no bound for an entry a lookup still reaches, and the pool stamps every GPU-owned entry that a slot's last fill
+// resolved to in each submission (pool_touch), a finalized slot's released one too: at 5120x2160 a session's log had
+// 989 and then 2,172 released entries holding 9.2 and 10.1 GiB against a bound of 4,008 MiB, and its overwritten
+// render targets "last used 1 presents ago". Each entry counts once, under the first reason that holds.
+#define REL_CENSUS_SUBS 3600
+#define REL_CENSUS_LINES 24
+static void rel_census(uint64_t cap) {   // tex_lock held
+    static uint32_t last, lines;
+    if (lines >= REL_CENSUS_LINES || (last && submit_epoch - last < REL_CENSUS_SUBS)) return;
+    last = submit_epoch ? submit_epoch : 1, lines++;
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    enum { YOUNG, SLOT, SLOT_OVER, SAMPLED, LOOKED, NEXT, KINDS };
+    uint64_t by[KINDS] = {0}, gpu = 0;
+    int n[KINDS] = {0}, ngpu = 0;
+    for (const Tex *e = rel_head; e; e = e->rel_next) {
+        if (!e->bytes) continue;
+        int shown = e->ph && pref[e->ph - 1].refs;
+        int k = now - e->rel_frame < stale_after(e) ? YOUNG
+              : now - e->samp_frame < STALE_FRAMES ? SAMPLED
+              : shown ? (e->overwritten ? SLOT_OVER : SLOT)
+              : !e->overwritten && !idle(e, now) ? LOOKED : NEXT;
+        by[k] += e->bytes, n[k]++;
+        if (!comes_back_intact(e)) gpu += e->bytes, ngpu++;
+    }
+    const double M = 1048576.0;
+    rt_log("vk: released textures over their bound: %d entries, %.0f MiB of %.0f MiB (%d of them, %.0f MiB, hold content "
+           "only the GPU made): %d, %.0f MiB, released too lately to go; %d, %.0f MiB, sampled or drawn into lately; %d, "
+           "%.0f MiB, shown by a texture pool slot and not sampled, and %d more, %.0f MiB, that another target was drawn "
+           "over; %d, %.0f MiB, reached by another lookup; %d, %.0f MiB, next to go", nreleased, rel_bytes / M, cap / M,
+           ngpu, gpu / M, n[YOUNG], by[YOUNG] / M, n[SAMPLED], by[SAMPLED] / M, n[SLOT], by[SLOT] / M, n[SLOT_OVER],
+           by[SLOT_OVER] / M, n[LOOKED], by[LOOKED] / M, n[NEXT], by[NEXT] / M);
+}
+
 static void sweep_pressure(void) {   // tex_lock held
     if (vram_pressure < 0) {
         const char *s = cfg_get("NX2NAVI_TEX_VRAM_PRESSURE");
@@ -3128,6 +3163,7 @@ static void sweep_pressure(void) {   // tex_lock held
         drop_overwritten();
         uint64_t cap = released_cap_bytes();
         if (rel_bytes > cap) drop_stale(cap, &n_cap_drops, DROP_CAP);
+        if (cap != UINT64_MAX && rel_bytes > cap + cap / 4) rel_census(cap);   // well over it still: what holds the rest
         if (rel_bytes > COMMIT_LOW_KEEP && low && !held)
             more = drop_stale(COMMIT_LOW_KEEP, &n_commit_drops, DROP_COMMIT) == PRESSURE_STEP;
     }
