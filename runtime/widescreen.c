@@ -6,9 +6,10 @@
 // them from the patch page instead (wide_out: the picture, wide_scene: the scene), wide_aspect replaces a 16:9 ratio of
 // sead's perspective projection (every 16:9 camera of the game) with the picture's, wide_hud keeps the HUD and menus
 // in their 16:9 shape in the middle of the picture (the UI's full-screen projection squeezed horizontally; fades and
-// the menu backgrounds that redraw a capture of the whole picture stay full width), and wide_movie shows pre-rendered
-// movies in the same middle 16:9. The heights stay the game's (1440 and 1080), so only the width grows, by the shape's
-// ratio to 16:9; the present scales the picture to the window keeping its shape (gfx_present.c, NX2NAVI_ASPECT=fit).
+// the menu backgrounds that redraw a capture of the whole picture stay full width), wide_movie shows pre-rendered
+// movies in the same middle 16:9, and wide_save draws that middle 16:9 into the picture a save file keeps. The heights
+// stay the game's (1440 and 1080), so only the width grows, by the shape's ratio to 16:9; the present scales the
+// picture to the window keeping its shape (gfx_present.c, NX2NAVI_ASPECT=fit).
 //
 // Setting NX2NAVI_GAME_ASPECT, read at start: "16:9" (the game's own, every set off), "window" (the shape of the window,
 // or of the monitor in fullscreen), or a fixed shape "21:9" (2560x1080 monitors, 64:27), "32:9". A shape within 1% of
@@ -32,6 +33,7 @@
 #define GAME_H 1440
 #define SCENE_H 1080
 #define GAME_DTA_KIB 312320.0     // the texture heap made for that picture (wide_heap_extra_kib)
+#define SAVE_W 543                // the width of the target a save's picture is drawn into (save_extra)
 
 // The window's size, or the monitor's in fullscreen; 0 when unknown.
 static int screen_size(int *w, int *h) {
@@ -164,9 +166,19 @@ uint64_t wide_heap_extra_kib(void) {
     return grow > 0 ? (uint64_t)ceil(GAME_DTA_KIB * grow / 1024) * 1024 : 0;
 }
 
+// The save's picture (recomp/patches-v111.txt, set wide_save): the game draws the whole picture into a target 543
+// pixels wide, which squeezes a picture wider than 16:9. The viewport of that draw is made wider than its target by the
+// picture's ratio over 16:9, half of it on each side, so the target, which the scissor keeps to, holds the middle 16:9
+// of the picture. Returns the pixels added for a picture of ow x oh: an even number, so the picture's middle stays in
+// the target's middle; 0 for a picture that is not wider than 16:9, taller or not.
+static int32_t save_extra(unsigned ow, unsigned oh) {
+    double wider = (double)ow * GAME_H / ((double)oh * GAME_W);
+    return wider > 1 ? 2 * (int32_t)lround(SAVE_W * (wider - 1) / 2) : 0;
+}
+
 void wide_init(void) {
     int so = rt_patch_set("wide_out"), ss = rt_patch_set("wide_scene"), sa = rt_patch_set("wide_aspect"),
-        sh = rt_patch_set("wide_hud"), sm = rt_patch_set("wide_movie");
+        sh = rt_patch_set("wide_hud"), sm = rt_patch_set("wide_movie"), sv = rt_patch_set("wide_save");
     // The scene's share of the picture is not a size in this set: the game's GPU-time dynamic resolution sets it each
     // frame (3/4 of the picture at most), and writing other sizes into wide_scene's constant or the 1920x1080 render
     // sizes left the light target where the controller put it. DLSS's modes fix the share through res_fixed instead
@@ -201,14 +213,24 @@ void wide_init(void) {
     memcpy(page + 176, squeeze4, 16);
     memcpy(page + 192, &margin, 4);
     memcpy(page + 208, keep2, 16);
+    // the save's picture: what its viewport gets added to its x and to its width. The set is not one wide_available
+    // asks for: C generated before it existed keeps the other sets and squeezes the save's picture as before.
+    int32_t extra = save_extra(ow, oh), save[2] = {-(extra / 2), extra};
+    memcpy(page + 224, save, 8);
     rt_patch_switch(so, 1);
     rt_patch_switch(ss, 1);
     rt_patch_switch(sa, 1);
     rt_patch_switch(sh, 1);
     rt_patch_switch(sm, 1);
+    if (extra > 0) rt_patch_switch(sv, 1);
     scale_k = oh > GAME_H ? (double)oh / GAME_H : 1.0;
     rt_log("widescreen: picture %ux%u, scene %ux%u (%.0f%% of it), camera aspect ratio %.4f (16:9 is %.4f), UI and movies "
            "in the middle %.1f%%", ow, oh, sw, sch, f * 100, ratio, game, squeeze * 100);
+    if (extra > 0 && sv >= 0)
+        rt_log("widescreen: a save's picture holds the middle 16:9 (its viewport %d pixels wide on the %d of its target)",
+               SAVE_W + extra, SAVE_W);
+    else if (extra > 0)
+        rt_log("widescreen: the generated C has no set wide_save; a save's picture holds the whole picture, squeezed");
 }
 
 // The picture the game draws: the widescreen one wide_init set up, else the game's own 2560x1440. DLSS's largest mode

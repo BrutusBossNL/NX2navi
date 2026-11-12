@@ -4,7 +4,8 @@
 # matched against, +116 the ratio that replaces it and +120 the tolerance of the match, as floats; +144 the bit
 # patterns of the UI's full-screen orthographic projection (m00 = 2 / 3840, m11 = 2 / 2160), +160..+175 and +208..+223
 # the four screen vtables that keep it, +176 the UI's horizontal squeeze (16:9 over the picture's ratio) in four lanes, +192 the
-# movie's margin on each side as a share of the width.
+# movie's margin on each side as a share of the width, +224 what the viewport of the save's picture gets added to its x
+# and +228 to its width, as 32-bit integers.
 #
 # The matrix-update, UI and movie sites: Copyright (c) 2026 Ivan0xFF (MIT; see THIRD_PARTY_NOTICES.md). Each is
 # written without branches or flags, as the generator's patch sites need. The set names differ from the other patch
@@ -162,6 +163,22 @@ site wide_hud main 774368 ad401041 ad401041 @page:x16 fd404a10 6e040431 6e0c2491
 # Pre-rendered movies: the movie layer's draw (main+0x3b5c71c) builds a viewport over the whole picture (sead viewport
 # at x29 - 40: min x +8, max x +16); it moves in by the page's margin on each side, the middle 16:9 of the picture.
 site wide_movie main 3b5c758 a941a269 d100a3b0 bd400a10 bd401211 1e303a32 @page:x17 bd40c233 1e330a52 1e322a10 1e323a31 bd000a10 bd001211 a941a269   # movie layer viewport: ldp x9, x8, [x19, #0x18]
+
+# The save's picture: the viewport helper (main+0x2846e0) makes whole pixels of a viewport object on its target and
+# hands x, y, width and height in w1..w4 to nvnCommandBufferSetScissor (main+0x284804) and then to
+# nvnCommandBufferSetViewport (main+0x284828), before it leaves through SetDepthRange; the two procedures' addresses
+# are the globals behind main+0x4c8da90 and main+0x4c8e7d8, which main+0x12a1738 onwards fills by name. The picture a
+# save file shows is drawn through it into a target of 543x306 (not a constant of main: the size comes with the game's
+# data, so the site knows the viewport by its numbers), and the whole picture went in: wider than 16:9, it came out
+# squeezed. Where the helper loads SetViewport's address, a viewport of exactly 0, 0, 543, 306 gets the page's +224
+# added to its x and +228 to its width (runtime/widescreen.c wide_init: wider by the picture's ratio over 16:9 and
+# centred on the target). The scissor was set before and stays the target's, so the save shows the middle 16:9 of the
+# picture, the part a 16:9 picture holds. Without branches or flags: the differences from those four numbers are or-ed
+# together, clz >> 5 of that is 1 only when there is none, and madd adds the page's two numbers times it. x9..x12 and
+# x16 are free: the call takes x0..x4, and the helper reads none of them after it. The set is on only for a picture
+# wider than 16:9.
+set wide_save NX2NAVI_PATCH_WIDE_SAVE 0
+site wide_save main 284824 f9400108 f9400108 @page:x16 295c2e0a 51087c69 5104c88c 2a0c0129 2a010129 2a020129 5ac01129 53057d29 1b0a0521 1b0b0d23   # ldr x8, [x8]; ldp w10, w11, [x16, #224]; sub w9, w3, #543; sub w12, w4, #306; orr w9, w9, w12; orr w9, w9, w1; orr w9, w9, w2; clz w9, w9; lsr w9, w9, #5; madd w1, w9, w10, w1; madd w3, w9, w11, w3
 
 # The game's zstd decoder (BSD zstd, statically linked into main) through the host's libzstd (runtime/ov_zstd.c): the
 # three calls of ZSTD_decompressMultiFrame (main+0xeb380: dctx, dst, capacity, src, size, dict, dict size, ddict) go to
