@@ -112,14 +112,20 @@ ffxReturnCode_t create_counted(ffxContext *ctx, ffxCreateContextDescHeader *desc
     return r;
 }
 
-// One upscaling context per output size, made for render sizes up to the output's: every render scale the menu sets
-// runs on it with its own render size at each dispatch (the API's dynamic resolution, up to maxRenderSize), and the
-// game's second scenes, of another output size, get their own. When all are taken, the least recently used one is
-// destroyed for the new size once the GPU is idle, as vk_dlaa.c free_size does for DLSS. One per render size, as
-// before, kept a context for each mode tried, each with its own video memory, and the seventh size found none.
+// One upscaling context per render size and output size, as AMD's own sample keeps them: it waits for the GPU and makes
+// the context anew whenever the render resolution changes, and sets FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION only for its
+// dynamic resolution mode. One context per output size that every mode of the menu ran on, with another render size at
+// each dispatch and without that flag, preceded an access violation in AMD's driver inside FSR 4's dispatch at the
+// first frame after a switch from 67 % to 100 % (vk_ffx4.cpp keeps its contexts the same way). With the game's dynamic
+// resolution on (NX2NAVI_DYN_RES, dynres.c), whose steps change the render size every few seconds, one context with
+// that flag takes them all. A context of another render size goes once no command buffer can still hold it
+// (UP_RECENT), so a switch keeps at most two of an output size for a few frames, and the game's second scenes, of
+// another output size, keep their own. When all slots are taken, the least recently used one is destroyed for the new
+// size once the GPU is idle, as vk_dlaa.c free_size does for DLSS.
 struct Up {
     ffxContext ctx = nullptr;
-    uint32_t mw = 0, mh = 0, ow = 0, oh = 0;   // the largest render size it takes; the output size
+    uint32_t mw = 0, mh = 0, ow = 0, oh = 0;   // the render size it was made for (the largest it takes with drs); the output size
+    bool drs = false;                          // made for dynamic resolution (FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION)
     uint64_t used = 0, used_ns = 0;            // up_tick and the time when context_for last returned it
 } U[4];
 uint64_t up_tick;
@@ -157,15 +163,22 @@ FfxApiResource image(const VkFfxImage *i, uint32_t state, uint32_t usage) {
 Up *context_for(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
     up_tick++;
     uint64_t now = plat_now_ns();
-    Up *small = nullptr;   // a context of this output size made for smaller render sizes
+    const bool drs = cfg_bool("NX2NAVI_DYN_RES");
+    Up *found = nullptr;
     for (Up &u : U)
-        if (u.ctx && u.ow == ow && u.oh == oh) {
-            if (w <= u.mw && h <= u.mh) {
-                u.used = up_tick, u.used_ns = now;
-                return &u;
-            }
-            small = &u;
+        if (u.ctx && u.ow == ow && u.oh == oh && u.drs == drs && (drs ? w <= u.mw && h <= u.mh : w == u.mw && h == u.mh))
+            found = &u;
+    const VkCtx *c = vk_ctx();
+    int waited = 0;
+    for (Up &u : U)   // the contexts of this output size for another render size, once no command buffer holds them
+        if (u.ctx && &u != found && u.ow == ow && u.oh == oh && up_tick - u.used >= UP_RECENT) {
+            if (!waited++) vk_queue_lock(), vkDeviceWaitIdle(c->device), vk_queue_unlock();   // their work may be in flight
+            destroy_up(&u, "the render size changed");
         }
+    if (found) {
+        found->used = up_tick, found->used_ns = now;
+        return found;
+    }
     Up *slot = nullptr, *lru = nullptr;
     for (Up &u : U) {
         if (!u.ctx) {
@@ -174,16 +187,14 @@ Up *context_for(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
         }
         if (up_tick - u.used >= UP_RECENT && (!lru || u.used < lru->used)) lru = &u;
     }
-    if (small && up_tick - small->used >= UP_RECENT) slot = nullptr, lru = small;   // a larger one takes its place
-    const VkCtx *c = vk_ctx();
     if (!slot && lru) {
         vk_queue_lock(), vkDeviceWaitIdle(c->device), vk_queue_unlock();   // its work may still be in flight
-        destroy_up(lru, lru == small ? "a larger render size came" : "its slot went to another output size");
+        destroy_up(lru, "its slot went to another output size");
         slot = lru;
     }
     if (!slot) return nullptr;
-    // the render size up to the output size: every mode of the menu, and a scene drawn at the output size itself
-    uint32_t mw = w > ow ? w : ow, mh = h > oh ? h : oh;
+    // the render size itself; for dynamic resolution, every size up to the output's (and a scene at the output size)
+    uint32_t mw = !drs ? w : w > ow ? w : ow, mh = !drs ? h : h > oh ? h : oh;
     ffxCreateBackendVKDesc be = {};
     be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
     be.vkDevice = c->device;
@@ -194,6 +205,9 @@ Up *context_for(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
     d.header.pNext = &be.header;
     // no infinite-depth flag: the game's far plane is finite (vk_dlaa.c proj_planes) and each dispatch gives it
     d.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+    // NX2NAVI_FFX_DEBUG=1 (test): the library checks the values of each dispatch and says what it finds (message)
+    if (rt_knob("FFX_DEBUG", "0")) d.flags |= FFX_UPSCALE_ENABLE_DEBUG_CHECKING;
+    if (drs) d.flags |= FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION;
     d.maxRenderSize = {mw, mh};
     d.maxUpscaleSize = {ow, oh};
     d.fpMessage = message;
@@ -203,7 +217,7 @@ Up *context_for(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
         slot->ctx = nullptr;
         return nullptr;
     }
-    slot->mw = mw, slot->mh = mh, slot->ow = ow, slot->oh = oh, slot->used = up_tick, slot->used_ns = now;
+    slot->mw = mw, slot->mh = mh, slot->ow = ow, slot->oh = oh, slot->drs = drs, slot->used = up_tick, slot->used_ns = now;
     ffxQueryGetProviderVersion v = {};
     v.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     A.query(&slot->ctx, &v.header);
