@@ -1521,6 +1521,7 @@ static int pool_presnap(void) {
     if (mode < 0) mode = rt_knob("POOL_PRESNAP", "1");
     return RT_KNOB_ON(mode);
 }
+static void pool_made(uint64_t t0);   // below, with the pool's creation budget
 
 // The submission being recorded checked the pool's entries by this list: for the idle clock it walked the pool
 // (vk_texture_new_submit).
@@ -1556,7 +1557,9 @@ int vk_texture_pool_fresh_locked(void) {
         }
         if (e->released) continue;
         if (!e->uploaded || e->checked != submit_epoch) {
+            uint64_t m0 = e->uploaded ? 0 : kern_now_ns();   // a first upload is part of making the entry
             make_fresh_snap(e);
+            if (m0) pool_made(m0);
             e->checked = submit_epoch;
             n_pool_checks++;
         }
@@ -4123,6 +4126,12 @@ static int want_take(void) {
 }
 
 void vk_texture_create_budget_locked(int n) { create_budget = n, create_deferred = 0; }
+
+// What the pool's lookups have spent making entries (entry_of under the budget) and uploading them the first time,
+// since the last call: the time vk_exec_draw.c pool_create_ns limits in a frame. Texture lock held where it is added.
+static uint64_t pool_make_ns;
+uint64_t vk_texture_pool_make_ns_take(void) { return __atomic_exchange_n(&pool_make_ns, 0, __ATOMIC_RELAXED); }
+static void pool_made(uint64_t t0) { __atomic_fetch_add(&pool_make_ns, kern_now_ns() - t0, __ATOMIC_RELAXED); }
 int vk_texture_create_deferred_locked(void) { int d = create_deferred; create_deferred = 0; return d; }
 
 // NX2NAVI_TEX_STALE_KEPT (default 1; 0: the stand-in, as before): a finalized slot of a CPU-written texture resolves to
@@ -4189,7 +4198,9 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         else if (!mem_readable((uint64_t)(uintptr_t)s->t.mem, s->t.L.size)) e = NULL;
         else if (!create_budget && !(s->cwant && want_take())) create_deferred = 1;
         else {
+            uint64_t m0 = kern_now_ns();
             e = entry_of(&s->t);
+            pool_made(m0);
             if (create_budget > 0) create_budget--;
         }
         if (e) s->cwant = 0;
@@ -4320,7 +4331,9 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
         round_checks++;
         // a released entry here is a finalized slot's own (stale_kept): the storage may be the game's to free or reuse
         if (e && !e->released && (!e->uploaded || e->checked != submit_epoch)) {
+            uint64_t m0 = pool_ctx && !e->uploaded ? kern_now_ns() : 0;   // the pool's lookup: as in its list check
             make_fresh_snap(e);
+            if (m0) pool_made(m0);
             e->checked = submit_epoch;
             touch(e);
         }

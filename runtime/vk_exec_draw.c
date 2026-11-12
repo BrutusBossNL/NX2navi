@@ -1965,7 +1965,7 @@ static struct {
     int ready, uab, sealed;            // sealed: a part of the current submission already reads sets[cur]
     uint32_t kinds, gen, epoch, sgen;
     int retry;                         // the last sync left slots to the creation budget
-    uint64_t frame, frame_ns;          // the frame of the last sync, and the sync time spent in it (pool_create_ns)
+    uint64_t frame, frame_ns;          // the frame of the last sync, and the time its syncs spent making textures (pool_create_ns)
     uint64_t n_frame_stops, n_defer_skips;   // syncs that created nothing for the frame's time, lookups they skipped
     uint64_t *tok;                     // per texture slot: vk_texture_slot_token it was filled under (0: stand-ins)
     VkImageView *view;                 // [kind * VK_POOL_TEX + id]: what the entry holds
@@ -2198,9 +2198,16 @@ static int pool_create_budget(void) {
 // The refresh runs before every draw that binds the pools, not once per submission, so the count above held for each
 // draw: an area load made 4,925 entries (1.7 GB of uploads) in one 430 ms frame, and while slots were left over every
 // draw walked the whole table and looked each of them up again (key and hash), about 100 ms of that frame on its own.
-// Once a frame's refreshes have taken NX2NAVI_POOL_CREATE_MS (default 6; 0: no limit), its later ones create nothing,
-// and skip the slots left earlier in the frame (pool_defer) instead of looking them up again; the first refresh of
-// each frame keeps its count budget. The slots left keep their stand-in, a few frames longer in a large load.
+// Once a frame's refreshes have spent NX2NAVI_POOL_CREATE_MS (default 6; 0: no limit) making textures, its later ones
+// create nothing, and skip the slots left earlier in the frame (pool_defer) instead of looking them up again; the
+// first refresh of each frame keeps its count budget. The slots left keep their stand-in, a few frames longer in a
+// large load.
+// The time counted is what the lookups spend making entries and uploading them the first time
+// (vk_texture_pool_make_ns_take). It was the whole refresh, with its check of every entry the pools hold: in Kakariko
+// that check alone takes 0.8 ms a submission, six submissions a frame, so most of the 6 ms was gone before a texture
+// was made, and the frame's later refreshes made none. The game moves about thirty of its textures to new storage
+// every four or five frames there; the ones a refresh left were on screen as their grey stand-ins for a frame (three
+// lamp posts in one recorded frame), 87 refreshes in 600 frames with 1,090 slots left between them.
 static uint64_t pool_create_ns(void) {
     static int64_t ns = -1, load_ns;
     if (ns < 0) {
@@ -2551,10 +2558,11 @@ static void pool_sync(VkExec *ex) {
     if (PL.sealed) return;   // current when checked: a change since waits for the next sync, which takes a new set
     uint64_t t0 = kern_now_ns(), f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (f != PL.frame) PL.frame = f, PL.frame_ns = 0;
+    vk_texture_pool_make_ns_take();   // what other lookups left: only this sync's making counts for the frame
     pool_sync_entries(ex);
     uint64_t t1 = kern_now_ns();
     PL.sync_ns += t1 - t0;
-    PL.frame_ns += t1 - t0;
+    PL.frame_ns += vk_texture_pool_make_ns_take();
     if (switched) {
         vk_texture_lock();
         pool_catch_up(from, pre);   // what the other sets got since; this sync's own writes went into it already
