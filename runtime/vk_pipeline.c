@@ -48,6 +48,7 @@
 #include "nvn_hmap.h"
 #include "platform/platform.h"
 #include "prp_file.h"
+#include "spirv_water.h"
 #include "tex.h"
 #include "vk_build_gate.h"
 #include "vk_cache_file.h"
@@ -3001,127 +3002,105 @@ static uint32_t vs_union_missing(const VkPipeState *s, GfxShaderIo fin[32]) {
 }
 
 
-// Optional private modules generated from exact local inputs by projective_recipe.py.
-// Mode 1 changes a complete coordinate pair; mode 2 guards one absorption material.
-static const char *water_projective_dir(void) {
-    static PlatMutex lock = PLAT_MUTEX_INIT;
-    static int checked;
-    static const char *dir;
-    plat_mutex_lock(&lock);
-    if (!checked) {
-        checked = 1;
-        const char *candidate = cfg_get("NX2NAVI_SPV_OVERRIDE");
-        if (candidate && *candidate) dir = candidate;
-    }
-    const char *result = dir;
-    plat_mutex_unlock(&lock);
-    return result;
-}
+// ---- water corrections (docs/water-projective.md; NX2NAVI_WATER_PROJECTIVE, default 1; 0: the translations as built)
+// Two of the game's water translations are built from an edited module (spirv_water.c):
+//  - the coordinate pair (mode 1). The vertex stage worked out each vertex's place on the screen (x / w and y / w,
+//    scaled to 0..1) and the fragment stage read it interpolated without perspective, to sample the scene behind the
+//    water. A triangle with a corner behind the camera has no such place for that corner, and the scene was sampled
+//    elsewhere: a rectangle of water over solid ground at the Hyrule Castle moat and the Castle Town canal. The pair
+//    now hands x, y and w down undivided and the fragment stage divides. Both stages change, or neither.
+//  - the absorption material (mode 2): its distance through the water could come out negative, which turned the
+//    dimming into a gain (a red beam). The distance stored is at least 0.
+// The translations are known by the FNV-1a of their SPIR-V, one profile per translator output (the host options of
+// AMD's and NVIDIA's drivers give different modules); every other module is built as it is. The edited modules are
+// made at their first use and kept. Modes go into the stage libraries' keys (PrKey, FsKey), so a library of an edited
+// module is never linked with one of the original.
+typedef struct {
+    uint64_t vs, fs, fs_set1;             // the coordinate pair: vertex, fragment, the fragment in its set 1 form
+    uint64_t mat, mat_set1;               // the absorption material, and in its set 1 form
+    uint32_t mat_pointer, mat_distance;   // the ids of the store its distance goes through
+} WaterProfile;
+static const WaterProfile water_profiles[] = {
+    {0xf6d753852c47b0deull, 0xa39c3d09241441faull, 0x3d3a316ab4da3bbaull, 0xe73dfc0f4c556df8ull, 0xabfccea256824a78ull, 1965, 8490},
+    {0x8d83e3705d790fedull, 0x3c20cb98dbaeb257ull, 0x216bd323c6b48ee2ull, 0x061318799d885bcfull, 0xb3cec6d0d78ac25aull, 1969, 8826},
+};
+enum { WATER_VERTEX, WATER_FRAGMENT, WATER_ABSORPTION };
 
-static int water_local_module_exists(uint64_t hash) {
-    const char *dir = water_projective_dir();
-    if (!dir) return 0;
-    char path[700];
-    int n = snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)hash);
-    return n > 0 && n < (int)sizeof path && plat_file_exists(path);
-}
+// The edited modules, by the hash of the module each stands for as it is built: a vertex translation, or a fragment
+// module in its set 1 form. state: 0 empty, 1 made, -1 the edit refused the module (it is built as it is).
+static struct { uint64_t key; uint32_t *code; uint64_t words; int state; } water_mods[8];
+static PlatMutex water_lock = PLAT_MUTEX_INIT;
 
-static int water_projective_pair(const VkPipeState *s) {
-    if (!P.indep || !s->fs || !water_projective_dir()) return 0;
-    uint64_t vn = 0, fn = 0;
-    const uint32_t *f = gfx_shader_spirv(s->fs, &fn);
-    if (!f) return 0;
-    uint64_t fh = fnv(FNV0, f, (size_t)fn * 4);
-    // The absorption correction is independent of the coordinate pair.
-    if ((fh == 0xe73dfc0f4c556df8ull && water_local_module_exists(0xabfccea256824a78ull)) ||
-        (fh == 0x061318799d885bcfull && water_local_module_exists(0xb3cec6d0d78ac25aull))) return 2;
-    if (!s->vs) return 0;
-    const uint32_t *v = gfx_shader_spirv(s->vs, &vn);
-    if (!v) return 0;
-    uint64_t vh = fnv(FNV0, v, (size_t)vn * 4);
-    if (vh == 0xf6d753852c47b0deull && fh == 0xa39c3d09241441faull)
-        return water_local_module_exists(vh) && water_local_module_exists(0x3d3a316ab4da3bbaull);
-    if (vh == 0x8d83e3705d790fedull && fh == 0x3c20cb98dbaeb257ull)
-        return water_local_module_exists(vh) && water_local_module_exists(0x216bd323c6b48ee2ull);
-    return 0;
-}
-
-// The local module that stands for the module of hash h, checked: one entry point, of the stage given (0 vertex,
-// 4 fragment). The caller frees it. A line in the log names each module the first time it is taken.
-static uint32_t *water_local_module(uint64_t h, int stage, uint64_t *words) {
-    const char *dir = water_projective_dir();
-    if (!dir) rt_fatal("water projective: recipe directory unavailable");
-    char path[700];
-    int path_len = snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)h);
-    if (path_len < 0 || path_len >= (int)sizeof path) rt_fatal("water projective: module path too long");
-    FILE *file = fopen(path, "rb");
-    if (!file) rt_fatal("water projective: local module missing: %s", path);
-    fseek(file, 0, SEEK_END);
-    long bytes = ftell(file);
-    rewind(file);
-    uint32_t *code = bytes >= 20 && bytes <= 1048576 && !(bytes & 3) ? malloc((size_t)bytes) : NULL;
-    if (!code || fread(code, 1, (size_t)bytes, file) != (size_t)bytes)
-        rt_fatal("water projective: invalid local module: %s", path);
-    fclose(file);
-    if (code[0] != 0x07230203u) rt_fatal("water projective: invalid SPIR-V header");
-    int entries = 0;
-    for (size_t at = 5; at < (size_t)bytes / 4;) {
-        uint32_t len = code[at] >> 16, op = code[at] & 65535;
-        if (!len || at + len > (size_t)bytes / 4) rt_fatal("water projective: malformed instruction");
-        if (op == 15) {
-            if (len < 4 || code[at + 1] != (uint32_t)stage) rt_fatal("water projective: wrong module stage");
-            entries++;
-        }
-        at += len;
+// The edited module that stands for the module of hash `key`, or NULL. w: the translation it is made from at the
+// first call (NULL: only look); a fragment translation is first put into its set 1 form, which must be the module
+// `key` names, as it is the form the pipeline builds.
+static const uint32_t *water_module(uint64_t key, int kind, const WaterProfile *p, const uint32_t *w, uint64_t n,
+                                    uint64_t *words) {
+    const uint32_t *code = NULL;
+    plat_mutex_lock(&water_lock);
+    int i = 0;
+    while (i < 8 && water_mods[i].state && water_mods[i].key != key) i++;
+    if (i < 8 && !water_mods[i].state && w) {
+        uint64_t wn = 0;
+        uint32_t *c = NULL, *set1 = kind == WATER_VERTEX ? NULL : spirv_set(w, n, 1);
+        if (kind == WATER_VERTEX) c = spirv_water_vertex(w, n, &wn);
+        else if (set1 && fnv(FNV0, set1, (size_t)n * 4) == key)
+            c = kind == WATER_FRAGMENT ? spirv_water_fragment(set1, n, &wn)
+                                       : spirv_water_absorption(set1, n, p->mat_pointer, p->mat_distance, &wn);
+        free(set1);
+        water_mods[i].key = key, water_mods[i].code = c, water_mods[i].words = wn, water_mods[i].state = c ? 1 : -1;
+        static const char *const names[] = {"vertex stage of the coordinate pair", "fragment stage of the coordinate pair",
+                                            "absorption material"};
+        if (c) rt_log("vk_pipeline: water: the %s (module %016llx) is built from its corrected form "
+                      "(NX2NAVI_WATER_PROJECTIVE)", names[kind], (unsigned long long)key);
+        else rt_log("vk_pipeline: water: the %s (module %016llx) is not of the shape its correction expects; built as "
+                    "it is", names[kind], (unsigned long long)key);
     }
-    if (entries != 1) rt_fatal("water projective: unexpected entry-point count");
-    static volatile uint64_t told[8];
-    for (int i = 0; i < 8; i++) {
-        uint64_t was = __atomic_load_n(&told[i], __ATOMIC_RELAXED);
-        if (was == h) break;
-        if (!was && __atomic_compare_exchange_n(&told[i], &was, h, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-            rt_log("water projective: %s module %016llx is built from %s", stage ? "fragment" : "vertex",
-                   (unsigned long long)h, path);
-            break;
-        }
-        if (was == h) break;   // another thread took the slot for the same module
-    }
-    *words = (uint64_t)bytes / 4;
+    if (i < 8 && water_mods[i].state == 1) code = water_mods[i].code, *words = water_mods[i].words;
+    plat_mutex_unlock(&water_lock);
     return code;
 }
 
-// The fragment module of a pipeline in water mode `mode` (water_mode): the local one for the module as it is built (in
-// its descriptor set 1 form), else the module itself.
-static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early, int mode) {
-    if (!mode) return make_module(w, n, early);
-    uint64_t h = fnv(FNV0, w, (size_t)n * 4);
-    if (mode == 2) {
-        // Unrelated fragment translations remain original.
-        if (h != 0xabfccea256824a78ull && h != 0xb3cec6d0d78ac25aull)
-            return make_module(w, n, early);
-    } else if (h != 0x3d3a316ab4da3bbaull && h != 0x216bd323c6b48ee2ull) {
-        rt_fatal("water projective: paired module changed; refusing a partial recipe");
+// The water mode of a pipeline's shaders: 1 a coordinate pair whose two edited modules exist, 2 the absorption
+// material whose edited module exists, else 0.
+static int water_projective_pair(const VkPipeState *s) {
+    static int on = -1;
+    if (on < 0) on = cfg_bool("NX2NAVI_WATER_PROJECTIVE");
+    if (!on || !P.indep || !s->fs) return 0;
+    uint64_t vn = 0, fn = 0, wn;
+    const uint32_t *f = gfx_shader_spirv(s->fs, &fn);
+    if (!f) return 0;
+    uint64_t fh = fnv(FNV0, f, (size_t)fn * 4);
+    for (size_t i = 0; i < sizeof water_profiles / sizeof *water_profiles; i++) {
+        const WaterProfile *p = &water_profiles[i];
+        // The absorption correction is independent of the coordinate pair.
+        if (fh == p->mat) return water_module(p->mat_set1, WATER_ABSORPTION, p, f, fn, &wn) ? 2 : 0;
+        if (fh != p->fs) continue;
+        const uint32_t *v = s->vs ? gfx_shader_spirv(s->vs, &vn) : NULL;
+        if (!v || fnv(FNV0, v, (size_t)vn * 4) != p->vs) return 0;
+        return water_module(p->vs, WATER_VERTEX, p, v, vn, &wn) && water_module(p->fs_set1, WATER_FRAGMENT, p, f, fn, &wn);
     }
-    uint64_t words = 0;
-    uint32_t *code = water_local_module(h, 4, &words);
-    VkShaderModule result = make_module(code, words, early);
-    free(code);
-    return result;
+    return 0;
 }
 
-// The vertex stage of a coordinate pair (mode 1): the local module for the translation itself, taken before the
+// The fragment module of a pipeline in water mode `mode` (water_mode): the edited one for the module as it is built
+// (in its set 1 form), else the module itself.
+static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early, int mode) {
+    uint64_t words = 0;
+    const uint32_t *code = mode ? water_module(fnv(FNV0, w, (size_t)n * 4), 0, NULL, NULL, 0, &words) : NULL;
+    if (mode == 1 && !code) LOG_ONCE("vk_pipeline: water: a coordinate pair's fragment module is not in its known form; built as it is");
+    return code ? make_module(code, words, early) : make_module(w, n, early);
+}
+
+// The vertex stage of a coordinate pair (mode 1): the edited module for the translation itself, taken before the
 // outputs the vertex shader's union adds (spirv_add_outputs), which differ from one install to the next and are added
-// to the local module as to any other. NULL in every other case; the caller frees it.
-static uint32_t *water_pair_vertex(const uint32_t *v, uint64_t n, int mode, uint64_t *words) {
-    if (mode != 1 || !v) return NULL;
-    uint64_t h = fnv(FNV0, v, (size_t)n * 4);
-    if (h != 0xf6d753852c47b0deull && h != 0x8d83e3705d790fedull)
-        rt_fatal("water projective: paired module changed; refusing a partial recipe");
-    return water_local_module(h, 0, words);
+// to the edited module as to any other. NULL in every other case. The module stays the table's.
+static const uint32_t *water_pair_vertex(const uint32_t *v, uint64_t n, int mode, uint64_t *words) {
+    return mode == 1 && v ? water_module(fnv(FNV0, v, (size_t)n * 4), 0, NULL, NULL, 0, words) : NULL;
 }
 
 // water_projective_pair for a pipeline of key k. A coordinate pair blended with dual-source factors keeps its original
-// modules: spirv_dual_source changes the fragment module before its set 1 form, which is then none the recipe knows.
+// modules: spirv_dual_source changes the fragment module before its set 1 form, which is then none the table holds.
 static int water_mode(const VkPipeState *s, const GKey *k) {
     int mode = water_projective_pair(s);
     return mode == 1 && k->dsb ? 0 : mode;
@@ -3133,9 +3112,9 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
     uint32_t *vpatched = NULL, *fpatched = NULL;
     int mesh = is_mesh(s);
-    int wmode = mesh ? 0 : water_mode(s, k);
+    int wmode = mesh || !l->set1 ? 0 : water_mode(s, k);   // the edited fragment modules are in their set 1 form
     uint64_t wn = 0;
-    uint32_t *vwater = water_pair_vertex(vcode, vw, wmode, &wn);
+    const uint32_t *vwater = water_pair_vertex(vcode, vw, wmode, &wn);
     if (vwater) vcode = vwater, vw = wn;
     VkShaderModule tm = VK_NULL_HANDLE;
     if (mesh && s->ts) {   // the task stage's bindings follow the fragment stage's (pipe_miss)
@@ -3196,7 +3175,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         if (fcode) fm = water_pair_module(fcode, fw, !k->a2c, wmode), fm_hash = mm_hash;
     }
     vm = make_module(vcode, vw, 0), vm_hash = mm_hash;
-    free(vpatched), free(fpatched), free(vwater);
+    free(vpatched), free(fpatched);
     VkPipeline pipe = VK_NULL_HANDLE;
     if (!vm || (s->fs && !fm) || (mesh && s->ts && !tm)) goto out;
 
@@ -3427,13 +3406,11 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw), *scode = vcode;
         sw = vw;
         uint64_t wn = 0;
-        uint32_t *vwater = water_pair_vertex(vcode, vw, pk->water_projective, &wn);
+        const uint32_t *vwater = water_pair_vertex(vcode, vw, pk->water_projective, &wn);
         if (vwater) vcode = vwater, vw = wn;
         if (pk->missing && (patched = spirv_add_outputs(vcode, vw, pk->missing, pk->fin, &n2))) vcode = patched, vw = n2;
         else if (pk->missing) LOG_ONCE("vk_pipeline: cannot add missing vertex outputs (mask %#x)", pk->missing);
-        m = make_module(vcode, vw, 0);
-        free(vwater);
-        if (!m) goto out;
+        if (!(m = make_module(vcode, vw, 0))) goto out;
         st.stage = VK_SHADER_STAGE_VERTEX_BIT, st.module = m;
         pin_subgroup32(&st, &rq, scode, sw);
         pi.stageCount = 1, pi.pStages = &st, pi.pViewportState = &vp, pi.pRasterizationState = &rs;

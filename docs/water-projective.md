@@ -48,14 +48,31 @@ original, paired-coordinate and absorption-guard pipelines.
 The vertex replacement stands for the translation itself: the outputs an install's
 vertex output union adds are added to the replacement as to any other module, so the
 pair holds whatever other fragment shaders that install has met with the vertex
-shader. A pair blended with dual-source factors keeps its original modules. The log
-names each replacement the first time it is built ("water projective: ... module").
+shader. A pair blended with dual-source factors keeps its original modules.
 The translations of game 1.1.1 are the same under the 0.9.0 translator as under
 0.8.0's on NVIDIA (RTX 5090), so the profiles above still apply there.
 
-## Private local preparation
+## In the runtime, on by default
 
-Use locally held inputs from the same supported translator profile:
+The runtime makes both corrections itself (`runtime/spirv_water.c`, called from
+`runtime/vk_pipeline.c` `water_projective_pair`): when a pipeline's shaders are one of
+the translations above, it edits their SPIR-V in memory, with the steps of
+`tools/projective_recipe.py` in the same order, and builds the pipeline from the
+result. No file is read or written and nothing derived from the game is shipped.
+`water_projective = 0` in `nx2navi.ini` builds the translations as they are. The log
+names each corrected module the first time it is built ("vk_pipeline: water: ...");
+a module that is not of the shape an edit expects is built as it is, with a line
+that says so. A coordinate pair is corrected in both stages or in neither.
+
+On the NVIDIA profile the runtime's three modules are byte for byte the ones the
+recipe writes (RTX 5090, game 1.1.1, 0.9.0's translator). The AMD profile runs the
+same code on AMD's translations, which were not at hand to compare.
+`python tests/water_projective_check.py` compares the two on made-up modules.
+
+## The recipe as a tool
+
+`tools/projective_recipe.py` makes the same modules as files from locally held
+inputs, for comparing or inspecting them:
 
 ```sh
 python tools/projective_recipe.py --vertex <local-vertex.spv> --fragment <local-fragment.spv> --material <local-material.spv> --output build/water-projective
@@ -64,14 +81,8 @@ python tools/projective_recipe.py --vertex <local-vertex.spv> --fragment <local-
 The material argument is optional for a coordinate-only comparison. The recipe
 rejects unknown inputs, mixed profiles and existing output files. It writes
 replacement modules named by the original vertex or set-1 fragment identities,
-plus a manifest. Validate every generated module with
-`spirv-val --target-env vulkan1.2 <module.spv>` before integration.
-
-Rebuild using the documented UCRT64 workflow. Set `NX2NAVI_SPV_OVERRIDE` to the
-absolute output directory in the test process, then restart. Default runtime
-behavior is unchanged. Use separate pipeline caches for comparisons and disable
-pipeline-binary reuse and boot prebuilding during the experiment. Unset the
-override and restart to disable it. Do not change the directory during a run.
+plus a manifest. Validate a generated module with
+`spirv-val --target-env vulkan1.2 <module.spv>`. The runtime does not read them.
 
 ## Validation and limits
 

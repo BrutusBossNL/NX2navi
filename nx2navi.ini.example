@@ -305,6 +305,10 @@
 # fix_c0 = 1
 # New GPU memory pools start zero-filled, as Switch memory does.
 # fix_zero = 1
+# Build the water's screen coordinates per pixel and keep its absorption distance at 0 or more: without it water is
+# drawn as a rectangle over solid ground at the Hyrule Castle moat and the Castle Town canal from some camera
+# positions, and can turn into a red beam there. 0: the water's shaders as they are.
+# water_projective = 1
 # Optimisations, 0 turns each off: skip bindings that did not change, remember shader lookups, reuse the previous
 # draw's pipeline when its state repeats, remember texture descriptors between draws, update descriptors in bulk,
 # skip push constants that did not change.
