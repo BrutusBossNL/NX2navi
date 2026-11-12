@@ -435,7 +435,7 @@
 # and task shaders (grass and other foliage) as compute shaders and draws what they make; 0 skips those draws. The
 # arena for their vertices and triangles is mesh_emu_mb MiB of video memory, with mesh_emu_tasks task records (3 KiB
 # each) per submission; with trace = perf the log says how much a submission used. Read at start.
-# mesh_emulation = 0
+# mesh_emulation = 1
 # mesh_emu_mb = 256
 # mesh_emu_tasks = 16384
 # Scaling to the window when it is larger than the game resolution: fsr (AMD FSR 1) or bilinear, and FSR's sharpening

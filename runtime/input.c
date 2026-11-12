@@ -536,12 +536,12 @@ static void pad_primary(SDL_Gamepad *p, const char *why) {
 // Joysticks SDL has no gamepad mapping for are not gamepads to it, and this file opens gamepads only. Known ones get a
 // mapping built from their own GUID (so it matches whatever bus, version and name checksum SDL put in it); any other is
 // logged once with its name, ids and GUID.
-// - hekate's USB HID Joy-Con mode (Nyx "USB Tools" > "Joy-Con mode", bdk/usb/usb_descriptors.c, usb_gadget_hid.c):
+// - A Switch that presents its Joy-Con over USB from its boot menu's tools:
 //   "Nyx Joy-Con", VID 0x11EC, PID 0xA7E1, a plain HID joystick: X, Y (left stick), Z, Rz (right stick) from 0 to 255
 //   with up at 0, a hat for the D-pad, and buttons 1-12 B, A, Y, X (south, east, west, north), L, R, ZL, ZR, Minus,
 //   Plus, left and right stick clicks. Capture and Home are not sent.
 static const struct { uint16_t vid, pid; const char *name, *map; } known_joysticks[] = {
-    {0x11EC, 0xA7E1, "hekate Joy-Con (USB HID)",
+    {0x11EC, 0xA7E1, "Nyx Joy-Con (USB HID)",
      "a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,back:b8,start:b9,leftstick:b10,"
      "rightstick:b11,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,leftx:a0,lefty:a1,rightx:a2,righty:a3"},
 };

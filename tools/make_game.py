@@ -1446,9 +1446,9 @@ def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None, first=()):
     """fast: fast_clang's compiler for the lifted code, with msys as its sysroot. first: include flags that go
     ahead of inc for the runtime's sources only (vulkan_headers); the lifted code includes none of those headers,
     and its command, which is part of its objects' keys, stays as it was. NX2NAVI_GUEST_OPT (an environment variable,
-    or guest_opt in nx2navi.ini) 1 builds the lifted code at -O1; by default -O2: the game's own threads run it and
+    or guest_opt in nx2navi.ini) 2 builds the lifted code at -O2; by default -O1: the game's own threads run it and
     bound the frame on a slower CPU; the build takes several times longer."""
-    guest_opt = '-O1' if os.environ.get('NX2NAVI_GUEST_OPT', '').strip() == '1' else '-O2'   # -O2 unless guest_opt = 1
+    guest_opt = '-O2' if os.environ.get('NX2NAVI_GUEST_OPT', '').strip() == '2' else '-O1'   # -O1 unless guest_opt = 2
     def cmd_for(src, dst):
         cpp = src.suffix in ('.cpp', '.cxx')
         # the lifted code at -O1 (its size makes -O2 slow to build), the runtime at -O2; neither may assume strict

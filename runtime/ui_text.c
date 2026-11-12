@@ -90,7 +90,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_AUTO] = "Automatic: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Full", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduced", [UI_MENU_TEX_DETAIL_LOW] = "Low",
     [UI_MENU_TAB_LAMA] = "Lama patches",
-    [UI_MENU_LAMA_INTRO] = "Settings of the RX 580 patches (apply_rx580_fix). Most take effect after a restart.",
+    [UI_MENU_LAMA_INTRO] = "Settings for older graphics cards and ones short of video memory. Most take effect after a restart.",
     [UI_MENU_LAMA_MEMORY] = "Video memory and textures",
     [UI_MENU_LAMA_RENDER] = "Rendering",
     [UI_MENU_LAMA_BUILD] = "Build",
