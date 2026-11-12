@@ -658,6 +658,7 @@ static int dead_pending(void);
 
 static void vram_log(uint64_t frame);
 static void outside_watch(uint64_t frame);
+static void up_ts_log(uint64_t frame);
 
 static volatile uint64_t mirror_frame;   // the frame vk_mem_census last saw, for mirror_sync's log lines
 
@@ -4226,6 +4227,7 @@ typedef struct {
     int nchunk, cap_chunk;
     VkDeviceSize chunk_used;  // bytes of the last chunk handed out
     uint64_t bytes;   // staging bytes of its buffers (upload_cap)
+    int ts;           // its pair of upload timestamps (up_ts_*), -1: not timed
 } Batch;
 
 enum { DEAD_IMAGE = 1, DEAD_IMAGE_VMA, DEAD_VIEW, DEAD_BUFFER_VMA, DEAD_HOST };
@@ -4239,6 +4241,58 @@ static int open_active;
 static Batch *inflight;
 static int ninflight, cap_inflight;
 static Batch *spare;                  // completed batches whose command buffer and fence are reused
+// ---- upload GPU time (NX2NAVI_TRACE=perf): a timestamp at the start and the end of each upload batch, read when it
+// retires. The replay's GPU time (vk_sync.c) times only its own parts; upload batches go to the queue as submissions of
+// their own, with the ASTC decoder's dispatches in them, so their time showed only as GPU idle "with it queued".
+// cmd_lock held throughout.
+#define UP_TS_PAIRS 256
+static VkQueryPool up_ts_pool;
+static int up_ts_state;               // 0 not set up, 1 on, -1 off
+static uint8_t up_ts_busy[UP_TS_PAIRS];
+static uint32_t up_ts_next;
+static uint64_t up_ts_ns, up_ts_n, up_ts_max_ns, up_ts_missed, up_n_batches;   // since the last log line
+
+static int up_ts_open(VkCtx *c, VkCommandBuffer cb) {
+    if (!(rt_trace & RT_TRACE_PERF) || up_ts_state < 0) return -1;
+    if (!up_ts_state) {
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                    .queryCount = 2 * UP_TS_PAIRS};
+        up_ts_state = c->props.limits.timestampComputeAndGraphics &&
+                      vkCreateQueryPool(c->device, &qi, NULL, &up_ts_pool) == VK_SUCCESS ? 1 : -1;
+        if (up_ts_state < 0) return -1;
+    }
+    uint32_t p = up_ts_next % UP_TS_PAIRS;
+    if (up_ts_busy[p]) { up_ts_missed++; return -1; }
+    up_ts_next++, up_ts_busy[p] = 1;
+    vkCmdResetQueryPool(cb, up_ts_pool, 2 * p, 2);
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, up_ts_pool, 2 * p);
+    return (int)p;
+}
+
+static void up_ts_read(VkCtx *c, Batch *b) {   // b retired: its fence signalled
+    if (b->ts < 0) return;
+    uint64_t t[2];
+    if (vkGetQueryPoolResults(c->device, up_ts_pool, 2 * (uint32_t)b->ts, 2, sizeof t, t, sizeof t[0],
+                              VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] >= t[0]) {
+        uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * c->props.limits.timestampPeriod);
+        up_ts_ns += ns, up_ts_n++;
+        if (ns > up_ts_max_ns) up_ts_max_ns = ns;
+    }
+    up_ts_busy[b->ts] = 0;
+    b->ts = -1;
+}
+
+static void cmd_init(void *p);
+static void up_ts_log(uint64_t frame) {   // every 60 frames
+    plat_once(&cmd_once, cmd_init, NULL);
+    plat_rmutex_lock(&cmd_lock);
+    rt_log("perf: frame %llu: upload batches %.1f per frame, on the GPU %.2f ms per frame (%llu timed, %.3f ms each, the "
+           "longest %.2f ms; %llu not timed)", (unsigned long long)frame, up_n_batches / 60.0, up_ts_ns / 60e6,
+           (unsigned long long)up_ts_n, up_ts_n ? up_ts_ns / 1e6 / (double)up_ts_n : 0.0, up_ts_max_ns / 1e6,
+           (unsigned long long)up_ts_missed);
+    up_ts_ns = up_ts_n = up_ts_max_ns = up_ts_missed = up_n_batches = 0;
+    plat_rmutex_unlock(&cmd_lock);
+}
 static int nspare, cap_spare;
 static uint64_t next_seq, done_seq;   // batches handed out / completed (all batches up to done_seq)
 static Dead *dead;
@@ -4325,6 +4379,7 @@ static void retire(VkCtx *c, int wait_all) {
         Batch *b = &inflight[k];
         if (wait_all) vkWaitForFences(c->device, 1, &b->fence, VK_TRUE, UINT64_MAX);
         else if (vkGetFenceStatus(c->device, b->fence) != VK_SUCCESS) break;
+        up_ts_read(c, b);
         free_staging(c, b);
         done_seq = b->seq;
         if (nspare == cap_spare) grow((void **)&spare, &cap_spare, sizeof *spare);
@@ -4462,6 +4517,7 @@ VkCommandBuffer vk_upload_begin(void) {
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(open_b.cb, &bi);
+    open_b.ts = up_ts_open(c, open_b.cb);
     open_b.seq = ++next_seq;
     vk_crumb(open_b.cb, VK_CRUMB_UPLOAD, open_b.seq);
     open_active = 1;
@@ -4694,6 +4750,8 @@ uint64_t vk_upload_flush(int wait) {
         for (int i = 0; i < open_b.nchunk; i++)
             vmaFlushAllocation(c->vma, open_b.chunk[i].alloc, 0, i + 1 < open_b.nchunk ? VK_WHOLE_SIZE : open_b.chunk_used);
         vk_crumb(open_b.cb, VK_CRUMB_UPLOAD_END, open_b.seq);
+        if (open_b.ts >= 0) vkCmdWriteTimestamp(open_b.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, up_ts_pool, 2 * (uint32_t)open_b.ts + 1);
+        up_n_batches++;
         vkEndCommandBuffer(open_b.cb);
         VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &open_b.cb};
         vk_queue_lock();
