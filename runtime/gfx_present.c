@@ -942,8 +942,18 @@ static VkImage hudless_record(VkCommandBuffer cb, unsigned slot, int w, int h, c
     VkImageView pv;
     uint32_t pw, ph;
     VkFormat pf;
-    if (!(vk_fg_active() || ng_running()) || !vk_dlaa_fg_hudless(&pic, &pv, &pw, &ph, &pf) || (int)pw != w || (int)ph != h)
+    if (!(vk_fg_active() || ng_running()) || !vk_dlaa_fg_hudless(&pic, &pv, &pw, &ph, &pf) || !pw || !ph || w <= 0 || h <= 0)
         return VK_NULL_HANDLE;
+    // The upscaler's output can be smaller than the presented picture: the scene is 75% of it in handheld mode
+    // (widescreen.c, 1440x810 in a 1920x1080 picture) and the game's last passes scale it up with the HUD. Taken only
+    // at the same size, as before, that frame had no HUD-less picture and was not generated: 5 of 3600 frames generated
+    // in handheld mode on an RX 580 (2026-11-11). The crop is taken at the same place of the smaller picture.
+    int prect[4] = {rect[0], rect[1], rect[2], rect[3]};
+    if ((int)pw != w || (int)ph != h) {
+        prect[0] = (int)((int64_t)rect[0] * pw / w), prect[1] = (int)((int64_t)rect[1] * ph / h);
+        prect[2] = (int)((int64_t)rect[2] * pw / w), prect[3] = (int)((int64_t)rect[3] * ph / h);
+        if (prect[2] <= 0 || prect[3] <= 0) return VK_NULL_HANDLE;
+    }
     VkCtx *c = vk_ctx();
     if (g_hl && (g_hl_w != g_sc_ext.width || g_hl_h != g_sc_ext.height || g_hl_fmt != g_sc_fmt)) {
         vk_queue_lock(), vkDeviceWaitIdle(c->device), vk_queue_unlock();
@@ -980,7 +990,7 @@ static VkImage hudless_record(VkCommandBuffer cb, unsigned slot, int w, int h, c
     }
     // the steps' per-slot views of their source: a slot of its own (the presented picture's views stay valid for this
     // command buffer); with HDR the PQ encode as for the presented float picture
-    put_picture(cb, slot + FRAMES, pic, pf, w, h, rect, g_hl, to, general);
+    put_picture(cb, slot + FRAMES, pic, pf, (int)pw, (int)ph, prect, g_hl, to, general);
     sync_barrier(cb, g_hl, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
