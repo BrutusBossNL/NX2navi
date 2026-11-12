@@ -52,6 +52,13 @@ static uint64_t reserved;         // asynchronous replay: newest value handed ou
 // memory itself (value << 1 | live), under st_lock. A value not found counts as live.
 #define LIVE_RING 4096
 static uint64_t live_of[LIVE_RING];
+// Per submission value: the newest submission up to it whose GPU reads guest memory itself (live_of), 0 none. The
+// submit wait is for the frame's first submission, but the game's writes after it race with every submission before it
+// that still reads guest memory: those of the frame before (the instances of its grass and moss, read through the
+// device address table) were often still on the GPU when the wait ended at the first one's hand-over, and the game
+// wrote the next frame's instances under them (flicker and sliding foliage, RX 580, 2026-11-11). The wait goes on until
+// that one is done.
+static uint64_t live_last_of[LIVE_RING], live_last;
 // per value (index & LIVE_RING - 1): the newest value up to it whose completion hands results to the CPU (vk_exec_take_results)
 static uint64_t res_of[LIVE_RING], res_last;
 static uint8_t res_kinds[LIVE_RING];   // per value: its VK_RES_* kinds
@@ -1297,6 +1304,8 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     int res = own ? 0x1f : vk_exec_take_results();
     plat_mutex_lock(&st_lock);
     live_of[fence & (LIVE_RING - 1)] = fence << 1 | (uint64_t)(live != 0);
+    if (live) live_last = fence;
+    live_last_of[fence & (LIVE_RING - 1)] = live_last;
     res_kinds[fence & (LIVE_RING - 1)] = (uint8_t)res;
     if (res & res_mask) res_last = fence;
     res_of[fence & (LIVE_RING - 1)] = res_last;
@@ -1419,7 +1428,14 @@ int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(u
     uint64_t need = 0;   // the newest submission up to value whose completion hands the CPU results
     if (ok) {
         live = done < value && live_of[value & (LIVE_RING - 1)] != (value << 1);
+        int known = live_of[value & (LIVE_RING - 1)] >> 1 == value;
+        need = known ? res_of[value & (LIVE_RING - 1)] : value;
         if (res_mode == 2) need = value - 1;
+        if (!res_mode) need = 0;
+        uint64_t lneed = known ? live_last_of[value & (LIVE_RING - 1)] : value;   // the newest reading guest memory
+        if (lneed > need) need = lneed;
+        while (!live && need && done < need) {
+            if (timeout_ns < (1ull << 62)) {
                 uint64_t el = plat_now_ns() - w0;
                 if (el >= timeout_ns) { ok = 0; break; }
                 plat_cond_wait_ns(&cv_done, &st_lock, timeout_ns - el);
