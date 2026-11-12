@@ -482,9 +482,12 @@ static double ocarina_step(double dt) {
 // above 60 fps, the cut loses the fraction every frame. whole_frames keeps it per counter (by its guest address) and
 // hands out the whole part, so each counter moves at the game's pace at any frame rate; at a step of exactly one it
 // gives what the game computes. A value that is not positive, or too large for a count, is cut as fcvtzs cuts it.
+// The water's ripples keep their remainders per water object in a table of their own (frame_rate_water_host).
 #define WHOLE_SLOTS 8
-static struct { uint64_t at; float rem; uint32_t used; } whole_slot[WHOLE_SLOTS];
-static uint32_t whole_calls;
+#define WATER_SLOTS 64
+typedef struct { uint64_t at; float rem; uint64_t used; } WholeSlot;   // used: whole_calls at the slot's last use
+static WholeSlot whole_slot[WHOLE_SLOTS], water_slot[WATER_SLOTS];
+static uint64_t whole_calls;
 static PlatMutex whole_lock = PLAT_MUTEX_INIT;
 
 static uint32_t cut_fcvtzs(float f) {   // fcvtzs w, s: toward zero, saturating, NaN 0
@@ -494,22 +497,25 @@ static uint32_t cut_fcvtzs(float f) {   // fcvtzs w, s: toward zero, saturating,
     return (uint32_t)(int32_t)f;
 }
 
-static uint32_t whole_frames(uint64_t at, float amount) {
+// The whole part of amount plus the remainder the table slot[n] keeps for `at`; a new `at` takes the slot unused longest.
+static uint32_t whole_take(WholeSlot *slot, int n, uint64_t at, float amount) {
     if (!(amount > 0.0f) || amount >= 2147483648.0f) return cut_fcvtzs(amount);
     plat_mutex_lock(&whole_lock);
     int k = -1, oldest = 0;
-    for (int i = 0; i < WHOLE_SLOTS; i++) {
-        if (whole_slot[i].at == at) { k = i; break; }
-        if (whole_slot[i].used < whole_slot[oldest].used) oldest = i;
+    for (int i = 0; i < n; i++) {
+        if (slot[i].at == at) { k = i; break; }
+        if (slot[i].used < slot[oldest].used) oldest = i;
     }
-    if (k < 0) k = oldest, whole_slot[k].at = at, whole_slot[k].rem = 0.0f;
-    whole_slot[k].used = ++whole_calls;
-    float sum = whole_slot[k].rem + amount;
+    if (k < 0) k = oldest, slot[k].at = at, slot[k].rem = 0.0f;
+    slot[k].used = ++whole_calls;
+    float sum = slot[k].rem + amount;
     uint32_t whole = cut_fcvtzs(sum);
-    whole_slot[k].rem = sum - (float)whole;
+    slot[k].rem = sum - (float)whole;
     plat_mutex_unlock(&whole_lock);
     return whole;
 }
+
+static uint32_t whole_frames(uint64_t at, float amount) { return whole_take(whole_slot, WHOLE_SLOTS, at, amount); }
 
 // The time of day (main+0x3cdf70, patches-v111.txt): s0 holds twice the step, the game seconds of this frame; w8 gets
 // the whole ones, the counter being the seconds of the day at +0x3c of the object in x19.
@@ -532,6 +538,32 @@ void frame_rate_day_host(Cpu *c) {
                    (now - t0) / 1e9, exact, (unsigned long long)cut);
             t0 = now, given = cut = 0, exact = 0;
         }
+    }
+}
+
+// The water's ripples (main+0x472e0, patches-v111.txt): s0 holds the frame's step and w9 gets the whole steps in it,
+// which the renderer multiplies by the water's substeps. The remainder is kept for the water object in x21, in a table
+// of the waters' own: every water surface of a place asks once a frame, and with fewer slots than surfaces each would
+// take another's slot in turn, start without a remainder every frame and stand still as it did with the cut.
+// NX2NAVI_TRACE=perf: every 10 s, the steps the waters were given beside those the cut alone would have given.
+void frame_rate_water_host(Cpu *c) {
+    uint32_t bits = (uint32_t)c->v[0];
+    float step;
+    memcpy(&step, &bits, 4);
+    uint32_t whole = whole_take(water_slot, WATER_SLOTS, c->x[21], step);
+    c->x[9] = whole;
+    if (rt_trace & RT_TRACE_PERF) {
+        static uint64_t t0, asked, given, cut;
+        uint64_t now = plat_now_ns(), n = 0, g = 0, k = 0, t = 0;
+        plat_mutex_lock(&whole_lock);   // the counts: nothing says one thread alone draws the waters
+        asked++, given += whole, cut += cut_fcvtzs(step);
+        if (!t0) t0 = now;
+        if (now - t0 >= 10000000000ull) n = asked, g = given, k = cut, t = now - t0, t0 = now, asked = given = cut = 0;
+        plat_mutex_unlock(&whole_lock);
+        if (n)
+            rt_log("frame rate: the water's ripples got %llu steps in %.1f s, asked %llu times (cut to whole steps "
+                   "each time, as the game cuts them, %llu)", (unsigned long long)g, t / 1e9, (unsigned long long)n,
+                   (unsigned long long)k);
     }
 }
 

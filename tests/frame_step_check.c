@@ -44,9 +44,12 @@ int plat_mem_readable(uint64_t a, size_t n) { (void)a, (void)n; return 0; }
 void mem_kernel_access(uint64_t a, uint64_t n) { (void)a, (void)n; }
 int mem_host_readable(uint64_t a, uint64_t n) { (void)a, (void)n; return 0; }
 uint64_t kern_now_ns(void) { return 0; }
+void plat_mutex_lock(PlatMutex *m) { (void)m; }     // one thread here
+void plat_mutex_unlock(PlatMutex *m) { (void)m; }
 
 // ---- one present: the pacer asks for the period, then reports the display time. Returns the step in 60 Hz frames.
 static uint64_t now_ns = 1000000000ull;
+uint64_t plat_now_ns(void) { return now_ns; }
 static double wall_s, game_s;
 static float present(double interval_s) {
     frame_step_cap_ns();
@@ -63,6 +66,25 @@ static void set_limit(const char *l) {
     version++;
     present(1.0);   // a gap: the filter starts again
     wall_s = game_s = 0;
+}
+
+// ---- the patch sites that cut the step to a whole number, called as the lifted code calls them: the value in s0, the
+// object in its register, the whole number back in the register the cut wrote (all 64 bits of it).
+static Cpu cpu;
+static uint32_t water(uint64_t object, float step) {   // frame_rate_water_host: x21, w9
+    uint32_t bits;
+    memcpy(&bits, &step, 4);
+    cpu.v[0] = bits, cpu.x[21] = object, cpu.x[9] = ~0ull;
+    frame_rate_water_host(&cpu);
+    CHECK(cpu.x[9] >> 32 == 0, "the water's steps leave x9's upper half %#llx", (unsigned long long)cpu.x[9]);
+    return (uint32_t)cpu.x[9];
+}
+static uint32_t day(uint64_t object, float secs) {   // frame_rate_day_host: x19, w8
+    uint32_t bits;
+    memcpy(&bits, &secs, 4);
+    cpu.v[0] = bits, cpu.x[19] = object, cpu.x[8] = ~0ull;
+    frame_rate_day_host(&cpu);
+    return (uint32_t)cpu.x[8];
 }
 
 int main(int argc, char **argv) {
@@ -170,6 +192,34 @@ int main(int argc, char **argv) {
               caps[i].gen, game, caps[i].game_hz);
     }
     fg_mult = 1;
+
+    // The water's ripples at 144 fps, a step of 60/144 frame: 64 water objects asked once a frame each run 600 steps
+    // in 1440 frames (the cut gave none), and the day's seconds asked between them keep their own fraction.
+    {
+        const float step = 60.0f / 144.0f;
+        const uint64_t first = 0x7100000000ull, clock = 0x7200000000ull;
+        uint32_t steps[64] = {0}, secs = 0;
+        for (int f = 0; f < 1440; f++) {
+            for (int k = 0; k < 64; k++) steps[k] += water(first + 0x1000 * (uint64_t)k, step);
+            secs += day(clock, 2 * step);
+        }
+        for (int k = 0; k < 64; k++)
+            CHECK(steps[k] >= 599 && steps[k] <= 600, "water object %d of 64 at 144 fps: %u steps in 1440 frames", k, steps[k]);
+        CHECK(secs >= 1199 && secs <= 1200, "the day beside 64 water objects: %u seconds in 1440 frames", secs);
+    }
+    // A step of one frame, and of two, is what the game computes, also after a fraction was left; a quarter frame
+    // gives one step every fourth frame, and what fcvtzs cuts to nothing or saturates leaves the remainder alone.
+    {
+        const uint64_t pond = 0x7300000000ull;
+        for (int i = 0; i < 3; i++) CHECK(water(pond, 0.25f) == 0, "a quarter frame, call %d", i);
+        CHECK(water(pond, 0.0f) == 0 && water(pond, -3.5f) == 0xfffffffdu && water(pond, NAN) == 0 &&
+                  water(pond, 3e9f) == 0x7fffffffu, "zero, a negative step, NaN and a step too large are cut as fcvtzs cuts");
+        CHECK(water(pond, 0.25f) == 1, "the fourth quarter frame");
+        CHECK(water(pond, 0.5f) == 0, "half a frame");
+        for (int i = 0; i < 60; i++) CHECK(water(pond, 1.0f) == 1, "one frame, call %d", i);
+        for (int i = 0; i < 30; i++) CHECK(water(pond, 2.0f) == 2, "two frames, call %d", i);
+        CHECK(water(pond, 0.5f) == 1, "the half frame kept through the whole ones");
+    }
     printf("frame_step_check: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;
 }

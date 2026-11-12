@@ -46,6 +46,17 @@ site ostep main 3b4eaf8 1e201820 bd410120   # fdiv s0, s1, s0 -> ldr s0, [x9, #2
 # with the fraction kept for the next frame, so the day keeps the game's pace at any frame rate. x30 is the function's
 # own saved one, and the call at main+0x3cdfc8 sets it again.
 site ostep main 3cdfc0 1e380008 952b4be8   # fcvtzs w8, s0 -> bl page+0xf60
+# The water's ripples: the water renderer (main+0x472e0, reached from main+0x47160 for a water object whose flags at
+# +8 have bit 3, which that entry clears) runs its ripple simulation trunc(step) * substeps times, the step being the
+# time manager's (its +0, or one of its group steps at +0x20 + 0x30 * n) and the substeps +0x4c of the water's
+# parameters (object +0x1e8, then +0x150, or the parent those name), and skips the simulation when the product is
+# under 1 (main+0x47618). With the step above under one frame that was every frame above 60 fps: the rings Link and
+# everything else make in water stood still. The cut calls the page's +0xf50 instead (runtime/frame_rate.c
+# frame_rate_water_host): the step goes into a remainder kept for the water object (x21, the function's x0) and w9
+# gets the whole steps in it, so the rings spread at the game's pace at any frame rate, and a step of exactly one
+# frame gives what the game computes. Every path to the cut has the step in s0 (the one that asks the parameters'
+# parent keeps it across its call), and x30 is the function's own saved one.
+site ostep main 475f8 1e380009 95396656   # fcvtzs w9, s0 -> bl page+0xf50
 
 # Physics solver steps: the physics system's step setup (main+0x38aeb80, and the same code in main+0x38afc10) gives the
 # rigid body world its solver step count for the frame, trunc(frames per update * count + 0.001) with the count at
