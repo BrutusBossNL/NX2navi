@@ -359,12 +359,17 @@ sites do: at 144 fps each of 64 water objects gets its ripple steps and the day 
 gives what the game computes. No game files.
 
 A change to how the mixer applies volumes (`runtime/audio_mixer.c` `accumulate_ramp`, the voice and splitter paths
-of `audio_mixer_render`) passes `python tests\audio_mixer_check.py`, which builds `audio_mixer.c` with the rest of
-the runtime stubbed and mixes voices of one constant sample, so a mix buffer shows the gain sample by sample: a
+of `audio_mixer_render`) or to what it owes the device after a stall (`ring_pull`, `audio_mixer_owed`) passes
+`python tests\audio_mixer_check.py`, which builds `audio_mixer.c` with the rest of the runtime stubbed. It mixes
+voices of one constant sample, so a mix buffer shows the gain sample by sample: a
 volume stepped from 0 to 1 rises in equal steps across the next 5 ms frame and holds after it, for a voice into a mix,
 a voice into a splitter destination and a submix into one; a voice that starts, was silent in the frame before or was
 moved to another mix, a destination that is new or was moved, and the first frame after the renderer starts take the
-new volume at once; `NX2NAVI_AUDIO_RAMP=0` applies every volume at once. No game files and no audio device.
+new volume at once; `NX2NAVI_AUDIO_RAMP=0` applies every volume at once. It also makes the device's requests by
+hand: the silence of an underrun, up to the prefill's return, is owed in whole render frames, which are rendered and
+not queued; the silence before the first prefill and across a stop is not owed, and more than 3 seconds of it is given
+up. The render thread's own timing (`runtime/audren.c` `render_thread`) is not built by it. No game files and no audio
+device.
 
 A change to the mouse camera (`runtime/mouse_direct.c`, the mouse path of `runtime/input.c`, the set `mouse_direct` of
 `recomp/patches-v111.txt` or `patches-v143.txt`) passes `python tests\mouse_direct_check.py --cc <clang> --deps

@@ -717,6 +717,11 @@
 # as the console does (1, the default). 0 applies the new volume at once, which clicks when a volume moves quickly (a
 # fade, a sound passing by). Takes effect at the next start.
 # audio_ramp = 1
+# After the sound was held up (the PC was busy and a gap was heard), skip as much sound as the gap was long, so the
+# sound keeps its place against the picture as on the console (1, the default). Gaps of more than 3 seconds are not
+# skipped. 0 plays on from where the sound stopped, which leaves it later than the picture by every gap so far.
+# Takes effect at the next start.
+# audio_catchup = 1
 # Volume in percent (0 to 100), on top of the game's own. Changes while the game runs take effect at once.
 # volume = 100
 # Speakers: stereo, 5.1 or auto (5.1 when the Windows speaker setup has six or more channels, stereo otherwise). The

@@ -14,6 +14,9 @@
 // The device's clock paces the render thread, as the audio hardware paces the Switch's DSP (audio_mixer_pace_ns): a
 // frame is rendered when the ring holds less than the output target, max(prefill, two device periods), so the queue and
 // the delay from the game to the speakers stay there and the host and device clocks cannot drift apart.
+// When the render thread is held up the ring runs out and the device plays silence; the frames that silence stands for
+// are then rendered and dropped (audio_mixer_owed, NX2NAVI_AUDIO_CATCHUP), so the sound keeps its place against the
+// picture.
 // Without a device, while the renderer is
 // stopped and while the device takes nothing (a stall), the render thread keeps real time on its own timer; what piled
 // up meanwhile is skipped on the SDL thread once the device resumes (more than QUEUE_SLACK_MS above the target plus the
@@ -69,6 +72,10 @@ typedef struct Mixer {
     float ring[RING_FRAMES * OUT_MAX];
     _Atomic uint64_t wr, rd, underruns, overruns, missing_frames, callback_frames, callback_nonzero, skipped_frames;
     _Atomic int playing; int ready;                // ready: the callback's own state
+    int gap;                                       // the callback's own: an underrun's silence has not ended yet
+    _Atomic uint64_t silent_frames;                // silence played in such gaps so far (audio_mixer_owed)
+    uint64_t made_up; unsigned owed_epoch;         // render thread: how much of it is caught up or forgotten; the
+                                                   // stop_epoch that count belongs to
     int target, period;                            // output target and device period, frames (output_open)
     uint64_t stall_ns;
     _Atomic uint64_t pulled_ns;                    // kern_now_ns of the device's last request, 0 before the first
@@ -282,10 +289,12 @@ static void ring_pull(Mixer *m, float *out, uint32_t frames) {
         have = wr - rd;
         m->callback_epoch = epoch;
         m->ready = 0;
+        m->gap = 0;
     }
     if (!atomic_load_explicit(&m->playing, memory_order_acquire)) {
         memset(out, 0, (size_t)frames * oc * sizeof(float));
         m->ready = 0;
+        m->gap = 0;
         atomic_store_explicit(&m->rd, wr, memory_order_release);
         return;
     }
@@ -297,9 +306,13 @@ static void ring_pull(Mixer *m, float *out, uint32_t frames) {
     if (!m->ready) {
         if (have < prefill) {
             memset(out, 0, (size_t)frames * oc * sizeof(float));
+            // an underrun's silence goes on until the prefill is queued again (audio_mixer_owed); the wait for the
+            // first prefill after a start is not such a gap
+            if (m->gap) atomic_fetch_add_explicit(&m->silent_frames, frames, memory_order_release);
             return;
         }
         m->ready = 1;
+        m->gap = 0;
     }
     uint64_t keep = (prefill > (uint64_t)m->target ? prefill : (uint64_t)m->target) + frames;
     uint64_t slack = (uint64_t)m->rate * QUEUE_SLACK_MS / 1000;
@@ -324,7 +337,9 @@ static void ring_pull(Mixer *m, float *out, uint32_t frames) {
         memset(out + (size_t)oc * n, 0, (size_t)(frames - n) * oc * sizeof(float));
         atomic_fetch_add(&m->underruns, 1);
         atomic_fetch_add(&m->missing_frames, frames - n);
+        atomic_fetch_add_explicit(&m->silent_frames, frames - n, memory_order_release);
         m->ready = 0;
+        m->gap = 1;
     }
     atomic_store_explicit(&m->rd, rd + n, memory_order_release);
 }
@@ -426,6 +441,7 @@ static void channels_switch(Mixer *m, int channels) {
     atomic_store_explicit(&m->rd, atomic_load(&m->wr), memory_order_release);
     m->channels = channels;
     m->ready = 0;
+    m->gap = 0;
     m->reported &= ~(1u << 6);   // the device sink's line again, with the new output
     atomic_store_explicit(&m->pulled_ns, 0, memory_order_release);
     rt_log("audio: the output is now %s", channels == 6 ? "5.1" : "stereo");
@@ -455,6 +471,7 @@ static void device_check(Mixer *m, uint64_t now) {
     m->device = 0;
     m->device_name[0] = 0;
     m->ready = 0;
+    m->gap = 0;
     atomic_store_explicit(&m->pulled_ns, 0, memory_order_release);
     char err[256];
     if (stream_open(m, m->rate, SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, err, sizeof err)) {
@@ -477,6 +494,36 @@ int64_t audio_mixer_pace_ns(AudioRenderer *r, uint64_t now) {
     if (have < (uint64_t)m->target) return 0;
     int64_t ns = (int64_t)((have - (uint64_t)m->target + 1) * 1000000000ull / (uint64_t)m->rate);
     return ns < 500000 ? 500000 : ns;   // until the device has taken it below the target
+}
+
+// Catch-up after a stall (NX2NAVI_AUDIO_CATCHUP, audren.c render_thread), for the frames the device paces. While the
+// render thread is held up the device goes on taking periods: the ring runs out and ring_pull plays silence, first for
+// the rest of that request (the underrun) and then until the prefill is queued again. The device's clock went on by
+// that silence and the game's sound did not, and audio_mixer_pace_ns only fills the ring to its target again, so
+// everything after the gap would be heard that much later than the picture it belongs to, and every further gap would
+// add to it. This says whether a whole render frame of such silence is still owed and takes it off the debt; the
+// caller renders that frame with `drop` set (audio_mixer_render), which moves the game's sound on and queues nothing,
+// so the ring is filled to the same target afterwards. The debt is counted in the device's own samples, not in host
+// time: the two clocks cannot drift into it, and a gap of less than a frame waits for the next one. Whatever was owed
+// when the renderer stopped is forgotten, and so is a debt of more than AUDIO_CATCHUP_MAX_MS, with -1 returned: after
+// that long the sound goes on from now.
+int audio_mixer_owed(AudioRenderer *r) {
+    Mixer *m = r->mixer;
+    if (!m || !m->device_ok) return 0;
+    unsigned epoch = atomic_load_explicit(&m->stop_epoch, memory_order_acquire);
+    uint64_t silent = atomic_load_explicit(&m->silent_frames, memory_order_acquire);
+    if (epoch != m->owed_epoch) {
+        m->owed_epoch = epoch;
+        m->made_up = silent;
+    }
+    uint64_t owed = silent - m->made_up;
+    if (owed < (uint64_t)m->frame) return 0;
+    if (owed > (uint64_t)m->rate * AUDIO_CATCHUP_MAX_MS / 1000) {
+        m->made_up = silent;
+        return -1;
+    }
+    m->made_up += (uint64_t)m->frame;
+    return 1;
 }
 
 int audio_mixer_out_stats(AudioRenderer *r, AudioOutStats *o) {
@@ -1078,7 +1125,7 @@ static void mix_circular_sink(AudioRenderer *r,int id) {
 }
 uint32_t audio_mixer_sink_written(AudioRenderer *r,int id) {Mixer *m=r->mixer;return m?m->sink_written[id]:0;}
 
-void audio_mixer_render(AudioRenderer *r, double seconds) {
+void audio_mixer_render(AudioRenderer *r, double seconds, int drop) {
     (void)seconds;
     Mixer *m = r->mixer; if (!m) return;
     const int frames = m->frame, mc = r->param.submix_count + 1;
@@ -1256,6 +1303,10 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
         else if (r->sinks[i].type == SINK_CIRCULAR){mix_circular_sink(r,i);circular=1;}
     } else {m->sink_address[i]=0;m->sink_size[i]=m->sink_offset[i]=m->sink_old[i]=m->sink_written[i]=0;}
     if (m->channels != output_channels()) channels_switch(m, output_channels());
+    // A catch-up frame (audren.c render_thread) ends here. Everything above ran, so the voices' filters and ramps, the
+    // effects and the sinks the game reads back are where they would be had the frame been heard; the device gets
+    // nothing of it.
+    if (drop) return;
     const int oc = m->channels;
     float *out=m->output_scratch;
     memset(out, 0, sizeof(float) * (size_t)oc * (size_t)frames);

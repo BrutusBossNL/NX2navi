@@ -126,6 +126,9 @@ _Static_assert(__builtin_offsetof(AudrenAuxParam, send_info) == 64, "auxiliary e
 #define AUDREN_WORK_BUFFER_BYTES 0x10000u                     // the host keeps its state in host memory
 #define AUDREN_BEHAVIOR_OUT 0xb0u
 #define AUDREN_RENDER_INFO_OUT 0x10u
+// Catch-up after a stall (NX2NAVI_AUDIO_CATCHUP; audren.c render_thread, audio_mixer.c audio_mixer_owed): a gap longer
+// than this is not caught up, the sound goes on from now.
+#define AUDIO_CATCHUP_MAX_MS 3000
 
 // Server-side voice: the DSP's view of one client voice.
 typedef struct {
@@ -191,11 +194,19 @@ void audio_mixer_update_routing(AudioRenderer *r, const uint8_t *splitters, uint
 void audio_mixer_update_effects(AudioRenderer *r);
 void audio_mixer_effect_result(AudioRenderer *r, int id, void *output, unsigned size);
 uint32_t audio_mixer_sink_written(AudioRenderer *r, int id);
-void audio_mixer_render(AudioRenderer *r, double seconds);   // after audio_voices_prepare, before voices advance
+// After audio_voices_prepare, before voices advance. `drop`: a catch-up frame (audren.c render_thread). It is mixed in
+// full, so the voices' filters, the effects and the sinks the game reads back advance as for any frame, and nothing
+// of it is queued for the device.
+void audio_mixer_render(AudioRenderer *r, double seconds, int drop);
 // Device pacing for the render thread at kern_now_ns `now`: 0 renders the next frame now, a positive value waits that
 // many ns (the ring is at its target), -1 leaves the pace to the render thread's timer (no device, renderer stopped,
 // device stalled).
 int64_t audio_mixer_pace_ns(AudioRenderer *r, uint64_t now);
+// Catch-up for the frames the device paces (render thread, lock not held). 1: the device has played at least one render
+// frame of silence for want of rendered sound that is not made up for yet; that frame is taken off what is owed and
+// the caller renders one frame with `drop` set. 0: nothing is owed. -1: more than AUDIO_CATCHUP_MAX_MS was owed and is
+// forgotten.
+int audio_mixer_owed(AudioRenderer *r);
 // NX2NAVI_AUDIO_STATS: the output's counters since it opened, and the longest gap between two device requests since
 // the last call (which starts that measure again). False without a device.
 typedef struct { uint64_t underruns, missing_frames, skipped_frames, overruns, queued_frames, pull_gap_max_ns; } AudioOutStats;

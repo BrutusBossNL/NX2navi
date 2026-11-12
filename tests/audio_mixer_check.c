@@ -1,5 +1,6 @@
-/* The mixer's volume ramps (runtime/audio_mixer.c accumulate_ramp, audio_mixer_render), with the rest of the runtime
-   stubbed. No game data and no audio device: NX2NAVI_AUDIO=none mixes without opening one. Each voice plays a wave
+/* The mixer's volume ramps (runtime/audio_mixer.c accumulate_ramp, audio_mixer_render) and what it owes the device
+   after a stall (ring_pull, audio_mixer_owed), with the rest of the runtime stubbed. No game data and no audio device:
+   NX2NAVI_AUDIO=none mixes without opening one, and the device's requests are made by hand. Each voice plays a wave
    buffer of one constant sample, so a mix buffer holds the gain the voice went in with, sample by sample. */
 #include "../runtime/audio_mixer.c"
 
@@ -87,11 +88,13 @@ static void renderer_close(AudioRenderer *r) {
     free(r->voices), free(r->mixes), free(r->sinks), free(r->effects), free(r->channels), free(r);
 }
 
-/* One render pass, counted as audren.c render_thread counts it. The voices are not advanced: every sample is the same. */
-static void pass(AudioRenderer *r) {
-    audio_mixer_render(r, (double)FRAME / 48000);
+/* One render pass, counted as audren.c render_thread counts it; `drop`: a catch-up frame. The voices are not
+   advanced: every sample is the same. */
+static void render(AudioRenderer *r, int drop) {
+    audio_mixer_render(r, (double)FRAME / 48000, drop);
     r->elapsed_frames++;
 }
+static void pass(AudioRenderer *r) { render(r, 0); }
 
 /* A voice as the game's update leaves a new one (audren.c update_voice with is_new: voice_reset, then started). Of
    what the slot's last voice was mixed with, voice_reset clears only ramp_pass, so the rest is kept here too. */
@@ -283,11 +286,82 @@ static void ramps_off(void) {
     ramp_setting = 1;
 }
 
+/* What the device paces: the device's requests (ring_pull, the SDL callback's part) and the render thread's question
+   (audio_mixer_owed) by hand, on a mixer that takes itself to have a device. */
+static void catch_up(void) {
+    AudioRenderer *r = renderer_open();
+    Mixer *m = r->mixer;
+    enum { PERIOD = 2 * FRAME };
+    static float out[2 * (PERIOD + FRAME)];
+    const int prefill = m->prefill;   /* render frames the output waits for; even on every platform */
+    m->device_ok = 1, m->period = PERIOD, m->target = prefill * FRAME;
+    r->channels[0].mix[0] = 1, r->channels[0].mix[1] = 1;
+    ServerVoice *v = voice_new(r, 0, 1, 0, SPLITTER_UNUSED);
+
+    ring_pull(m, out, PERIOD);
+    ring_pull(m, out, PERIOD);
+    CHECK(out[0] == 0 && audio_mixer_owed(r) == 0, "the silence before the first prefill is not owed");
+    for (int i = 0; i < prefill; i++) pass(r);
+    uint64_t queued = atomic_load(&m->wr) - atomic_load(&m->rd);
+    CHECK(queued == (uint64_t)prefill * FRAME, "the frames are queued for the device (%llu samples)", (unsigned long long)queued);
+    for (int i = 0; i < prefill; i += 2) {
+        ring_pull(m, out, PERIOD);
+        CHECK(out[0] == 0.5f && out[2 * PERIOD - 1] == 0.5f, "the device plays what was queued");
+    }
+    CHECK(audio_mixer_owed(r) == 0, "nothing is owed while the ring keeps up");
+
+    /* the render thread is held up for three device periods: an underrun, then silence until the prefill is back */
+    for (int i = 0; i < 3; i++) ring_pull(m, out, PERIOD);
+    CHECK(out[0] == 0 && atomic_load(&m->underruns) == 1, "the device plays silence");
+    v->in.volume = 0.5f;   /* the game's update that came meanwhile */
+    for (int i = 0; i < 6; i++) {
+        uint64_t wr = atomic_load(&m->wr), frames = r->elapsed_frames;
+        CHECK(audio_mixer_owed(r) == 1, "three periods of silence: render frame %d of 6 is owed", i + 1);
+        render(r, 1);
+        CHECK(atomic_load(&m->wr) == wr && r->elapsed_frames == frames + 1, "a catch-up frame is rendered and not queued");
+        if (i == 0) CHECK(ramped(buf(r, 0), 0.5f, 0.25f), "it is mixed in full: the volume the game set ramps in it");
+    }
+    CHECK(audio_mixer_owed(r) == 0, "after six frames nothing more is owed");
+    for (int i = 0; i < prefill; i++) pass(r);
+    queued = atomic_load(&m->wr) - atomic_load(&m->rd);
+    CHECK(queued == (uint64_t)prefill * FRAME, "the ring is filled to the same target afterwards");
+    ring_pull(m, out, PERIOD);
+    CHECK(out[0] == 0.25f && out[2 * PERIOD - 1] == 0.25f, "the device goes on with the frames after the dropped ones");
+    CHECK(audio_mixer_owed(r) == 0, "the device's requests while the ring keeps up add nothing");
+
+    /* less than a render frame of silence waits for the next gap */
+    for (int i = 2; i < prefill; i += 2) ring_pull(m, out, PERIOD);   /* the ring is empty again, */
+    for (int i = 0; i < prefill; i++) pass(r);                        /* and filled */
+    for (int i = 2; i < prefill; i += 2) ring_pull(m, out, PERIOD);   /* down to one period */
+    ring_pull(m, out, PERIOD + 100);                                  /* a request for 100 samples more than that */
+    CHECK(atomic_load(&m->underruns) == 2 && audio_mixer_owed(r) == 0, "100 samples of silence are not a frame yet");
+    ring_pull(m, out, 200);                                           /* still waiting for the prefill: 300 in all */
+    CHECK(audio_mixer_owed(r) == 1 && audio_mixer_owed(r) == 0, "300 samples of silence: one frame is owed, 60 samples stay");
+
+    /* a stop forgets what was owed, and the wait for the prefill after the start is not owed */
+    for (int i = 0; i < 3; i++) ring_pull(m, out, PERIOD);
+    audio_mixer_set_running(r, 0);
+    ring_pull(m, out, PERIOD);
+    audio_mixer_set_running(r, 1);
+    ring_pull(m, out, PERIOD);
+    ring_pull(m, out, PERIOD);
+    CHECK(audio_mixer_owed(r) == 0, "nothing is owed across a stop");
+
+    /* more than AUDIO_CATCHUP_MAX_MS of silence is not caught up */
+    for (int i = 0; i < prefill; i++) pass(r);
+    for (int i = 0; i < prefill / 2 + 1 + 48000 / PERIOD * (AUDIO_CATCHUP_MAX_MS + 100) / 1000; i++) ring_pull(m, out, PERIOD);
+    CHECK(audio_mixer_owed(r) == -1, "over %d ms of silence is given up", AUDIO_CATCHUP_MAX_MS);
+    CHECK(audio_mixer_owed(r) == 0, "and nothing of it is owed afterwards");
+    m->device_ok = 0;
+    renderer_close(r);
+}
+
 int main(void) {
     voice_into_mix();
     voice_into_splitter();
     mix_into_splitter();
     ramps_off();
+    catch_up();
     printf("audio_mixer_check: %s\n", fails ? "FAIL" : "ok");
     return fails ? 1 : 0;
 }
