@@ -3682,6 +3682,10 @@ static VkViewport draw_viewport(VkExec *ex) {
     if (w < 1) w = 1;
     if (h < 1) h = 1;
     VkViewport v = {x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};   // the y flip: negative height
+    if (ex->mark) {   // NX2NAVI_PASS_TIMES: how much of the pass the draws cover
+        if ((uint32_t)w > ex->mark->vw) ex->mark->vw = (uint32_t)w;
+        if ((uint32_t)h > ex->mark->vh) ex->mark->vh = (uint32_t)h;
+    }
     vk_dlaa_viewport(ex, &v);   // the scene's draws move by the DLAA jitter
     return v;
 }

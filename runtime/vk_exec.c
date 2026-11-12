@@ -860,6 +860,7 @@ void vk_exec_pass_begin(VkExec *ex) {
         m->step = ex->mark_passes++;
         m->w = ex->pass_w, m->h = ex->pass_h, m->d = ex->pass_layers;
         m->layer = ex->depth.image ? ex->depth.base_layer : 0;
+        m->vw = m->vh = 0;
         m->ncolor = (uint8_t)(ex->pass_ncolor < 8 ? ex->pass_ncolor : 8);
         for (int i = 0; i < m->ncolor; i++) m->color[i] = ex->pass_color[i];
         m->depth = ex->pass_depth ? ex->pass_depth : ex->pass_stencil;

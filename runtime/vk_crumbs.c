@@ -628,6 +628,7 @@ typedef struct {
     unsigned long long sid;
     double us;
     uint64_t n, draws;
+    uint32_t vw, vh;   // the largest viewport its draws set
 } PtSum;
 static PtSum pt_sum[PT_SUMS];
 static uint32_t pt_read;                 // the newest mark id taken in
@@ -677,6 +678,9 @@ static void pt_add(const VkPassMark *m, double us) {
         if (e->key && e->key != key) continue;
         if (!e->key)
             *e = (PtSum){key, m->kind, m->ncolor, m->w, m->h, m->d, m->ncolor ? m->color[0] : VK_FORMAT_UNDEFINED,
+                         m->depth, sid, 0, 0, 0, 0, 0};
+        if (m->vw > e->vw) e->vw = m->vw;
+        if (m->vh > e->vh) e->vh = m->vh;
         e->us += us, e->n++, e->draws += m->draws == UINT32_MAX ? 0 : m->draws;
         return;
     }
@@ -705,6 +709,9 @@ static void pt_report(uint64_t frames) {
                    e->us / (double)e->n / 1e3);
         else
             rt_log("vk:   %5.2f ms/frame %5.1f%% pass %ux%u x%u, %u colour (first fmt %d), depth fmt %d, fs %016llx: %.1f per "
+                   "frame, %.3f ms and %.0f draws each, viewport up to %ux%u", e->us / f / 1e3,
+                   pt_total_us > 0 ? e->us * 100 / pt_total_us : 0, e->w, e->h, e->d, e->ncolor, (int)e->c0, (int)e->depth,
+                   e->sid, e->n / f, e->us / (double)e->n / 1e3, (double)e->draws / (double)e->n, e->vw, e->vh);
     }
     memset(pt_sum, 0, sizeof pt_sum);
     pt_total_us = 0, pt_marks = 0, pt_lost = 0;

@@ -128,6 +128,7 @@ typedef struct {
     uint32_t step;                      // index of the pass, or of the dispatch, within its submission, from 0
     uint32_t w, h, d;                   // render area and layers; a dispatch: group counts (0 0 0: indirect)
     uint32_t draws;                     // draws recorded in the pass; UINT32_MAX until its end is recorded
+    uint32_t vw, vh;                    // the largest viewport a draw of the pass set (dynamic resolution draws in part)
     uint64_t fence;                     // the submission: the timeline value it signals
     VkFormat color[8], depth;           // attachment formats (VK_FORMAT_UNDEFINED: none)
     const GfxShader *first[2], *last[2];// vertex and fragment shader of the first and last draw; a dispatch: first[0]
