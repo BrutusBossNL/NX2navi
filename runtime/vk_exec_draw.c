@@ -154,11 +154,11 @@ typedef struct {
     VkBuffer sup_buf;
     VkDeviceSize sup_off;
     int sup_valid;
-    uint8_t c0[3][VK_C0_BYTES];          // last c0 bank per stage (vertex, fragment, compute) and where it lives
-    VkBuffer c0_buf[3];
-    VkDeviceSize c0_off[3];
-    int c0_valid[3];
-    struct { p_bind_buf ssbo[16], ubo[16]; uint32_t dim[3], binst; uint8_t push[1024]; } c0_in[3];   // what vk_c0_fill read for c0[k]
+    uint8_t c0[5][VK_C0_BYTES];          // last c0 bank per stage (vertex, fragment, compute, task, mesh) and where it lives
+    VkBuffer c0_buf[5];
+    VkDeviceSize c0_off[5];
+    int c0_valid[5];
+    struct { p_bind_buf ssbo[16], ubo[16]; uint32_t dim[3], binst; uint8_t push[1024]; } c0_in[5];   // what vk_c0_fill read for c0[k]
     VkPipelineLayout ds_layout;          // graphics layout the sets below were last pushed or bound with
     VkDescriptorSet ds_bound[2];         // allocated set bound per set number (0: none or pushed since)
     VkDescriptorSet ds_last[2];          // last allocated and written set per set number, contents in DS
@@ -1277,7 +1277,11 @@ static uint32_t nvn2_cs_tables_at(const uint8_t *ctl);
 
 static VkDescriptorBufferInfo c0_info(VkExec *ex, int st) {
     DrawCtx *const cx = ex->dc;
-    int k = st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : 2;
+    // One bank per stage: the inputs below do not say which stage they are for, and the stages lay the storage table out
+    // at different offsets (c0_ssbo_base). Task and mesh shared the compute entry: the foliage's task and mesh stages
+    // bind the same storage buffers, so the task stage was handed the mesh stage's bank (its table at 0x770), read
+    // zero addresses at 0x670, culled every instance and launched no mesh workgroups.
+    int k = st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : st == NVN_STAGE_TASK ? 3 : st == NVN_STAGE_MESH ? 4 : 2;
     // vk_c0_fill reads the storage slots, and the uniform slots and dispatch size for compute or the base instance for
     // graphics: equal inputs give the same bank, so neither the fill nor the 2 KiB compare is needed.
     // A vertex or fragment bank depends on the storage slots and the base instance alone (the rest of its inputs record
