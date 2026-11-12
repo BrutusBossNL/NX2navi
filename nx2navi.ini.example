@@ -96,6 +96,12 @@
 # Occlusion query results are read back from the video card in batches, 0 or 1. Default: on. 0 reads each query with a
 # call of its own, as before, which on AMD's Windows driver held every frame's "GPU done" back by about 4 ms.
 # oq_batch = 1
+# EXPERIMENT, 0 or 1. Default: off. The game asks the video card how much of an object would show behind what is
+# already drawn (an occlusion query) and leaves hidden objects out. With 1 it asks nothing and draws them all: more
+# draws in a frame, and no queries to issue or results to wait for and read back. Whether that gains or loses frames
+# has not been measured, and it differs from place to place. The log's "patches:" line at the start says
+# "occlusion_off on" when the game was built with the patch set and the setting took effect.
+# patch_occlusion_off = 0
 # How many milliseconds a submit call waits for the game's own signal that the frame's data is written, when the
 # frame's commands begin with a wait for that signal (0 to 100; 0: the frame is set aside at once and drawn at its
 # present, as before).

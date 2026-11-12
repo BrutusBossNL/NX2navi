@@ -200,3 +200,23 @@ site zstd main f5c2c  94000015 9536acd5   # bl the stream feed -> page+0xf80
 # on the patch page (+0xf70), which puts the free camera's vectors into those registers and does the instruction's
 # own work.
 site freecam main 4c4e50 1e624011 95277048   # fcvt s17, d0 -> bl page+0xf70
+
+# Occlusion queries off, an experiment (patch_occlusion_off = 1; off by default). main+0x11ac790 copies the values of a
+# parameter object (x20) into a list of options (x21): an option is found by the CRC-32 of its name (vtable +0x38) and
+# keeps its value at +0x18. Two of the parameters are CreateZPrePassOcclusionQuery (the byte main+0xf5acc0 returns:
+# +0x596 of the object, or its parent's while +0x606 is clear) and CreateSamplesPassedQuery (main+0xf5bf70: +0x58e and
+# +0x607), named so where main+0x35727d0 lists the parameters; their options are create_z_pre_pass_occlusion_query
+# (0x2b8ea8de) and create_samples_passed_query (0xd1eaac2b). The function reads each byte at three places: where it
+# first writes the option (its mode 0), and where an update (mode 1) compares the byte with the option and where it
+# then stores it. All six read 0 instead, so neither option is ever set: the game is left without its occlusion
+# queries, and so without their reports and the conditional renders that depend on them, and draws what it would have
+# tested. What that costs and saves in play has not been measured, hence the default. Left as they are: the function's
+# mode 2, which only answers whether one option differs from its parameter (the compare every option shares,
+# main+0x11c8be0) and so answers yes for these two wherever the parameter is set, and the listing at main+0x35727d0.
+set occlusion_off NX2NAVI_PATCH_OCCLUSION_OFF 0
+site occlusion_off main 11ace68 39400008 2a1f03e8   # ldrb w8, [x0] -> mov w8, wzr: the z-pre-pass query's first write
+site occlusion_off main 11b828c 39400008 2a1f03e8   # its update's compare
+site occlusion_off main 11b82a4 39400008 2a1f03e8   # its update's store
+site occlusion_off main 11acec8 39400008 2a1f03e8   # the samples-passed query's first write
+site occlusion_off main 11b82dc 39400008 2a1f03e8   # its update's compare
+site occlusion_off main 11b82f4 39400008 2a1f03e8   # its update's store
