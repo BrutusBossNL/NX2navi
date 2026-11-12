@@ -1645,10 +1645,15 @@ static void tab_lama(float scale) {
     opt_toggle("NX2NAVI_ASTC_SCRATCH_KEEP", UI_MENU_LAMA_ASTC_KEEP, UI_MENU_LAMA_ASTC_KEEP_DESC);
     opt_group(UI_MENU_LAMA_RENDER);
     const bool native = vk_mesh_shader_native() != 0;   // vk_exec_draw.c: the emulation only where the GPU lacks them
+    if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
     opt_toggle("NX2NAVI_MESH_EMULATION", UI_MENU_LAMA_MESH_EMU, UI_MENU_LAMA_MESH_EMU_DESC);
     }
+    if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
     opt_slider("NX2NAVI_MESH_EMU_MB", UI_MENU_LAMA_MESH_MB, 64, 2048, UI_MENU_LAMA_MESH_MB_DESC, 64, "%.0f MB");
+    if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
     opt_slider("NX2NAVI_MESH_EMU_TASKS", UI_MENU_LAMA_MESH_TASKS, 4096, 65536, UI_MENU_LAMA_MESH_TASKS_DESC, 4096, "%.0f");
+    if (native) opt_disable_next(UI_MENU_LAMA_MESH_NATIVE);
+    opt_toggle("NX2NAVI_MESH_EMU_BATCH", UI_MENU_LAMA_MESH_BATCH, UI_MENU_LAMA_MESH_BATCH_DESC);   // vk_exec_draw.c
     opt_toggle("NX2NAVI_TEX_CLOBBER", UI_MENU_LAMA_CLOBBER, UI_MENU_LAMA_CLOBBER_DESC);
     static const UiTextId vec[] = {UI_MENU_OFF, UI_MENU_LAMA_VEC_AUTO, UI_MENU_ON};   // gfx_shader.c patch_vec_index
     opt_choice("NX2NAVI_VEC_INDEX_FIX", UI_MENU_LAMA_VEC_INDEX, vec, 3, UI_MENU_LAMA_VEC_INDEX_DESC);

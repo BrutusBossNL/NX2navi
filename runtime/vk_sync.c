@@ -764,6 +764,55 @@ static CmdSlot *take_slot(VkCtx *c, uint64_t fence) {
     return &slots[cur_slot];
 }
 
+// ---- the part's pre-pass command buffer (vk.h vk_sync_pre; vk_exec_draw.c mesh emulation, NX2NAVI_MESH_EMU_BATCH)
+// Begun at the first call of a part, submitted right before the part (after the mirror prologue) and ended there. Its
+// own pool: with the recorder on, the recorder thread records the part (cmd_pool) while the replay records this.
+static VkCommandPool pre_pool;
+static CmdSlot *pre_slots;
+static int npre, pre_pair = -1;
+static VkCommandBuffer pre_cb;
+VkCommandBuffer vk_sync_pre(void) {
+    if (pre_cb) return pre_cb;
+    if (!pre_pool) {
+        VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                      .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                      .queueFamilyIndex = c->gfx_family};
+        if (vkCreateCommandPool(c->device, &pi, NULL, &pre_pool) != VK_SUCCESS) return VK_NULL_HANDLE;
+    }
+    uint64_t gpu = 0;
+    vkGetSemaphoreCounterValue(c->device, c->timeline, &gpu);
+    int i = 0;
+    while (i < npre && pre_slots[i].fence > gpu) i++;
+    if (i == npre) {
+        CmdSlot *n = realloc(pre_slots, sizeof *n * (size_t)(npre + 1));
+        if (!n) return VK_NULL_HANDLE;
+        pre_slots = n;
+        VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pre_pool,
+                                          .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+        if (vkAllocateCommandBuffers(c->device, &ai, &pre_slots[npre].cb) != VK_SUCCESS) return VK_NULL_HANDLE;
+        npre++;
+    }
+    pre_slots[i].fence = cur_fence;   // the submission's value: its parts are done by then
+    VkCommandBuffer cb = pre_slots[i].cb;
+    pre_pair = ts_open(cb);
+    // everything earlier in queue order (the parts before, the mirror prologue) before what it records
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    pre_cb = cb;
+    return cb;
+// The pre-pass command buffer of the part that goes now, ended; VK_NULL_HANDLE without one.
+static VkCommandBuffer pre_end(uint64_t fence) {
+    VkCommandBuffer cb = pre_cb;
+    if (!cb) return VK_NULL_HANDLE;
+    pre_pair = -1;
+    vkEndCommandBuffer(cb);
+    pre_cb = VK_NULL_HANDLE;
+    return cb;
+}
+
 // The copies the replay's first accesses to VRAM mirrors queued (vk_memory.c), in a command buffer of their own that is
 // submitted right before the part that needs them and timed like a part; VK_NULL_HANDLE when there are none. After the
 // part was recorded, sub_lock held; may move slots[].
@@ -878,10 +927,8 @@ static VkCommandBuffer split_part(int exec) {
     ts_end(cb, cur_fence);
     if (!rec_end_cb(cb, 0, 0)) vkEndCommandBuffer(cb);   // every command of the part is in cb, ended by its recorder
     vk_upload_flush(0);   // the uploads this part asked for precede it in queue order
-    VkCommandBuffer pro = prologue(c, cur_fence);
-    VkCommandBufferSubmitInfo cbi[PART_CBS + 2];
-    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = part_list(cbi, pro, cb, 1),
-                        .pCommandBufferInfos = cbi};
+    VkCommandBuffer pro = prologue(c, cur_fence), pre = pre_end(cur_fence);
+    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = ncb, .pCommandBufferInfos = cbi};
     VkSemaphoreSubmitInfo esig = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = exec_tl,
                                   .value = cur_fence, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
     if (exec && exec_tl && exec_sig < cur_fence)
@@ -954,7 +1001,7 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     if (cpu0) perf_replay_cpu(plat_thread_cpu_ns(me) - cpu0);
     // After the recording: the uploads it asked for (and every earlier one) precede it in queue order.
     vk_upload_flush(0);
-    VkCommandBuffer pro = prologue(c, fence);
+    VkCommandBuffer pro = prologue(c, fence), pre = pre_end(fence);
     s = &slots[cur_slot];
     VkCommandBufferSubmitInfo cbi[PART_CBS + 2];
     uint32_t ncbi = part_list(cbi, pro, s->cb, recorded);
@@ -965,10 +1012,8 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
                                      .value = fence, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT}};
     int both = exec_tl && exec_sig < fence;
     if (both) exec_sig = fence;
-    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = ncbi,
-                        .pCommandBufferInfos = cbi, .signalSemaphoreInfoCount = both ? 2u : 1u,
-                        .pSignalSemaphoreInfos = sig};
-    ts_submitted();
+    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = ncb, .pCommandBufferInfos = cbi,
+                        .signalSemaphoreInfoCount = both ? 2u : 1u, .pSignalSemaphoreInfos = sig};
     queue_submit(c, &si, fence);   // held or handed to the queue (submit batching)
     vk_mem_lazy_handed();
     s->fence = recorded ? fence : 0;

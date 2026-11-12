@@ -750,6 +750,9 @@ VkCommandBuffer vk_sync_append_later(int n, int *at);
 void vk_sync_append_fill(int at, const VkCommandBuffer *cbs, int n);
 VkCommandBuffer vk_sync_worker_begin(int w);
 void vk_sync_worker_end(VkCommandBuffer cb);
+// The part's pre-pass command buffer: submitted right before the part being recorded (after its mirror prologue), begun
+// with a full barrier at the first call of a part; VK_NULL_HANDLE when it cannot be made. Replay thread, sub_lock held.
+VkCommandBuffer vk_sync_pre(void);
 extern int vk_sub_in_frame;   // replay: the submission being recorded is the frame's n-th (0 the first; vk_backend.c)
 // Runs fn(arg) on the completion thread once fence is done on the GPU (event writes, counter reports, sync state).
 // Callbacks run in the order they were added, after those of earlier values; a value already done runs at once there.

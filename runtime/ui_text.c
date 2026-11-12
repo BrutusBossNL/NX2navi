@@ -123,6 +123,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_LAMA_MESH_NATIVE] = "this GPU has mesh shaders",
     [UI_MENU_LAMA_MESH_MB] = "Mesh emulation memory",
     [UI_MENU_LAMA_MESH_MB_DESC] = "Video memory for the emulated meshes' vertices and indices, in MB.",
+    [UI_MENU_LAMA_MESH_BATCH] = "Mesh emulation before the pass",
+    [UI_MENU_LAMA_MESH_BATCH_DESC] = "The emulated mesh stages of a render pass run before the pass in a command buffer "
+                                     "of their own, instead of splitting the pass at every emulated draw. Off: the "
+                                     "split, as before.",
     [UI_MENU_LAMA_MESH_TASKS] = "Mesh emulation task records",
     [UI_MENU_LAMA_MESH_TASKS_DESC] = "Task records per submission for the emulated meshes. Raise it when the log reports "
                                      "that a submission asked for more.",

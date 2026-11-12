@@ -1112,6 +1112,9 @@ static void set_rt(VkExec *ex, const p_set_rt *r) {
 static int split_n = -1, split_idle, split_in_pass, split_draws, split_at, part_start;
 static uint64_t split_ns, part_t0;
 static uint64_t n_parts, n_subs, n_idle_parts, n_pass_splits;
+int vk_exec_split_now(VkExec *ex) {
+    return 1;
+}
 
 static int split_wanted(void) {
     if (split_draws >= split_at) return 1;
@@ -2082,9 +2085,10 @@ static uint32_t group_peek(const VkExec *ex, const op_hdr *h, const op_hdr **end
     int begun = 0;
     const p_set_rt *rt = &ex->rt;
     *why = GE_LIMIT;
-    // mesh draws stay on the submitting thread with the mesh fallback (its buffers are shared) and while
-    // NX2NAVI_GPU_PASSES copies their workgroup counts (one list)
-    int mesh_serial = vk_ctx()->mesh_fallback || vk_gpu_passes_capturing();
+    // mesh draws stay on the submitting thread with the mesh fallback (its buffers are shared), with the mesh emulation
+    // (no VK_EXT_mesh_shader: its arena, queue and the part's pre-pass command buffer are the submitting thread's) and
+    // while NX2NAVI_GPU_PASSES copies their workgroup counts (one list)
+    int mesh_serial = vk_ctx()->mesh_fallback || !vk_ctx()->has_mesh_shader || vk_gpu_passes_capturing();
     for (uint32_t ops = 0; ops < GROUP_PEEK; ops++) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_) { *why = GE_RUN; break; }   // the walk reports it
         const void *a = nvn_op_payload(h);

@@ -5575,6 +5575,7 @@ static void mfb_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind) {
     ex->recorded++;
 }
 
+static int mesh_emu_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind, const VkMemSpan *args);
 // The primitive an emulated draw's mesh stage outputs: point meshes draw point lists, the rest triangles.
 static int mesh_emu_draw_prim(VkExec *ex) {
     static struct { const GfxShader *s; int prim; } memo[256];
@@ -5601,6 +5602,9 @@ static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
     PFN_vkCmdDrawMeshTasksEXT fn = draw_mesh_fn();
     if (!fn && mesh_emu_on()) {
         if (d->first) warn_once(W_MESH, "an emulated mesh draw from workgroup %u: drawn from workgroup 0", d->first);
+        if (d->count && rt_knob("MESH", "1")) mesh_emu_draw(ex, d->count, NULL, NULL);
+        return;
+    }
     static int on = -1;
     if (on < 0) on = rt_knob("MESH", "1");   // NX2NAVI_MESH=0: mesh draws are skipped (diagnosis)
     if (!d->count || !on) return;
@@ -5652,7 +5656,7 @@ uint32_t vk_exec_mesh_counts(const uint32_t **out) {
     *out = mesh_count_map;
     return mesh_count_map ? mesh_count_n : 0;
 }
-static void mesh_count_note(VkExec *ex, const VkMemSpan *src) {
+static void mesh_count_note(VkExec *ex, VkCommandBuffer cb, const VkMemSpan *src) {
     uint32_t cap = (uint32_t)vk_gpu_passes_capturing();
     if (!cap) { mesh_count_was = 0; return; }
     if (!mesh_count_was) mesh_count_was = 1, mesh_count_n = 0;
@@ -5667,8 +5671,8 @@ static void mesh_count_note(VkExec *ex, const VkMemSpan *src) {
     }
     if (mesh_count_n >= MESH_COUNTS) return;
     VkBufferCopy cp = {src->offset, 4ull * mesh_count_n++, 4};
-    vkCmdCopyBuffer(ex->cb, src->buffer, mesh_count_buf, 1, &cp);
-    ex->recorded++;
+    vkCmdCopyBuffer(cb, src->buffer, mesh_count_buf, 1, &cp);
+    if (cb == ex->cb) ex->recorded++;
 }
 
 // NX2NAVI_MESH_AHEAD (default 1; 0 = each draw by itself, "ab" switches with the A/B blocks): the copy of a record
@@ -5705,7 +5709,11 @@ static int mesh_ahead_on(void) {
     return RT_KNOB_ON(mode);
 }
 
-static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan *src, VkDeviceSize *at) {
+// A ring entry {count from src, 1, 1}, filled in cb; ex->cb: after a full barrier, which ends the pass (the next draw
+// opens it again) and orders the culling's writes before the copy. Another cb (the pre-pass one of the mesh
+// emulation) begins with one. d: the draw it is for, which may take an entry filled ahead (MESH_AHEAD, ex->cb only);
+// NULL: none (the mesh emulation's).
+static int mesh_ring_entry(VkExec *ex, VkCommandBuffer cb, const p_draw_mesh_ind *d, const VkMemSpan *src, VkDeviceSize *at) {
     DrawCtx *const cx = ex->dc;
     if ((rt_trace & RT_TRACE_PERF) && (mesh_ahead_taken + mesh_ahead_own) % 20000 == 19999) {
         char stops[160];
@@ -5714,7 +5722,7 @@ static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan
                "their pass; the runs ended: %s", (unsigned long long)(mesh_ahead_taken + mesh_ahead_own + 1),
                (unsigned long long)mesh_ahead_taken, stops);
     }
-    if (cx->ma_i < cx->ma_n) {
+    if (d && cb == ex->cb && cx->ma_i < cx->ma_n) {
         if (cx->ma[cx->ma_i].d == d && cx->ma[cx->ma_i].ind == d->ind && cx->ma_brk == vk_exec_brk_now()) {
             *at = cx->ma[cx->ma_i++].at;
             __atomic_add_fetch(&mesh_ahead_taken, 1, __ATOMIC_RELAXED);
@@ -5725,15 +5733,18 @@ static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan
     __atomic_add_fetch(&mesh_ahead_own, 1, __ATOMIC_RELAXED);
     if (!__atomic_load_n(&mesh_ring, __ATOMIC_ACQUIRE) && (vk_exec_in_chunk() || !mesh_ring_make())) return 0;
     *at = 12ull * (__atomic_fetch_add(&mesh_ring_next, 1, __ATOMIC_RELAXED) % MESH_RING);
-    vk_exec_barrier(ex);   // ends the pass (the next draw opens it again) and orders the culling's writes before the copy
-    vk_gpu_gap_note(VK_GAP_MESH_RING, 12);
-    vkCmdFillBuffer(ex->cb, mesh_ring, *at + 4, 8, 1);
+    int own = cb == ex->cb;
+    if (own) {
+        vk_exec_barrier(ex);
+        cb = ex->cb;
+        vk_gpu_gap_note(VK_GAP_MESH_RING, 12);
     }
+    vkCmdFillBuffer(cb, mesh_ring, *at + 4, 8, 1);
     VkBufferCopy cp = {src->offset, *at, 4};
-    vkCmdCopyBuffer(ex->cb, src->buffer, mesh_ring, 1, &cp);
-    mesh_count_note(ex, src);
+    vkCmdCopyBuffer(cb, src->buffer, mesh_ring, 1, &cp);
+    mesh_count_note(ex, cb, src);
     cx->ma_n = cx->ma_i = 0;
-    if (mesh_ahead_on()) {
+    if (d && own && mesh_ahead_on()) {
         const void *run[MESH_AHEAD];
         int n = vk_exec_mesh_run(d, run, MESH_AHEAD);
         for (int i = 0; i < n; i++) {
@@ -5746,7 +5757,7 @@ static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan
             vkCmdFillBuffer(ex->cb, mesh_ring, fa + 4, 8, 1);
             VkBufferCopy fc = {ip.offset, fa, 4};
             vkCmdCopyBuffer(ex->cb, ip.buffer, mesh_ring, 1, &fc);
-            mesh_count_note(ex, &ip);
+            mesh_count_note(ex, ex->cb, &ip);
             ex->recorded += 2;
             cx->ma[cx->ma_n].d = f, cx->ma[cx->ma_n].ind = f->ind, cx->ma[cx->ma_n].at = fa;
             cx->ma_n++;
@@ -5759,6 +5770,7 @@ static int mesh_ring_entry(VkExec *ex, const p_draw_mesh_ind *d, const VkMemSpan
                            .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &di);
+    if (own) ex->recorded += 3;
     return 1;
 }
 
@@ -5777,6 +5789,11 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
                          (unsigned long long)d->ind);
     ex->dc->c0_binst = 0;
     VK_MEM_USE(ip);
+        mesh_emu_draw(ex, 0, NULL, &ip);
+        vk_mem_count(ip.cls, VK_MUSE_IND, 4);
+        VK_MEM_BOUND(ip);
+        return;
+    }
     if (fallback) {
         mfb_draw(ex, 0, &ip);
         vk_mem_count(ip.cls, VK_MUSE_IND, 4);
@@ -5874,9 +5891,12 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
                            .dstAccessMask = da | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &di);
+        }
     }
     }
 // count: the first stage's workgroups, or ind: a {count, 1, 1} record to dispatch from
+// args: an indirect draw's arguments in game memory (count, 1, 1 copied into a ring entry, which ind then is)
+static int mesh_emu_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind, const VkMemSpan *args) {
     if (!me_arena()) return 0;
     ex->dc->c0_binst = 0;
     int prim = mesh_emu_draw_prim(ex);
@@ -5895,13 +5915,41 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
                    : "its descriptors cannot be bound for compute");
         ME.skipped++;
         return 0;
+    }
     VkPipelineLayout layout = info->layout;
     int push = info->push, pool = info->pool;
     VkDescriptorUpdateTemplate tpl_c = info->emu_tpl_c;
     VkDescriptorSet set0 = ex->dc->B.ds_bound[0];
+    // NX2NAVI_MESH_EMU_BATCH (default on): the stages run in the part's pre-pass command buffer (vk_sync_pre), which
+    // the queue runs before the part, and the pass is not split for them. At the first emulated draw of a pass the part
+    // pass of 20 emulated draws was 20 passes, each emulated draw a pass end and begin with a full barrier, three more
+    // barriers and the targets stored and loaded again: on an RX 580 6 to 7 ms of a frame's GPU time went to the gaps
+    // between passes (gpu_passes, Kokiri Forest, 2026-11-10).
+    static int batch = -1;
+    if (batch < 0) {
+        batch = rt_knob("MESH_EMU_BATCH", "1");
+        rt_log("vk: mesh emulation: the stages of a pass's emulated draws %s (NX2NAVI_MESH_EMU_BATCH=%d)",
+               batch ? "run before the pass, in a command buffer of their own" : "split the pass", batch);
     }
+    VkCommandBuffer pre = VK_NULL_HANDLE;
+    if (batch && ex->in_pass) {
+        if (ex->pre_pass != ex->pass_serial && vk_exec_split_now(ex)) {
+            if (!prepare_draw_ex(ex, prim, 0x7fffffff, 0, 1) || PD_info != info) {   // the pass again, in the new part
+            ex->pre_pass = ex->pass_serial;
+            set0 = ex->dc->B.ds_bound[0];
         }
+        if (ex->pre_pass == ex->pass_serial) pre = vk_sync_pre();
     }
+    if (!pre) vk_exec_barrier(ex);   // ends the pass; what the game wrote before (its culling) is visible to the stages
+    VkCommandBuffer cb = pre ? pre : ex->cb;
+    VkMemSpan ring = {0};
+    if (args) {
+        if (!mesh_ring_entry(ex, cb, NULL, args, &ring.offset)) {
+            warn_once(W_MESH, "the indirect mesh ring could not be created: skipped");
+            ME.skipped++;
+            return 0;
+        ring.buffer = mesh_ring, ind = &ring;
+        cb = pre ? pre : ex->cb;
     uint32_t ep = vk_texture_epoch();
     if (ep != ME.epoch) {   // the first emulated draw of this submission: the counters start over
         ME.epoch = ep;
@@ -5925,6 +5973,14 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
     vkCmdFillBuffer(cb, ME.buf, ro + 4, 4, 1);
     uint32_t pc[8] = {(uint32_t)ME.addr, (uint32_t)(ME.addr >> 32), (uint32_t)(ro / 4), ME.iw, ME.icap, ME.vw, ME.vcap, ME.trecs};
     }
+    if (!pre) {
+        // the draw: prepared again (the pass reopens, every binding is recorded again)
+        vk_exec_draw_new_cb();
+        ex->dirty = VK_EXEC_DIRTY_ALL;
+        if (!prepare_draw_ex(ex, prim, 0x7fffffff, 0, 1) || PD_info != info) {
+            ME.skipped++;
+            return 0;
+        }
     }
     cb = ex->cb;
     vkCmdBindIndexBuffer(cb, ME.buf, (VkDeviceSize)ME.iw * 4, VK_INDEX_TYPE_UINT32);
