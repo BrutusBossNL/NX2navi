@@ -1425,10 +1425,30 @@ def fast_clang(msys, clang, env):
     return fast if mine and clang_ident(fast, env) == mine else None
 
 
+def guest_opt_ini(out):
+    """NX2NAVI_GUEST_OPT from nx2navi.ini next to the exe (the menu's Lama patches tab writes it there) when the
+    environment does not set it: the next build of the game folder out takes it."""
+    if os.environ.get('NX2NAVI_GUEST_OPT', '').strip():
+        return
+    try:
+        for line in (Path(out) / 'nx2navi.ini').read_text(encoding='utf-8', errors='replace').splitlines():
+            key, eq, value = line.partition('=')
+            key = key.strip().lower()
+            if eq and key in ('guest_opt', 'nx2navi_guest_opt'):
+                value = value.split('#')[0].split(';')[0].strip().strip('"')
+                if value:
+                    os.environ['NX2NAVI_GUEST_OPT'] = value
+    except OSError:
+        pass
+
+
 def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None, first=()):
     """fast: fast_clang's compiler for the lifted code, with msys as its sysroot. first: include flags that go
     ahead of inc for the runtime's sources only (vulkan_headers); the lifted code includes none of those headers,
-    and its command, which is part of its objects' keys, stays as it was."""
+    and its command, which is part of its objects' keys, stays as it was. NX2NAVI_GUEST_OPT (an environment variable,
+    or guest_opt in nx2navi.ini) 1 builds the lifted code at -O1; by default -O2: the game's own threads run it and
+    bound the frame on a slower CPU; the build takes several times longer."""
+    guest_opt = '-O1' if os.environ.get('NX2NAVI_GUEST_OPT', '').strip() == '1' else '-O2'   # -O2 unless guest_opt = 1
     def cmd_for(src, dst):
         cpp = src.suffix in ('.cpp', '.cxx')
         # the lifted code at -O1 (its size makes -O2 slow to build), the runtime at -O2; neither may assume strict
@@ -1440,7 +1460,7 @@ def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None, first=()):
         cc = [str(fast), f'--sysroot={msys}'] if guest and fast else [str(clangxx if cpp else clang)]
         # -fdeclspec: third_party/ffx_api/ffx_api.h declares its entry points __declspec(dllexport) unconditionally
         declspec = ['-fdeclspec'] if cpp and not WIN else []
-        return [*cc, '-c', '-std=gnu++17' if cpp else '-std=gnu11', '-O1' if guest else '-O2',
+        return [*cc, '-c', '-std=gnu++17' if cpp else '-std=gnu11', guest_opt if guest else '-O2',
                 *march, '-fno-strict-aliasing', '-w', *declspec, *([] if guest else first), *inc, '-o', str(dst), str(src)]
     return cmd_for
 
@@ -1681,6 +1701,20 @@ def retune_due(obj, msys):
         return True
 
 
+def write_runtime_map(full, dst):
+    """The linker's map (the build cache's, which tools/prof_report.py reads) without the lines of the lifted game
+    functions (f_<hex>): the runtime's and the libraries' symbols, a few MiB, next to the exe to send with a crash log
+    or a NX2NAVI_PROFILE profile of the render thread."""
+    lifted = re.compile(r'\bf_[0-9a-f]{4,}\b')   # any line naming a lifted function: its symbol or its section
+    try:
+        with open(full, encoding='utf-8', errors='replace') as i, open(dst, 'w', encoding='utf-8') as o:
+            for line in i:
+                if not lifted.search(line):
+                    o.write(line)
+    except OSError:
+        pass
+
+
 def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     """romfs_job: the RomFS step still running beside this one (a first build). Everything that does not include
     romfs_config.h compiles meanwhile; the RomFS index and the few files that include it follow once it is done.
@@ -1707,6 +1741,9 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     cid, cid_old = compiler_ids(clang, env)   # fast_clang's compiler writes the same objects: not part of the key
     now = cpu_level(clang, env)
     level = lifted_level(obj, now, update)
+    guest_opt_ini(out)
+    if os.environ.get('NX2NAVI_GUEST_OPT', '').strip() == '2':   # runtime_cmd's guest_opt
+        say('  lifted code at -O2 (NX2NAVI_GUEST_OPT): a long build')
     if level == now:
         say(f'  the lifted code is built for x86-64-v{level}, this processor\'s level' if level else
             '  the lifted code is built for generic x86-64: the processor\'s level could not be read')
@@ -1794,7 +1831,7 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     stamp = [[o.name, o.stat().st_size, o.stat().st_mtime_ns] for o in objs]
     if prebuilt:
         stamp.append([prebuilt[0].name, prebuilt[0].stat().st_size, sha256_file(prebuilt[0])])
-    link_key = sha256_bytes(json.dumps([LINK_LIBS, ld, cid] + stamp).encode())
+    link_key = sha256_bytes(json.dumps([LINK_LIBS, ld, cid, 'map'] + stamp).encode())
     state_link = cache_dir / 'link.key'
     if exe.is_file() and state_link.is_file() and state_link.read_text(encoding='utf-8') == link_key:
         say(f'  {EXE_NAME} is current, not linked again')
@@ -1814,6 +1851,7 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
         except PermissionError:
             tmp.unlink(missing_ok=True)
             fail(f'{exe} is in use: close the game and try again')
+        write_runtime_map(cache_dir / 'ocarina.map', out / 'nx2navi.map')   # next to the exe, to send with a crash log
         state_link.write_text(link_key, encoding='utf-8')
     copy_if_changed(gen / 'romfs-index.bin', out / 'romfs-index.bin')
     xlate = xlate_source()

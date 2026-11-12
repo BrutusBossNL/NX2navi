@@ -36,6 +36,7 @@ namespace {
 
 struct {
     VkQueue present = VK_NULL_HANDLE, acquire = VK_NULL_HANDLE;
+    uint32_t pfam = 0, afam = 0;   // their queue families
     ffxContext sc = nullptr;   // the swapchain context
     ffxContext fg = nullptr;   // the frame generation context
     VkExtent2D fg_ext = {0, 0};
@@ -108,6 +109,12 @@ extern "C" int vk_fg_wanted(void) {
     if (F.sc) return !F.failed && !four;
     if (four) return 1;
     if (F.failed) return 0;
+    if (!F.present) {   // no queue to present on besides the game's (vk_device.c says why): the plain swapchain stays
+        static int told_q;
+        if (!__atomic_exchange_n(&told_q, 1, __ATOMIC_RELAXED))
+            rt_log("fg: AMD FSR 3.1 frame generation is set, but the device got no queue for its presents: off");
+        return 0;
+    }
     if (vk_ffx_framegen_available()) return 1;
     static int told;
     if (!__atomic_exchange_n(&told, 1, __ATOMIC_RELAXED))
@@ -118,10 +125,12 @@ extern "C" int vk_fg_wanted(void) {
 // Always the three queues: the setting can be switched on during a run, and idle queues cost nothing.
 extern "C" uint32_t vk_fg_queue_count(void) { return 3; }
 
-extern "C" void vk_fg_queues(VkQueue present, VkQueue acquire) {
-    F.present = present, F.acquire = acquire;
-    vk_fg4_queues(present, acquire);
+extern "C" void vk_fg_queues(VkQueue present, uint32_t present_family, VkQueue acquire, uint32_t acquire_family) {
+    F.present = present, F.acquire = acquire, F.pfam = present_family, F.afam = acquire_family;
+    vk_fg4_queues(present, present_family, acquire, acquire_family);
 }
+
+extern "C" int vk_fg_has_queues(void) { return F.present != VK_NULL_HANDLE; }
 
 // AMD's swapchain is in place: the window's swapchain handle is AMD's object, and every swapchain call has to go
 // through AMD's functions. That holds after a failure too, until the present code has replaced the swapchain
@@ -153,8 +162,8 @@ extern "C" VkResult vk_fg_create_swapchain(const VkSwapchainCreateInfoKHR *ci, V
     d.createInfo.oldSwapchain = VK_NULL_HANDLE;
     d.gameQueue = {c->gfx_queue, c->gfx_family, submit_game};
     d.asyncComputeQueue = {VK_NULL_HANDLE, c->gfx_family, nullptr};
-    d.presentQueue = {F.present, c->gfx_family, nullptr};
-    d.imageAcquireQueue = {F.acquire, c->gfx_family, nullptr};
+    d.presentQueue = {F.present, F.pfam, nullptr};
+    d.imageAcquireQueue = {F.acquire, F.afam, nullptr};
     ffxReturnCode_t r = vk_ffx_create(&F.sc, &d.header);
     if (r != FFX_API_RETURN_OK) {
         F.sc = nullptr;
@@ -278,6 +287,15 @@ extern "C" void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt,
     fgr_note(&F.cuts, F.frame, reset || !F.prepared);
     if ((reset || !F.prepared) && on) F.cut_frames++;
     F.prepared = on;
+    // Every 600 frames, whether this one generates or not: what kept frames from being generated, and how many frames
+    // AMD's swapchain presented (generated ones included). Logged only from a generating frame, as before, a run whose
+    // frames never generated (the menu open at the swapchain's second frame, no inputs, no HUD-less picture) said nothing.
+    if (F.frame == 120 || F.frame % 600 == 0)
+        rt_log("fg: %llu frames, %llu generated (%llu with the HUD kept out), %llu presents by the swapchain; not generated: "
+               "%llu menu open, %llu without depth and motion, %llu without the HUD-less picture; %llu after a camera cut",
+               (unsigned long long)F.frame, (unsigned long long)F.generated, (unsigned long long)F.hudless,
+               (unsigned long long)vk_fg_presents(sc), (unsigned long long)F.paused, (unsigned long long)F.no_inputs,
+               (unsigned long long)F.no_hudless, (unsigned long long)F.cut_frames);
     ffxConfigureDescFrameGeneration cfg = {};
     cfg.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
     cfg.swapChain = (void *)sc;
@@ -321,11 +339,6 @@ extern "C" void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt,
     p.motionVectors = image(&mv);
     r = vk_ffx_dispatch(&F.fg, &p.header);
     if (r != FFX_API_RETURN_OK) return fail("frame generation preparation", r);
-    if (F.frame == 2 || F.frame % 3600 == 0)
-        rt_log("fg: %llu frames presented, %llu generated (%llu with the HUD kept out); paused %llu (menu), %llu without depth "
-               "and motion, %llu without the HUD-less picture; %llu after a camera cut", (unsigned long long)F.frame, (unsigned long long)F.generated,
-               (unsigned long long)F.hudless, (unsigned long long)F.paused, (unsigned long long)F.no_inputs,
-               (unsigned long long)F.no_hudless, (unsigned long long)F.cut_frames);
 }
 
 extern "C" void vk_fg_release(void) {

@@ -247,6 +247,7 @@ int mem_lazy_skip(uint64_t a, uint64_t n, uint64_t h0, int64_t delta, uint64_t o
 int mem_lazy_armed(uint64_t a, uint64_t n);
 // Copies the ranges src[i] = {address, bytes} of guest memory whose pages read without a fault to dst[i], ok[i] set.
 int mem_copy_readable(uint8_t *const *dst, const uint64_t (*src)[2], int n, uint8_t *ok);
+int mem_lazy_touches(uint64_t a, uint64_t n);   // 0: the CPU can read [a, a + n) without a fault now
 void mem_lazy_window(int open);
 void mem_lazy_release(uint64_t a, uint64_t n);
 void mem_lazy_report(uint64_t frame, uint64_t skipped);

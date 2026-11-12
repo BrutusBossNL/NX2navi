@@ -62,6 +62,7 @@ static const char *const known[] = {
     "ONE_PER_CORE", "OPERATION_MODE", "OUTPUT_RES", "PAD_LAYOUT", "PACE_HZ", "PASS_CRUMBS", "PATCH_OUTPUT", "PATCH_RES_FIXED", "PATCH_SCENE", "PATCH_WIDE_ASPECT", "PATCH_WIDE_HUD", "PATCH_WIDE_MOVIE", "PATCH_WIDE_OUT", "PATCH_FREECAM", "PATCH_WIDE_SCENE", "PCSS", "PCSS_K", "PERF_OVERLAY", "PERF_SLOW_MS", "PIPELINE_CACHE", "PIPELINE_CACHE_MAX_MB", "PIPELINE_CACHE_PLAY", "PIPELINE_CACHE_PLAY_MB", "PIPE_BINARIES", "PIPE_BINARIES_MAX_MB", "PIPE_FEEDBACK", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SEED", "PIPE_SKIP", "PIPE_SYNC", "PIPE_WAIT", "POWER_FULL", "TEX_SAME", "TEX_SAME_BIG", "TEX_FLAT3D", "TEX_KEEP_TAKEN", "TEX_STALE_KEPT", "PRESENT_HELD", "HELD_SYNC",
     "PREPARE_PIPELINES", "PREWARM_FULL", "PREWARM_WAIT_MS", "PREWARM_XLATE", "PROBE_MOVIE", "PROBE_MOVIE_SHOT", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES", "PROFILE_REPLAY", "PROFILE_SLOW",
     "POOL_FAST", "POOL_GROUP", "POOL_GROUP_CHECK", "POOL_PRESNAP", "POOL_PRESNAP_RUNS",
+    "SUBMIT_FINISH_GPU", "SVC_WAITS", "SNAP_WIDEN", "SUBMIT_FINISH_RESULTS", "SUBMIT_FINISH_KINDS", "FOLIAGE", "MIRROR_STAGE", "FLUSH_SKIP_CLEAN", "MIRROR_HOT", "MESH_EMULATION", "MESH_EMU_MB", "MESH_EMU_TASKS", "MESH_EMU_BATCH", "GUEST_OPT", "LOG_TEX_NEW", "DUMP_KEY", "VEC_INDEX_FIX", "PASS_TIMES",
     "PROFILE_MAIN", "PROFILE_RENDER", "PROMPTS", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REALTIME", "REC_END", "REEXEC",
     "REFLEX", "RENDER_SCALE", "REPLAY_ASYNC", "REPLAY_PIPE", "REPLAY_RUNS", "REPLAY_WORKERS", "RTSS", "RTSS_ENUM", "SCENE_SHARE",
     "PRESNAP_PLACE",
@@ -74,6 +75,7 @@ static const char *const known[] = {
     "SET_AT", "SWKBD_TEST", "TAA", "DBG_TEST", "DEBUG_MENU", "MENU_TEST_DEBUG", "FSR4", "FSR4_FG", "FG4_VERSION", "FG4_SWAPCHAIN", "TEST_PAD", "TEST_PAD_AT", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "DEPTH_INIT_INLINE", "DEPTH_ALIAS_LOG", "TEX_DISUSE", "TEX_DISUSE_EVICT", "TEX_GEN_UNDO", "TEX_MEMO", "TEX_VRAM_PRESSURE", "TEX_RELEASED_MB", "TEX_RELEASED_MAX", "TEX_REUSE", "TEX_SPLIT_FILL", "TEX_COMMIT_FREE_MB", "TEX_PROC_COMMIT_MB", "TEX_EVICT", "TEX_COMMIT_EVICT", "MIRROR_EVICT", "VRAM_BUDGET_MB", "TIMER_1MS", "TRACE", "TXD_TRANSPOSE", "UBO_SNAPSHOT", "EVO_TRACE", "EVENT_AT_SYNC", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NAN_PRESERVE", "VK_NOOPT", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECONVERGE", "VK_NAN_BITS", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VS_OUTS", "WATER_PROJECTIVE",
     "WAIT_WATCH_S", "WALK_KEY", "WALK_SCALE", "WB_EXACT", "WB_FENCE_LIMIT", "WB_MERGE", "WB_NO_REUP", "WB_MERGE_MAX", "WB_PROBE", "WB_SPLIT", "WB_LAZY", "WB_LAZY_CHUNK", "WB_LAZY_TOUCH", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_KEEP", "XLATE_PROCS",
+    "UPLOAD_BATCH_MB", "VRAM_HEAP_LIMIT", "VRAM_RESERVE_MB", "TEX_CLOBBER",
     "ZSTD_CHECK", "ZSTD_NATIVE",
     "BIND_REUSE", "DYN_DELTA", "STG_ARENA", "SUBMIT_BATCH", "SUBMIT_THREAD", "ASTC_GPU_DESWIZZLE", "ASTC_SCRATCH_KEEP", "ASTC_ARENA", "ASTC_BC1",
     "TEXUP_LOG_MS", "DYN_RES", "DYN_RES_TARGET", "DYN_RES_STEP", "TEXTURE_DETAIL",
@@ -89,6 +91,12 @@ static const char *const known[] = {
 
 // The nx2navi.ini section a key cfg_set may write goes to when the file lacks it (nx2navi.ini.example's sections).
 static const struct { const char *key, *section; } sections[] = {
+    // the menu's Lama patches tab (ui/menu.cpp tab_lama)
+    {"TEX_RELEASED_MAX", "performance"}, {"MIRROR_HOT", "performance"}, {"FREEZE_IDLE", "performance"}, {"SUBMIT_FINISH_KINDS", "performance"}, {"FOLIAGE", "performance"},
+    {"ZSTD_NATIVE", "performance"},
+    {"VRAM_HEAP_LIMIT", "performance"}, {"VRAM_RESERVE_MB", "performance"}, {"UPLOAD_BATCH_MB", "performance"}, {"MESH_EMULATION", "performance"},
+    {"MESH_EMU_MB", "performance"}, {"MESH_EMU_TASKS", "performance"}, {"MESH_EMU_BATCH", "performance"}, {"VEC_INDEX_FIX", "performance"},
+    {"GUEST_OPT", "performance"}, {"PASS_TIMES", "diagnostics"}, {"DUMP_KEY", "diagnostics"},
     {"FPS_LIMIT", "frame rate"}, {"FPS60", "frame rate"}, {"RTSS", "frame rate"},
     {"REALTIME", "frame rate"}, {"CLOTH_REALTIME", "frame rate"}, {"HIGHFPS_FIX", "frame rate"},
     {"PHYSICS_STEPS", "frame rate"}, {"PICKUP_COUNT", "frame rate"}, {"STEP_STEADY", "frame rate"},
@@ -138,6 +146,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"PREWARM_XLATE", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"},
     {"TEX_ALIAS", "performance"}, {"DEPTH_INIT_INLINE", "performance"}, {"DEPTH_ALIAS_LOG", "diagnostics"}, {"TEX_DISUSE", "performance"}, {"TEX_DISUSE_EVICT", "performance"}, {"TEX_GEN_UNDO", "performance"}, {"TEX_REUSE", "performance"}, {"TEX_SPLIT_FILL", "performance"}, {"TEX_VRAM_PRESSURE", "performance"}, {"TEX_PROC_COMMIT_MB", "performance"}, {"ASTC_BC", "performance"}, {"LOD_GUARD", "performance"}, {"FIX_C0", "performance"}, {"FIX_ZERO", "performance"}, {"WATER_PROJECTIVE", "performance"},
     {"BIND_SKIP", "performance"}, {"SHADER_CACHE_FLUSH", "performance"}, {"SHADER_CARRY", "performance"}, {"PIPELINE_CACHE_PLAY", "performance"}, {"PIPELINE_CACHE_PLAY_MB", "performance"}, {"FFX_PIPE_CACHE", "performance"}, {"SHADER_MEMO", "performance"}, {"PIPE_MEMO", "performance"}, {"TEX_MEMO", "performance"}, {"DESC_TEMPLATE", "performance"},
+    {"TEX_CLOBBER", "performance"},
     {"PUSH_SKIP", "performance"}, {"SPLIT_DRAWS", "performance"}, {"SPLIT_IDLE", "performance"}, {"SPLIT_IN_PASS", "performance"}, {"SPLIT_US", "performance"}, {"VK_VALIDATION", "performance"},
     {"VK_DYN_VERTEX", "performance"}, {"VK_DYN_A2C", "performance"}, {"VK_SUBGROUP_PIN", "performance"}, {"VK_RECONVERGE", "performance"},
     {"VK_NAN_PRESERVE", "performance"}, {"VK_NAN_BITS", "performance"},
@@ -249,7 +258,7 @@ static const CfgMeta metas[] = {
     // offer's number, which this setting or the menu accepts), always (every room, the save still copied first), or a number.
     {"COOP_ACCEPT", "ask", NULL, LIVE},
     // Advanced: scheduling
-    {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
+    {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "1", "0|1", RESTART},
     {"REPLAY_WORKERS", "3", "0..16", RESTART}, {"REPLAY_PIPE", "0", "0..4", RESTART},
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
     // dynamic resolution (dynres.c): the scene follows the GPU time toward DYN_RES_TARGET milliseconds
@@ -302,9 +311,22 @@ static const CfgMeta metas[] = {
     // all|<count>: the compute pipelines the boot keeps, those dispatched most recently (vk_pipeline.c, compute-used.bin)
     {"COMPUTE_KEEP", "512", NULL, RESTART},
     {"SHADER_CARRY", "1", "0|1", RESTART},   // gfx_shader.c "Carry": a previous translator's translations until translated again
+    // the menu's Lama patches tab (ui/menu.cpp tab_lama): the settings of the RX 580 patches
+    {"TEX_RELEASED_MAX", "", NULL, RESTART},   // vk_texture.c released_max: "" by the video memory budget, else 1..16384
+    {"MIRROR_HOT", "25", "0..1000", RESTART}, {"FREEZE_IDLE", "1800", "0..100000", RESTART},
+    {"SUBMIT_FINISH_KINDS", "31", "0..31", RESTART},   // vk_sync.c res_mask
+    {"FOLIAGE", "full", "full|reduced|off", RESTART},   // vk_exec_draw.c foliage_skip
+    {"VRAM_HEAP_LIMIT", "auto", NULL, RESTART},   // vk_device.c vram_heap_limits: auto, 0 or MiB
+    {"VRAM_RESERVE_MB", "512", "0..4096", RESTART},   // vk_vma_budget.c: video memory kept free of VMA's allocations
+    {"UPLOAD_BATCH_MB", "256", NULL, RESTART},   // vk_memory.c: MiB of staging before a batch goes early, 0 no limit
+    {"MESH_EMULATION", "1", "0|1", RESTART}, {"MESH_EMU_MB", "256", "32..2048", RESTART},
+    {"MESH_EMU_TASKS", "16384", "256..262144", RESTART}, {"MESH_EMU_BATCH", "1", "0|1", RESTART}, {"VEC_INDEX_FIX", "0", "0|auto|1", RESTART},
+    {"GUEST_OPT", "2", "1|2", RESTART},   // tools/make_game.py: the next Rebuild the Game
+    {"PASS_TIMES", "0", "0|1", RESTART}, {"DUMP_KEY", "", NULL, RESTART},   // vk_crumbs.c, vk_dump.c
     // textures and memory
     {"ASTC", "auto", "auto|gpu|native|cpu", RESTART}, {"MEMORY", "auto", "auto|import|mirror|verify", RESTART},
     {"TEX_ALIAS", "1", "0|1", RESTART}, {"DEPTH_INIT_INLINE", "1", "0|1", RESTART}, {"DEPTH_ALIAS_LOG", "0", "0|1", RESTART}, {"TEX_DISUSE", "1", "0|1|2", RESTART}, {"TEX_DISUSE_EVICT", "0", "0|1", RESTART}, {"TEX_GEN_UNDO", "1", "0|1", RESTART}, {"TEX_REUSE", "1", "0|1", RESTART}, {"TEX_SPLIT_FILL", "1", "0|1|2", RESTART}, {"TEX_VRAM_PRESSURE", "80", "0..100", RESTART}, {"ASTC_BC", "", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},
+    {"TEX_CLOBBER", "1", "0|1", RESTART},
     {"STG_ARENA", "1", "0|1", RESTART}, {"ASTC_GPU_DESWIZZLE", "1", "0|1", RESTART},
     {"ASTC_SCRATCH_KEEP", "1", "0|1", RESTART}, {"ASTC_ARENA", "1", "0|1", RESTART},   // vk_astc.c scratch_get, vk_texture.c astc_arena
     // render fixes

@@ -28,6 +28,7 @@ extern "C" {
 #include "platform/platform.h"
 #include "vk.h"
 #include "vk_ffx.h"
+#include "vk_fg.h"
 }
 
 namespace {
@@ -274,7 +275,8 @@ extern "C" int vk_ffx_available(void) {
 #endif
 }
 
-extern "C" int vk_ffx_framegen_available(void) { return vk_ffx_available(); }   // the same library, its API calls
+// the same library, its API calls; and a queue for the frame generation swapchain's presents (vk_fg_has_queues)
+extern "C" int vk_ffx_framegen_available(void) { return vk_ffx_available() && vk_fg_has_queues(); }
 
 // NX2NAVI_FSR4 (default 0, live): FSR 4 where it runs (vk_ffx4.cpp) and has not failed in a row, else FSR 3.1.
 extern "C" int vk_ffx_fsr4(void) { return cfg_bool("NX2NAVI_FSR4") && vk_ffx4_available() && !vk_ffx4_failed(); }

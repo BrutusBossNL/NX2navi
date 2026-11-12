@@ -127,6 +127,8 @@ typedef struct VkExec {
     const void *fb_fs;                   // feedback_scan's memo: fragment shader, texture bind serial, pass serial
     uint32_t fb_serial, fb_pass, fb_sampled;
     uint32_t tex_serial, pass_serial;    // bumped by every texture or image bind and pass begin
+    uint32_t pre_pass;                   // the pass (pass_serial) the part's pre-pass command buffer serves (vk_sync_pre;
+                                         // vk_exec_draw.c mesh emulation); a pass begins after it with another serial
 } VkExec;
 
 // Begins dynamic rendering with the current targets unless a pass is open (a full memory barrier precedes it). Call
@@ -142,6 +144,9 @@ void vk_exec_barrier(VkExec *ex);
 void vk_exec_barrier_dispatch(VkExec *ex);
 // NX2NAVI_TRACE=perf, every 600 frames: the barriers per frame by kind.
 void vk_exec_barrier_log(uint64_t frame);
+// Ends the open pass and the part without handing it to the queue (vk_sync_cut): the next draw begins the pass again
+// at the start of a new command buffer, which the part's pre-pass command buffer precedes. 0 when no more can wait.
+int vk_exec_split_now(VkExec *ex);
 // vk_texture.c (NX2NAVI_TEX_ALIAS): commands that must run at the replay's current position. vk_exec_inline_begin returns
 // the command buffer being recorded after a full barrier (an open pass is ended; *reopen says so), or VK_NULL_HANDLE
 // when this thread is not recording a replay. vk_exec_inline_end begins the pass again when it was open.
