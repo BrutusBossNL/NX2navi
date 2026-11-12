@@ -2422,6 +2422,10 @@ static void svc_wait_note(const Cpu *c, uint32_t imm, uint64_t ns) {
 
 int kern_svc(Cpu *c, uint32_t imm) {
     static int waits = -1;
+    if (waits < 0) {   // no settings row: cfg_bool only on a set value (an unset key is fatal there)
+        const char *v = cfg_get("NX2NAVI_SVC_WAITS");
+        waits = v && *v && cfg_bool("NX2NAVI_SVC_WAITS");
+    }
     if (waits && plat_thread_id() == prof_main_tid) {
         uint64_t w0 = kern_now_ns();
         int r = kern_svc_inner(c, imm);
