@@ -46,6 +46,7 @@
 #include "mesh_emu_spirv.h"
 #include "gfx.h"
 #include "host.h"
+#include "mem_need.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
 #include "prp_file.h"
@@ -746,8 +747,12 @@ static VkResult pipe_create(int kind, void *ci, VkPipeline *pipe) {
 // The data of the pipeline cache file at path for vkCreatePipelineCache (malloc'd, its size in *size), NULL when the
 // run starts without it, which the log says with the file's size. Cache data whose header names another device or
 // driver is dropped before Vulkan sees it.
-// NX2NAVI_PIPELINE_CACHE_MAX_MB (default 512; 0 no limit): a larger file starts the run empty, and the run's
-// saves replace it. The file only grows: entries of earlier translators and builds stay, and on NVIDIA
+// NX2NAVI_PIPELINE_CACHE_MAX_MB (default 1024; 0 no limit): a larger file starts the run empty, and the run's
+// saves replace it. The limit has to stay above what one run builds, or nothing ever replaces the file: at 512, with
+// the pipeline list of 0.9.1 (8,849 records), an RTX 2080 Ti's file held 551 MB and the play file the run then wrote
+// 541 MB, so both were dropped at every start, 7,247 of 8,531 pipelines were built again in each (17 s of the
+// boot) and 541 MB were written again in each session (cache_load says so when both files are over). The file only
+// grows: entries of earlier translators and builds stay, and on NVIDIA
 // (621.01) an entry another executable wrote is neither used nor written again, so a renamed or updated exe
 // compiles while the file keeps its size (2026-11-09: 650 MB, 15-18 % of the pipelines read from it). The
 // whole file sits in process memory twice at the boot (this read and the driver's copy) and is copied out
@@ -830,6 +835,10 @@ static void cache_load(VkCtx *c) {
     int want = cfg_bool("NX2NAVI_PIPELINE_CACHE_PLAY") && !prep_mode, on = want && P.cache_control;
     size_t psize = 0, pkept = 0;
     void *pdata = cache_data_read(c, P.play_path, &psize);
+    if (base_over && cache_over_cap)   // what one run builds is over the limit: nothing will ever replace either file
+        rt_log("vk_pipeline: both pipeline cache files are over NX2NAVI_PIPELINE_CACHE_MAX_MB, so what one run builds does "
+               "not fit it: this start builds every pipeline again, and so will each one after it until the limit is "
+               "raised above the play file's size (pipeline_cache_max_mb in nx2navi.ini; 0 = no limit)");
     VkPipelineCache play = psize || on ? cache_make(c, pdata, psize, &pkept) : VK_NULL_HANDLE;
     free(pdata);
     uint64_t fold_at = (uint64_t)strtoull(cfg_value("NX2NAVI_PIPELINE_CACHE_PLAY_MB"), NULL, 10) << 20;
@@ -4173,6 +4182,7 @@ static struct {
     uint32_t pend_n, pend_cap;
     uint8_t *file;                     // the file as read at boot, until the prewarm is done with it
     size_t file_n;                     // records in it
+    size_t own_n;                      // of them, the first ones: this install's own (keys_open); the shared list's follow
     PlatMutex io;                        // one writer
     // prebuild progress (under P.lock)
     int loading;                       // the prewarm still queues records
@@ -4276,6 +4286,7 @@ static void keys_open_seed(void);
 static void keys_open_own(void);
 static void keys_open(void) {
     keys_open_own();
+    K.own_n = K.file_n;
     if (K.path[0]) keys_open_seed();
 }
 
@@ -5287,6 +5298,30 @@ void vk_pipeline_prewarm(void) {
     __atomic_store_n(&pw_phase, 3, __ATOMIC_RELEASE);
 }
 
+// NX2NAVI_PIPE_SEED_BOOT (auto, the default; 1; 0): whether the boot builds the pipelines of the shared list that this
+// install has never drawn (keys_open_seed), 1, or leaves them to their first draw, 0. Built at boot they are there
+// when a draw first needs them, which is what the list is for, and every one is a pipeline the driver holds for the
+// whole run: with the list of 0.9.1 the boot's pipeline stage went from about 1.6 GB of commit (0.8.0, 3,256
+// pipelines on an RTX 5080) to 3.9-4.4 GB (8,531 on an RTX 2080 Ti, 6,977 on an RTX 5070 Ti) and 0.3-0.6 GiB of
+// video memory, 1.5-1.8 GB of commit on AMD's driver, of which the list's share is half to nearly all. On a machine
+// that has that to spare it buys the first visit of every area without a wait. On one that starts short of the
+// commit the game takes in play (mem_need.h, the start's own warning) it is memory taken from the game for
+// pipelines that may never be drawn, and running out of commit ends the game (a failed allocation or a lost device).
+// auto leaves them out there and only there. A pipeline left out is made at its first draw as any new one is, from
+// pipeline-cache.bin when the preparation built it (0.5-0.8 ms on a worker), and is the install's own from then on:
+// the next start builds it at boot. Mesh pipelines are built at boot either way: they have no fast link, and a draw
+// waits for the whole build. The list's pairs still count in the vertex output unions, so the modules stay the ones
+// the preparation built.
+static int seed_boot(void) {
+    static int on = -1;
+    if (on >= 0) return on;
+    const char *e = cfg_get("NX2NAVI_PIPE_SEED_BOOT");
+    if (e && (!strcmp(e, "0") || !strcmp(e, "1"))) return on = e[0] == '1';
+    double proc, used, limit, need = strtod(cfg_value("NX2NAVI_MEM_NEED_MB"), NULL);
+    plat_commit_info(&proc, &used, &limit);
+    return on = !mem_need_short(proc, used, limit, need);
+}
+
 static void prewarm_run(void) {
     const char *gpu = rt_config()->gpu;
     uint32_t pr_hist[16] = {0}, fs_hist[4] = {0};   // library state of the recorded pipelines (lb_start)
@@ -5354,7 +5389,8 @@ static void prewarm_run(void) {
         return;
     }
     pm_set();
-    uint32_t queued = 0, dropped = 0, known = 0;
+    uint32_t queued = 0, dropped = 0, known = 0, listed = 0;
+    int at_boot = seed_boot();
     plat_mutex_lock(&P.lock);
     K.t0 = t1;
     K.loading = 1;
@@ -5385,6 +5421,10 @@ static void prewarm_run(void) {
             pr_hist[(k.clamp & 1) | (k.poly_mode & 3) << 1 | (k.minus_w & 1) << 3]++;
             fs_hist[k.samples >= 8 ? 3 : k.samples >= 4 ? 2 : k.samples >= 2 ? 1 : 0]++;
         }
+        if (!at_boot && i >= K.own_n && !is_mesh(&s)) {   // of the shared list alone: made at its first draw (seed_boot)
+            listed++;
+            continue;
+        }
         uint64_t h = key_hash(&k, sizeof k);
         int q = 0;
         if (pipe_find(&k, sizeof k, h)) known++;
@@ -5392,6 +5432,13 @@ static void prewarm_run(void) {
     }
     K.loading = 0;
     plat_mutex_unlock(&P.lock);
+    if (listed) {
+        const char *e = cfg_get("NX2NAVI_PIPE_SEED_BOOT");
+        rt_log("vk_pipeline: prewarm: %u records of the shared pipeline list that this install has not drawn are left to "
+               "their first draw, when pipeline-cache.bin gives them (NX2NAVI_PIPE_SEED_BOOT=%s%s)", listed,
+               e && !strcmp(e, "0") ? "0" : "auto",
+               e && !strcmp(e, "0") ? "" : ": this machine started with less commit free than the game takes in play");
+    }
     free(ids), free(sh);
 
     __atomic_store_n(&pw_pipe_done, 0, __ATOMIC_RELAXED);
