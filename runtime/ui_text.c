@@ -470,6 +470,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                  "where the card has none, keeps video memory within what the driver reports free, waits less for the GPU and "
                                  "prepares frames on a thread of their own. Measured on a Radeon RX 580 only: it can show a dark or flickering "
                                  "frame now and then, so leave it off on a newer card.",
+    [UI_MENU_REPLAY_WORKERS] = "Replay workers (experimental)",
+    [UI_MENU_REPLAY_WORKERS_DESC] = "CPU threads that help translate each frame's draws for the GPU, beside the game's own "
+                                    "thread. 3 gave about 20% more frames a second in Hyrule Field on an 8-core CPU; more "
+                                    "than 3 gave nothing more. Some players' games crashed with them on: 0 (off) is the "
+                                    "safe choice. Takes effect after a restart.",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
     [UI_MENU_DISCORD_RPC_DESC] = "Shows \"Playing NX2navi\" with the play time in your Discord status while the "
                                  "game runs. discord_app_id and discord_image in nx2navi.ini choose the application.",
