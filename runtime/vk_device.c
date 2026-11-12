@@ -794,3 +794,6 @@ int probe_vkdevice(void) {
     printf("probe-vkdevice: %s (validation errors %ld)\n", g_errors_total ? "FAILED" : "passed", g_errors_total);
     return g_errors_total ? 1 : 0;
 }
+
+// The GPU has mesh shaders: the mesh emulation (NX2NAVI_MESH_EMULATION) does nothing there (the menu's Lama patches tab).
+int vk_mesh_shader_native(void) { return g_vk.has_mesh_shader; }

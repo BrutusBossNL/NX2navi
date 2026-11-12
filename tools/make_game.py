@@ -1425,10 +1425,29 @@ def fast_clang(msys, clang, env):
     return fast if mine and clang_ident(fast, env) == mine else None
 
 
+def guest_opt_ini(out):
+    """NX2NAVI_GUEST_OPT from nx2navi.ini next to the exe (the menu's Lama patches tab writes it there) when the
+    environment does not set it: the next build of the game folder out takes it."""
+    if os.environ.get('NX2NAVI_GUEST_OPT', '').strip():
+        return
+    try:
+        for line in (Path(out) / 'nx2navi.ini').read_text(encoding='utf-8', errors='replace').splitlines():
+            key, eq, value = line.partition('=')
+            key = key.strip().lower()
+            if eq and key in ('guest_opt', 'nx2navi_guest_opt'):
+                value = value.split('#')[0].split(';')[0].strip().strip('"')
+                if value:
+                    os.environ['NX2NAVI_GUEST_OPT'] = value
+    except OSError:
+        pass
+
+
 def runtime_cmd(clang, clangxx, inc, level=0, fast=None, msys=None, first=()):
     """fast: fast_clang's compiler for the lifted code, with msys as its sysroot. first: include flags that go
     ahead of inc for the runtime's sources only (vulkan_headers); the lifted code includes none of those headers,
-    and its command, which is part of its objects' keys, stays as it was."""
+    and its command, which is part of its objects' keys, stays as it was. NX2NAVI_GUEST_OPT (an environment variable,
+    or guest_opt in nx2navi.ini) 1 builds the lifted code at -O1; by default -O2: the game's own threads run it and
+    bound the frame on a slower CPU; the build takes several times longer."""
     def cmd_for(src, dst):
         cpp = src.suffix in ('.cpp', '.cxx')
         # the lifted code at -O1 (its size makes -O2 slow to build), the runtime at -O2; neither may assume strict
@@ -1721,6 +1740,7 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     cid, cid_old = compiler_ids(clang, env)   # fast_clang's compiler writes the same objects: not part of the key
     now = cpu_level(clang, env)
     level = lifted_level(obj, now, update)
+    guest_opt_ini(out)
     if os.environ.get('NX2NAVI_GUEST_OPT', '').strip() == '2':   # runtime_cmd's guest_opt
         say('  lifted code at -O2 (NX2NAVI_GUEST_OPT): a long build')
     if level == now:

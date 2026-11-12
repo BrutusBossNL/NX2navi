@@ -421,6 +421,9 @@
 # is read and written by the GPU in system memory instead (0: every pool keeps its video memory copy). For GPUs and
 # buses short of bandwidth; on an RX 580 the pools the game refills every frame cost about 8 ms a frame in copies.
 # mirror_hot = 0
+# 2: the next Rebuild the Game compiles the game's code at -O2 instead of -O1 (faster game threads on a slower CPU, a
+# build several times longer). Read by tools/make_game.py; the environment variable NX2NAVI_GUEST_OPT wins.
+# guest_opt = 1
 # GPUs without mesh shaders (VK_EXT_mesh_shader: AMD before RDNA 2, NVIDIA before Turing): 1 runs the game's mesh
 # and task shaders (grass and other foliage) as compute shaders and draws what they make; 0 skips those draws. The
 # arena for their vertices and triangles is mesh_emu_mb MiB of video memory, with mesh_emu_tasks task records (3 KiB

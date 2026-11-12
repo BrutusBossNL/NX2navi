@@ -89,6 +89,59 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_DESC] = "Sharpness of large surface textures. Reduced and Low leave out their largest versions, so that an area fits the video memory of 6 and 8 GB cards; only surfaces seen up close look softer. Automatic picks by the card's video memory.",
     [UI_MENU_TEX_DETAIL_AUTO] = "Automatic: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Full", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduced", [UI_MENU_TEX_DETAIL_LOW] = "Low",
+    [UI_MENU_TAB_LAMA] = "Lama patches",
+    [UI_MENU_LAMA_INTRO] = "Settings of the RX 580 patches (apply_rx580_fix). Most take effect after a restart.",
+    [UI_MENU_LAMA_MEMORY] = "Video memory and textures",
+    [UI_MENU_LAMA_RENDER] = "Rendering",
+    [UI_MENU_LAMA_BUILD] = "Build",
+    [UI_MENU_LAMA_DIAG] = "Diagnostics",
+    [UI_MENU_LAMA_RELEASED] = "Released textures kept",
+    [UI_MENU_LAMA_RELEASED_DESC] = "How many textures the game has released are kept as they are; past it only those that "
+                                   "lose nothing when dropped go. Fewer leaves more video memory for the rest; more "
+                                   "saves making them again; too few lets some blink black for a moment. Auto: one per 2 MB "
+                                   "of the video memory budget, 2048 to 8192.",
+    [UI_MENU_LAMA_CLOBBER] = "Fix overwritten textures",
+    [UI_MENU_LAMA_CLOBBER_DESC] = "A texture the game reads after another image was drawn over its memory gets memory of "
+                                  "its own. Fixes the teal splotches in Kokiri Forest's fog.",
+    [UI_MENU_LAMA_MIRROR_HOT] = "Pools copied every frame stay in system memory",
+    [UI_MENU_LAMA_MIRROR_HOT_DESC] = "A game memory pool whose copies to and from video memory each frame reach this "
+    [UI_MENU_LAMA_HEAP_LIMIT] = "Video memory heap limit",
+    [UI_MENU_LAMA_HEAP_LIMIT_DESC] = "Auto: on GPUs with a second video memory heap (an RX 580 shows 6 GB and 2 GB), "
+                                     "each heap is filled only to its budget before the next one is used, so the "
+                                     "driver does not run out. Off: no limit.",
+    [UI_MENU_LAMA_UPLOAD_BATCH] = "Upload batch limit",
+    [UI_MENU_LAMA_UPLOAD_BATCH_DESC] = "Texture uploads waiting in staging memory are sent to the GPU early once they "
+                                       "hold this much, so an area load cannot run video memory out.",
+    [UI_MENU_LAMA_NO_LIMIT] = "No limit",
+    [UI_MENU_LAMA_ASTC_KEEP] = "Keep the ASTC decode buffer",
+    [UI_MENU_LAMA_ASTC_KEEP_DESC] = "The buffer that GPU-decodes compressed textures is kept between upload batches "
+                                    "instead of being allocated again for each one.",
+    [UI_MENU_LAMA_MESH_EMU] = "Mesh shader emulation",
+    [UI_MENU_LAMA_MESH_EMU_DESC] = "Draws grass, moss and other foliage on GPUs without mesh shaders (AMD RX 400/500 "
+                                   "and Vega, GTX 10-series and older), with compute shaders. GPUs with mesh shaders "
+                                   "ignore it.",
+    [UI_MENU_LAMA_MESH_NATIVE] = "this GPU has mesh shaders",
+    [UI_MENU_LAMA_MESH_MB] = "Mesh emulation memory",
+    [UI_MENU_LAMA_MESH_MB_DESC] = "Video memory for the emulated meshes' vertices and indices, in MB.",
+    [UI_MENU_LAMA_MESH_TASKS] = "Mesh emulation task records",
+    [UI_MENU_LAMA_MESH_TASKS_DESC] = "Task records per submission for the emulated meshes. Raise it when the log reports "
+                                     "that a submission asked for more.",
+    [UI_MENU_LAMA_VEC_INDEX] = "Vector index fix",
+    [UI_MENU_LAMA_VEC_INDEX_DESC] = "Shaders read uniform vector components at computed indices whole and select the "
+                                    "component, for drivers that get such reads wrong. Auto: on AMD's own drivers.",
+    [UI_MENU_LAMA_VEC_AUTO] = "Auto (AMD)",
+    [UI_MENU_LAMA_GUEST_OPT] = "Optimised game code (-O2)",
+    [UI_MENU_LAMA_GUEST_OPT_DESC] = "The next Rebuild the Game in the launcher compiles the game's code at -O2 instead "
+                                    "of -O1: the game's own threads run faster on a slower CPU. The build takes "
+                                    "several times longer.",
+    [UI_MENU_LAMA_GUEST_OPT_NOTE] = "at the next rebuild",
+    [UI_MENU_LAMA_PASS_TIMES] = "Pass times in the log",
+    [UI_MENU_LAMA_PASS_TIMES_DESC] = "GPU time of every render pass and dispatch goes to the log, with the largest "
+                                     "viewport each kind of pass draws with. Costs a little frame time.",
+    [UI_MENU_LAMA_DUMP_KEY] = "Frame dump key",
+    [UI_MENU_LAMA_DUMP_KEY_DESC] = "Each press of this key in the game window dumps the next frame (images and the "
+                                   "frame's passes) to the dump folder, for a glitch caught while it is on screen. "
+                                   "Windows only.",
     [UI_MENU_SHARPNESS] = "FSR sharpness",
     [UI_MENU_SHARPNESS_DESC] = "How sharp FSR makes the picture. 0 turns it off.",
     [UI_MENU_SHARPNESS_NEEDS_FSR] = "only with AMD FSR 1 or FSR 3.1",
