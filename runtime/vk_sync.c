@@ -1382,6 +1382,8 @@ int vk_sync_recorded_wait(uint64_t value, uint64_t timeout_ns, int (*gpu_wait)(u
     static int gpu = -1, res_mode = 1;
     if (gpu < 0) {
         res_mode = rt_knob("SUBMIT_FINISH_RESULTS", "1");
+        const char *km = cfg_get("NX2NAVI_SUBMIT_FINISH_KINDS");   // a number (rt_knob reads only 0, 1 and ab)
+        res_mask = (km && *km ? (int)strtol(km, NULL, 0) : 31) & 0x1f;
         rt_log("vk: result kinds the submit wait counts: %#x (NX2NAVI_SUBMIT_FINISH_KINDS: 1 events, 2 counter reports, "
                "4 occlusion reports, 8 GPU writes of unmirrored memory, 16 mirror write-backs)", res_mask);
         rt_log("vk: the wait after a frame's first submission also waits for %s (NX2NAVI_SUBMIT_FINISH_RESULTS=%d)",
