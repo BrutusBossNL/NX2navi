@@ -5396,6 +5396,28 @@ uint64_t vk_upload_flush(int wait) {
         open_b.sub_ns = plat_now_ns();
         VkResult r = vkQueueSubmit(c->gfx_queue, 1, &si, open_b.fence);
         vk_queue_unlock();
+        if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY) {
+            // The driver had no memory to take the batch, which ended the game here (five logs of three reports, all on
+            // integrated GPUs, one with 9 GB of commit to spare: the device's own heap was full). A refused
+            // submit leaves the command buffer and the fence as they were, so it can be made again: first the batches
+            // in flight are waited for, which gives their staging back and lets the objects that waited for them be
+            // destroyed, then the kept buffers and spare blocks go back to the driver (vk_mem_give_back), as for a
+            // refused staging buffer. Only a second refusal ends the run.
+            VkResult first = r;
+            int flying = ninflight;
+            retire(c, 1);
+            collect_locked(c);
+            uint64_t freed = vk_mem_give_back();
+            vk_queue_lock();
+            open_b.sub_ns = plat_now_ns();
+            r = vkQueueSubmit(c->gfx_queue, 1, &si, open_b.fence);
+            vk_queue_unlock();
+            static volatile int32_t told;
+            if (plat_inc32(&told) <= 16)
+                rt_log("vk: upload submit refused (%d): waited for %d batches in flight, %.1f MiB of kept buffers and "
+                       "spare blocks given back, %s", (int)first, flying, freed / 1048576.0,
+                       r == VK_SUCCESS ? "taken at the second try" : "refused again");
+        }
         if (r != VK_SUCCESS) {
             vk_mem_oom_report("upload submit", r);
             vk_device_lost_check(r, "the submit of an upload batch");
