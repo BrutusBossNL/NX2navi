@@ -2495,9 +2495,9 @@ static const char *origin_name(const GfxShader *s) {
 // The shaders of the pipeline this thread builds, for the crash notes (platform.h plat_crash_context): the first 8
 // bytes of each cache key, as gfx_shader.c names its cache files.
 static void crash_note(const char *what, const GfxShader *a, const GfxShader *b, const GfxShader *c) {
-    static __thread char buf[160];
+    static __thread char buf[320];
     char *o = buf;
-    o += snprintf(o, 40, "building %s", what);
+    o += snprintf(o, 160, "building %s", what);
     const GfxShader *sh[3] = {a, b, c};
     for (int i = 0; i < 3; i++)
         if (sh[i]) {
@@ -3607,7 +3607,9 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
     VkPipelineCreationFeedbackCreateInfo fci;
     VkPipelineCreationFeedback fb;
     pi.pNext = fb_chain(&fci, &fb, pi.pNext);
-    crash_note("a pipeline library", s->vs, s->fs, NULL);
+    static const char *const kind_name[4] = {"a vertex input library", "a pre-rasterization library",
+                                             "a fragment shader library", "a fragment output library"};
+    crash_note(kind_name[kind], s->vs, s->fs, NULL);
     if (pipe_create(1, &pi, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
     plat_crash_context(NULL);
     if (pipe && (kind == LIB_PR || kind == LIB_FS)) fb_note(FB_LIBRARY, &fb);   // the shader libraries: the others compile nothing
@@ -3838,7 +3840,12 @@ static VkPipeline gpl_link(const VkPipeState *s, const GKey *k, const Layout *lc
                                            .layout = l->layout};
         if (build) plat_mutex_unlock(&P.lock);
         uint64_t t1 = qpc();
-        crash_note("a library link", s->vs, s->fs, NULL);
+        char what[160];   // the parts that differ between links: a link that crashes the driver names its case
+        snprintf(what, sizeof what,
+                 "a library link (fragment shader %s, %u colour targets, depth format %u, stencil format %u, %u samples, "
+                 "vertex outputs added %#x)", s->fs ? "yes" : "none", k->n_color, k->depth, k->stencil, k->samples,
+                 pk.missing);
+        crash_note(what, s->vs, s->fs, NULL);
         if (vkCreateGraphicsPipelines(P.device, VK_NULL_HANDLE, 1, &pi, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
         plat_crash_context(NULL);
         double ms = ms_since(t1);   // the link alone: library builds are counted apart
