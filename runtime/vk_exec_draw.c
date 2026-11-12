@@ -6289,6 +6289,7 @@ static void untranslated_dispatch_fallback(VkExec *ex) {
     }
     ex->recorded++;
     vk_exec_barrier(ex);
+    vk_dlaa_upscaler(ex, di, df, dw, dh);   // the scene upscaler's output: DLSS's or FSR's picture goes there (vk_dlaa.c)
 }
 
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {

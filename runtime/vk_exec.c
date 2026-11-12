@@ -911,6 +911,7 @@ void vk_exec_pass_end(VkExec *ex) {
         vk_texture_gpu_written(ex->depth.tex), tfr_note(&ft, stamp);
     }
     if (lk) plat_mutex_unlock(&tfr_lock);
+    vk_dlaa_pass_end(ex);   // a jittered pass left its targets' outer rows or columns undrawn
 }
 
 VkCommandBuffer vk_exec_inline_begin(int *reopen) {

@@ -74,6 +74,7 @@ typedef struct VkExec {
     float vp[16][6];                     // OP_VIEWPORTS: x, y, w, h, near, far
     int has_vp;                          // a viewport was set; else the render area
     int vp_jittered;                     // the viewport recorded last took the DLAA jitter (vk_dlaa.c vk_dlaa_viewport)
+    int pass_jit;                        // a viewport of the pass open now took it: its targets' edges are filled at its end (vk_dlaa_pass_end)
     p_scissor scissor;                   // OP_SCISSOR (scissor 0)
     int has_scissor;                     // a scissor was set; else unbounded
     float depth_range[2];                // OP_DEPTH_RANGE: overrides the viewports' near and far
