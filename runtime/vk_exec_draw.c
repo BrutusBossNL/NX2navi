@@ -197,6 +197,7 @@ typedef struct {
     const VkPipeInfo *info;              // the pipeline whose RsList ranges body holds, as of bind op generation gen
     uint64_t gen;
     uint8_t body[RS_BYTES];
+    int gen_only;                        // the last signature differed from the one before in vk_texture_slots_gen alone
     int rec;                             // a graphics build is running: count_use records, scratch copies mark volatile
     int volatile_;                       // the build copied guest bytes into transient memory: a rebuild differs
     RsCount cnt[2 * VK_MCLS_N], pcnt[2 * VK_MCLS_N];
@@ -236,6 +237,7 @@ typedef struct {
     const VkPipeInfo *info;
     uint64_t g[PB_G];
     uint8_t ok[PB_DESC];        // descriptor j holds a result that may be reused
+    uint8_t lost[PB_DESC];      // ... held one when a move of the texture slot generation alone emptied the entry (GST_*)
     uint64_t in[PB_DESC][4];    // the values it was resolved from (pb_key)
     VkDescSlot d[PB_DESC];
     PbCount cnt[PB_DESC];       // what its resolution counted for the census
@@ -247,6 +249,29 @@ typedef struct {
     uint64_t tex[2][32], img[2][32];
     VkPipeState pipe;
 } MemoKey;
+
+// What the texture slot generation costs the draws. The whole-draw skip (bind_sig), the shader memo (memo_match) and
+// the kept descriptors (PbEntry) hold only while vk_texture_slots_gen stays where it was, although a draw reads a few
+// slots and its buffer descriptors read none. Registrations no longer move it while a submission is replayed
+// (vk_backend.c "Registrations in submit order"); the replay's own lookups still do, when one takes a released entry
+// back or makes one (vk_texture.c entry_of), and so does a texture another thread of the game finalizes meanwhile
+// (vk_texture_release). These counters say how much kept state such a move alone throws away, so that a play session
+// shows whether checking the slots a draw reads (vk_texture_slot_token, as slot_still does) would spare anything.
+// Counted per recording context (DrawCtx.gst), since the replay workers record at once, and summed by gen_stat_log
+// into a line of the texture pool's periodic log.
+enum {
+    GST_BINDS,        // graphics bind_resources calls
+    GST_MOVES,        // ... that found another generation than the one before them in the same command buffer
+    GST_SKIPS,        // whole-draw skips taken (in check mode: draws a skip would have spared)
+    GST_SKIP_LOST,    // draws built because the generation moved, every other input of the skip being equal
+    GST_MEMO_LOST,    // shader memo misses with every other field of the key equal
+    GST_PB_EMPTIED,   // kept-descriptor entries holding results that were emptied with every other global equal
+    GST_PB_DROPPED,   // ... the descriptors those entries held
+    GST_PB_AGAIN_BUF, // of those, buffer descriptors then resolved again from the values they were kept under
+    GST_PB_AGAIN_TEX, // ... and sampled-texture descriptors (spared only if their slot still resolves the same)
+    GST_PB_RESOLVED,  // descriptors resolved in all with the per-binding reuse on (pb_keep)
+    GST_N
+};
 
 // ---- the recording context
 // bind_resources: the sampled-texture descriptors this context resolved, each with the generations and slot token it
@@ -306,15 +331,32 @@ typedef struct DrawCtx {
     VkWriteDescriptorSet bind_w[MAX_BINDINGS];   // bind_resources: write structs, packed descriptors, texel views
     VkDescSlot bind_d[MAX_DESC];
     VkBufferView bind_bv[MAX_DESC];
+    uint64_t gst[GST_N];                 // GST_*: written by the recording thread alone (gst_add), read by gen_stat_log
+    VkCommandBuffer gst_cb;              // the command buffer of its last graphics bind_resources and the texture slot
+    uint32_t gst_gen;                    // generation that call found (GST_MOVES)
 } DrawCtx;
 static DrawCtx dc_main = {.bind_gen = 1};
 static _Thread_local DrawCtx *dc = &dc_main;
+
+// Every context, for gen_stat_log's sums: dc_main and those vk_exec_draw_ctx_new made (one per replay worker and one
+// for the submitting thread's help, vk_exec.c rw_init). A context past DC_MAX is left out of the sums.
+#define DC_MAX 32
+static DrawCtx *dc_all[DC_MAX] = {&dc_main};
+static int dc_n = 1;   // atomic
 
 void *vk_exec_draw_ctx_new(void) {
     DrawCtx *c = calloc(1, sizeof *c);
     if (!c) rt_fatal("vk: out of memory (draw context)");
     c->bind_gen = 1;
+    int i = __atomic_fetch_add(&dc_n, 1, __ATOMIC_RELAXED);
+    if (i < DC_MAX) __atomic_store_n(&dc_all[i], c, __ATOMIC_RELEASE);
     return c;
+}
+
+// One context's count k grows by v. Only the thread recording with the context writes it, so a plain add stored
+// atomically is enough for the log's reads from another thread.
+static inline void gst_add(DrawCtx *cx, int k, uint64_t v) {
+    __atomic_store_n(&cx->gst[k], cx->gst[k] + v, __ATOMIC_RELAXED);
 }
 
 void vk_exec_draw_ctx_use(void *c) { dc = c ? c : &dc_main; }
@@ -2352,6 +2394,35 @@ uint64_t vk_pool_takes(void) { return __atomic_load_n(&pool_takes, __ATOMIC_ACQU
 static uint64_t pool_memo_hits;   // pool_fill: slots that shared another slot's lookup (defined with pool_memo below)
 static uint64_t pool_memo_same;   // of those, slots whose entries held the shared views already
 
+// The GST_* counts of every context since the last line, per presented frame; due: this call logs (it only takes the
+// starting point otherwise, at the first set switch, so the first line does not spread the boot's frames over the
+// counts). Texture lock held (pool_catch_up), which keeps the statics to one caller.
+static void gen_stat_log(int due) {
+    static uint64_t last[GST_N], frame0;
+    static int started;
+    if (started && !due) return;
+    uint64_t t[GST_N] = {0}, f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int n = __atomic_load_n(&dc_n, __ATOMIC_RELAXED);
+    for (int i = 0; i < n && i < DC_MAX; i++) {
+        const DrawCtx *c = __atomic_load_n(&dc_all[i], __ATOMIC_ACQUIRE);
+        for (int k = 0; c && k < GST_N; k++) t[k] += __atomic_load_n(&c->gst[k], __ATOMIC_RELAXED);
+    }
+    if (started && due && f > frame0) {
+        double fr = (double)(f - frame0), d[GST_N];
+        for (int k = 0; k < GST_N; k++) d[k] = (double)(t[k] - last[k]) / fr;
+        rt_log("vk_exec: draw bindings and the texture slot generation over %llu frames, per frame: %.0f graphics binds, "
+               "%.1f of them found the generation moved since the bind before in their command buffer; whole-draw skips: "
+               "%.0f taken, %.1f lost to the generation alone; shader memo: %.1f lost to it alone; kept descriptors: %.1f "
+               "entries holding %.0f descriptors emptied by it alone, of which %.0f buffer and %.0f texture descriptors "
+               "were resolved again from the values they were kept under (%.0f descriptors resolved in all)",
+               (unsigned long long)(f - frame0), d[GST_BINDS], d[GST_MOVES], d[GST_SKIPS], d[GST_SKIP_LOST],
+               d[GST_MEMO_LOST], d[GST_PB_EMPTIED], d[GST_PB_DROPPED], d[GST_PB_AGAIN_BUF], d[GST_PB_AGAIN_TEX],
+               d[GST_PB_RESOLVED]);
+    }
+    memcpy(last, t, sizeof last);
+    frame0 = f, started = 1;
+}
+
 static void pool_catch_up(uint64_t from, uint64_t to) {
     VkDescriptorSet set = PL.set;
     if (to - from > POOL_LOG) {   // the log has wrapped since: every entry
@@ -2368,6 +2439,7 @@ static void pool_catch_up(uint64_t from, uint64_t to) {
     }
     pool_flush();
     PL.switches++;
+    gen_stat_log(PL.switches % 3600 == 0);
     if (PL.switches % 3600 == 0) {   // diagnosis: what invalidates the slots (vk_texture.c vk_texture_bucket_stats)
         char bs[1024];
         vk_texture_bucket_stats(bs, sizeof bs);
@@ -3449,6 +3521,7 @@ static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
 static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
     DrawCtx *const cx = ex->dc;
     const RsList *l = rs_list(ex, info);
+    cx->RS.gen_only = 0;
     if (!l->ok) return cx->RS.hn = 0, cx->RS.info = NULL, 0;
     uint64_t *h = cx->RS.h, diff = 0;
     uint32_t n = 0;
@@ -3456,7 +3529,9 @@ static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
     PUT((uintptr_t)info);
     PUT((uintptr_t)ex->prog);
     PUT(ex->prog->serial);
-    PUT((uint64_t)vk_texture_slots_gen() << 32 | vk_texture_epoch());
+    // the generation's word apart from diff, to tell a signature that only it changed (RS.gen_only, GST_SKIP_LOST)
+    uint64_t gw = (uint64_t)vk_texture_slots_gen() << 32 | vk_texture_epoch(), gd = h[n] ^ gw;
+    h[n++] = gw;
     PUT((uint64_t)vk_sampler_gen() << 32 | (uint32_t)ex->nfbl);
     PUT(vk_mem_gen() + vk_usnap_gen());   // both only grow
     for (int i = 0; i < ex->nfbl && i < 9; i++) PUT((uintptr_t)ex->fbl_img[i]);
@@ -3475,8 +3550,9 @@ static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
 #undef PUT
     diff |= n != cx->RS.hn;
     cx->RS.hn = n;
+    int gen_only = !diff && gd && !(uint32_t)gd;   // the upper half, the generation, moved; the epoch below it did not
     int fast = cx->RS.info == info && cx->RS.gen == cx->bind_gen;
-    if (fast && rs_on != 2) return !diff;
+    if (fast && rs_on != 2) return cx->RS.gen_only = gen_only, !diff && !gd;
     const uint8_t *e = (const uint8_t *)ex;
     uint8_t *d = cx->RS.body;
     int bd = 0;
@@ -3488,7 +3564,8 @@ static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
     }
     if (fast && bd) rt_fatal("vk_exec: descriptor build skip check: bound slots changed without a bind op");
     cx->RS.info = info, cx->RS.gen = cx->bind_gen;
-    return !diff && !bd;
+    cx->RS.gen_only = gen_only && !bd;
+    return !diff && !gd && !bd;
 }
 
 // The binding profile in the NX2NAVI_TRACE=gfx frame line reads the clock around every descriptor; without the trace
@@ -3543,6 +3620,18 @@ static PbEntry *pb_entry(DrawCtx *cx, const VkPipeInfo *info, const uint64_t g[P
     uintptr_t p = (uintptr_t)info;
     PbEntry *e = &cx->PB[(p >> 6 ^ p >> 13) % PB_N];
     if (e->info != info || memcmp(e->g, g, sizeof e->g)) {
+        // Emptied for the texture slot generation alone (the upper half of word 3, pb_globals): what it held is
+        // counted and marked, and pb_take counts each marked descriptor that comes back with the values it was kept
+        // under. Emptied for anything else, its results were gone whatever the generation did.
+        uint64_t gd = e->g[3] ^ g[3];
+        if (e->info == info && gd && !(uint32_t)gd && !memcmp(e->g, g, 3 * sizeof *g) &&
+            !memcmp(e->g + 4, g + 4, (PB_G - 4) * sizeof *g)) {
+            uint32_t held = 0;
+            for (int j = 0; j < PB_DESC; j++) held += e->ok[j], e->lost[j] |= e->ok[j];
+            if (held) gst_add(cx, GST_PB_EMPTIED, 1), gst_add(cx, GST_PB_DROPPED, held);
+        } else {
+            memset(e->lost, 0, sizeof e->lost);
+        }
         e->info = info;
         memcpy(e->g, g, sizeof e->g);
         memset(e->ok, 0, sizeof e->ok);
@@ -3593,6 +3682,11 @@ static int pb_take(const VkExec *ex, const VkPipeBinding *b, uint32_t j, uint32_
         vk_exec_frame.bind_reused++;
         return 1;
     }
+    if (cx->pb_e->lost[j]) {   // dropped by a generation move alone (pb_entry): with the same values it would have served
+        cx->pb_e->lost[j] = 0;
+        if (!memcmp(cx->pb_e->in[j], cx->pb_key_cur, sizeof cx->pb_key_cur))
+            gst_add(cx, b->kind == GFX_RES_TEX ? GST_PB_AGAIN_TEX : GST_PB_AGAIN_BUF, 1);
+    }
     cx->pb_cnt_cur = (PbCount){0};
     cx->pb_cap = &cx->pb_cnt_cur, cx->pb_spoiled = 0;
     return 0;
@@ -3603,6 +3697,7 @@ static void pb_keep(DrawCtx *cx, uint32_t j, const VkDescSlot *o) {
     cx->pb_cap = NULL;
     if (!cx->pb_e || j >= PB_DESC) return;
     vk_exec_frame.bind_resolved++;
+    gst_add(cx, GST_PB_RESOLVED, 1);
     if (!cx->pb_key_ok) {
         cx->pb_e->ok[j] = 0;
         return;
@@ -3671,10 +3766,18 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     bind_stats(info);
     int gfx = info->bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS;
     int skip = gfx ? bind_skip_on() : 0, same = 0, was_valid = cx->B.res_valid;
+    if (gfx) {   // GST_MOVES: only within a command buffer, where the kept state could have lasted
+        uint32_t tg = vk_texture_slots_gen();
+        gst_add(cx, GST_BINDS, 1);
+        if (cx->gst_cb == ex->cb && cx->gst_gen != tg) gst_add(cx, GST_MOVES, 1);
+        cx->gst_cb = ex->cb, cx->gst_gen = tg;
+    }
     if (skip) {
         uint64_t sig_t0 = bt_now();
         same = bind_sig(ex, info);
         vk_exec_frame.bind_sig_ns += (uint64_t)(bt_now() - sig_t0);
+        if (same && was_valid) gst_add(cx, GST_SKIPS, 1);
+        else if (was_valid && cx->RS.gen_only) gst_add(cx, GST_SKIP_LOST, 1);
         if (same && was_valid && skip == 1) {
             for (int i = 0; i < cx->RS.ncnt; i++) vk_mem_count(cx->RS.cnt[i].cls, cx->RS.cnt[i].use, cx->RS.cnt[i].bytes);
             BS.bind_skip++;
@@ -4459,6 +4562,9 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
                 rt_fatal("vk_exec: shader memo of program %llu differs from the lookup", (unsigned long long)ex->prog->serial);
         }
     } else {
+        // GST_MEMO_LOST: the memo holds this draw's key but for the generation
+        if (memo && cx->SM.valid && cx->SM.k.gen != gen && memo_match(ex, cx->SM.k.gen, &cx->SM.k))
+            gst_add(cx, GST_MEMO_LOST, 1);
         cx->SM.valid = 0;
         if (fb) vs = cx->mfb_cur_vs, has_vs = 1;
         else vs = shader_for(ex, vst, &has_vs, &vs_wait, 0);
