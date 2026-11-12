@@ -5829,6 +5829,7 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
 // NX2NAVI_MESH_EMU_TASKS its task records per submission (default 16384, 3 KiB each). Before the counters start over
 // they are copied to a readback ring; the perf log reports the most a submission asked for against the capacities.
 #define ME_RB 64
+static struct {
     VkBuffer buf, rb;
     VmaAllocation alloc, rb_alloc;
     uint32_t *rb_map;
@@ -5837,8 +5838,29 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
     int failed;
     uint64_t draws, skipped;
     uint32_t max[4];
+    VkPipelineLayout alayout;   // the allocation shader's (push constants only)
+    VkPipeline apipe;
 } ME;
 
+// The allocation shader's pipeline (mesh_emu_spirv.h mesh_emu_alloc_spirv); 0 when it cannot be made.
+static int me_alloc_pipe(void) {
+    VkDevice dev = vk_ctx()->device;
+    VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+    VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .pushConstantRangeCount = 1,
+                                     .pPushConstantRanges = &pcr};
+    if (vkCreatePipelineLayout(dev, &li, NULL, &ME.alayout) != VK_SUCCESS) return ME.alayout = VK_NULL_HANDLE, 0;
+    size_t n = 0;
+    const uint32_t *w = mesh_emu_alloc_spirv(&n);
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = n * 4, .pCode = w};
+    VkShaderModule m;
+    if (vkCreateShaderModule(dev, &mi, NULL, &m) != VK_SUCCESS) return 0;
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                      .layout = ME.alayout};
+    VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &ME.apipe);
+    vkDestroyShaderModule(dev, m, NULL);
+    if (r != VK_SUCCESS) return ME.apipe = VK_NULL_HANDLE, 0;
     return 1;
 }
 
@@ -5858,6 +5880,9 @@ static int me_arena(void) {
                                       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (!me_alloc_pipe()) {
+        ME.failed = 1;
+        rt_log("vk: mesh emulation: the allocation shader's pipeline could not be created: mesh draws skipped");
         return 0;
     }
     if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &ME.buf, &ME.alloc, NULL) != VK_SUCCESS) {
@@ -5880,6 +5905,8 @@ static int me_arena(void) {
     if (vmaCreateBuffer(vk_ctx()->vma, &rbi, &rai, &ME.rb, &ME.rb_alloc, &rinfo) == VK_SUCCESS) ME.rb_map = rinfo.pMappedData;
     else ME.rb = VK_NULL_HANDLE;
     return 1;
+}
+
 // The access masks also carry the generic MEMORY_WRITE / MEMORY_READ bits. SHADER_STORAGE_READ/WRITE exist only in
 // synchronization2 (bits above 31), and AMD's driver for Polaris (23.10.01, RX 580) did not act on them: the mesh
 // dispatch that reads the {groups, task workgroups, 1} the task stage had just written read zeros and launched no
@@ -5892,9 +5919,101 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
                            .dstAccessMask = da | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &di);
+}
+
+// The stages of the emulated draws whose records were filled, waiting to be recorded (me_flush): the draws of a pass
+// with NX2NAVI_MESH_EMU_BATCH, which run in the part's pre-pass command buffer when it ends (vk_exec_mesh_flush, from
+// vk_sync.c), or the one draw that runs in the part. Recorded by stage, with one barrier between stages for all the
+// draws: the fills, the allocation (task records; index ranges of draws without a task stage), every task stage, the
+// allocation of the other index ranges, every mesh stage. Each draw's indices are a range of its own and its task
+// records too (the allocation shader), so the draws' stages need nothing of each other's. One by one, as before
+// 2026-11-11, each draw took three barriers, and its task base and first index were copies of the arena's counters
+// after the draw before it: an RX 580 spent 5.5 ms of a frame's GPU time on 69 draws' stages (Kokiri Forest),
+// most of it waiting at the barriers with the GPU nearly idle.
+typedef struct {
+    VkPipeline tp, mp;
+    VkPipelineLayout layout;
+    VkDescriptorUpdateTemplate tpl_c;
+    VkDescriptorSet set0, pset;
+    int push;
+    uint32_t count, rec, pc[8];
+    VkBuffer ib;   // the first stage's indirect dispatch (VK_NULL_HANDLE: count)
+    VkDeviceSize io;
+    size_t doff;
+    uint32_t dbytes;
+} MeQ;
+#define MEQ_MAX 256
+static struct {
+    MeQ q[MEQ_MAX];
+    int n, tasks;
+    uint8_t *d;   // the push descriptors' data of the queued draws
+    size_t dn, dcap;
+} MEQ;
+
+static void me_bind(VkCommandBuffer cb, const MeQ *q) {
+    if (q->push) rec_push_tpl(vk_pipeline_push_tpl_fn(), cb, q->tpl_c, q->layout, 0, MEQ.d + q->doff, q->dbytes);
+    else vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, q->layout, 0, 1, &q->set0, 0, NULL);
+    if (q->pset) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, q->layout, 2, 1, &q->pset, 0, NULL);
+    vkCmdPushConstants(cb, q->layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT, 0, MESH_EMU_PC_BYTES, q->pc);
+}
+
+static void me_first(VkCommandBuffer cb, const MeQ *q) {
+    if (q->ib) vkCmdDispatchIndirect(cb, q->ib, q->io);
+    else vkCmdDispatch(cb, q->count, 1, 1);
+}
+
+static void me_alloc(VkCommandBuffer cb, uint32_t mode) {
+    uint32_t pc[8] = {(uint32_t)ME.addr, (uint32_t)(ME.addr >> 32), MEQ.q[0].rec, (uint32_t)MEQ.n, mode, ME.icap, ME.trecs, 0};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ME.apipe);
+    vkCmdPushConstants(cb, ME.alayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    vkCmdDispatch(cb, 1, 1, 1);
+}
+
+// The queued draws' stages into cb (the pre-pass command buffer, or the part for a draw that runs there); returns the
+// commands recorded.
+static int me_flush(VkCommandBuffer cb) {
+    if (!MEQ.n || !cb) return 0;
+    const VkAccessFlags2 rw = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    const VkPipelineStageFlags2 cs = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    int k = 0;
+    me_barrier(cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, cs | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+               rw | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+    me_alloc(cb, 0), k += 4;
+    me_barrier(cb, cs, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, cs | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+               rw | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+    if (MEQ.tasks) {   // the task stages wrote the mesh dispatch {max mesh groups, task workgroups, 1} into the draw record
+        for (int i = 0; i < MEQ.n; i++) {
+            const MeQ *q = &MEQ.q[i];
+            if (!q->tp) continue;
+            me_bind(cb, q);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, q->tp);
+            me_first(cb, q), k += 4;
         }
+        me_barrier(cb, cs, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, cs | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                   rw | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+        me_alloc(cb, 1), k += 4;
+        me_barrier(cb, cs, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, cs | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                   rw | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
     }
+    for (int i = 0; i < MEQ.n; i++) {
+        const MeQ *q = &MEQ.q[i];
+        me_bind(cb, q);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, q->mp);
+        if (q->tp) vkCmdDispatchIndirect(cb, ME.buf, MESH_EMU_DOFF + (VkDeviceSize)q->rec * MESH_EMU_DWORDS * 4 + 20);
+        else me_first(cb, q);
+        k += 4;
     }
+    me_barrier(cb, cs, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+               VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                   cs | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+               VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT | rw | VK_ACCESS_2_TRANSFER_READ_BIT);
+    MEQ.n = MEQ.tasks = 0, MEQ.dn = 0;
+    return k + 4;
+}
+
+// vk.h: the pre-pass command buffer ends (vk_sync.c pre_end): the stages of the draws queued for it go in first.
+void vk_exec_mesh_flush(VkCommandBuffer cb) { me_flush(cb); }
+
 // count: the first stage's workgroups, or ind: a {count, 1, 1} record to dispatch from
 // args: an indirect draw's arguments in game memory (count, 1, 1 copied into a ring entry, which ind then is)
 static int mesh_emu_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind, const VkMemSpan *args) {
@@ -5939,12 +6058,16 @@ static int mesh_emu_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind, const
     if (batch && ex->in_pass) {
         if (ex->pre_pass != ex->pass_serial && vk_exec_split_now(ex)) {
             if (!prepare_draw_ex(ex, prim, 0x7fffffff, 0, 1) || PD_info != info) {   // the pass again, in the new part
+                ME.skipped++;
+                return 0;
+            }
             ex->pre_pass = ex->pass_serial;
             set0 = ex->dc->B.ds_bound[0];
         }
         if (ex->pre_pass == ex->pass_serial) pre = vk_sync_pre();
     }
     if (!pre) vk_exec_barrier(ex);   // ends the pass; what the game wrote before (its culling) is visible to the stages
+    if (!pre && MEQ.n) me_flush(vk_sync_pre());   // the draws queued for the pre-pass command buffer go before this one
     VkCommandBuffer cb = pre ? pre : ex->cb;
     VkMemSpan ring = {0};
     if (args) {
@@ -5952,8 +6075,10 @@ static int mesh_emu_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind, const
             warn_once(W_MESH, "the indirect mesh ring could not be created: skipped");
             ME.skipped++;
             return 0;
+        }
         ring.buffer = mesh_ring, ind = &ring;
         cb = pre ? pre : ex->cb;
+    }
     uint32_t ep = vk_texture_epoch();
     if (ep != ME.epoch) {   // the first emulated draw of this submission: the counters start over
         ME.epoch = ep;
@@ -5963,20 +6088,55 @@ static int mesh_emu_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind, const
                 const uint32_t *h = ME.rb_map + 4 * ((ME.resets - 32) % ME_RB);
                 for (int k = 0; k < 4; k++)
                     if (h[k] > ME.max[k]) ME.max[k] = h[k];
+            }
             VkBufferCopy rc = {0, 16 * (ME.resets % ME_RB), 16};
             vkCmdCopyBuffer(cb, ME.buf, ME.rb, 1, &rc);
             ME.resets++;
             me_barrier(cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                        VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        }
         vkCmdFillBuffer(cb, ME.buf, 0, 32, 0);   // the counters, and the diagnosis words 4-7 (mesh_emu_spirv.c)
         me_barrier(cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                    VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
     uint32_t rec = ME.rec++ % MESH_EMU_DRECS;
     VkDeviceSize ro = MESH_EMU_DOFF + (VkDeviceSize)rec * MESH_EMU_DWORDS * 4;
+    if (MEQ.n && (MEQ.n == MEQ_MAX || (MEQ.q[0].rec + (uint32_t)MEQ.n) % MESH_EMU_DRECS != rec))
+        me_flush(vk_sync_pre());   // full, or not the next record (the allocation shader takes a run of them)
+    // the record: DrawIndexedIndirect {0, 1, 0, 0, 0}, mesh dispatch, task base, then the words the allocation shader
+    // reads (mesh_emu_spirv.h MESH_EMU_R_*); an indirect first stage's count is copied from its arguments
     vkCmdFillBuffer(cb, ME.buf, ro, 4, 0);
     vkCmdFillBuffer(cb, ME.buf, ro + 4, 4, 1);
+    vkCmdFillBuffer(cb, ME.buf, ro + 8, (MESH_EMU_R_FIRST - 2) * 4, 0);
+    if (ind) {
+        const VkMemSpan *src = args ? args : ind;
+        VkBufferCopy cp = {src->offset, ro + MESH_EMU_R_FIRST * 4, 4};
+        vkCmdCopyBuffer(cb, src->buffer, ME.buf, 1, &cp);
+    } else vkCmdFillBuffer(cb, ME.buf, ro + MESH_EMU_R_FIRST * 4, 4, count);
+    vkCmdFillBuffer(cb, ME.buf, ro + MESH_EMU_R_ICUR * 4, 8, 0);
+    vkCmdFillBuffer(cb, ME.buf, ro + MESH_EMU_R_PER * 4, 4, mi.max_p * (mi.prim ? mi.prim : 3));
+    vkCmdFillBuffer(cb, ME.buf, ro + MESH_EMU_R_TASK * 4, 8, tp ? 1 : 0);   // and the unused last word
     uint32_t pc[8] = {(uint32_t)ME.addr, (uint32_t)(ME.addr >> 32), (uint32_t)(ro / 4), ME.iw, ME.icap, ME.vw, ME.vcap, ME.trecs};
+    MeQ *q = &MEQ.q[MEQ.n];
+    *q = (MeQ){.tp = tp, .mp = mp, .layout = layout, .tpl_c = tpl_c, .set0 = set0, .pset = pool ? PL.set : VK_NULL_HANDLE,
+               .push = push, .count = count, .rec = rec, .ib = ind ? ind->buffer : VK_NULL_HANDLE, .io = ind ? ind->offset : 0};
+    memcpy(q->pc, pc, sizeof pc);
+    if (push) {
+        if (MEQ.dn + emu_d_bytes > MEQ.dcap) {
+            size_t c = MEQ.dcap ? MEQ.dcap * 2 : 65536;
+            while (c < MEQ.dn + emu_d_bytes) c *= 2;
+            uint8_t *d = realloc(MEQ.d, c);
+            if (!d) {
+                ME.skipped++;
+                return 0;
+            }
+            MEQ.d = d, MEQ.dcap = c;
+        }
+        memcpy(MEQ.d + MEQ.dn, emu_d, emu_d_bytes);
+        q->doff = MEQ.dn, q->dbytes = emu_d_bytes, MEQ.dn += emu_d_bytes;
     }
+    MEQ.n++, MEQ.tasks += !!tp;
+    if (!pre) ex->recorded += 3 + me_flush(cb);   // the one draw's stages, here
     if (!pre) {
         // the draw: prepared again (the pass reopens, every binding is recorded again)
         vk_exec_draw_new_cb();

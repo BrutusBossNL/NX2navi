@@ -7,7 +7,13 @@
 #include <stdint.h>
 
 // The arena: one buffer, its address in the push constants of every emulation stage.
+//   words 0-3: vertex slots used, indices reserved, task records reserved, overflows (the replay zeroes them per
+//              submission)
 //   MESH_EMU_DOFF: draw records, MESH_EMU_DWORDS words each: DrawIndexedIndirect {indexCount, instanceCount,
+//                  firstIndex, vertexOffset, firstInstance}, mesh dispatch {x, y, z}, task base, then the MESH_EMU_R_*
+//                  words; the replay fills them, the allocation shader (mesh_emu_alloc_spirv) reserves each draw's
+//                  task records and index range, so that the stages of many draws can run together: a draw's
+//                  indices are one range (its DrawIndexedIndirect) whatever the order its mesh workgroups run in
 //   MESH_EMU_TOFF: task records, MESH_EMU_TWORDS words each: mesh workgroup count, then the payload
 //   index area (uint32 indices), vertex area (16-byte slots: position, then each generic output) at offsets the
 //   replay passes in the push constants.
@@ -15,6 +21,12 @@
 #define MESH_EMU_DWORDS 16u
 #define MESH_EMU_DRECS 4096u
 #define MESH_EMU_TOFF (MESH_EMU_DOFF + MESH_EMU_DRECS * MESH_EMU_DWORDS * 4u)
+#define MESH_EMU_R_GROUPS 9u   // mesh workgroups with output: the task stage adds the counts it emits
+#define MESH_EMU_R_FIRST 10u   // the first stage's workgroups (the replay: the count, or a copy of the indirect one)
+#define MESH_EMU_R_ICUR 11u    // indices taken from the draw's range (the mesh stage's atomics)
+#define MESH_EMU_R_ICAP 12u    // the draw's range: indices reserved (fit in the area)
+#define MESH_EMU_R_PER 13u     // indices one mesh workgroup may emit (OutputPrimitives x vertices per primitive)
+#define MESH_EMU_R_TASK 14u    // 1 with a task stage
 #define MESH_EMU_TWORDS 780u                   // 1 + payloads of up to 776 words (3072 bytes and the 32 the
                                                // translator adds for the payload header since 0.6.0), padded
 // task records: as many as the push constants say (the replay sizes them, NX2NAVI_MESH_EMU_TASKS); the index area
@@ -25,6 +37,13 @@
 // Header words 0-2 count what the stages asked for, beyond the capacities too (the replay logs the most per
 // submission); word 3 counts mesh workgroups that did not fit.
 #define MESH_EMU_PC_BYTES 32u
+
+// The allocation shader (GLCompute, one invocation): for the n draw records from ring index first, mode 0 reserves the
+// task records of draws with a task stage (MESH_EMU_R_FIRST of them, from word 2) and the index ranges of draws
+// without one (MESH_EMU_R_FIRST x MESH_EMU_R_PER, from word 1); mode 1, after the task stages, the index ranges of
+// draws with one (MESH_EMU_R_GROUPS x MESH_EMU_R_PER). Push constants, 32 bytes: u64 arena address; uint first, n,
+// mode, index capacity, task record capacity, unused. Static words, *n of them.
+const uint32_t *mesh_emu_alloc_spirv(size_t *n);
 
 typedef struct MeshEmuInfo {
     int task;                 // 1 TaskEXT, 0 MeshEXT

@@ -812,6 +812,8 @@ static void gpu_stats(PerfGpu *g) {
     g->mirror_ns = (uint64_t)plat_xchg64(&ts_mirror_ns, 0);
 }
 
+WEAK void vk_exec_mesh_flush(VkCommandBuffer cb) { (void)cb; }   // without vk_exec_draw.c: nothing is queued
+
 // Weak stand-in for vk_exec.c's replay: only empty recordings ({OP_BEGIN, OP_END}) can be submitted.
 WEAK int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t fence) {
     (void)cb, (void)fence;
@@ -1037,6 +1039,7 @@ static int nchain;
 static VkCommandBuffer pre_end(uint64_t fence) {
     VkCommandBuffer cb = pre_cb;
     if (!cb) return VK_NULL_HANDLE;
+    vk_exec_mesh_flush(cb);   // the stages of the pass's emulated draws, by stage
     ts_close(cb, pre_pair, fence, GTL_PRE);
     pre_pair = -1;
     vkEndCommandBuffer(cb);
