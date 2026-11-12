@@ -20,6 +20,12 @@ void flight_frame(uint64_t frame, uint64_t now_ns, uint64_t interval_ns, const u
 // carries the frame whose counts in frames.tsv it is part of. Any thread: the ring takes no lock. A no-op until
 // flight_init turned the recorder on.
 enum { FLIGHT_TEX_NEW, FLIGHT_TEX_UP, FLIGHT_TEX_REUP, FLIGHT_TEX_RELEASE, FLIGHT_TEX_TAKEBACK, FLIGHT_TEX_DROP,
+       FLIGHT_TEX_BYTES,   // after UP and REUP: what the upload read (detail: a hash of 64 probes of its storage; us:
+                           // how many of the probes were all zero), so a second upload tells new bytes from the same
+       FLIGHT_TEX_REG,     // a slot registered with a CPU-written texture (us: the slot; detail: what it named before:
+                           // 0 nothing, 1 another descriptor at this storage, 2 other storage, 3 a finalized texture)
+       FLIGHT_TEX_BLANK,   // a shader sampled a slot that has no image of its own and follows none: its stand-in was
+                           // on screen (us: the slot; detail: bit 0 the slot is finalized, bit 1 it is held out)
        FLIGHT_TEX_N };
 // The texture's flags: a depth or stencil image, mirrored (the CPU writes its storage), bound into pool memory, an ASTC
 // texture, written by the GPU (VkTexImage.gpu_owned).
