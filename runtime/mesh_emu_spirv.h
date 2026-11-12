@@ -28,6 +28,8 @@ typedef struct MeshEmuInfo {
     int task;                 // 1 TaskEXT, 0 MeshEXT
     uint32_t threads;         // LocalSize x
     uint32_t max_v, max_p;    // mesh: OutputVertices, OutputPrimitivesEXT
+    uint32_t prim;            // mesh: 3 triangles, 2 lines, 1 points (triangles and points are emulated)
+    uint32_t psize_slot;      // mesh: the slot holding the point size (x), 0 without one
     uint32_t payload_words;   // the task payload's size (mesh: what it reads, 0 without a task stage)
     uint32_t max_mesh;        // task: the most mesh workgroups one task workgroup launches (dispatch width)
     uint32_t slots;           // mesh: 16-byte slots per vertex: position and each generic output
@@ -40,3 +42,8 @@ typedef struct MeshEmuInfo {
 uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_t *out_n, const char **why);
 
 // The vertex shader of an emulated mesh pipeline: position and the generic outputs from the vertex slots, as types[l]
+// (0 float, 1 signed, 2 unsigned) with comps[l] components for every location l in need (the fragment stage's
+// inputs); a location the mesh stage does not write is zero. malloc'd, *out_n words.
+// A task or mesh module's output primitive: 3 triangles, 2 lines, 1 points, 0 not a mesh module.
+int mesh_emu_prim(const uint32_t *w, size_t n);
+

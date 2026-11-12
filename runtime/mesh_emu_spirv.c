@@ -33,6 +33,7 @@ enum {
 enum { ScInput = 1, ScOutput = 3, ScWorkgroup = 4, ScPrivate = 6, ScFunction = 7, ScPushConstant = 9,
        ScPhysicalStorageBuffer = 5349, ScTaskPayload = 5402 };
 enum { DecBlock = 2, DecArrayStride = 6, DecBuiltIn = 11, DecLocation = 30, DecOffset = 35, DecPerPrimitive = 5271 };
+enum { BiPosition = 0, BiPointSize = 1, BiPrimPoint = 5294, BiVertexIndex = 42, BiNumWorkgroups = 24, BiWorkgroupId = 26, BiLocalInvocationIndex = 29,
        BiPrimTri = 5296 };
 enum { CapShader = 1, CapInt64 = 11, CapMeshShading = 5283, CapPSBAddresses = 5347 };
 enum { ModelVertex = 0, ModelGLCompute = 5, ModelTask = 5364, ModelMesh = 5365 };
@@ -233,12 +234,17 @@ static void if_end(Em *e, uint32_t merge) {
     op(e->code, OpLabel, 1, merge);
 }
 
+typedef struct { uint32_t var, len, role, loc, slot; } OutVar;   // role 0 position, 1 generic, 2 indices, 3 point size
 
 // The mesh epilogue (replaces the entry function's return)
 static void mesh_epilogue(Em *e, const MeshEmuInfo *info, const OutVar *ov, int nov, uint32_t vcount, uint32_t pcount,
+                          uint32_t sh_vb, uint32_t sh_ib, uint32_t p_wg_v4f, uint32_t p_wg_v3u, uint32_t p_wg_f32,
+                          uint32_t p_wg_u32) {
     Mod *m = e->m;
+    uint32_t S = info->slots, T = info->threads, K = info->prim;
     barrier(e);
     uint32_t lid = ld(e, m->t_u32, m->lii), base = words_base(e);
+    uint32_t isz = mul(e, pcount, cu(e, K)), vsz = mul(e, vcount, cu(e, S));
     uint32_t mz;
     if_begin(e, E2(e, OpIEqual, m->t_bool, lid, cu(e, 0)), &mz);
     {
@@ -273,6 +279,16 @@ static void mesh_epilogue(Em *e, const MeshEmuInfo *info, const OutVar *ov, int 
                 uint32_t s0 = add(e, VB, mul(e, v, cu(e, S)));
                 for (int k = 0; k < nov; k++) {
                     if (ov[k].role == 2) continue;
+                    uint32_t bits;
+                    if (ov[k].role == 3) {   // the point size, in x
+                        uint32_t ps = ld(e, m->t_f32, E2(e, OpAccessChain, p_wg_f32, ov[k].var, v));
+                        uint32_t pb = E1(e, OpBitcast, m->t_u32, ps);
+                        bits = nid(m);
+                        op(e->code, OpCompositeConstruct, 6, m->t_v4u, bits, pb, cu(e, 0), cu(e, 0), cu(e, 0));
+                    } else {
+                        uint32_t src = ld(e, m->t_v4f, E2(e, OpAccessChain, p_wg_v4f, ov[k].var, v));
+                        bits = E1(e, OpBitcast, m->t_v4u, src);
+                    }
                     uint32_t dst = E3(e, OpAccessChain, e->p_v4u_psb, sbase, cu(e, 0), add(e, s0, cu(e, ov[k].slot)));
                     op(e->code, OpStore, 4, dst, bits, 2u, 16u);
                 }
@@ -286,6 +302,11 @@ static void mesh_epilogue(Em *e, const MeshEmuInfo *info, const OutVar *ov, int 
         for (uint32_t r = 0; r * T < info->max_p; r++) {
             uint32_t p = add(e, lid, cu(e, r * T)), mp;
             if_begin(e, ult(e, p, pcount), &mp);
+            uint32_t tri = K == 3 ? ld(e, m->t_v3u, E2(e, OpAccessChain, p_wg_v3u, idxv, p))
+                                  : ld(e, m->t_u32, E2(e, OpAccessChain, p_wg_u32, idxv, p));
+            uint32_t at = add(e, add(e, iw, IB), mul(e, p, cu(e, K)));
+            for (uint32_t c = 0; c < K; c++) {
+                uint32_t li = K == 3 ? E2(e, OpCompositeExtract, m->t_u32, tri, c) : tri;
                 uint32_t val = E3(e, OpSelect, m->t_u32, vbok, add(e, VB, mul(e, li, cu(e, S))), cu(e, 0));
                 word_store(e, base, add(e, at, cu(e, c)), val);
             }
@@ -375,6 +396,7 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
         i += len;
     }
     if (!info->threads) { *why = "no LocalSize"; goto done; }
+    if (mesh && info->prim != 3 && info->prim != 1) { *why = "only triangle and point meshes are emulated"; goto done; }
     if (!m->t_f32 || (mesh && !m->t_v4f)) { *why = "no float types"; goto done; }
 
     // output variables and the payload
@@ -400,6 +422,8 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
             if (o == OpFunction) break;
             if (o == OpDecorate && a[0] == m->var[i].id) {
                 if (a[1] == DecBuiltIn && a[2] == BiPosition) ov[nov].role = 0;
+                else if (a[1] == DecBuiltIn && (a[2] == BiPrimTri || a[2] == BiPrimPoint)) ov[nov].role = 2;
+                else if (a[1] == DecBuiltIn && a[2] == BiPointSize) ov[nov].role = 3;
                 else if (a[1] == DecLocation) ov[nov].role = 1, ov[nov].loc = a[2];
                 else if (a[1] == DecBuiltIn) { *why = "an unsupported mesh output built-in"; goto done; }
                 else if (a[1] == DecPerPrimitive) { *why = "per-primitive outputs are not emulated"; goto done; }
@@ -407,6 +431,9 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
             k += l2;
         }
         if (ov[nov].role == 9) { *why = "an output without a role"; goto done; }
+        if (ov[nov].role < 2 && arr[2] != m->t_v4f) { *why = "a vertex output that is not a vec4"; goto done; }
+        if (ov[nov].role == 3 && arr[2] != m->t_f32) { *why = "a point size that is not a float"; goto done; }
+        if (ov[nov].role == 2 && arr[2] != (info->prim == 3 ? m->t_v3u : m->t_u32)) { *why = "indices of an unexpected type"; goto done; }
         nov++;
     }
     info->payload_words = payload_len;
@@ -425,6 +452,8 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
         for (uint32_t l = 0; l < 32; l++)
             if (locs >> l & 1) info->generic_loc[info->n_generic++] = (uint8_t)l;
         info->slots = 1 + info->n_generic;
+        for (int i = 0; i < nov; i++)
+            if (ov[i].role == 3) info->psize_slot = info->slots, ov[i].slot = info->slots++;
         for (int i = 0; i < nov; i++) {
             if (ov[i].role == 0) ov[i].slot = 0;
             if (ov[i].role == 1)
@@ -499,6 +528,8 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
     }
     uint32_t p_wg_u32, p_wg_v4f = 0, p_wg_v3u = 0;
     NEED_PTR(p_wg_u32, ScWorkgroup, m->t_u32);
+    uint32_t p_wg_f32 = 0;
+    if (mesh) { NEED_PTR(p_wg_v4f, ScWorkgroup, m->t_v4f); NEED_PTR(p_wg_v3u, ScWorkgroup, m->t_v3u); NEED_PTR(p_wg_f32, ScWorkgroup, m->t_f32); }
     uint32_t sh_vb = 0, sh_ib = 0, wgemu = 0, p_priv_v3 = 0, p_priv_u32 = 0, p_in_u32 = find_ptr(m, ScInput, m->t_u32);
     if (mesh) {
         sh_vb = nid(m), op(&ntypes, OpVariable, 3, p_wg_u32, sh_vb, (uint32_t)ScWorkgroup);
@@ -622,6 +653,7 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
         }
         if (in_ep && mesh && o == OpReturn) {
             if (!vcount || ep_done) { *why = "no SetMeshOutputsEXT before the return, or several returns"; goto done; }
+            mesh_epilogue(&e, info, ov, nov, vcount, pcount, sh_vb, sh_ib, p_wg_v4f, p_wg_v3u, p_wg_f32, p_wg_u32);
             ep_done = 1;
             i += len;
             continue;
@@ -686,6 +718,22 @@ done:
     return ret;
 }
 
+int mesh_emu_prim(const uint32_t *w, size_t n) {
+    uint32_t ep = 0;
+    for (size_t i = 5; i + 1 < n;) {
+        uint32_t o = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || o == OpFunction) break;
+        if (o == OpEntryPoint && len >= 3) ep = w[i + 1] == ModelMesh || w[i + 1] == ModelTask;
+        if (o == OpExecutionMode && len >= 3 && ep) {
+            if (w[i + 2] == ModeOutputTriangles) return 3;
+            if (w[i + 2] == ModeOutputLines) return 2;
+            if (w[i + 2] == ModeOutputPoints) return 1;
+        }
+        i += len;
+    }
+    return 0;
+}
+
 // ---- the vertex shader of an emulated mesh pipeline
     Buf b = {0}, t = {0}, an = {0}, c = {0};
     uint32_t id = 1;
@@ -693,6 +741,7 @@ done:
     uint32_t glsl = N(), fn = N(), t_void = N(), t_fn = N(), t_u32 = N(), t_i32 = N(), t_f32 = N(), t_u64 = N(),
              t_v4u = N(), t_v4f = N(), t_v4i = N(), rt_v4 = N(), s_slots = N(), p_slots = N(), p_v4u_psb = N(),
              pc_struct = N(), p_pc = N(), pc_var = N(), p_pc_u64 = N(), p_pc_u32 = N(), p_in_i32 = N(),
+             vidx = N(), p_out_v4f = N(), pos = N(), c0 = N(), c4 = N(), c16 = N(), p_out_f32 = N(), psz = N();
     (void)glsl;
     uint32_t vecs[3][5] = {{0}};   // [type][comps] vector ids (comps 2..4), [type][1] the scalar
     vecs[0][1] = t_f32, vecs[1][1] = t_i32, vecs[2][1] = t_u32, vecs[0][4] = t_v4f, vecs[1][4] = t_v4i, vecs[2][4] = t_v4u;
@@ -726,6 +775,11 @@ done:
     op(&t, OpVariable, 3, p_pc, pc_var, (uint32_t)ScPushConstant);
     op(&t, OpVariable, 3, p_in_i32, vidx, (uint32_t)ScInput);
     op(&t, OpVariable, 3, p_out_v4f, pos, (uint32_t)ScOutput);
+    if (mi->psize_slot) {
+        op(&t, OpTypePointer, 3, p_out_f32, (uint32_t)ScOutput, t_f32);
+        op(&t, OpVariable, 3, p_out_f32, psz, (uint32_t)ScOutput);
+        op(&an, OpDecorate, 3, psz, (uint32_t)DecBuiltIn, (uint32_t)BiPointSize);
+    }
     op(&an, OpDecorate, 3, rt_v4, (uint32_t)DecArrayStride, 16u);
     op(&an, OpDecorate, 2, s_slots, (uint32_t)DecBlock);
     op(&an, OpMemberDecorate, 4, s_slots, 0u, (uint32_t)DecOffset, 0u);
@@ -734,6 +788,7 @@ done:
     op(&an, OpDecorate, 3, vidx, (uint32_t)DecBuiltIn, (uint32_t)BiVertexIndex);
     op(&an, OpDecorate, 3, pos, (uint32_t)DecBuiltIn, (uint32_t)BiPosition);
     ifc[ni++] = pc_var, ifc[ni++] = vidx, ifc[ni++] = pos;
+    if (mi->psize_slot) ifc[ni++] = psz;
         uint32_t p = N(), v = N();
         op(&t, OpVariable, 3, p, v, (uint32_t)ScOutput);
         ifc[ni++] = v;
@@ -754,6 +809,15 @@ done:
     op(&c, OpIMul, 4, t_u64, off, s64, c16);
     op(&c, OpIAdd, 4, t_u64, a, e64, off);
     op(&c, OpConvertUToPtr, 3, p_slots, base, a);
+    if (mi->psize_slot) {
+        uint32_t ci = N(), p = N(), v = N(), x = N(), f = N();
+        op(&t, OpConstant, 3, t_u32, ci, mi->psize_slot);
+        op(&c, OpAccessChain, 5, p_v4u_psb, p, base, c0, ci);
+        op(&c, OpLoad, 5, t_v4u, v, p, 2u, 16u);
+        op(&c, OpCompositeExtract, 4, t_u32, x, v, 0u);
+        op(&c, OpBitcast, 3, t_f32, f, x);
+        op(&c, OpStore, 2, psz, f);
+    }
     uint32_t slot_of[33];
     for (int k = 0; k < 33; k++) slot_of[k] = 0xffffffffu;
     slot_of[32] = 0;   // position

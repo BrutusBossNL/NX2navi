@@ -3091,7 +3091,8 @@ static void gkey_fill(const VkPipeState *s, GKey *k) {
             o[3] = (uint8_t)blend_factor(b->src_a), o[4] = (uint8_t)blend_factor(b->dst_a), o[5] = (uint8_t)blend_op(b->eq_a);
         }
     }
-    if (is_mesh(s)) k->topo_class = 2;   // mesh draws: no vertex input, the mesh stage declares its primitives
+    // mesh draws: no vertex input, the mesh stage declares its primitives (emulated point meshes draw point lists)
+    if (is_mesh(s)) k->topo_class = s->prim == NVN_DRAW_PRIMITIVE_POINTS ? 0 : 2;
     if (!P.dyn_vi && !is_mesh(s)) {
         VtxInput v;
         vertex_input(s, &v);

@@ -5569,6 +5569,20 @@ static void mfb_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind) {
     ex->recorded++;
 }
 
+// The primitive an emulated draw's mesh stage outputs: point meshes draw point lists, the rest triangles.
+static int mesh_emu_draw_prim(VkExec *ex) {
+    static struct { const GfxShader *s; int prim; } memo[256];
+    int present = 0, pending = 0;
+    const GfxShader *ms = ex->prog ? shader_for(ex, NVN_STAGE_MESH, &present, &pending, 0) : NULL;
+    if (!ms) return NVN_DRAW_PRIMITIVE_TRIANGLES;
+    unsigned h = (unsigned)((uintptr_t)ms >> 4) & 255;
+    if (memo[h].s != ms) {
+        uint64_t n = 0;
+        const uint32_t *w = gfx_shader_spirv(ms, &n);
+        memo[h].s = ms, memo[h].prim = w && mesh_emu_prim(w, (size_t)n) == 1 ? NVN_DRAW_PRIMITIVE_POINTS : NVN_DRAW_PRIMITIVE_TRIANGLES;
+    }
+    return memo[h].prim;
+}
 static int mesh_emu_on(void) {
     static int on = -1;
     if (on < 0) {
@@ -5580,6 +5594,7 @@ static int mesh_emu_on(void) {
 static void op_draw_mesh(VkExec *ex, const p_draw_mesh *d) {
     PFN_vkCmdDrawMeshTasksEXT fn = draw_mesh_fn();
     if (!fn && mesh_emu_on()) {
+        if (d->first) warn_once(W_MESH, "an emulated mesh draw from workgroup %u: drawn from workgroup 0", d->first);
     static int on = -1;
     if (on < 0) on = rt_knob("MESH", "1");   // NX2NAVI_MESH=0: mesh draws are skipped (diagnosis)
     if (!d->count || !on) return;
@@ -5849,6 +5864,8 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
 // count: the first stage's workgroups, or ind: a {count, 1, 1} record to dispatch from
     if (!me_arena()) return 0;
     ex->dc->c0_binst = 0;
+    int prim = mesh_emu_draw_prim(ex);
+    if (!prepare_draw_ex(ex, prim, 0x7fffffff, 0, 1)) return 0;
     const VkPipeInfo *info = PD_info;
     const GfxShader *ms = ex->dc->B.st.vs, *ts = ex->dc->B.st.ts;
     VkPipeline mp = VK_NULL_HANDLE, tp = VK_NULL_HANDLE;
