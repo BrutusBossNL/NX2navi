@@ -1639,6 +1639,8 @@ static void tab_lama(float scale) {
         static const char *const values[] = {"auto", "0"};
         const char *names[] = {menu_text(UI_MENU_AUTO), menu_text(UI_MENU_OFF)};
         opt_choice_list("NX2NAVI_VRAM_HEAP_LIMIT", UI_MENU_LAMA_HEAP_LIMIT, values, names, 2, UI_MENU_LAMA_HEAP_LIMIT_DESC);
+    }
+    }
     {   // vk_memory.c upload_batch_cap
         static const char *const values[] = {"128", "256", "512", "1024", "0"};
         const char *names[] = {"128 MB", "256 MB", "512 MB", "1024 MB", menu_text(UI_MENU_LAMA_NO_LIMIT)};
@@ -1648,6 +1650,10 @@ static void tab_lama(float scale) {
         static const char *const values[] = {"1800", "1200", "600", "60", "0"};
         const char *names[] = {"1800", "1200", "600", "60", menu_text(UI_MENU_OFF)};
         opt_choice_list("NX2NAVI_FREEZE_IDLE", UI_MENU_LAMA_FREEZE, values, names, 5, UI_MENU_LAMA_FREEZE_DESC);
+    {   // vk_sync.c res_mask: the result kinds the submit wait counts (31 all, 30 all but events)
+        static const char *const values[] = {"31", "30"};
+        const char *names[] = {menu_text(UI_MENU_LAMA_RESULTS_ALL), menu_text(UI_MENU_LAMA_RESULTS_NO_EVENTS)};
+        opt_choice_list("NX2NAVI_SUBMIT_FINISH_KINDS", UI_MENU_LAMA_RESULTS, values, names, 2, UI_MENU_LAMA_RESULTS_DESC);
     opt_toggle("NX2NAVI_ZSTD_NATIVE", UI_MENU_LAMA_ZSTD, UI_MENU_LAMA_ZSTD_DESC);   // ov_zstd.c trusted
     opt_group(UI_MENU_LAMA_RENDER);
     opt_toggle("NX2NAVI_REPLAY_ASYNC", UI_MENU_LAMA_ASYNC, UI_MENU_LAMA_ASYNC_DESC);   // vk_backend.c

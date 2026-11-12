@@ -144,6 +144,12 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                  "tracking can skip it. 1800 (about 15 s): few thaws and small tracking queries. 60: "
                                  "the game thaws regions all the time and every thaw stalls a frame. Off: no stalls, but "
                                  "the tracking scans all memory every frame.",
+    [UI_MENU_LAMA_RESULTS] = "Wait for GPU results",
+    [UI_MENU_LAMA_RESULTS_DESC] = "After a frame's first submission the game waits until the GPU wrote the results it "
+                                  "reads back. All: events, counter and occlusion reports, write-backs. Without events: "
+                                  "a shorter wait; on an RX 580 nothing flickered.",
+    [UI_MENU_LAMA_RESULTS_ALL] = "All",
+    [UI_MENU_LAMA_RESULTS_NO_EVENTS] = "Without events",
     [UI_MENU_LAMA_ZSTD] = "Native data decompression",
     [UI_MENU_LAMA_ZSTD_DESC] = "Decompresses the game's zstd data with the PC's libzstd instead of the game's own "
                                "decoder translated from the console. Lighter streaming while you move.",

@@ -302,6 +302,7 @@ static const CfgMeta metas[] = {
     // the menu's Lama patches tab (ui/menu.cpp tab_lama): the settings of the RX 580 patches
     {"TEX_RELEASED_MAX", "", NULL, RESTART},   // vk_texture.c released_max: "" by the video memory budget, else 1..16384
     {"MIRROR_HOT", "25", "0..1000", RESTART}, {"FREEZE_IDLE", "1800", "0..100000", RESTART},
+    {"SUBMIT_FINISH_KINDS", "31", "0..31", RESTART},   // vk_sync.c res_mask
     {"VRAM_HEAP_LIMIT", "auto", NULL, RESTART},   // vk_device.c vram_heap_limits: auto, 0 or MiB
     {"UPLOAD_BATCH_MB", "256", NULL, RESTART},   // vk_memory.c: MiB of staging before a batch goes early, 0 no limit
     {"MESH_EMULATION", "1", "0|1", RESTART}, {"MESH_EMU_MB", "256", "32..2048", RESTART},
