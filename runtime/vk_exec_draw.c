@@ -1545,6 +1545,12 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
     // submission as their draws: either way this ran for the guest submission.
     if (r->cbuf_slot == VK_GPA_CB_SLOT) {
         vk_mem_shadow_table_read();
+        // What the table names is mostly guest memory itself (pools without a mirror), which the GPU reads as it runs:
+        // the submission's submit wait is the GPU's (vk_mem_take_live). Without this the staged mirror uploads
+        // (NX2NAVI_MIRROR_STAGE) ended the wait once the replay had submitted, and the game wrote the next frame's
+        // instances while the GPU still drew from them: the small grass and moss, which reach their instances through
+        // the table, flickered and slid over the ground as the camera turned (RX 580, Kokiri Forest, 2026-11-11).
+        vk_mem_note_live();
         VkDescriptorBufferInfo t = vk_gpa_info();
         return t.buffer ? t : (VkDescriptorBufferInfo){Z.zbuf, 0, VK_WHOLE_SIZE};
     }
