@@ -66,11 +66,13 @@
 # of latency, and can show a dark or flickering frame now and then: the other thread reads vertex and buffer memory
 # the game has sometimes rewritten by then.
 # replay_async = 0
-# Record the large groups of draws of a submission on this many replay worker threads beside the submitting one, 0 to
-# 16. Default: 3 (Hyrule Field standing on an RX 7900 XT: 51.7 instead of 43.6 fps). 0: the replay records everything
-# on one thread, as before; try it if a picture looks wrong. With 1 a worker records each long run of draws while the
-# submitting thread waits for it: no faster, it checks that the pictures stay the same.
-# replay_workers = 3
+# EXPERIMENTAL. Record the large groups of draws of a submission on this many replay worker threads beside the
+# submitting one, 0 to 16. Default: 0, the replay records everything on one thread. 3 gave 51.7 instead of 43.6 fps
+# standing in Hyrule Field on an RX 7900 XT, and more than 3 gave nothing more; some players' games ended with a lost
+# graphics device with it on, so it is off unless you turn it on (also in the menu: Game, Testing, Replay workers).
+# With 1 a worker records each long run of draws while the submitting thread waits for it: no faster, it checks that
+# the pictures stay the same.
+# replay_workers = 0
 # EXPERIMENTAL, THE GAME CRASHES WITH 1. 1 lifts the virtual core gate: guest threads run without the console's limit
 # of one thread per core, and the game keeps per-core data without locks. With 1 the game crashes or hangs,
 # usually at start. Keep 0 to play.
