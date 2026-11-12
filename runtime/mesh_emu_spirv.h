@@ -47,3 +47,7 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
 // A task or mesh module's output primitive: 3 triangles, 2 lines, 1 points, 0 not a mesh module.
 int mesh_emu_prim(const uint32_t *w, size_t n);
 
+// fsw: the fragment shader's SPIR-V; its input variables are matched one for one (Location, Component, type, Flat),
+// else (NULL, or a declaration the parser does not take) one vector per location of need.
+uint32_t *mesh_emu_vs(const MeshEmuInfo *m, uint32_t need, const uint8_t types[32], const uint8_t comps[32],
+                      const uint32_t *fsw, size_t fsn, size_t *out_n);

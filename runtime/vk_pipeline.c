@@ -3257,6 +3257,9 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
             cp[i] = need >> i & 1 && !fin[i].packed && fin[i].comps ? (uint8_t)fin[i].comps : 4;
         }
         size_t vn = 0;
+        uint64_t fsw = 0;
+        const uint32_t *fcode0 = s->fs ? gfx_shader_spirv(s->fs, &fsw) : NULL;
+        vpatched = mesh_emu_vs(&me->mi, need, ty, cp, fcode0, (size_t)fsw, &vn);
         if (!vpatched) return VK_NULL_HANDLE;
         vcode = vpatched, vw = vn;
         mesh = 0;   // a vertex pipeline from here on

@@ -735,7 +735,50 @@ int mesh_emu_prim(const uint32_t *w, size_t n) {
 }
 
 // ---- the vertex shader of an emulated mesh pipeline
+// The fragment shader's input variables as declared: Location, Component, scalar type and width, Flat. 0 when one
+// is not a plain 32-bit scalar or vector (the caller then goes by the reflection's per-location summary).
+typedef struct { uint32_t loc, comp, type, comps, flat; } FsIn;
+static int fs_inputs(const uint32_t *w, size_t n, FsIn *o, int max) {
+    if (!w || n < 5 || w[0] != 0x07230203) return 0;
+    uint32_t bound = w[3];
+    if (bound > (1u << 22)) return 0;
+    uint32_t *loc = calloc(bound, 4), *comp = calloc(bound, 4), *ty = calloc(bound, 4), *cn = calloc(bound, 4), *pt = calloc(bound, 4);
+    uint8_t *flat = calloc(bound, 1), *bi = calloc(bound, 1), *hl = calloc(bound, 1);
+    int k = 0, ok = loc && comp && ty && cn && pt && flat && bi && hl;
+    for (size_t i = 5; ok && i < n;) {
+        uint32_t o2 = w[i] & 0xffff, len = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        if (!len || i + len > n || o2 == OpFunction) break;
+        if (o2 == OpDecorate && len >= 3 && a[0] < bound) {
+            if (a[1] == DecLocation && len >= 4) loc[a[0]] = a[2], hl[a[0]] = 1;
+            if (a[1] == 31 && len >= 4) comp[a[0]] = a[2];   // Component
+            if (a[1] == 14) flat[a[0]] = 1;                 // Flat
+            if (a[1] == DecBuiltIn) bi[a[0]] = 1;
+        }
+        if (o2 == OpTypeFloat && len >= 3 && a[0] < bound && a[1] == 32) ty[a[0]] = 1, cn[a[0]] = 1;
+        if (o2 == OpTypeInt && len >= 4 && a[0] < bound && a[1] == 32) ty[a[0]] = a[2] ? 2 : 3, cn[a[0]] = 1;
+        if (o2 == OpTypeVector && len >= 4 && a[0] < bound && a[1] < bound && ty[a[1]]) ty[a[0]] = ty[a[1]], cn[a[0]] = a[2];
+        if (o2 == OpTypePointer && len >= 4 && a[0] < bound && a[1] == ScInput) pt[a[0]] = a[2] + 1;
+        if (o2 == OpVariable && len >= 4 && a[2] == ScInput && a[1] < bound && a[0] < bound && !bi[a[1]] && hl[a[1]]) {
+            uint32_t p = pt[a[0]] ? pt[a[0]] - 1 : 0;
+            if (!p || p >= bound || !ty[p] || cn[p] > 4 || loc[a[1]] >= 32 || k == max) { k = 0, ok = 0; break; }
+            o[k++] = (FsIn){loc[a[1]], comp[a[1]], ty[p] - 1, cn[p], flat[a[1]]};
+        }
+        i += len;
+    }
+    free(loc), free(comp), free(ty), free(cn), free(pt), free(flat), free(bi), free(hl);
+    return ok ? k : 0;
+}
+
+uint32_t *mesh_emu_vs(const MeshEmuInfo *mi, uint32_t need, const uint8_t types[32], const uint8_t comps[32],
+                      const uint32_t *fsw, size_t fsn, size_t *out_n) {
     Buf b = {0}, t = {0}, an = {0}, c = {0};
+    FsIn in[64];
+    int nin = fs_inputs(fsw, fsn, in, 64);
+    if (!nin)   // the per-location summary: one vector per location
+        for (uint32_t l = 0; l < 32; l++)
+            if (need >> l & 1)
+                in[nin++] = (FsIn){l, 0, types[l] <= 2 ? types[l] : 0, comps[l] >= 1 && comps[l] <= 4 ? comps[l] : 4, types[l] == 1 || types[l] == 2};
     uint32_t id = 1;
 #define N() (id++)
     uint32_t glsl = N(), fn = N(), t_void = N(), t_fn = N(), t_u32 = N(), t_i32 = N(), t_f32 = N(), t_u64 = N(),
@@ -787,10 +830,23 @@ int mesh_emu_prim(const uint32_t *w, size_t n) {
     for (uint32_t k = 0; k < 7; k++) op(&an, OpMemberDecorate, 4, pc_struct, k, (uint32_t)DecOffset, k ? 4 + 4 * k : 0u);
     op(&an, OpDecorate, 3, vidx, (uint32_t)DecBuiltIn, (uint32_t)BiVertexIndex);
     op(&an, OpDecorate, 3, pos, (uint32_t)DecBuiltIn, (uint32_t)BiPosition);
+    uint32_t ifc[80], ni = 0;
     ifc[ni++] = pc_var, ifc[ni++] = vidx, ifc[ni++] = pos;
     if (mi->psize_slot) ifc[ni++] = psz;
+    // outputs: one per fragment input, same Location, Component and type
+    uint32_t outv[64] = {0}, outt[64] = {0};
+    for (int q = 0; q < nin; q++) {
+        int ty = in[q].type <= 2 ? (int)in[q].type : 0, k = in[q].comps >= 1 && in[q].comps <= 4 ? (int)in[q].comps : 4;
+        if (in[q].comp + (uint32_t)k > 4) k = (int)(4 - in[q].comp);
+        in[q].type = (uint32_t)ty, in[q].comps = (uint32_t)k;
+        outt[q] = vecs[ty][k];
         uint32_t p = N(), v = N();
+        op(&t, OpTypePointer, 3, p, (uint32_t)ScOutput, outt[q]);
         op(&t, OpVariable, 3, p, v, (uint32_t)ScOutput);
+        op(&an, OpDecorate, 3, v, (uint32_t)DecLocation, in[q].loc);
+        if (in[q].comp) op(&an, OpDecorate, 3, v, 31u, in[q].comp);   // Component
+        if (in[q].flat || ty) op(&an, OpDecorate, 2, v, 14u);           // Flat
+        outv[q] = v;
         ifc[ni++] = v;
     }
     // code: slot = vertex area + VertexIndex; each output from slot + its index
@@ -822,6 +878,8 @@ int mesh_emu_prim(const uint32_t *w, size_t n) {
     for (int k = 0; k < 33; k++) slot_of[k] = 0xffffffffu;
     slot_of[32] = 0;   // position
     for (uint32_t g = 0; g < mi->n_generic; g++) slot_of[mi->generic_loc[g]] = 1 + g;
+    for (int q = -1; q < nin; q++) {   // -1: the position
+        uint32_t l = q < 0 ? 32 : in[q].loc;
         uint32_t val;
         if (slot_of[l] == 0xffffffffu) {
             val = 0;
@@ -832,22 +890,32 @@ int mesh_emu_prim(const uint32_t *w, size_t n) {
             op(&c, OpAccessChain, 5, p_v4u_psb, p, base, c0, ci);
             op(&c, OpLoad, 5, t_v4u, val, p, 2u, 16u);
         }
+        if (q < 0) {
             uint32_t f = N();
             op(&c, OpBitcast, 3, t_v4f, f, val);
             op(&c, OpStore, 2, pos, f);
             continue;
         }
+        int ty = (int)in[q].type, k = (int)in[q].comps;
+        uint32_t v4t = vecs[ty][4], r, c0i = in[q].comp;
         if (!val) {   // not written by the mesh stage: zero
             uint32_t z = N();
             r = N();
+            op(&t, OpConstantNull, 2, outt[q], z);
+            op(&c, OpCopyObject, 3, outt[q], r, z);
         } else {
             uint32_t cv = val;
             if (ty != 2) cv = N(), op(&c, OpBitcast, 3, v4t, cv, val);
             if (k == 4) r = cv;
+            else if (k == 1) r = N(), op(&c, OpCompositeExtract, 4, outt[q], r, cv, c0i);
             else {
                 r = N();
+                put(&c, (uint32_t)(5 + k) << 16 | 79u);   // OpVectorShuffle: components comp..comp+k-1
+                put(&c, outt[q]), put(&c, r), put(&c, cv), put(&c, cv);
+                for (int z = 0; z < k; z++) put(&c, c0i + (uint32_t)z);
             }
         }
+        op(&c, OpStore, 2, outv[q], r);
     }
     op(&c, OpReturn, 0);
     op(&c, OpFunctionEnd, 0);
