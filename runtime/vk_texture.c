@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -1609,6 +1610,17 @@ static const char *const start_names[START_N] = {
     "started on its own", "filled from storage over a live entry", "content copied from a live entry",
     "content copied from a released entry", "started empty over a live entry", "started empty over a released entry",
     "content copied from the released CPU-written entry it replaced (split fill)", "filled from its storage (split fill)"};
+const char *vk_texture_start_name(int start) { return start >= 0 && start < START_N ? start_names[start] : "?"; }
+const char *vk_texture_drop_name(int why) { return why >= 0 && why < DROP_N ? drop_names[why] : "?"; }
+
+// An entry's event for the flight recorder (flight.h flight_tex, FLIGHT_TF_*): a no-op while the recorder is off.
+static void flight_ev(const Tex *e, int kind, uint32_t detail, uint32_t us) {
+    if (!flight_on) return;
+    uint32_t fl = (e->f.depth ? FLIGHT_TF_DEPTH : 0) | (e->f.stencil ? FLIGHT_TF_STENCIL : 0) |
+                  (e->pub.mirrored ? FLIGHT_TF_MIRRORED : 0) | (e->bound_to ? FLIGHT_TF_BOUND : 0) |
+                  (e->f.astc_bw ? FLIGHT_TF_ASTC : 0) | (e->pub.gpu_owned ? FLIGHT_TF_GPU : 0);
+    flight_tex(kind, e->key.addr, (uint32_t)e->t.d.format, e->pub.width, e->pub.height, e->pub.layers, fl, detail, us);
+}
 
 static uint64_t frames_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED); }
 
@@ -1695,6 +1707,7 @@ static void write_back_n(Tex **v, int n);
 static uint64_t n_drop_wb;   // entries written back before their drop since the last perf line
 
 static void drop_tex(Tex *e, int why) {
+    flight_ev(e, FLIGHT_TEX_DROP, (uint32_t)why, 0);
     if (why == DROP_COMMIT || why == DROP_IDLE_COMMIT) commit_drop_note(e);
     if (e->gpu_dirty && why != DROP_OVERWRITTEN && why != DROP_SHUTDOWN) {
         uint32_t now;
@@ -3181,6 +3194,7 @@ static void upload(Tex *e) {
     } else {
         n_uploads++, perf_count(PERF_CNT_TEX_UP);
     }
+    flight_ev(e, e->uploaded ? FLIGHT_TEX_REUP : FLIGHT_TEX_UP, e->wt_n, (uint32_t)(dt / 1000));
     e->wt_n = 0;
     e->uploaded = 1;
     e->n_up++;
@@ -3652,6 +3666,7 @@ static Tex *entry_of(const tex_t *t) {
         origin_made(e);
         perf_count(PERF_CNT_TEX_NEW);
         start_at(e, &k, 0);
+        flight_ev(e, FLIGHT_TEX_NEW, e->og_start, 0);
         e->next_at = nvn_hm_get(&by_addr, &k.addr);
         nvn_hm_put(&by_addr, &k.addr, e);
         nvn_hm_put(&by_key, &k, e);
@@ -3661,6 +3676,7 @@ static Tex *entry_of(const tex_t *t) {
         e->samp_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);   // new: not disused before it is drawn
     }
     if (e->released) {
+        flight_ev(e, FLIGHT_TEX_TAKEBACK, 0, 0);
         e->samp_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);   // in use again, as a new one
         uint64_t gap = e->samp_frame - e->rel_frame;
         if (gap > e->back_gap) e->back_gap = gap > UINT32_MAX ? UINT32_MAX : (uint32_t)gap;
@@ -3725,6 +3741,7 @@ static void wb_cfg_init(void) {
 static int wb_wanted(const Tex *e) { return e->t.L.size <= wb_limit || e->run < WB_RUN; }
 
 static void mark_released(Tex *e) {   // tex_lock held; e is not released
+    flight_ev(e, FLIGHT_TEX_RELEASE, 0, 0);
     e->released = 1;
     e->rel_epoch = submit_epoch;
     e->rel_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
