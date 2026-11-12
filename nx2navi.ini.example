@@ -845,6 +845,11 @@
 # last one it finished. Unset: on AMD GPUs (VK_AMD_buffer_marker). 1: also on NVIDIA GPUs
 # (VK_NV_device_diagnostic_checkpoints), which NVIDIA says costs a little. 0: off.
 # pass_crumbs = 1
+# GPU draw marks, for a GPU crash (device lost) that comes back in the same place on an AMD GPU: inside each render pass
+# a mark is written wherever the shaders change, and after the crash the log names the shaders of the draws the GPU had
+# not finished, not only the pass. It costs a little frame rate, so it is off unless a crash is being tracked down.
+# Needs the pass marks above (AMD GPUs). Default: 0.
+# draw_crumbs = 1
 # A test of how the game ends when the video card stops answering (device lost): the hand-over to the GPU queue with
 # this number is not made and is taken as one the driver refused with a lost device. The log then holds one report and
 # one FATAL line, and the game ends with exit code 72. 0: never. Default: 0.

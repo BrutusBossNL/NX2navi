@@ -148,12 +148,14 @@ typedef struct {
     const GfxShader *first[2], *last[2];// vertex and fragment shader of the first and last draw; a dispatch: first[0]
     uint32_t gp;                        // NX2NAVI_GPU_PASSES: the timestamp pair of this mark plus one; 0 none
     uint32_t layer;                     // NX2NAVI_GPU_PASSES: the first layer of the depth target (a shadow cascade)
+    uint32_t gap;                       // bits of VK_GAP_*: what the replay recorded between the mark before and this one
 } VkPassMark;
 void vk_gpu_passes_frame(uint64_t frame);   // vk_crumbs.c, each present: NX2NAVI_GPU_PASSES, GPU time per pass and dispatch
 // NX2NAVI_GPU_PASSES also times what a part of a submission spends outside its passes and dispatches (vk_crumbs.c, "the
 // gap ledger"). vk_gpu_passes_part: vk_sync.c, at the start (end 0) and the end (end 1) of each part's command buffer.
 // vk_gpu_gap_note: the replay is about to record commands of this kind outside a pass or dispatch; units is their size
-// (bytes for buffers, texels for images, 0 unknown). Both do nothing outside the timed frames. Replay thread only.
+// (bytes for buffers, texels for images, 0 unknown). Outside the timed frames the first does nothing and the second
+// only notes the kind for the next pass mark (VkPassMark.gap, a lost device's report). Replay thread only.
 enum {
     VK_GAP_COPY_B2B, VK_GAP_COPY_B2T, VK_GAP_COPY_T2B, VK_GAP_COPY_T2T, VK_GAP_CLEAR_BUF, VK_GAP_CLEAR_TEX,
     VK_GAP_CLEAR_TARGET, VK_GAP_UPSCALER, VK_GAP_WB_MERGE, VK_GAP_WB_COPY, VK_GAP_TWIN, VK_GAP_POOL_MARKS,
@@ -184,6 +186,11 @@ const VkPassMark *vk_pass_mark_record(uint32_t id);   // the ring record of mark
 // the extension they came from), then each with its ring record. vk_pass_marks_report logs it; the probe checks it.
 void vk_pass_marks_format(const char *source, uint32_t started, uint32_t finished, char *o, size_t size);
 void vk_pass_marks_report(void);    // vk_device.c device_fault_report: the AMD words and the NVIDIA checkpoints, formatted
+// Draw marks (vk_crumbs.c, NX2NAVI_DRAW_CRUMBS=1 with VK_AMD_buffer_marker; off by default): a mark where the shaders
+// or the pipeline state change inside pass m, before the draw with index draw in that pass, so a lost device's report
+// names the shaders of the draws the GPU had not finished. Replay thread only; nothing while vk_draw_marks_on is 0.
+extern int vk_draw_marks_on;
+void vk_draw_mark(VkCommandBuffer cb, const VkPassMark *m, const GfxShader *vs, const GfxShader *fs, uint32_t draw);
 
 // ---- window and present (gfx_present.c). Host threads only.
 // vk_present_image: blits the crop rectangle {x, y, w, h} of src (NULL, or w/h <= 0: the whole w x h image), scaled
