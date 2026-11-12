@@ -28,6 +28,11 @@ void plat_thread_join(PlatThread *t);     // waits for fn to return, then frees 
 // Waits at most ns for fn to return: 1 when it did (t is freed), 0 when it still runs (t stays valid).
 int plat_thread_join_ns(PlatThread *t, uint64_t ns);
 void plat_thread_detach(PlatThread *t);   // frees t; the thread runs on
+// fn runs on every thread these calls make, when its function has returned and before the thread ends: for what a
+// thread keeps for itself alone (a decoder context). At most PLAT_THREAD_END_HOOKS, each added once.
+#define PLAT_THREAD_END_HOOKS 4
+void plat_thread_end_hook(void (*fn)(void));
+void plat_thread_end_run(void);            // the platform files' thread start functions call it
 // Restricts t (NULL: the calling thread) to the logical processors in mask (bit n = processor n of the first group).
 // Returns the previous mask, 0 on failure.
 uint64_t plat_thread_affinity(PlatThread *t, uint64_t mask);

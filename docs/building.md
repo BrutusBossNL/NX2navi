@@ -395,6 +395,11 @@ waits on its event and leaves the others asleep, a wait on several handles repor
 the wait on it, timed waits keep their time, a cancel ends any wait, and 4,000 signals to eight looping waiters are
 each seen. It runs a second time with `NX2NAVI_SYNC_WAKE_ALL=1`. No game files.
 
+A change to what a host thread gives back when it ends (`runtime/platform/win32.c` `thread_main`,
+`plat_thread_end_hook`) passes `python tests\thread_end_check.py`, which builds the platform layer alone: 416 threads
+sleep, read a file and end, half joined and half detached; the end hook runs once on each, and on Windows the process
+holds as many handles afterwards as before (each thread's sleep timer and read event are closed). No game files.
+
 A change to the log queue (`runtime/logq.c`) passes `python tests\logq_check.py`, which builds it with the platform
 layer and a destination of its own: 160,000 lines from eight threads arrive whole and in each thread's order, a line
 logged while the queue's lock is taken waits and does not pass the lines queued before it, a destination that takes

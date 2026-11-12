@@ -114,6 +114,7 @@ static void *thread_main(void *p) {
     __atomic_store_n(&t->tid, (int32_t)syscall(SYS_gettid), __ATOMIC_RELEASE);
     if (t->name[0]) pthread_setname_np(pthread_self(), t->name);
     t->fn(t->arg);
+    plat_thread_end_run();   // what the other files keep per thread (platform.h plat_thread_end_hook)
     return NULL;
 }
 
