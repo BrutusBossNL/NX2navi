@@ -5905,6 +5905,7 @@ static void me_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFla
             ME.resets++;
             me_barrier(cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                        VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vkCmdFillBuffer(cb, ME.buf, 0, 32, 0);   // the counters, and the diagnosis words 4-7 (mesh_emu_spirv.c)
         me_barrier(cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                    VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
     uint32_t rec = ME.rec++ % MESH_EMU_DRECS;

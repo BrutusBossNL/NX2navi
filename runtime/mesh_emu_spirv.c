@@ -245,6 +245,12 @@ static void mesh_epilogue(Em *e, const MeshEmuInfo *info, const OutVar *ov, int 
     barrier(e);
     uint32_t lid = ld(e, m->t_u32, m->lii), base = words_base(e);
     uint32_t isz = mul(e, pcount, cu(e, K)), vsz = mul(e, vcount, cu(e, S));
+    // header word 6: mesh workgroups that reached the output copy; word 7: the primitives they declared (diagnosis)
+    {
+        uint32_t l0 = E2(e, OpIEqual, m->t_bool, lid, cu(e, 0));
+        atomic(e, OpAtomicIAdd, base, cu(e, 6), E3(e, OpSelect, m->t_u32, l0, cu(e, 1), cu(e, 0)));
+        atomic(e, OpAtomicIAdd, base, cu(e, 7), E3(e, OpSelect, m->t_u32, l0, pcount, cu(e, 0)));
+    }
     uint32_t mz;
     if_begin(e, E2(e, OpIEqual, m->t_bool, lid, cu(e, 0)), &mz);
     {
@@ -630,6 +636,11 @@ uint32_t *mesh_emu_compute(const uint32_t *w, size_t n, MeshEmuInfo *info, size_
                 uint32_t recw = add(&e, cu(&e, MESH_EMU_TOFF / 4), mul(&e, slotc, cu(&e, MESH_EMU_TWORDS)));
                 uint32_t cnt = word_load(&e, base, recw);
                 uint32_t act = E2(&e, OpLogicalAnd, m->t_bool, ok, ult(&e, x, cnt));
+                // header words 4 and 5: mesh workgroups started and past this check (diagnosis: vk_dump mesh.txt)
+                uint32_t l0 = E2(&e, OpIEqual, m->t_bool, lid, cu(&e, 0));
+                atomic(&e, OpAtomicIAdd, base, cu(&e, 4), E3(&e, OpSelect, m->t_u32, l0, cu(&e, 1), cu(&e, 0)));
+                atomic(&e, OpAtomicIAdd, base, cu(&e, 5),
+                       E3(&e, OpSelect, m->t_u32, E2(&e, OpLogicalAnd, m->t_bool, l0, act), cu(&e, 1), cu(&e, 0)));
                 uint32_t cont = nid(m), retl = nid(m);
                 op(&code, OpSelectionMerge, 2, cont, 0u);
                 op(&code, OpBranchConditional, 3, act, cont, retl);
