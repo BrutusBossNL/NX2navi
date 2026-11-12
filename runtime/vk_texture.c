@@ -92,6 +92,7 @@ typedef struct Tex {
     uint64_t scan_frame;          // one more than the frame vk_texture_gpu_written last looked for overwritten entries
     uint64_t ow_frame;            // gfx_counters.frames when overwritten was set
     uint8_t overwritten;          // released, and a texture at another address was drawn over its storage (overwrite_others)
+    uint64_t kept_frame;          // drop_overwritten: the present (plus one) in which it was last left because it is used
     uint8_t in_gwin;              // in gwin[]
     int pidx;                     // 1 + its index in pent[] (vk_texture_pool_note_locked); 0: not listed
     int ph;                       // 1 + its index in pref[] (pool_ref); 0: none
@@ -674,6 +675,10 @@ static int tex_reuse_on(void) {
 }
 
 static void destroy_tex(Tex *e);
+static int used_lately(const struct Tex *e, uint64_t now, uint64_t within);
+// The presents a released entry must have gone unused before its image may go to another texture (create_tex): the
+// pool's marks reach an entry a few presents after the draw that sampled it.
+#define REUSE_UNUSED 16
 
 // NX2NAVI_TEX_REUSE_NAMED (default 0; 1: as before, any released entry's image may go): a registered slot that is not
 // finalized names e's descriptor, so a shader can still sample e through the pool. The game finalizes a texture object
@@ -1274,6 +1279,7 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         int n = 0;
         for (Tex *q = nvn_hm_get(&reuse, &e->ik); q && n < 128; q = q->ru_next, n++) {
             if (q->rel_epoch == submit_epoch || now - q->rel_frame < 2 || q->key.addr == k->addr) continue;
+            if (used_lately(q, now, REUSE_UNUSED)) continue;   // still drawn with or sampled: its content is asked for
             uint64_t dist = q->key.addr > k->addr ? q->key.addr - k->addr : k->addr - q->key.addr;
             // not one a current slot still names (slot_names), asked only of a candidate that would be the best
             if (q->overwritten) {
@@ -2350,14 +2356,41 @@ static int drop_stale(uint64_t keep, uint64_t *count, int why) {   // returns th
     return dropped;
 }
 
+// A draw, a read or the pool's marks used e within `within` presents of now (touch, vk_pool_marks_read).
+static int used_lately(const Tex *e, uint64_t now, uint64_t within) {
+    return now - e->use_frame < within || now - e->samp_frame < within;
+}
+
 // Drops up to PRESSURE_STEP entries that were marked overwritten OVERWRITTEN_KEEP presents ago or earlier
 // (overwrite_others): the image reuse found no texture to give their images to in that time.
+// Not one that was used since (NX2NAVI_TEX_OVERWRITTEN_USED=0: those too, as before): the mark says another target was
+// drawn over the entry's storage, not that nothing reads the entry. In a player's recording the entry of a second
+// descriptor at the scene target's address (format 0x40 beside the target's 0x3f, both 2400x1350) was dropped here
+// and made again in the same frame, its content copied from a released entry at that address, whose bits are the
+// scene in the other format. That frame's picture was nearly black with its colours exchanged (brightness 17 against
+// 102 in the frames around it); the frames before and after were as usual. Whatever looks such an entry up after its
+// drop makes it again that way, so an entry something still uses stays; so does one the image reuse would take
+// (create_tex, REUSE_UNUSED).
 static void drop_overwritten(void) {
+    static int used_too = -1;
+    static uint64_t n_kept;
+    if (used_too < 0) used_too = !cfg_bool("NX2NAVI_TEX_OVERWRITTEN_USED");
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int dropped = 0;
     for (Tex *e = rel_head, *next; e && now - e->rel_frame >= OVERWRITTEN_KEEP && dropped < PRESSURE_STEP; e = next) {
         next = e->rel_next;
         if (!e->overwritten || now - e->ow_frame < OVERWRITTEN_KEEP) continue;
+        if (!used_too && used_lately(e, now, OVERWRITTEN_KEEP)) {
+            if (e->kept_frame != now + 1 && (!n_kept++ || !(n_kept & (n_kept - 1))))   // the first, then at powers of two
+                rt_log("vk: an overwritten texture stays, it is still used: %#llx fmt %#x %ux%u, last used %llu presents "
+                       "ago (%llu so far; NX2NAVI_TEX_OVERWRITTEN_USED=0 drops such a texture)",
+                       (unsigned long long)e->key.addr, e->t.d.format, e->t.d.width, e->t.d.height,
+                       (unsigned long long)(now - (e->use_frame > e->samp_frame ? e->use_frame : e->samp_frame)),
+                       (unsigned long long)n_kept);
+            e->kept_frame = now + 1;
+            e->ow_frame = now;   // looked at again OVERWRITTEN_KEEP presents from now
+            continue;
+        }
         drop_tex(e, DROP_OVERWRITTEN);
         dropped++, n_over_drops++;
     }
