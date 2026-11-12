@@ -71,10 +71,14 @@ static void results_run(uint64_t upto);
 // H is guarded by the queue lock. NX2NAVI_SUBMIT_BATCH=0 (or 1) hands each to the queue at once; =N holds up to N.
 #define HOLD_CAP 16
 #define HOLD_NS 500000ull
+// Command buffers of one submission: the mirror prologue, the parts cut before the part with their pre-pass command
+// buffers (CHAIN_MAX), the part's pre-pass command buffer, the part (vk_sync_pre, vk_sync_cut, chain_infos).
+#define CHAIN_MAX 64
+#define SUB_CBS (CHAIN_MAX + PART_CBS + 3)
 static struct {
     int n;
     VkSubmitInfo2 si[HOLD_CAP];
-    VkCommandBufferSubmitInfo cbi[HOLD_CAP][PART_CBS + 2];   // the prologue and the part's command buffers
+    VkCommandBufferSubmitInfo cbi[HOLD_CAP][SUB_CBS];
     VkSemaphoreSubmitInfo sig[HOLD_CAP][2];
     uint64_t last;                    // the newest timeline value a held submission signals, 0 none
     uint64_t batches, subs;           // vkQueueSubmit2 calls and the submissions they carried
@@ -272,6 +276,7 @@ static void queue_submit(VkCtx *c, const VkSubmitInfo2 *si, uint64_t value) {
     if (H.n == HOLD_CAP) hold_flush_locked(c);
     int i = H.n++;
     H.si[i] = *si;
+    if (si->commandBufferInfoCount > SUB_CBS) rt_fatal("vk: a submission of %u command buffers", si->commandBufferInfoCount);
     if (si->commandBufferInfoCount)
         memcpy(H.cbi[i], si->pCommandBufferInfos, sizeof H.cbi[i][0] * si->commandBufferInfoCount);
     H.si[i].pCommandBufferInfos = H.cbi[i];
@@ -971,6 +976,7 @@ static VkCommandBuffer split_part(int exec) {
     if (!rec_end_cb(cb, 0, 0)) vkEndCommandBuffer(cb);   // every command of the part is in cb, ended by its recorder
     vk_upload_flush(0);   // the uploads this part asked for precede it in queue order
     VkCommandBuffer pro = prologue(c, cur_fence), pre = pre_end(cur_fence);
+    VkCommandBufferSubmitInfo cbi[SUB_CBS];
     uint32_t ncb = chain_infos(cbi, pro, pre, cb);   // the mirror copies, the cut parts, the pre-pass work, the part
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = ncb, .pCommandBufferInfos = cbi};
     VkSemaphoreSubmitInfo esig = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = exec_tl,
@@ -1047,8 +1053,8 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     vk_upload_flush(0);
     VkCommandBuffer pro = prologue(c, fence), pre = pre_end(fence);
     s = &slots[cur_slot];
-    VkCommandBufferSubmitInfo cbi[PART_CBS + 2];
-    uint32_t ncbi = part_list(cbi, pro, s->cb, recorded);
+    VkCommandBufferSubmitInfo cbi[SUB_CBS];
+    int sent = recorded || nchain || npart_cbs;   // a cut part or a piece goes with the part after it, which goes too
     uint32_t ncb = chain_infos(cbi, pro, pre, sent ? s->cb : VK_NULL_HANDLE);
     // the timeline, and the executed timeline unless a part of this submission signalled it already (split_part)
     VkSemaphoreSubmitInfo sig[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = c->timeline,
