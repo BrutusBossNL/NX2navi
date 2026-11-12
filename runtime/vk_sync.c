@@ -773,6 +773,7 @@ static int npre, pre_pair = -1;
 static VkCommandBuffer pre_cb;
 VkCommandBuffer vk_sync_pre(void) {
     if (pre_cb) return pre_cb;
+    VkCtx *c = vk_ctx();
     if (!pre_pool) {
         VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                       .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -794,6 +795,9 @@ VkCommandBuffer vk_sync_pre(void) {
     }
     pre_slots[i].fence = cur_fence;   // the submission's value: its parts are done by then
     VkCommandBuffer cb = pre_slots[i].cb;
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(cb, &bi);
     pre_pair = ts_open(cb);
     // everything earlier in queue order (the parts before, the mirror prologue) before what it records
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -803,6 +807,13 @@ VkCommandBuffer vk_sync_pre(void) {
     vkCmdPipelineBarrier2(cb, &di);
     pre_cb = cb;
     return cb;
+}
+
+// Command buffers of the submission that a cut (vk_sync_cut) ended and that go to the queue with the next part, in
+// order before it: a cut part's pre-pass command buffer, then the part.
+static VkCommandBuffer chain[CHAIN_MAX];
+static int nchain;
+
 // The pre-pass command buffer of the part that goes now, ended; VK_NULL_HANDLE without one.
 static VkCommandBuffer pre_end(uint64_t fence) {
     VkCommandBuffer cb = pre_cb;
@@ -833,26 +844,59 @@ static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
     return cb;
 }
 
-// The command buffers of the part that ends now, in queue order, into cbi: the prologue (when there is one), the
-// part's earlier pieces (vk_sync_append) and, with `with_last`, its last command buffer. Empties the list.
-static uint32_t part_list(VkCommandBufferSubmitInfo *cbi, VkCommandBuffer pro, VkCommandBuffer last, int with_last) {
+// What goes to the queue for a part: the mirror prologue, the parts cut before it with their pre-pass command buffers
+// and pieces (the chain, emptied), the part's own pre-pass command buffer, the part's earlier pieces (vk_sync_append:
+// the replay's and its workers', emptied), the part's last command buffer. Any of them may be missing.
+static uint32_t chain_infos(VkCommandBufferSubmitInfo *cbi, VkCommandBuffer pro, VkCommandBuffer pre, VkCommandBuffer cb) {
     uint32_t n = 0;
-    VkCommandBufferSubmitInfo one = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-    if (pro) one.commandBuffer = pro, cbi[n++] = one;
+#define CHAIN_ADD(x) \
+    if (x) cbi[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = (x)}
+    CHAIN_ADD(pro);
+    for (int k = 0; k < nchain; k++) CHAIN_ADD(chain[k]);
+    CHAIN_ADD(pre);
     for (int i = 0; i < npart_cbs; i++) {
         if (!part_cbs[i]) rt_fatal("vk: a replay worker's command buffer is missing from a part");
-        one.commandBuffer = part_cbs[i], cbi[n++] = one;
+        CHAIN_ADD(part_cbs[i]);
     }
-    if (with_last) one.commandBuffer = last, cbi[n++] = one;
-    npart_cbs = 0;
+    CHAIN_ADD(cb);
+#undef CHAIN_ADD
+    nchain = 0, npart_cbs = 0;
     return n;
+}
+
+// A cut: the part ends and the replay goes on in a new command buffer, as at a split, but nothing goes to the queue:
+// the part (its pre-pass command buffer, its pieces and itself) waits in the chain for the next part that does. The
+// texture pool set stays as it is, as nothing of the submission has been handed to the GPU. VK_NULL_HANDLE when the
+// chain is full.
+VkCommandBuffer vk_sync_cut(void) {
+    if (nchain + npart_cbs + 2 > CHAIN_MAX) return VK_NULL_HANDLE;
+    for (int i = 0; i < npart_cbs; i++)
+        if (!part_cbs[i]) return VK_NULL_HANDLE;   // a replay worker's piece not filled yet: the part goes on
+    VkCtx *c = vk_ctx();
+    VkCommandBuffer cb = slots[cur_slot].cb;
+    vk_gpu_passes_part(cb, 1);
+    ts_end(cb, cur_fence);
+    if (!rec_end_cb(cb, 0, 0)) vkEndCommandBuffer(cb);
+    VkCommandBuffer pre = pre_end(cur_fence);
+    if (pre) chain[nchain++] = pre;
+    for (int i = 0; i < npart_cbs; i++) chain[nchain++] = part_cbs[i];
+    npart_cbs = 0;
+    chain[nchain++] = cb;
+    CmdSlot *s = take_slot(c, cur_fence);   // the cut part keeps its slot until the value is reached
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(s->cb, &bi);
+    ts_begin(s->cb);
+    rec_begin(s->cb, cur_fence);
+    vk_gpu_passes_part(s->cb, 0);
+    return s->cb;
 }
 
 // The replay workers (vk_exec.c "replay workers"): the replay's command buffer being recorded ends and joins the
 // part's list, then n places for the command buffers the workers record, in that order, and a new command buffer of
 // the same part is begun and returned: the same timeline value, timed and submitted with the rest, so the workers'
 // commands run between the replay's commands before and after. The places are filled (vk_sync_append_fill) before the
-// part is submitted, which part_list checks. vk_sync_append_room: whether the list has room for n more.
+// part is submitted, which chain_infos checks. vk_sync_append_room: whether the list has room for n more.
 int vk_sync_append_room(int n) { return npart_cbs + n + 1 <= PART_CBS; }
 
 VkCommandBuffer vk_sync_append_later(int n, int *at) {
@@ -914,7 +958,6 @@ VkCommandBuffer vk_sync_worker_begin(int w) {
 }
 
 void vk_sync_worker_end(VkCommandBuffer cb) { vkEndCommandBuffer(cb); }
-
 static VkCommandBuffer split_part(int exec);
 VkCommandBuffer vk_sync_split(void) { return split_part(0); }
 // The part that ends here is the last with the submission's own commands: it signals the executed timeline.
@@ -928,6 +971,7 @@ static VkCommandBuffer split_part(int exec) {
     if (!rec_end_cb(cb, 0, 0)) vkEndCommandBuffer(cb);   // every command of the part is in cb, ended by its recorder
     vk_upload_flush(0);   // the uploads this part asked for precede it in queue order
     VkCommandBuffer pro = prologue(c, cur_fence), pre = pre_end(cur_fence);
+    uint32_t ncb = chain_infos(cbi, pro, pre, cb);   // the mirror copies, the cut parts, the pre-pass work, the part
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = ncb, .pCommandBufferInfos = cbi};
     VkSemaphoreSubmitInfo esig = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = exec_tl,
                                   .value = cur_fence, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
@@ -1005,6 +1049,7 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
     s = &slots[cur_slot];
     VkCommandBufferSubmitInfo cbi[PART_CBS + 2];
     uint32_t ncbi = part_list(cbi, pro, s->cb, recorded);
+    uint32_t ncb = chain_infos(cbi, pro, pre, sent ? s->cb : VK_NULL_HANDLE);
     // the timeline, and the executed timeline unless a part of this submission signalled it already (split_part)
     VkSemaphoreSubmitInfo sig[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = c->timeline,
                                      .value = fence, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT},
@@ -1016,7 +1061,7 @@ static uint64_t submit(const uint64_t *handles, int n, const OwnCommands *own) {
                         .signalSemaphoreInfoCount = both ? 2u : 1u, .pSignalSemaphoreInfos = sig};
     queue_submit(c, &si, fence);   // held or handed to the queue (submit batching)
     vk_mem_lazy_handed();
-    s->fence = recorded ? fence : 0;
+    s->fence = sent ? fence : 0;
     vk_mem_note_submit(fence);
     plat_mutex_lock(&st_lock);
     __atomic_store_n(&issued, fence, __ATOMIC_RELEASE);

@@ -1111,8 +1111,17 @@ static void set_rt(VkExec *ex, const p_set_rt *r) {
 // command, it was 4% of the replay in Kokiri Forest.
 static int split_n = -1, split_idle, split_in_pass, split_draws, split_at, part_start;
 static uint64_t split_ns, part_t0;
-static uint64_t n_parts, n_subs, n_idle_parts, n_pass_splits;
+static uint64_t n_parts, n_subs, n_idle_parts, n_pass_splits, n_cuts;
+
 int vk_exec_split_now(VkExec *ex) {
+    int in_pass = ex->in_pass;
+    if (in_pass) vk_exec_pass_end(ex);
+    VkCommandBuffer cb = vk_sync_cut();   // not handed to the queue: the texture pool set stays (vk_exec_pool_split)
+    if (!cb) return 0;
+    ex->cb = cb;
+    ex->dirty = VK_EXEC_DIRTY_ALL;
+    vk_exec_draw_new_cb();
+    n_cuts++;
     return 1;
 }
 
@@ -2583,10 +2592,10 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     if (n) n_subs++;
     if ((rt_trace & RT_TRACE_PERF) && n_subs >= 240) {
         rt_log("perf: replay command buffer parts per submission %.2f (%.2f first parts sent while the GPU was idle, %.2f "
-               "splits inside a pass); event order: held %llu, resumed %llu (%llu without their signal), switches %llu, "
+               "splits inside a pass, %.2f cuts for emulated mesh stages); event order: held %llu, resumed %llu (%llu without their signal), switches %llu, "
                "held now %d; waits a CPU signal met only after the submission's copies were taken: %llu",
                (double)(n_subs + n_parts) / (double)n_subs, (double)n_idle_parts / (double)n_subs,
-               (double)n_pass_splits / (double)n_subs, (unsigned long long)evo_held, (unsigned long long)evo_resumed,
+               (double)n_pass_splits / (double)n_subs, (double)n_cuts / (double)n_subs, (unsigned long long)evo_held, (unsigned long long)evo_resumed,
                (unsigned long long)evo_forced, (unsigned long long)evo_switches, evo_pending,
                (unsigned long long)vk_exec_event_late_take());
         uint64_t xw, xe, xl, xm, le, lc, lo;
@@ -2678,7 +2687,7 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
         }
         RW.groups = RW.group_draws = RW.chunks = RW.serial_draws = RW.wait_ns = 0;
         evo_held = evo_resumed = evo_forced = evo_switches = 0;
-        n_subs = n_parts = n_idle_parts = n_pass_splits = 0;
+        n_subs = n_parts = n_idle_parts = n_pass_splits = n_cuts = 0;
     }
     rec_spent_ns += kern_now_ns() - in_ns;
     if (rec_spent_ns >= REC_CLAIM_NS) rec_claim();

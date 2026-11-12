@@ -142,6 +142,8 @@ void vk_exec_barrier(VkExec *ex);
 void vk_exec_barrier_dispatch(VkExec *ex);
 // NX2NAVI_TRACE=perf, every 600 frames: the barriers per frame by kind.
 void vk_exec_barrier_log(uint64_t frame);
+// Ends the open pass and the part without handing it to the queue (vk_sync_cut): the next draw begins the pass again
+// at the start of a new command buffer, which the part's pre-pass command buffer precedes. 0 when no more can wait.
 int vk_exec_split_now(VkExec *ex);
 // vk_texture.c (NX2NAVI_TEX_ALIAS): commands that must run at the replay's current position. vk_exec_inline_begin returns
 // the command buffer being recorded after a full barrier (an open pass is ended; *reopen says so), or VK_NULL_HANDLE

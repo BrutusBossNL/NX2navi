@@ -5922,6 +5922,9 @@ static int mesh_emu_draw(VkExec *ex, uint32_t count, const VkMemSpan *ind, const
     VkDescriptorSet set0 = ex->dc->B.ds_bound[0];
     // NX2NAVI_MESH_EMU_BATCH (default on): the stages run in the part's pre-pass command buffer (vk_sync_pre), which
     // the queue runs before the part, and the pass is not split for them. At the first emulated draw of a pass the part
+    // is cut there (vk_sync_cut: ended, but handed to the queue only with the next part, so the texture pool set stays;
+    // a split there took a new set, and each took 2.3 ms of the replay to refresh), so that the pass begins the next
+    // part and only what came before it runs before the stages. Split, a
     // pass of 20 emulated draws was 20 passes, each emulated draw a pass end and begin with a full barrier, three more
     // barriers and the targets stored and loaded again: on an RX 580 6 to 7 ms of a frame's GPU time went to the gaps
     // between passes (gpu_passes, Kokiri Forest, 2026-11-10).
