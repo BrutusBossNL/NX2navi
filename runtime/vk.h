@@ -6,6 +6,20 @@
 #pragma clang diagnostic ignored "-Wnullability-completeness"
 #include "vk_mem_alloc.h"
 #pragma clang diagnostic pop
+// Every VMA allocation goes by the device-local heaps' live budgets (vk_vma_budget.c): a heap within the reserve of its
+// budget takes nothing new while another heap can.
+VkResult vk_vma_create_image(VmaAllocator vma, const VkImageCreateInfo *ici, const VmaAllocationCreateInfo *ai, VkImage *img,
+                             VmaAllocation *a, VmaAllocationInfo *info);
+VkResult vk_vma_create_buffer(VmaAllocator vma, const VkBufferCreateInfo *bci, const VmaAllocationCreateInfo *ai,
+                              VkBuffer *buf, VmaAllocation *a, VmaAllocationInfo *info);
+VkResult vk_vma_allocate_memory(VmaAllocator vma, const VkMemoryRequirements *req, const VmaAllocationCreateInfo *ai,
+                                VmaAllocation *a, VmaAllocationInfo *info);
+uint64_t vk_vma_moved(void);   // allocations placed outside a full heap so far
+#ifndef VK_VMA_BUDGET_IMPL
+#define vmaCreateImage vk_vma_create_image
+#define vmaCreateBuffer vk_vma_create_buffer
+#define vmaAllocateMemory vk_vma_allocate_memory
+#endif
 #include "nvn_obj.h"   // pool_t, tex_t, view_t, samp_par, NVNcopyRegion (memory and textures block)
 #include "gfx.h"       // GfxShader, GfxShaderRes, GfxShaderAnswers (pipelines block)
 

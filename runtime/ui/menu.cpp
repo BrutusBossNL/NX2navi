@@ -1640,6 +1640,10 @@ static void tab_lama(float scale) {
         const char *names[] = {menu_text(UI_MENU_AUTO), menu_text(UI_MENU_OFF)};
         opt_choice_list("NX2NAVI_VRAM_HEAP_LIMIT", UI_MENU_LAMA_HEAP_LIMIT, values, names, 2, UI_MENU_LAMA_HEAP_LIMIT_DESC);
     }
+    {   // vk_vma_budget.c reserve_bytes
+        static const char *const values[] = {"512", "256", "768", "1024", "0"};
+        const char *names[] = {"512 MB", "256 MB", "768 MB", "1024 MB", menu_text(UI_MENU_OFF)};
+        opt_choice_list("NX2NAVI_VRAM_RESERVE_MB", UI_MENU_LAMA_RESERVE, values, names, 5, UI_MENU_LAMA_RESERVE_DESC);
     }
     {   // vk_memory.c upload_batch_cap
         static const char *const values[] = {"128", "256", "512", "1024", "0"};

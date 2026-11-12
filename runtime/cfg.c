@@ -93,6 +93,7 @@ static const struct { const char *key, *section; } sections[] = {
     // the menu's Lama patches tab (ui/menu.cpp tab_lama)
     {"TEX_RELEASED_MAX", "performance"}, {"MIRROR_HOT", "performance"}, {"FREEZE_IDLE", "performance"}, {"SUBMIT_FINISH_KINDS", "performance"}, {"FOLIAGE", "performance"},
     {"ZSTD_NATIVE", "performance"},
+    {"VRAM_HEAP_LIMIT", "performance"}, {"VRAM_RESERVE_MB", "performance"}, {"UPLOAD_BATCH_MB", "performance"}, {"MESH_EMULATION", "performance"},
     {"MESH_EMU_MB", "performance"}, {"MESH_EMU_TASKS", "performance"}, {"MESH_EMU_BATCH", "performance"}, {"VEC_INDEX_FIX", "performance"},
     {"GUEST_OPT", "performance"}, {"PASS_TIMES", "diagnostics"}, {"DUMP_KEY", "diagnostics"},
     {"FPS_LIMIT", "frame rate"}, {"FPS60", "frame rate"}, {"RTSS", "frame rate"},
@@ -306,6 +307,7 @@ static const CfgMeta metas[] = {
     {"SUBMIT_FINISH_KINDS", "31", "0..31", RESTART},   // vk_sync.c res_mask
     {"FOLIAGE", "full", "full|reduced|off", RESTART},   // vk_exec_draw.c foliage_skip
     {"VRAM_HEAP_LIMIT", "auto", NULL, RESTART},   // vk_device.c vram_heap_limits: auto, 0 or MiB
+    {"VRAM_RESERVE_MB", "512", "0..4096", RESTART},   // vk_vma_budget.c: video memory kept free of VMA's allocations
     {"UPLOAD_BATCH_MB", "256", NULL, RESTART},   // vk_memory.c: MiB of staging before a batch goes early, 0 no limit
     {"MESH_EMULATION", "1", "0|1", RESTART}, {"MESH_EMU_MB", "256", "32..2048", RESTART},
     {"MESH_EMU_TASKS", "16384", "256..262144", RESTART}, {"MESH_EMU_BATCH", "1", "0|1", RESTART}, {"VEC_INDEX_FIX", "0", "0|auto|1", RESTART},

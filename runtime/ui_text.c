@@ -105,6 +105,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                   "its own. Fixes the teal splotches in Kokiri Forest's fog.",
     [UI_MENU_LAMA_MIRROR_HOT] = "Pools copied every frame stay in system memory",
     [UI_MENU_LAMA_MIRROR_HOT_DESC] = "A game memory pool whose copies to and from video memory each frame reach this "
+    [UI_MENU_LAMA_RESERVE] = "Video memory kept free",
+    [UI_MENU_LAMA_RESERVE_DESC] = "Room kept free in each video memory heap for what FidelityFX (FSR 3.1, frame generation) and the "
+                                  "driver allocate on their own: a heap with less than this left takes no new allocation while "
+                                  "another heap can. Off: video memory can fill up with frame generation on, and the game ends.",
     [UI_MENU_LAMA_HEAP_LIMIT] = "Video memory heap limit",
     [UI_MENU_LAMA_HEAP_LIMIT_DESC] = "Auto: on GPUs with a second video memory heap (an RX 580 shows 6 GB and 2 GB), "
                                      "each heap is filled only to its budget before the next one is used, so the "
