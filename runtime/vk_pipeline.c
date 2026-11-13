@@ -5022,6 +5022,85 @@ static void fast_retire(Pipe *p) {
     fast_retired++;
 }
 
+// ---- pipelines no draw has used, given back while video memory is short
+// The boot builds the recorded pipelines ahead of play (the prewarm and the shipped pipeline list), and the driver keeps
+// each one's compiled code in video memory until it is destroyed. In a 4K session with DLSS and frame generation the
+// device-local memory outside the allocator was 4.2 GB with 6,300 graphics pipelines alive, 3,589 of them not drawn
+// once in that run. On a card short of video memory those are the cheapest thing to give back: no draw has recorded
+// them. So while the device-local memory in use is over NX2NAVI_TEX_VRAM_PRESSURE percent of the budget (vk_mem_vram,
+// which NX2NAVI_VRAM_BUDGET_MB caps for a test), the autosave thread takes up to RELEASE_BATCH graphics pipelines that
+// no draw has looked up in this run out of the table every RELEASE_EVERY_MS, and destroys them with their entries once
+// the GPU is past the submission being recorded and one more (as fast_retire). A draw that needs one later misses it as
+// it would a pipeline never built (pipe_miss): its stage libraries link it, or the look-ahead queued them
+// (vk_pipeline_hint), and its optimised build comes from the pipeline cache, which still holds it.
+// Only entries no lookup reached go (used_min 0; pipe_minute is set before the first lookup, ensure_init), so no draw's
+// memo (vk_exec_draw.c, the PM context) nor any caller holds their VkPipeInfo. Not taken: mesh pipelines (without
+// stage libraries their build is long), entries building or with a link queued, failed ones, and compute pipelines.
+// The next pass logs the device-local use then and now, so a log says what a batch gave back.
+// NX2NAVI_PIPE_RELEASE=0 keeps every pipeline for the run, as before 0.10.0.
+#define RELEASE_EVERY_MS 5000
+#define RELEASE_BATCH 256
+static uint64_t rel_total, rel_batches;
+static uint64_t rel_used0;   // device-local use (MiB) when the last batch went; 0 none to report
+
+static void released_destroy_cb(void *arg) {   // the completion thread: the entry is out of the table since its batch
+    Pipe *p = arg;
+    if (p->info.pipeline) vkDestroyPipeline(P.device, p->info.pipeline, NULL);
+    free(p->bindings);
+    free(p);
+}
+
+// Caller holds P.lock.
+static int releasable(const Pipe *p) {
+    if (p->used_min || !p->info.pipeline || p->building || p->job || p->link_queued || p->fast || p->t_miss || !p->lay)
+        return 0;
+    if (p->info.bind_point != VK_PIPELINE_BIND_POINT_GRAPHICS || p->key_size != sizeof(GKey)) return 0;
+    const GKey *k = (const GKey *)p->key;
+    return k->vs && gfx_shader_stage(k->vs) != GFX_STAGE_MS;
+}
+
+static void pressure_release(uint64_t now) {
+    static int on = -1, pct;
+    static uint64_t last;
+    if (on < 0) {
+        on = cfg_bool("NX2NAVI_PIPE_RELEASE");
+        pct = cfg_int("NX2NAVI_TEX_VRAM_PRESSURE");
+        if (pct <= 0 || pct > 100) pct = 80;
+        if (!on) rt_log("vk_pipeline: every pipeline stays for the run, also while video memory is short (NX2NAVI_PIPE_RELEASE=0)");
+    }
+    if (!on || now - last < RELEASE_EVERY_MS) return;
+    last = now;
+    uint64_t used = 0, budget = 0;
+    int exact = 0;
+    if (!vk_mem_vram(&used, &budget, &exact) || !budget) return;
+    if (rel_used0) {
+        rt_log("vk_pipeline: device-local memory in use %llu MiB when the last batch of unused pipelines went, %llu MiB "
+               "now", (unsigned long long)rel_used0, (unsigned long long)(used >> 20));
+        rel_used0 = 0;
+    }
+    if (used * 100 < budget * (uint64_t)pct) return;
+    Pipe *gone[RELEASE_BATCH];
+    int n = 0;
+    plat_mutex_lock(&P.lock);
+    for (int b = 0; b < PIPE_BUCKETS && n < RELEASE_BATCH; b++)
+        for (Pipe **pp = &pipes[b]; *pp && n < RELEASE_BATCH;) {
+            Pipe *p = *pp;
+            if (releasable(p)) *pp = p->next, gone[n++] = p;
+            else pp = &p->next;
+        }
+    uint64_t at = vk_sync_issued() + 2;
+    plat_mutex_unlock(&P.lock);
+    if (!n) return;
+    for (int i = 0; i < n; i++) vk_completion_add(at, released_destroy_cb, gone[i]);
+    rel_total += (uint64_t)n, rel_batches++;
+    rel_used0 = used >> 20;
+    if (rel_batches <= 16 || !(rel_batches & (rel_batches - 1)))
+        rt_log("vk_pipeline: video memory in use %llu of %llu MiB (over %d%%): %d graphics pipelines no draw used in this "
+               "run given back, %llu in %llu batches so far; a draw that needs one builds it again from the pipeline "
+               "cache (NX2NAVI_PIPE_RELEASE)", (unsigned long long)(used >> 20), (unsigned long long)(budget >> 20), pct, n,
+               (unsigned long long)rel_total, (unsigned long long)rel_batches);
+}
+
 // The whole build of job j, which the caller took off its queue, and the job's end: its pipeline is entered, the
 // threads waiting for it are woken and j is freed. lowrun: 1 on a pool worker that took j from the low queue. Caller
 // holds P.lock, which is released for the build.
@@ -8852,6 +8931,7 @@ static void autosave_once(void) {
     if (!P.ready) return;
     uint64_t now = plat_now_ms();
     __atomic_store_n(&pipe_minute, minute_now(), __ATOMIC_RELAXED);
+    pressure_release(now);   // while video memory is short: the pipelines no draw used go
     if (now - last_sizes >= SIZES_EVERY_MS && (P.cache || P.play)) last_sizes = now, cache_sizes_ask();
     if (now - last_keys >= 2000) {
         last_keys = now;
