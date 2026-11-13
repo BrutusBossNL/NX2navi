@@ -198,15 +198,15 @@ def find(steam_folder, signed=signed_by_valve):
 
 
 def wanted(game_dir):
-    """True when co-op is on in the game's settings, read as runtime/cfg.c reads them: NX2NAVI_COOP from the
-    environment the game inherits first, else nx2navi.ini's coop; empty is the default, off, and any other value but 0
-    is on (cfg_bool). The launcher puts the library beside the game (ensure) only then: with co-op off the game loads
+    """True when co-op is on in the game's settings, read as runtime/cfg.c reads them: NX2NAVI_COOP_STEAM from the
+    environment the game inherits first, else nx2navi.ini's coop_steam; empty is the default, off, and any other value
+    but 0 is on (cfg_bool). The old co-op's switch, coop, turns nothing on (cfg.c keeps it known only). The launcher puts the library beside the game (ensure) only then: with co-op off the game loads
     none, and a Play should not wait for a search of the Steam library. A file that cannot be read counts as off."""
-    value = os.environ.get('NX2NAVI_COOP')
+    value = os.environ.get('NX2NAVI_COOP_STEAM')
     if value is None:
         from . import gameini
         try:
-            value = gameini.get(game_dir, 'coop')
+            value = gameini.get(game_dir, 'coop_steam')
         except OSError:
             return False
     return value not in ('', '0')

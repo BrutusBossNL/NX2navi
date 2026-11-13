@@ -5088,19 +5088,22 @@ class SteamLibTest(Tmp):
         self.assertFalse((empty / steamlib.NAME).exists())
 
     def test_the_library_is_wanted_only_with_co_op_on(self):
-        """As runtime/cfg.c reads co-op: NX2NAVI_COOP first, else the game's nx2navi.ini, off by default."""
+        """As runtime/cfg.c reads co-op: NX2NAVI_COOP_STEAM first, else the game's nx2navi.ini, off by default; the
+        old switch, coop, turns nothing on."""
         game = self.tmp / 'game'
         game.mkdir()
         with mock.patch.dict(os.environ):
-            os.environ.pop('NX2NAVI_COOP', None)
+            os.environ.pop('NX2NAVI_COOP_STEAM', None)
             self.assertFalse(steamlib.wanted(game))                       # no settings file: the default, off
-            (game / 'nx2navi.ini').write_text('[coop]\ncoop = 0\n', encoding='utf-8')
+            (game / 'nx2navi.ini').write_text('[coop]\ncoop_steam = 0\n', encoding='utf-8')
             self.assertFalse(steamlib.wanted(game))
-            (game / 'nx2navi.ini').write_text('[coop]\ncoop = 1\ncoop =\n', encoding='utf-8')
+            (game / 'nx2navi.ini').write_text('[coop]\ncoop = 1\n', encoding='utf-8')
+            self.assertFalse(steamlib.wanted(game))                       # the old switch turns nothing on
+            (game / 'nx2navi.ini').write_text('[coop]\ncoop_steam = 1\ncoop_steam =\n', encoding='utf-8')
             self.assertTrue(steamlib.wanted(game))                        # an empty line leaves the earlier value
-            os.environ['NX2NAVI_COOP'] = '0'
+            os.environ['NX2NAVI_COOP_STEAM'] = '0'
             self.assertFalse(steamlib.wanted(game))                       # the environment wins, as in the game
-            os.environ['NX2NAVI_COOP'] = '1'
+            os.environ['NX2NAVI_COOP_STEAM'] = '1'
             self.assertTrue(steamlib.wanted(self.tmp / 'no game'))
 
     def test_play_waits_for_the_library_only_with_co_op_on_and_not_on_the_windows_thread(self):
@@ -5122,14 +5125,14 @@ class SteamLibTest(Tmp):
         with mock.patch.dict(os.environ), mock.patch('launcher.ui.app.steamlib.ensure', side_effect=ensure), \
                 mock.patch('launcher.ui.app.winsys.start_game') as start, \
                 mock.patch('launcher.ui.app.saves.game_running', return_value=False):
-            os.environ.pop('NX2NAVI_COOP', None)
+            os.environ.pop('NX2NAVI_COOP_STEAM', None)
             App.play(a)                                                   # co-op off: no search, the game starts
             self.assertEqual(searched, [])
             start.assert_called_once_with(game / 'ocarina.exe')
             a.game_proc = None
             start.reset_mock()
             a.root.after.reset_mock()
-            gameini.put(game, 'coop', 'coop', '1')
+            gameini.put(game, 'coop', 'coop_steam', '1')
             App.play(a)                                                   # co-op on: the search runs on its own thread
             self.assertTrue(done.wait(10))
             self.assertNotEqual(searched, [threading.current_thread()])
