@@ -88,7 +88,22 @@ static unsigned picture_height(void) {
 static double dlss_share(void);
 double wide_dlss_share(void) { return dlss_share(); }   // vk_dlaa.c: the mode's share, 0 off
 
+// Without DLSS or FSR 3.1 (FSR 1, bilinear) the game's dynamic resolution took the scene down to a third of the picture
+// under load, and a plain scale shows every step of that. The most the game's controller ever gives (wide_init) is held.
+#define PLAIN_SHARE 0.75
+
 static double heap_share(void);
+
+// Set by wide_init when the grown heap table (wide_heap_extra_kib) did not reach the game: romfs.c could not build
+// it (a table in a form it does not rewrite, as a mod's may be) or could not write it to the profile folder. The game
+// then has the shipped heap, made for its own picture with the scene at PLAIN_SHARE, and gets no more than that:
+// a larger scene or picture in the shipped heap is the crash the growth is there to prevent.
+static int heap_unserved;
+
+// The most the scene can be of the picture in the heap the game has.
+static double fit_share(void) {
+    return heap_unserved ? PLAIN_SHARE : heap_share();
+}
 
 // The share of the picture the upscaler's mode renders (NX2NAVI_DLSS; NVIDIA's ratios).
 static double mode_share(void) {
@@ -100,22 +115,20 @@ static double mode_share(void) {
 static double dlss_share(void) {
     if (!vk_dlaa_wanted() || !cfg_bool("NX2NAVI_DLAA") || (!vk_dlaa_fsr3() && !vk_dlaa_available())) return 0;
     double s = mode_share();
-    // Never more than the texture heap was made for at the start (heap_share). A mode chosen in the menu that renders
+    // Never more than the texture heap the game has was made for (fit_share). A mode chosen in the menu that renders
     // more than the start's did gets its size after a restart; a heap at its limit never holds the whole picture.
-    if (s > heap_share()) {
+    if (s > fit_share()) {
         static int said;
         if (!said++)
             rt_log("widescreen: the scene is %.0f%% of the picture, not the mode's %.0f%%: the game's render-target heap "
-                   "was sized at the start for that much. A mode chosen in the menu gets its size after a restart, "
-                   "unless the start's log says the heap is at its limit", heap_share() * 100, s * 100);
-        s = heap_share();
+                   "%s. A mode chosen in the menu gets its size after a restart, unless the start's log says the heap "
+                   "is at its limit", fit_share() * 100, s * 100,
+                   heap_unserved ? "is the shipped one (the start's log says why the grown one was not served)"
+                                 : "was sized at the start for that much");
+        s = fit_share();
     }
     return s;
 }
-
-// Without DLSS or FSR 3.1 (FSR 1, bilinear) the game's dynamic resolution took the scene down to a third of the picture
-// under load, and a plain scale shows every step of that. The most the game's controller ever gives (wide_init) is held.
-#define PLAIN_SHARE 0.75
 
 static double scene_share(void) {
     static double plain = -1;
@@ -124,7 +137,7 @@ static double scene_share(void) {
         plain = e && *e ? atof(e) : PLAIN_SHARE;
     }
     double s = dlss_share();
-    return s > 0 ? s : plain;
+    return s > 0 ? s : plain > fit_share() ? fit_share() : plain;   // NX2NAVI_SCENE_SHARE above the heap the game has
 }
 
 static int picture_size(unsigned *ow, unsigned *oh, int quiet);
@@ -251,7 +264,19 @@ void wide_init(void) {
     // (wide_present).
     double game = (double)GAME_W / GAME_H, f = 0.75;
     unsigned ow, oh;
+    // The grown heap table is served from here on, or is not (romfs.c heapdef_overlay says why in the log): before
+    // the guest runs and before the first present asks for the scene's share.
+    if (wide_heap_extra_kib()) {
+        fs_init();
+        if (!res_heapdef_ok()) {
+            heap_unserved = 1;
+            rt_log("widescreen: the game's render-target heap stays the shipped one (the grown table was not served, see "
+                   "the RomFS and resolution lines above): the scene is %.0f%% of the picture at most and the picture "
+                   "the game's own 2560x1440", PLAIN_SHARE * 100);
+        }
+    }
     if (!picture_size(&ow, &oh, 0)) return;   // the game's own sizes: every set stays off
+    if (heap_unserved) return;                // a larger picture's targets do not fit the shipped heap
     if (so < 0 || ss < 0 || sa < 0 || sh < 0 || sm < 0) {
         rt_log("widescreen: the generated C has no widescreen patch sets (gen.py --patches recomp/patches-v111.txt); "
                "the game's own 2560x1440 picture");
@@ -294,7 +319,7 @@ void wide_init(void) {
 void wide_picture(unsigned *w, unsigned *h) {
     static unsigned pw, ph;
     if (!pw) {
-        if (!wide_available() || !picture_size(&pw, &ph, 1)) pw = GAME_W, ph = GAME_H;
+        if (!wide_available() || heap_unserved || !picture_size(&pw, &ph, 1)) pw = GAME_W, ph = GAME_H;
     }
     *w = pw, *h = ph;
 }
