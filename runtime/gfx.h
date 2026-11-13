@@ -172,6 +172,14 @@ typedef struct {
     // and the GPU's): the back end may hold it longer (vk_dlssg.c vk_dlssg_frame_start, Reflex's sleep for DLSS Frame
     // Generation). NULL: nothing to do.
     void (*frame_start)(void);
+    // The game is about to read its pad (ov_input.c npad_states), several times a frame: where the pad read is the
+    // first thing a frame does, the back end holds the frame's start here, before the input is sampled (vk_lowlat.c
+    // vk_lowlat_frame_start). NULL: nothing to do.
+    void (*input_read)(void);
+    // nvnQueuePresentTexture, with the pacer's period in ns (0: it holds nothing): 1 when the back end holds the next
+    // frame's start to that period itself (vk_lowlat.c vk_lowlat_pace, a driver's low-latency sleep), so the pacer
+    // waits for neither the present's slot nor the window image. NULL: never.
+    int (*frame_paced)(uint64_t period_ns);
     void (*finish)(void);
     void (*read_texels)(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row, uint64_t img);
     void (*write_texels)(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row, uint64_t img);

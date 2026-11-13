@@ -37,6 +37,7 @@ int vk_fg_wanted(void) { return 0; }
 static int fg_mult = 1;   // frames on screen per game frame
 int vk_dlssg_multiplier(void) { return fg_mult; }
 int vk_dlssg_active(void) { return fg_mult > 1; }
+int vk_lowlat_on(void) { return 0; }
 void rtss_limit_want(int64_t millihz) { (void)millihz; }
 int rtss_limit_active(void) { return 0; }
 int plat_mem_read(uint64_t a, void *out, size_t n) { (void)a, (void)out, (void)n; return 0; }

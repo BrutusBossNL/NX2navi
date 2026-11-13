@@ -32,6 +32,7 @@
 #include "vk_fg.h"
 #include "vk_dlaa.h"
 #include "vk_dlssg.h"
+#include "vk_lowlat.h"
 
 #define FRAMES 2
 #define MAX_IMAGES 16
@@ -189,6 +190,7 @@ static VkDeviceSize g_cap_size;
 static int g_cap_w, g_cap_h, g_cap_valid;
 static int g_flip_on;            // vk_present_blit submitted the blit of swapchain image g_flip_idx; vk_present_flip presents it
 static uint32_t g_flip_idx;
+static uint64_t g_flip_frame;    // ... of this game frame, when a driver's low latency follows it (vk_lowlat.c); else 0
 
 // ---- NX2NAVI_FLIGHT thumbnails (flight.c; g_pl): each present also blits the swapchain image down into slot frame % g_th_n
 // of a host-visible ring. A slot's tag names the frame it holds complete; recording a new frame clears the tag first,
@@ -285,6 +287,7 @@ unsigned gfx_window_focus_messages(void) { return (unsigned)g_focus_msgs; }
 // Present path (g_pl held): a settings change (cfg_version) reaches the window thread, which applies a changed size or
 // fullscreen; a changed NX2NAVI_VK_PRESENT or NX2NAVI_HDR rebuilds the swapchain at this present.
 static int g_sc_hdr_wanted;   // vk_hdr_wanted when the swapchain was made (create_swapchain)
+static int g_sc_ll_wanted;    // vk_lowlat_swapchain_wanted then
 static void window_settings_live(void) {
     static unsigned seen;
     static int started;
@@ -302,6 +305,8 @@ static void window_settings_live(void) {
     // HDR switched in the menu: a swapchain of the other format. Compared with what the swapchain was made for, not
     // with what it got: on a display without HDR10 the setting stays on and the swapchain SDR, and that is settled.
     if (started && vk_hdr_wanted() != g_sc_hdr_wanted) plat_xchg32(&g_dirty, 1);
+    // NVIDIA's low latency switched in the menu (vk_lowlat.c): its mode is asked for when the swapchain is made
+    if (started && vk_lowlat_swapchain_wanted() != g_sc_ll_wanted) plat_xchg32(&g_dirty, 1);
     ov_operation_mode_live();
     audio_channels_live();
     if (started) gfx_window_apply_settings();
@@ -353,10 +358,17 @@ static void flip_locked(void) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_render_done[g_flip_idx], .swapchainCount = 1, .pSwapchains = &g_sc,
                            .pImageIndices = &g_flip_idx};
+    // A driver's low latency (vk_lowlat.c): its present stage or marker right before the present of a game frame it
+    // follows, the frame's number on the present where the plain swapchain takes one, and the end marker after it.
+    // Nothing for any other present (the boot screen, a frame the mode did not start, the mode off).
+    VkLowlatPresent ll;
     vk_queue_lock();
+    pi.pNext = vk_lowlat_present_begin(g_flip_frame, &ll);
+    g_flip_frame = 0;
     VkResult r = vk_dlssg_active() ? vk_dlssg_present(vk_ctx()->gfx_queue, &pi)
                : vk_fg_active()    ? vk_fg_present(&pi) : vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
+    vk_lowlat_present_end(&ll);
     vk_device_lost_check(r, "the present");
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
 }
@@ -429,6 +441,7 @@ static int create_swapchain(void) {
 
     vk_queue_lock();
     vkDeviceWaitIdle(c->device);
+    vk_lowlat_swapchain(VK_NULL_HANDLE, 0);   // NVIDIA's low-latency calls name the swapchain: none while it is replaced
     VkSwapchainKHR old = g_sc;
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_surface, .minImageCount = count,
@@ -465,8 +478,22 @@ static int create_swapchain(void) {
             return 0;
         }
     }
+    // NVIDIA's low latency (vk_lowlat.c): the plain swapchain is made with the latency mode while the setting is on,
+    // the only structure in its chain. A frame generation's swapchain above is not: the calls cannot name it.
+    const VkSwapchainLatencyCreateInfoNV lat = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV,
+                                                .latencyModeEnable = VK_TRUE};
+    int ll_sc = 0;
+    g_sc_ll_wanted = vk_lowlat_swapchain_wanted();
     if (r != VK_SUCCESS && vk_dlssg_active()) r = vk_dlssg_create_swapchain(c->device, &ci, &g_sc);   // Streamline's hook
-    else if (r != VK_SUCCESS) r = vkCreateSwapchainKHR(c->device, &ci, NULL, &g_sc);
+    else if (r != VK_SUCCESS) {
+        if (g_sc_ll_wanted) ci.pNext = &lat, ll_sc = 1;
+        r = vkCreateSwapchainKHR(c->device, &ci, NULL, &g_sc);
+    }
+    {   // three creates in a row that fail with the latency mode asked for: the next is made without it
+        static int ll_failed;
+        ll_failed = r != VK_SUCCESS && ll_sc ? ll_failed + 1 : 0;
+        if (ll_failed >= 3) vk_lowlat_swapchain_refused((int)r);
+    }
     if (r != VK_SUCCESS) {
         static volatile int32_t n_failed;
         int32_t nf_log = plat_inc32(&n_failed);
@@ -492,6 +519,7 @@ static int create_swapchain(void) {
     vk_hdr_set_active(hdr);
     if (hdr) vk_hdr_metadata(g_sc, 1);
     g_sc_ext = ext;
+    vk_lowlat_swapchain(ll_sc ? g_sc : VK_NULL_HANDLE, 1);   // the sleep mode is set on it; none: not one for that path
     g_sc_n = MAX_IMAGES;
     if (vk_fg_active()) {   // AMD's swapchain: the count first (a larger capacity is not cut down to it)
         uint32_t n = 0;
@@ -1437,6 +1465,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     uint32_t idx = 0;
     // NGX frame generation: the frame is composed into ng.bb and the presenter shows it (ng_show); no acquire here
     const int ngp = ng_ready();
+    vk_lowlat_fg_presents(ngp);   // the presenter presents several times a frame: a driver's low latency steps aside
     VkResult r = ngp               ? VK_SUCCESS
                : vk_dlssg_active() ? vk_dlssg_acquire(c->device, g_sc, 1000000000ull, g_acquire[slot], &idx)
                : vk_fg_active()    ? vk_fg_acquire(g_sc, 1000000000ull, g_acquire[slot], &idx)
@@ -1624,6 +1653,11 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 1, .pWaitSemaphoreInfos = &wait,
                         .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi, .signalSemaphoreInfoCount = 1,
                         .pSignalSemaphoreInfos = &sig};
+    // A driver's low latency (vk_lowlat.c): the game frame this blit shows, and NVIDIA's tag with its number
+    VkLatencySubmissionPresentIdNV ll_tag;
+    int ll_tagged = 0;
+    const uint64_t ll_frame = src ? vk_lowlat_blit_frame(&ll_tag, &ll_tagged) : 0;
+    if (ll_tagged) si.pNext = &ll_tag;
     const uint64_t ng_n = ng.n + 1;   // through the presenter: this frame's number on its timelines
     if (via_ng) {
         // No acquire to wait for. The frame writes one of the presenter's two image sets: it waits on the GPU until
@@ -1647,6 +1681,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     } else if (r == VK_SUCCESS) {
         g_flip_on = 1;
         g_flip_idx = idx;
+        g_flip_frame = ll_frame;
         if (!defer) flip_locked();
     } else {
         vk_device_lost_check(r, "the present's submit");
@@ -1712,6 +1747,7 @@ void gfx_window_release_vk(void) {
         vk_queue_lock(), vkDeviceWaitIdle(c->device), vk_queue_unlock();
         vk_queue_unlock();
         g_flip_on = 0;   // its blit is done (device idle); the swapchain goes away unpresented
+        vk_lowlat_swapchain(VK_NULL_HANDLE, 0);
         ng_release();    // NGX frame generation's presenter shows nothing more; its images go before the device
         menu_vk_release();
         vk_fsr_release();

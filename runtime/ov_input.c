@@ -13,6 +13,7 @@
 
 #include "debug_tools.h"
 #include "cfg.h"
+#include "gfx.h"
 #include "host.h"
 #include "input.h"
 #include "ov.h"
@@ -91,6 +92,9 @@ static void npad_states(Cpu *c, uint32_t want) {
     NpadState s = {.sampling = ++sample};
     int live = want && enabled && allowed && id == pad_id() && want == pad_style() && (styles & want);
     plat_mutex_unlock(&lock);
+    // A frame's first pad read is where a driver's low-latency sleep belongs (vk_lowlat.c vk_lowlat_frame_start): the
+    // wait comes before the input is sampled, so the frame is drawn from the newest input. Nothing while that is off.
+    if (gfx_backend()->input_read) gfx_backend()->input_read();
     if (live) {
         s.attributes = ATTR_CONNECTED;
         input_poll(&s.buttons, &s.lx, &s.ly, &s.rx, &s.ry);
