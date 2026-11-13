@@ -449,6 +449,13 @@ one's name. An install, a rebuild and the rebuild of an update claim `game`; an 
 download claim `app`; the update check claims nothing and runs beside anything. Two launcher folders that share one
 game folder are not kept apart: the lock belongs to the launcher folder.
 
+A job that claims `game` leaves `data/job-running.json` (what it is, the game folder, when it started) from its start
+to its end. A job that ends removes it, also after Cancel or an error, which the job screen has told. A launcher that
+was stopped in the middle (closed by the system, a power cut) leaves it: the next start logs it and says on the home or
+first screen which job did not finish and what finishes it (`jobs.interrupted`), once. Nothing is rolled back: the
+build keeps the old `ocarina.exe` until the new one is linked and records each finished step, so the game folder
+stays playable and Rebuild the Game, or Begin Installation, goes on from the steps that were done.
+
 ## Releases
 
 1. Bump `VERSION`; build the shader translator (`tools/build_xlate.py`).

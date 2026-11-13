@@ -3809,6 +3809,70 @@ class LockTest(Tmp):
         self.assertEqual(again.result, 'ok', again.error)                # the first job let go when it ended
         self.assertEqual((locks._files, locks._claims), ({}, {}))
 
+    def test_a_job_the_launcher_was_stopped_in_is_told_at_the_next_start(self):
+        """A job that writes into the game folder leaves data/job-running.json while it runs. Ended, also by an
+        error, it removes it; a launcher stopped in the middle leaves it, and the next start says which job did not
+        finish, once."""
+        self.patch_tools()
+        ctx = self.make_ctx('ok')
+        self.addCleanup(ctx._file.close)
+        marker = ctx.layout.data / jobs.MARKER
+        during = []
+
+        class Watched(jobs.RebuildJob):
+            def run(self):
+                during.append(json.loads(marker.read_text(encoding='utf-8')))
+
+        self.assertEqual(Watched(ctx, self.tmp / 'game').run_inline().result, 'ok')
+        self.assertEqual((during[0]['task'], during[0]['kind'], during[0]['game_dir']),
+                         ('the rebuild of the game', 'rebuild', str(self.tmp / 'game')))
+        self.assertFalse(marker.exists())
+        self.assertIsNone(jobs.interrupted(ctx))
+
+        class Failing(jobs.RebuildJob):
+            def run(self):
+                raise build.BuildError('the build stopped')
+
+        self.assertEqual(Failing(ctx, self.tmp / 'game').run_inline().result, 'failed')
+        self.assertFalse(marker.exists())                                # it ended and said so on screen
+        check = jobs.Job(ctx, [])
+        self.assertFalse(check._mark())                                  # a job that writes nothing there leaves none
+        self.assertTrue(jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game')._mark())   # stopped before its end
+        self.assertTrue(marker.exists())
+        self.assertEqual(jobs.interrupted(ctx)['task'], 'the installation of the game')
+        self.assertFalse(marker.exists())
+        self.assertIsNone(jobs.interrupted(ctx))                         # told once
+        marker.write_text('{"task": ')                                   # cut while it was written
+        self.assertIsNone(jobs.interrupted(ctx))
+        self.assertFalse(marker.exists())
+
+    def test_the_window_says_which_job_did_not_finish(self):
+        game = made_up_game(self.tmp / 'game')
+        App, a = mock_app(self, game)
+        a.args.selftest = False
+        a.ctx.zstd_missing = ''
+        self.assertTrue(jobs.RebuildJob(a.ctx, game)._mark())
+        App.start(a)
+        a.show.assert_called_once_with('home')
+        self.assertIn('stopped during the rebuild of the game', a.message)
+        self.assertIn('Rebuild the Game finishes', a.message)
+        a.ctx._file.flush()
+        self.assertIn('the launcher was stopped during the rebuild of the game',
+                      (self.layout.logs / 'launcher.log').read_text(encoding='utf-8'))
+        App, a = mock_app(self, self.tmp / 'no game yet')                # an install that was stopped: first run
+        a.args.selftest = False
+        a.ctx.zstd_missing = ''
+        self.assertTrue(jobs.InstallJob(a.ctx, self.tmp / 'g.nup', self.tmp / 'no game yet')._mark())
+        App.start(a)
+        a.show.assert_called_once_with('first_run')
+        self.assertIn('stopped during the installation of the game', a.message)
+        self.assertIn('Begin Installation goes on', a.message)
+        App, a = mock_app(self, game)                                    # the next start has nothing to tell
+        a.args.selftest = False
+        a.ctx.zstd_missing = ''
+        App.start(a)
+        self.assertEqual(a.message, '')
+
     def test_a_failed_job_lets_go_of_the_folder(self):
         self.patch_tools()
         ctx = self.make_ctx('--fail')

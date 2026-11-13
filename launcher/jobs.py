@@ -3,6 +3,8 @@ staging of an update. Each job is a list of steps the window shows as rows; the 
 timer (rev changes on every change) and never blocks on it. The same jobs run headless from launcher/cli.py.
 BackgroundUpdate decides when a staged update installs."""
 import collections
+import json
+import os
 import threading
 import time
 import traceback
@@ -16,6 +18,29 @@ PENDING, RUNNING, DONE, SKIPPED, FAILED = 'pending', 'running', 'done', 'skipped
 # Failures whose message says all there is to say: the log gets one line for them (failure_line), not a traceback.
 # A refused update check wrote 22 lines of two tracebacks into launcher.log each time.
 PLAIN_FAILURES = (feed.FeedError, build.BuildError, locks.Busy)
+
+
+# data/job-running.json: the job that is writing into the game folder, from its start to its end (Job._main). A job
+# that ends, also by Cancel or an error, removes it and has told its result on screen. One the launcher was stopped
+# in (closed by the system, a power cut, a crash) leaves it, and the next start says so (interrupted).
+MARKER = 'job-running.json'
+
+
+def interrupted(ctx):
+    """The job the launcher was stopped in, as it wrote it ({'task', 'kind', 'game_dir', 'started'}), or None. The
+    marker is removed: it is told once. Call it while this process holds the launcher folder's lock and runs no
+    job, or the marker read is a running job's."""
+    path = ctx.layout.data / MARKER
+    try:
+        with open(path, encoding='utf-8') as f:
+            left = json.load(f)
+    except (OSError, ValueError):
+        left = None
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return left if isinstance(left, dict) and left.get('task') else None
 
 
 def failure_line(e):
@@ -256,10 +281,27 @@ class Job:
             file.release()
             raise
 
+    def _mark(self):
+        """Leave MARKER for the time the job writes into the game folder; True when it was written."""
+        if 'game' not in self.claims:
+            return False
+        try:
+            path = self.ctx.layout.data / MARKER
+            tmp = path.with_name(path.name + '.tmp')
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'task': self.doing(), 'kind': self.kind, 'game_dir': str(getattr(self, 'game_dir', '')),
+                           'started': time.time()}, f)
+            os.replace(tmp, path)
+            return True
+        except OSError:
+            return False
+
     def _main(self):
         file = claimed = None
+        marked = False
         try:
             file, claimed = self._hold()
+            marked = self._mark()
             self.run()
             self.result = 'ok'
         except net.Cancelled:
@@ -275,6 +317,11 @@ class Job:
                 if s.state == RUNNING:
                     s.state = FAILED if self.result == 'failed' else PENDING
                     s.value = 'Stopped' if self.result == 'failed' else 'Cancelled'
+            if marked:
+                try:
+                    (self.ctx.layout.data / MARKER).unlink(missing_ok=True)
+                except OSError:
+                    pass
             locks.release_claim(claimed)
             if file:
                 file.release()

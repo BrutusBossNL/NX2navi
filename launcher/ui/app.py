@@ -755,6 +755,11 @@ class App:
             self.settings.save()
         if self.ctx.zstd_missing:   # told at once, not when Begin Installation stops at the build tools
             self.message = self.ctx.zstd_missing
+        left = None if a.selftest else jobs.interrupted(self.ctx)   # before any job of this start leaves its own
+        if left:
+            self.ctx.log(f'the launcher was stopped during {left["task"]} (started '
+                         f'{time.strftime("%Y-%m-%d %H:%M", time.localtime(left.get("started") or 0))}, game folder '
+                         f'{left.get("game_dir") or "none"})')
         for old in self.layout.root.glob('python.old*'):   # the Python an update replaced (launcher/native/nx2navi.c)
             shutil.rmtree(old, ignore_errors=True)
         if gd or self.settings.get('dump'):
@@ -771,6 +776,12 @@ class App:
             # build from before the update and Rebuild the Game finishes it, not the first-run screen and its dump
             self.show('home')
             self.after_update_notice()
+            if left and not self.message:
+                # make_game.py keeps the old exe until the new one is linked and records each finished step, so the
+                # game folder is playable and a rebuild goes on from there; the player is told that it is due
+                self.message = (f'NX2navi was closed or stopped during {left["task"]}, which did not finish. Play '
+                                'starts the last finished build; Rebuild the Game finishes what was left.')
+                self.render()
             if self.install_staged('a staged update waited for the launcher to start'):
                 return
             if a.play:   # Play from Steam with a mod's code to build in first (play_only)
@@ -779,6 +790,9 @@ class App:
             if self.settings.get('auto_check'):
                 self.check_now()
         else:
+            if left and not self.message:
+                self.message = (f'NX2navi was closed or stopped during {left["task"]}, which did not finish. Begin '
+                                'Installation goes on from the steps that were done.')
             self.show('first_run')
             self.find_dumps()
 
