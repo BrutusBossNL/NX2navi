@@ -1612,6 +1612,10 @@ static void tab_controls(float scale) {
     opt_slider("NX2NAVI_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
     opt_slider("NX2NAVI_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");
     opt_toggle("NX2NAVI_RUMBLE_TRIGGERS", UI_MENU_RUMBLE_TRIGGERS, UI_MENU_RUMBLE_TRIGGERS_DESC);
+    // HD rumble can be switched only while the gamepad in use is one whose actuators take the game's values (a Switch
+    // Pro Controller or Joy-Con, input.c hd_probe); with any other the row is greyed out and says what it needs.
+    if (!input_rumble_hd_available()) opt_disable_next(UI_MENU_RUMBLE_HD_NEEDS);
+    opt_toggle("NX2NAVI_RUMBLE_HD", UI_MENU_RUMBLE_HD, UI_MENU_RUMBLE_HD_DESC);
     opt_group(UI_MENU_GROUP_STICKS);
     double now[2];
     bool pad = input_pad_stick_percent(now) != 0;
