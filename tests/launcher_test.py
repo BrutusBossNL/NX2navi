@@ -4254,6 +4254,63 @@ class SavesTest(unittest.TestCase):
             saves.import_save(self.game, big, log=lambda m: None)
         self.assertEqual((acct / 'save.dat').read_bytes(), b'1')      # nothing changed
 
+    @staticmethod
+    def game_lock(path):
+        """The profile lock as the game takes it (runtime/platform plat_lock_file): Windows opens the file without
+        sharing, elsewhere flock. Returns a function that lets go of it, or None when it is refused."""
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+            k = ctypes.WinDLL('kernel32', use_last_error=True)
+            k.CreateFileW.restype = wintypes.HANDLE
+            k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                      wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            k.CloseHandle.argtypes = [wintypes.HANDLE]
+            h = k.CreateFileW(str(path), 0xC0000000, 0, None, 4, 0x80, None)
+            if h in (None, wintypes.HANDLE(-1).value):
+                return None
+            return lambda: k.CloseHandle(h)
+        import fcntl
+        f = open(path, 'a+b')
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return None
+        return f.close
+
+    def test_no_import_while_the_game_holds_its_profile(self):
+        """The import takes the game's own profile lock for the time it replaces the save: a running game refuses
+        it with nothing changed, and a game that starts in the middle of an import is turned away by the lock
+        instead of mounting a save that is half replaced."""
+        acct = saves.account_dir(self.game)
+        self.files(acct, {'save.dat': b'old'})
+        src = self.files(self.tmp / 'theirs', {'save.dat': b'new'})
+        lock = self.game / 'profile' / 'instance.lock'
+        let_go = self.game_lock(lock)                                  # the game runs
+        self.assertIsNotNone(let_go)
+        with self.assertRaises(saves.SaveError) as refused:
+            saves.import_save(self.game, src, log=lambda m: None)
+        self.assertIn('the game is running', str(refused.exception))
+        self.assertEqual((acct / 'save.dat').read_bytes(), b'old')
+        self.assertFalse(saves.saves_dir(self.game).exists())          # no backup was made, nothing staged
+        self.assertFalse((self.game / 'profile' / 'save-tx' / 'import').exists())
+        let_go()                                                       # the game has ended
+        started = []
+        real_copytree = shutil.copytree
+
+        def copytree(a, b, *args, **kw):                               # the game is started during the backup's copy
+            started.append(self.game_lock(lock))
+            return real_copytree(a, b, *args, **kw)
+        with mock.patch.object(shutil, 'copytree', copytree):
+            r = saves.import_save(self.game, src, log=lambda m: None)
+        self.assertEqual(started, [None])                              # and is turned away
+        self.assertEqual((acct / 'save.dat').read_bytes(), b'new')
+        self.assertEqual((r['backup'] / 'save.dat').read_bytes(), b'old')
+        let_go = self.game_lock(lock)                                  # after the import the game starts as ever
+        self.assertIsNotNone(let_go)
+        let_go()
+
 
 class SaveShareTest(unittest.TestCase):
     """launcher/saves.py export_save and import_zip: one zip with the save and a manifest, for a bug report or another

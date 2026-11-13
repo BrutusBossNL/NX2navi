@@ -346,6 +346,11 @@ zip's save replaces the whole save, every slot, as a save folder does (below): t
 to `saves/backup <date time>` first. It refuses while the game runs. A zip taken from the saves folder moves to
 `saves/imported <date time>`.
 
+"While the game runs" is the game's own lock: the game holds `profile/instance.lock` from its start to its end
+(`runtime/fs_host.c` `fs_host_lock_profile`), and an import takes the same lock the same way for the time it copies
+the backup and swaps the save in (`saves.profile_lock`). A running game refuses the import; a game started in the
+middle of one ends at once with its message that the profile is in use, and starts normally after.
+
 The game's menu imports at the next start instead of at once: the game keeps its progress in memory and writes it back
 at its next save, over files replaced under it, and the save's working copy is made when the game mounts its save.
 Import a save checks the zip as the launcher does and puts its save in `profile/save-import`; the row then reads "at
