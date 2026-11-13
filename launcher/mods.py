@@ -387,11 +387,39 @@ def unwrap(folder):
     return True
 
 
-def _safe_members(names):
+# Names Windows keeps for devices, with or without an extension and in any case: a file called so is the device.
+WINDOWS_DEVICES = frozenset(('CON', 'PRN', 'AUX', 'NUL', *(f'{d}{n}' for d in ('COM', 'LPT') for n in '123456789¹²³')))
+
+
+def windows_name_problem(name):
+    """Why Windows cannot keep a file or folder under name, '' when it can: a device's name (CON, NUL.txt), a dot
+    or a space at its end (Windows drops them, so the file gets another name than the one the game asks for), or
+    a character Windows does not allow (a colon makes a hidden stream of another file)."""
+    if name.split('.')[0].rstrip(' ').upper() in WINDOWS_DEVICES:
+        return 'Windows keeps that name for a device'
+    if name != name.rstrip('. '):
+        return 'Windows drops a dot or a space at the end of a name'
+    bad = sorted({c for c in name if c in '<>:"|?*' or ord(c) < 32})
+    if bad:
+        return 'Windows allows no ' + ' '.join(c if ord(c) >= 32 else f'control character {ord(c)}' for c in bad) + ' in a name'
+    return ''
+
+
+def _safe_members(names, windows=None):
+    """ModError when a file of an archive (its member names) would land outside the archive's own folder, or, on
+    Windows (windows: None asks the system), under another name than its own or not at all (windows_name_problem):
+    unpacked all the same, such a file is missing where the game looks for it, with no word about it. The game
+    for Linux reads such names as they are, so there they pass."""
+    if windows is None:
+        windows = os.name == 'nt'
     for n in names:
         p = n.replace('\\', '/')
         if p.startswith('/') or re.match(r'^[A-Za-z]:', p) or '..' in p.split('/'):
             raise ModError(f'it holds a file outside its own folder ({n})')
+        for part in p.split('/') if windows else ():
+            why = windows_name_problem(part)
+            if why:
+                raise ModError(f'it holds a file Windows cannot keep under its name ({n}): {why}')
 
 
 def _tar():
@@ -451,6 +479,10 @@ def prepare(game_dir, log=None):
     for a in sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in ARCHIVES):
         name = a.stem.strip().rstrip('.')
         target = folder / name
+        why = windows_name_problem(name) if os.name == 'nt' and name else ''
+        if why:   # before exists(): Windows says a device's name exists in every folder
+            note(f'{a.name} was not unpacked: no folder can be called {name} ({why}); rename the archive')
+            continue
         if not name or target.exists():
             continue
         try:
@@ -539,6 +571,9 @@ def add(game_dir, src, log=None):
         name = src.stem.strip().rstrip('.') or UNNAMED
     else:
         raise ModError('it is no archive (.zip, .7z or .rar) and no folder')
+    why = windows_name_problem(name) if os.name == 'nt' else ''
+    if why:
+        raise ModError(f'no mod folder can be called {name} ({why}): rename it first')
     stage = _staging(folder)
     try:
         made = stage / 'mod'

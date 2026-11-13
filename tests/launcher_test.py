@@ -5395,6 +5395,43 @@ class ModsTest(Tmp):
         self.assertEqual([(m.name, m.enabled) for m in found], [('beta', True), (' Lead', False), ('Alpha', True)])
         self.assertEqual(self.mods.overlaps(found), {'beta': [('Alpha', 1, True)], 'Alpha': [('beta', 1, False)]})
 
+    def test_names_windows_cannot_keep_are_refused_in_an_archive(self):
+        """A file of a mod's archive called after a device (CON.pchtxt), ending in a dot or a space, or holding a
+        colon cannot be kept under its name on Windows: unpacked anyway it is lost, renamed or a hidden stream of
+        another file, and the game misses it without a word. The archive is refused with the file's name; on
+        Linux, whose game reads such names, it passes."""
+        problem = self.mods.windows_name_problem
+        for name in ('CON', 'con.pchtxt', 'NUL.tar.gz', 'Com1', 'LPT9.txt', 'aux .txt', 'trailing.', 'trailing ',
+                     'file.txt:stream', 'what?.bfres', 'tab\there'):
+            self.assertTrue(problem(name), name)
+        for name in ('console.txt', 'COM10.txt', 'a.b.c', '.hidden', 'nul_tex.bntx.zs', 'Actor', 'my mod (2)',
+                     'Ünïcödé'):
+            self.assertEqual(problem(name), '', name)
+        safe = self.mods._safe_members
+        safe(['romfs/Actor/a.bfres', 'romfs/Actor/', 'readme.txt'], windows=True)
+        for bad in ('exefs/CON.pchtxt', 'romfs/nul/a.txt', 'romfs/Actor/foo.', 'romfs/Actor /a.txt',
+                    'romfs/file.txt:stream', 'romfs\\AUX.bin'):
+            with self.assertRaises(self.mods.ModError) as refused:
+                safe(['romfs/ok.txt', bad], windows=True)
+            self.assertIn(f'({bad})', str(refused.exception))
+            safe(['romfs/ok.txt', bad], windows=False)                  # names as any other elsewhere
+        with self.assertRaises(self.mods.ModError):                     # leaving the folder is refused everywhere
+            safe(['../outside.txt'], windows=False)
+        with zipfile.ZipFile(self.folder / 'Device.zip', 'w') as z:
+            z.writestr('exefs/CON.pchtxt', '@stop\n')
+            z.writestr('romfs/a.txt', 'a')
+        done = self.mods.prepare(self.game)
+        if os.name == 'nt':
+            self.assertEqual(len(done), 1)
+            self.assertIn('Device.zip was not unpacked: it holds a file Windows cannot keep under its name '
+                          '(exefs/CON.pchtxt): Windows keeps that name for a device', done[0])
+            self.assertEqual(self.tree(), ['Device.zip'])                # nothing of it was unpacked
+            with self.assertRaises(self.mods.ModError):                 # Add a Mod refuses the same archive
+                self.mods.add(self.game, self.folder / 'Device.zip')
+            self.assertEqual(self.tree(), ['Device.zip'])
+        else:
+            self.assertEqual(self.tree(), ['Device.zip', 'Device/exefs/CON.pchtxt', 'Device/romfs/a.txt'])
+
     def test_a_picked_archive_or_folder_is_added(self):
         src = self.tmp / 'Downloads'
         src.mkdir()

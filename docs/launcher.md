@@ -378,6 +378,10 @@ A mod goes in as it came. Play first puts the folder in order (`mods.prepare`): 
 that folder is there already, and the archive stays; a mod folder whose files sit one or more folders down (an archive
 that held the mod's own folder) gets them moved up; a `romfs`, `romfslite`, `exefs` or `cheats` folder put straight into
 the mods folder becomes a mod of its own, *Unnamed mod*. An archive that would write outside its folder is refused.
+So is, on Windows, one that holds a file Windows cannot keep under its name (`mods.windows_name_problem`): a device's
+name such as `CON.pchtxt`, a name ending in a dot or a space, or one with a colon or another character Windows does
+not allow. Unpacked anyway such a file is lost, renamed or a hidden stream, and the game misses it without a word; the
+refusal names the file.
 Nothing is deleted. Add a Mod and Add a Mod Folder do the same for an archive or folder the player picks, which is
 unpacked or copied into the mods folder under a free name; Open Mods Folder opens it. The picked mod is put together
 in a folder beside the mods folder (`.adding-mod`) and moves in with one rename once it is complete, so a copy that
