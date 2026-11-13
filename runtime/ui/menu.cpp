@@ -1411,9 +1411,12 @@ static void tab_game(float scale) {
     // discord_rpc.c reads the setting on its own thread and connects or clears the status within half a second
     opt_toggle("NX2NAVI_DISCORD_RPC", UI_MENU_DISCORD_RPC, UI_MENU_DISCORD_RPC_DESC);
     rows_saves();
+    // Testing: experimental rows, then the debug menu where the game version has it
+    opt_group_text("Testing");
+    // vk_exec.c rw_init reads it at start: the row notes the restart and the bar's Restart does it
+    opt_slider("NX2NAVI_REPLAY_WORKERS", UI_MENU_REPLAY_WORKERS, 0, 8, UI_MENU_REPLAY_WORKERS_DESC, 1, "%.0f");
     // The debug menu, a tool for testing with English text of its own: off unless switched on here
     if (dbg_supported()) {
-        opt_group_text("Testing");
         const bool on = cfg_bool("NX2NAVI_DEBUG_MENU");
         if (opt_toggle_text("debug_menu", "Debug menu (F9)",
                             "F9 opens a window for testing: the game's flags by name, a teleport to every area's start "
