@@ -68,6 +68,20 @@ static _Atomic uint64_t *step_word;   // patch page +0: ratio (low float), secon
 static double step_now = STEP_FIRST_S;   // the step the patch page holds: what the game steps each frame
 static _Atomic uint32_t *step_interval;   // patch page +8: seconds * 60 (patches-v143.txt realtime)
 static _Atomic uint32_t *ostep_page;   // patch page +256 with the set ostep: frames per update (patches-v111.txt)
+static _Atomic uint32_t *carry_page;   // patch page +260 with the set ofollow: 100 / frames per update
+
+// The set ofollow (patches-v111.txt): the three follow-surface modules of the character controller keep only a tenth
+// of the supporting floor's velocity when the physics' inverse step is over the number at page +260. The game compares
+// with 100, which the inverse step passed at every update above 100 fps; under one frame per update 100 / frames per
+// update makes the cut come where it came at 60 fps. At one frame or more it stays 100, so 60 and 30 fps keep the
+// game's own cut. Written with frames per update (ocarina_step_write).
+static void floor_carry_store(float frames) {
+    if (!carry_page || !(frames > 0)) return;
+    float cut = frames < 1.0f ? 100.0f / frames : 100.0f;
+    uint32_t bits;
+    memcpy(&bits, &cut, 4);
+    atomic_store_explicit(carry_page, bits, memory_order_release);
+}
 static uint64_t last_ns;
 static double samples[STEP_SAMPLES];
 static unsigned sample_count, sample_next;
@@ -95,6 +109,13 @@ void frame_step_init(void) {
         memcpy(&bits, &one, 4);
         atomic_store_explicit(ostep_page, bits, memory_order_release);
         rt_log("frame rate: the game's frames per update follow the display interval (set ostep)");
+    }
+    int follow = rt_patch_set("ofollow");
+    if (follow >= 0) {
+        carry_page = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 260);
+        floor_carry_store(1.0f);
+        rt_log("frame rate: a moving floor carries a character as at 60 fps: %s",
+               rt_patch_enabled(follow) ? "on (set ofollow)" : "off, the game's cut above 100 fps (floor_carry = 0)");
     }
     // physics_steps (patches-v111.txt osolver and osolverfull): 0 the game's solver step count, trunc(frames per update
     // * 4 + 0.001); 1 (the default) that count rounded up; 2 rounded up and at least the 4 of a 60 Hz frame, every
@@ -725,6 +746,7 @@ static void ocarina_step_write(double dt) {
         uint32_t bits;
         memcpy(&bits, &f, 4);
         atomic_store_explicit(ostep_page, bits, memory_order_release);
+        floor_carry_store(f);
         ostep_last = f;
         return;
     }

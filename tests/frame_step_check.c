@@ -21,8 +21,8 @@ const char *cfg_get(const char *key) {
     return NULL;
 }
 unsigned cfg_version(void) { return version; }
-int rt_patch_set(const char *name) { return !strcmp(name, "ostep") ? 0 : -1; }
-int rt_patch_enabled(int set) { return set == 0; }
+int rt_patch_set(const char *name) { return !strcmp(name, "ostep") ? 0 : !strcmp(name, "ofollow") ? 1 : -1; }
+int rt_patch_enabled(int set) { return set == 0 || set == 1; }
 void rt_patch_disable(int set) { (void)set; }
 void rt_patch_switch(int set, int on) { (void)set, (void)on; }
 void *rt_patch_page(void) { return page; }
@@ -148,13 +148,29 @@ static uint32_t solver_steps(void (*fn)(Cpu *), float frames) {
     return (uint32_t)c.x[1];
 }
 
+// The floor-carry gate (set ofollow): 1 when its b.gt is taken, which keeps a tenth of the floor's velocity. s0 is the
+// physics' inverse step; the set's load reads the page through x8.
+void follow_game(Cpu *c);
+void follow_ofollow(Cpu *c);
+static int follow_cut(void (*fn)(Cpu *), float inverse) {
+    Cpu c;
+    memset(&c, 0, sizeof c);
+    uint32_t bits;
+    memcpy(&bits, &inverse, 4);
+    c.v[0] = bits, c.x[8] = (uint64_t)(uintptr_t)page;
+    fn(&c);
+    return !FLAG_Z(&c) && FLAG_N(&c) == FLAG_V(&c);   // gt
+}
+
 int main(int argc, char **argv) {
     int mean = argc > 1 && !strcmp(argv[1], "mean");
     if (mean) steady = "0";
     frame_step_init();
-    float one;
+    float one, cut0;
     memcpy(&one, page + 256, 4);
+    memcpy(&cut0, page + 260, 4);
     CHECK(one == 1.0f, "the page holds one frame before the first present, not %g", one);
+    CHECK(cut0 == 100.0f, "the floor carry's cut is the game's 100 before the first present, not %g", cut0);
     const double p60 = 16666667e-9, p240 = 4166667e-9;
 
     if (mean) {   // the comparison setting: 5 and 30 ms in turn give 15 and 20 ms in turn
@@ -378,6 +394,32 @@ int main(int argc, char **argv) {
         printf("frame_step_check: solver steps a second at 144 / 240 fps: physics_steps 1 %u / %u, 2 %u / %u\n",
                144 * solver_steps(solver_osolver, 60.0f / 144.0f), 240 * solver_steps(solver_osolver, 0.25f),
                144 * solver_steps(solver_osolverfull, 60.0f / 144.0f), 240 * solver_steps(solver_osolverfull, 0.25f));
+    }
+    // The floor carry (set ofollow). The physics' inverse step is 60 / (frames per update * time scale); the game cuts
+    // a floor's velocity to a tenth above 100, which at 60 fps is a time scale under 0.6 and above 100 fps every
+    // update. With the page's 100 / frames per update the set cuts exactly where the game cuts at 60 fps at any rate
+    // above 60; at 60 and 30 fps the page holds 100 and the set cuts where the game's own words do.
+    {
+        const char *limits[] = {"60", "30", "90", "120", "144", "240"};
+        const int hz[] = {60, 30, 90, 120, 144, 240};
+        const float scales[] = {1.0f, 0.8f, 0.62f, 0.58f, 0.5f, 0.25f};
+        for (int r = 0; r < 6; r++) {
+            set_limit(limits[r]);
+            float frames = 0, cut;
+            for (int i = 0; i < 60; i++) frames = present(1.0 / hz[r]);
+            memcpy(&cut, page + 260, 4);
+            CHECK(cut == (frames < 1 ? 100.0f / frames : 100.0f), "%d fps (%g frames): the floor carry's cut is %g",
+                  hz[r], frames, cut);
+            for (int s = 0; s < 6; s++) {
+                float inverse = 60.0f / (frames * scales[s]);
+                int set = follow_cut(follow_ofollow, inverse),
+                    want = follow_cut(follow_game, hz[r] > 60 ? 60.0f / scales[s] : inverse);
+                CHECK(set == want, "%d fps, time scale %.2f: the set %s, the game %s %s", hz[r], scales[s],
+                      set ? "cuts" : "carries", hz[r] > 60 ? "at 60 fps" : "here", want ? "cuts" : "carries");
+            }
+            CHECK(follow_cut(follow_game, 60.0f / frames) == (hz[r] > 100), "%d fps: the game's own words %s", hz[r],
+                  hz[r] > 100 ? "do not cut" : "cut");
+        }
     }
     printf("frame_step_check: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;

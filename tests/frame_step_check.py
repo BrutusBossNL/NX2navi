@@ -92,13 +92,50 @@ def solver_functions():
     return '\n'.join(out)
 
 
+# The floor-carry gate of the three follow-surface modules (set ofollow): mov w8, #100.0 and fmov s1, w8 before the
+# game's fcmp s0, s1 (s0 the physics' inverse step) and the b.gt to the tenth of the floor's velocity. The set makes the
+# two words adrp x8, page and ldr s1, [x8, #260]; the test lifts the load and the fcmp with x8 set to its page.
+FOLLOW_SITES = (0x13d704, 0x13a064, 0x389ac20)
+FOLLOW_GAME = (0x52a85908, 0x1e270101)   # mov w8, #0x42c80000; fmov s1, w8
+FOLLOW_LOAD = 0xbd410501                 # ldr s1, [x8, #260]
+FCMP = 0x1e212000                        # fcmp s0, s1
+
+
+def check_follow():
+    """Each gate's two words are the set ofollow's adrp to the page in x8 and its load of +260, over the game's."""
+    table = load(ROOT / 'recomp/patches-v111.txt', [('main', 0x7000000000, PAGE)])
+    names = {i: t[0] for i, t in enumerate(table.sets)}
+    bad = 0
+    for site in FOLLOW_SITES:
+        first = {names[k]: (words, have) for k, words, have in table.sites['main'].get(site, [])}
+        second = {names[k]: (words, have) for k, words, have in table.sites['main'].get(site + 4, [])}
+        if (first != {'ofollow': ([('page', 8)], FOLLOW_GAME[0])} or
+                second != {'ofollow': ([FOLLOW_LOAD], FOLLOW_GAME[1])}):
+            print(f'FAIL: the floor-carry gate at main+{site:#x} is {first} / {second}')
+            bad += 1
+    return bad
+
+
+def follow_functions():
+    lift = Lifter(0, simd='c')
+    out = []
+    for name, words in (('game', FOLLOW_GAME + (FCMP,)), ('ofollow', (FOLLOW_LOAD, FCMP))):
+        body = []
+        for k, w in enumerate(words):
+            insn = lift.lift(w, 0x7000000000 + FOLLOW_SITES[0] + 4 * k + (4 if name == 'ofollow' else 0))
+            assert insn.kind == 'op', (name, hex(w), insn.kind)
+            body.append('    ' + insn.code)
+        out.append(f'void follow_{name}(Cpu *c) {{\n' + '\n'.join(body) + '\n}\n')
+    return '\n'.join(out)
+
+
 def main():
     work = ROOT / 'build' / 'test' / 'frame_step'
     work.mkdir(parents=True, exist_ok=True)
     (work / 'layout.h').write_text(LAYOUT)
     exe = work / ('frame_step_check.exe' if os.name == 'nt' else 'frame_step_check')
     solver = work / 'solver_sites.c'
-    solver.write_text(solver_functions())
+    solver.write_text(solver_functions() + '\n' + follow_functions())
     env = dict(os.environ)
     if os.name == 'nt' and MSYS_BIN.exists():
         env['PATH'] = str(MSYS_BIN) + os.pathsep + env.get('PATH', '')
@@ -106,7 +143,7 @@ def main():
                            '-I', str(ROOT / 'runtime'), '-I', str(work),
                            str(ROOT / 'tests' / 'frame_step_check.c'), str(solver), '-o', str(exe), '-lm'], env=env)
     rc = subprocess.run([str(exe)], env=env).returncode
-    return subprocess.run([str(exe), 'mean'], env=env).returncode or rc or check_sites()
+    return subprocess.run([str(exe), 'mean'], env=env).returncode or rc or check_sites() + check_follow()
 
 
 if __name__ == '__main__':

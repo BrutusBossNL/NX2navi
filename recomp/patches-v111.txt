@@ -99,6 +99,36 @@ site osolver main 38afd10 bd440d02 1e2a1002   # the same three words in the seco
 site osolver main 38afd1c 1f010800 1f218800
 site osolver main 38afd20 1e380001 1e280001
 
+# Floors that carry a character: the character controller's update (main+0x3890a80, run from the physics step's jobs)
+# calls each of the controller's update modules (vtable +0x50). Three of them make the character follow what it stands
+# on: CharacterUpdateFollowSurface (vtable main+0x4c35730, update main+0x13d490), CharacterUpdateFollowSurfaceExtension
+# (main+0x4b9c008, main+0x139dc0) and CharacterUpdateDynamicFollowSurface (main+0x4c357b0, main+0x389aa40). Each finds
+# the supporting body by its ID (the word at [[controller +8] +0x28] +0x2c, looked up in the physics system's body
+# table), takes the body's velocity at the character (main+0x139c20: the linear part from the body's last and previous
+# transforms times the inverse of the step, main+0x138940, plus the angular part) and adds it to the character's move.
+# Before it adds it, each compares the physics system's inverse step ([[main+0x4e87ff0] +0xc0] +0x28, one over the
+# frame's seconds times the time scale, main+0x3b69870) with 100.0 and, above it, keeps a tenth of the velocity
+# (main+0x13dad4, main+0x13a39c, main+0x389af24; the 0.1 at main+0x3e40fb4). At the game's 60 and 30 fps the inverse
+# step is 60 or 30, so that happens only in a slow motion under 0.6 of the game's speed; above 100 fps it happened every
+# update. Link on the Deku Tree's floating platform (B1, Obj_Deku_MoveFloor_A_01) was carried at about a tenth of its
+# speed at 117 and 160 fps, and the platform drifted from under him (at 240 fps not at all, which the tenth alone does
+# not explain). The set compares with the page's +260 instead (runtime/frame_rate.c floor_carry_store, written with
+# +256): 100 / frames per update under one frame per update, else 100. The inverse step times frames per update is 60
+# over the time scale at any frame rate, so above 60 fps the cut comes where it came at 60 fps, and at 60 fps and below
+# (100 there, and until the first present) the words give what the game computes. At each site mov w8, #100.0 and
+# fmov s1, w8 become adrp x8, page and ldr s1, [x8, #260]; the fcmp
+# s0, s1 and b.gt after them are the game's. x8 is written again before any read on every path from the sites; s1 is
+# written again before any read, or reaches only calls that take no float argument (getters such as main+0xacd430 and
+# those behind vtable +0x68 and +0x210, nn::os::LockMutex and UnlockMutex, GetTlsValue, memset) and returns whose
+# caller (main+0x3890a80) reads no float result. No word reads or writes the flags.
+set ofollow NX2NAVI_FLOOR_CARRY 1
+site ofollow main 13d704 52a85908 @page:x8   # CharacterUpdateFollowSurface: mov w8, #0x42c80000 (100.0) -> adrp x8, page
+site ofollow main 13d708 1e270101 bd410501   # fmov s1, w8 -> ldr s1, [x8, #260]
+site ofollow main 13a064 52a85908 @page:x8   # the same two in CharacterUpdateFollowSurfaceExtension
+site ofollow main 13a068 1e270101 bd410501
+site ofollow main 389ac20 52a85908 @page:x8  # and in CharacterUpdateDynamicFollowSurface
+site ofollow main 389ac24 1e270101 bd410501
+
 # Fixed steps of the height-field surfaces: the physics' two water managers, phive::InteractiveWaterMgr (its update
 # main+0x3875f20, the vtable slot at main+0x4c32f90) and phive::ResponsiveWaterMgr (main+0x3882660, the slot at
 # main+0x4c33a88; the names are those of their postUpdateWorld profiler scopes, and their bodies are named

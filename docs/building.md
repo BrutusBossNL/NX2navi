@@ -471,7 +471,10 @@ the water managers and floors of the set `owater` get 60 fixed steps a second wi
 frame gives what the game computes. It also checks that each of those sites in `recomp/patches-v111.txt` ends in one
 `bl` to its page slot, and runs the physics solver step count's words of the original and the sets `osolver` and
 `osolverfull` (`physics_steps` 0, 1 and 2), lifted as the generator lifts them: the game's 4 and 8 at 60 and 30 fps
-for all three, rounded up by `osolver` and at least 4 every update by `osolverfull` above 60 fps. No game files.
+for all three, rounded up by `osolver` and at least 4 every update by `osolverfull` above 60 fps. For the set `ofollow`
+(`floor_carry`) it checks the two words of each of the three floor-carry gates and runs the gate's compare with the
+game's words and the set's: the page's cut is 100 at 60 and 30 fps, and from 90 to 240 fps the set cuts a floor's
+velocity at the time scales where the game cuts it at 60 fps and nowhere else. No game files.
 
 A change to how the mixer applies volumes (`runtime/audio_mixer.c` `accumulate_ramp`, the voice and splitter paths
 of `audio_mixer_render`) or to what it owes the device after a stall (`ring_pull`, `audio_mixer_owed`) passes
