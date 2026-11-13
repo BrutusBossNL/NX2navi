@@ -762,8 +762,8 @@ static void world_clock(double dt, double step) {
 // he moved since the last update, and the FLOOR_PROBE_NEAR groups nearest to him (within FLOOR_PROBE_RADIUS
 // horizontally), moved or not, each with its translation and how far it moved since the last present; with no group
 // that near, one line in 30 presents still gives Link alone. At 60 fps the moves of Link and of the group under him
-// match while he stands on it. The value is the number of lines to write (1 means 4000); off it costs one test per
-// present.
+// match while he stands on it. Each line also gives the time manager's base step, game speed and first two time
+// categories. The value is the number of lines to write (1 means 4000); off it costs one test per present.
 #define FLOOR_PROBE_RADIUS 8.0f
 #define FLOOR_PROBE_NEAR 4   // the groups a line names: the nearest, moved or not
 // The manager holds a few thousand groups (5345 in the Deku Tree; most entries are empty), and a readability check per
@@ -871,11 +871,21 @@ static void floor_probe(void) {
     static unsigned quiet;   // presents since the last line without a group near Link
     if (floor_link_ok && (nn > 0 || ++quiet >= 30)) {
         quiet = 0;
-        char line[160 + FLOOR_PROBE_NEAR * 120];
+        char line[320 + FLOOR_PROBE_NEAR * 120];
         int o = snprintf(line, sizeof line, "floor probe: step %.4f frames; link %.4f %.4f %.4f moved %.5f %.5f %.5f; "
                          "%d of %u groups within %.0f m", (double)frame_step_frames(), link[0], link[1], link[2],
                          link[0] - floor_link[0], link[1] - floor_link[1], link[2] - floor_link[2], nn, count,
                          (double)FLOOR_PROBE_RADIUS);
+        // the time manager **[main+0x4c7e890] the game steps by: +0x1c0 the base step and +0x10 the game speed in 60 Hz
+        // frames, and the first two time categories (+0x20 and +0x50: frames, 1 / frames, seconds, 1 / seconds, as
+        // main+0x2c84c makes them), so a line shows whether what the physics reads matches the step
+        uint64_t tslot = direct_ptr(MOD_MAIN_BASE + 0x4c7e890), tm = tslot ? direct_ptr(tslot) : 0;
+        float tb[2] = {0}, tc[8] = {0};
+        if (tm && direct_read(tm + 0x1c0, &tb[0], 4) && direct_read(tm + 0x10, &tb[1], 4) &&
+            direct_read(tm + 0x20, tc, 16) && direct_read(tm + 0x50, tc + 4, 16) && o > 0 && o < (int)sizeof line)
+            o += snprintf(line + o, sizeof line - o,
+                          "; time base %.4f speed %.4f cat0 %.4f %.4f %.6f %.3f cat1 %.4f %.4f %.6f %.3f", tb[0], tb[1],
+                          tc[0], tc[1], tc[2], tc[3], tc[4], tc[5], tc[6], tc[7]);
         for (int k = 0; k < nn && o > 0 && o < (int)sizeof line; k++)
             o += snprintf(line + o, sizeof line - o, "; group %d at %.4f %.4f %.4f moved %.5f %.5f %.5f", near[k],
                           near_t[k][0], near_t[k][1], near_t[k][2], near_m[k][0], near_m[k][1], near_m[k][2]);
