@@ -3,7 +3,8 @@
 // runtime/input_win.c; nothing pressed with NX2NAVI_INPUT=none). Docked (default) it is a full-key controller as player 1 (id 0, style bit 0); with
 // NX2NAVI_OPERATION_MODE=handheld it is the handheld controller (id 0x20, style bit 1) and player 1 is not connected,
 // which is the controller the game reads in that mode. Mouse and keyboard report no input. The controller has two
-// vibration devices (left, right) played on the gamepad's motors (NX2NAVI_RUMBLE=0: none) and a six-axis sensor fed by
+// vibration devices (left, right), played on the gamepad's motors or, with NX2NAVI_RUMBLE_HD=1, as they are on a Switch
+// controller's linear actuators (NX2NAVI_RUMBLE=0: no devices), and a six-axis sensor fed by
 // the gamepad's gyro and accelerometer (NX2NAVI_MOTION=0, live: reads at rest). State layouts follow the HID shared-memory format.
 #include <math.h>
 #include <stdint.h>
@@ -297,6 +298,22 @@ static float clamp01(float v) { return v > 0 ? (v < 1 ? v : 1) : 0; }   // NaN -
 // neutral frequency), all at 320 Hz and above (the high band's), log scale between.
 static float light_share(float f) { return f > 160 ? (f < 320 ? log2f(f / 160) : 1) : 0; }
 
+// Switch HD rumble as it is, for a gamepad whose actuators take it (input.h input_rumble_hd_on; NX2NAVI_RUMBLE_HD):
+// each side's newest value goes on with both bands' frequency and amplitude, the amplitude scaled by the rumble
+// strength alone (100 % = as the game sent it; the curve is for motors). A side the game has not updated for 250 ms,
+// or any side while vibration is not permitted, is at rest. input.c writes the reports and no longer drives that
+// gamepad's motors, so rumble_update's own call below reaches only the DualShock 3 reader then. Under vib_lock.
+static void hd_update(uint64_t now) {
+    if (!input_rumble_hd_on()) return;
+    RumbleHdValue v[2];
+    int live[2];
+    for (int s = 0; s < 2; s++) {
+        v[s] = (RumbleHdValue){vib_last[s].amp_low, vib_last[s].freq_low, vib_last[s].amp_high, vib_last[s].freq_high};
+        live[s] = vib_allowed && vib_at[s] && now - vib_at[s] <= RUMBLE_STALE_NS;
+    }
+    input_rumble_hd(v, live, rumble_strength);
+}
+
 // Switch HD rumble -> SDL_RumbleGamepad. Each side's two bands split by frequency between the heavy (low) and the light
 // (high) motor (light_share) and add up as energy per motor (root of the summed squares); the stronger side drives each
 // motor. A side the game has not updated for 250 ms is silent. Each send lasts 250 ms and is renewed every 50 ms while
@@ -304,6 +321,7 @@ static float light_share(float f) { return f > 160 ? (f < 320 ? log2f(f / 160) :
 static void rumble_update(uint64_t now) {
     float heavy = 0, light = 0;
     rumble_cfg();
+    hd_update(now);
     for (int s = 0; s < 2 && vib_allowed; s++) {
         if (!vib_at[s] || now - vib_at[s] > RUMBLE_STALE_NS) continue;
         const VibrationValue *v = &vib_last[s];

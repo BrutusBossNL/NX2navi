@@ -23,6 +23,7 @@
 #include "fs.h"
 #include "gfx.h"
 #include "gfx_wsys.h"
+#include "input.h"
 #include "nvn_api.h"
 #include "ov.h"
 #include "platform/platform.h"
@@ -91,6 +92,7 @@ void gfx_window_closed(void) {
     prof_write();   // plat_exit runs no atexit handlers
     rtss_limit_restore();   // RivaTuner Statistics Server's profile as it was
     coop_shutdown();   // LEAVE and BYE to the room, before the process ends
+    input_rumble_hd_stop();   // a controller on HD rumble gets the neutral value: nothing renews or stops it after the exit
     fs_save_flush();   // last: the game's threads still run until plat_exit, and a Commit after this one is refused
     if (restart) {
         cfg_setenv("NX2NAVI_REEXEC", NULL);   // the new process counts its own address-space retries (memory.c)
