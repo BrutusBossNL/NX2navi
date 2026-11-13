@@ -256,6 +256,7 @@ class App:
         self.dump_search = None
         self.uninstall_game = False
         self.game_proc = None
+        self.game_starting = False   # Play waits for co-op's Steam library file on a thread of its own (start_game)
         self.cursor_frames, self.cursor_k = [], 0
         self.last_second = 0
         self.gamepad = winsys.Gamepad()
@@ -1872,7 +1873,7 @@ class App:
             self.message = 'The game is not built yet.'
             self.render()
             return
-        if self.game_proc and self.game_proc.poll() is None:
+        if (self.game_proc and self.game_proc.poll() is None) or self.game_starting:
             return
         if saves.game_running(gd):   # a copy this launcher did not start (another launcher, a shortcut, a test run)
             self.message = 'The game is already running.'
@@ -1891,7 +1892,34 @@ class App:
             return
         if waiting:
             self.ctx.log(f'play: without the code of {", ".join(waiting)}, whose build did not finish')
-        steamlib.ensure(gd, self.ctx.layout.app / 'bin', log=self.ctx.log)   # co-op's Steam library file, beside the game
+        self.start_game(gd, exe)
+
+    def start_game(self, gd, exe):
+        """Starts the game. With co-op on in its settings, co-op's Steam library file goes beside it first
+        (steamlib.ensure), on a thread of its own: without the file that is a search of the player's Steam libraries
+        and a signature check, seconds in which the window would stand still. The game starts from the window's
+        thread once the file is there or known to be missing (launch)."""
+        if not steamlib.wanted(gd):
+            self.launch(exe)
+            return
+        import threading
+        self.game_starting = True
+        self.message = 'Starting the game…'
+        self.render()
+        kit_bin = self.ctx.layout.app / 'bin'
+
+        def work():
+            try:
+                steamlib.ensure(gd, kit_bin, log=self.ctx.log)
+            finally:
+                self.root.after(0, lambda: self.launch(exe))
+        threading.Thread(target=work, daemon=True).start()
+
+    def launch(self, exe):
+        if self.game_starting:   # start_game's message goes with the wait
+            self.game_starting = False
+            self.message = ''
+            self.render()
         try:
             self.game_proc = winsys.start_game(exe)
         except OSError as e:
@@ -2748,7 +2776,8 @@ def play_only(ctx):
     if waiting:   # the window builds the mods' code in, then starts the game (App.start with --play)
         ctx.log(f'play from Steam: the game is built again first for the code of {", ".join(waiting)}')
         return None
-    steamlib.ensure(gd, ctx.layout.app / 'bin', log=ctx.log)   # co-op's Steam library file, beside the game
+    if steamlib.wanted(gd):   # co-op's Steam library file, beside the game; no window waits here
+        steamlib.ensure(gd, ctx.layout.app / 'bin', log=ctx.log)
     try:
         proc = winsys.start_game(exe)
     except OSError as e:

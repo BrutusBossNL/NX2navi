@@ -197,6 +197,21 @@ def find(steam_folder, signed=signed_by_valve):
     return None
 
 
+def wanted(game_dir):
+    """True when co-op is on in the game's settings, read as runtime/cfg.c reads them: NX2NAVI_COOP from the
+    environment the game inherits first, else nx2navi.ini's coop; empty is the default, off, and any other value but 0
+    is on (cfg_bool). The launcher puts the library beside the game (ensure) only then: with co-op off the game loads
+    none, and a Play should not wait for a search of the Steam library. A file that cannot be read counts as off."""
+    value = os.environ.get('NX2NAVI_COOP')
+    if value is None:
+        from . import gameini
+        try:
+            value = gameini.get(game_dir, 'coop')
+        except OSError:
+            return False
+    return value not in ('', '0')
+
+
 _none = set()   # game folders for which this run of the launcher found no library: not searched again at each Play
 
 
