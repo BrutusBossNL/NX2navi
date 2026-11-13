@@ -71,8 +71,9 @@
 //
 // SPIR-V at rest (NX2NAVI_SHADER_COMPRESS, default 1; section "SPIR-V at rest"): the memory cache keeps every shader
 // for the life of the process, but its SPIR-V is read only while modules are made of it. A background thread keeps the
-// SPIR-V of a shader nobody read for NX2NAVI_SHADER_COMPRESS_IDLE_S seconds as a zstd frame alone, and a reader that
-// pins it (gfx_shader_spirv_pin) gets it decoded back (runtime/spv_store.h).
+// SPIR-V of a shader nobody read for NX2NAVI_SHADER_COMPRESS_IDLE_S seconds (fewer while the system memory is tight,
+// mem_budget.h) as a zstd frame alone, and a reader that pins it (gfx_shader_spirv_pin) gets it decoded back
+// (runtime/spv_store.h).
 //
 // The c2 handle ranges of handle_slot are the translator's handle layout.
 // The code layout the translator sees (graphics: code[0x30..], compute: code[0..]; c1 = code[c1..length]
@@ -85,6 +86,7 @@
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
+#include "mem_budget.h"
 #include "platform/platform.h"
 #include "prof.h"
 #include "prp_file.h"
@@ -2077,8 +2079,15 @@ static void spv_held(const GfxShader *g, uint64_t *plain, uint64_t *z) {
     *z = __atomic_load_n(&g->spv.zsize, __ATOMIC_RELAXED);
 }
 
-// How long a shader goes unpinned before its SPIR-V is compressed.
-static uint64_t zpass_idle_ms(void) { return (uint64_t)Z.idle_s * 1000; }
+// How long a shader goes unpinned before its SPIR-V is compressed: NX2NAVI_SHADER_COMPRESS_IDLE_S, at most 5 s while
+// the system memory is tight and 1 s while it is critical (mem_budget.h). Every level compresses losslessly; a shorter
+// wait only means that a shader read again soon after is decoded once more.
+static uint64_t zpass_idle_ms(void) {
+    uint64_t ms = (uint64_t)Z.idle_s * 1000;
+    int level = mem_budget_level(MEM_RAM);
+    uint64_t cap = level == MEM_CRITICAL ? 1000 : level == MEM_TIGHT ? 5000 : ms;
+    return ms < cap ? ms : cap;
+}
 
 static void zpass_main(void *arg) {
     (void)arg;
