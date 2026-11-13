@@ -258,6 +258,11 @@
 # the first time is built whole while its draw is left out for some frames, and the start waits until every pipeline
 # of earlier sessions is built. gpl = 1 turns it on again.
 # gpl = 1
+# The pipelines of the foliage, the grass and the terrain (mesh shaders) are linked from shader libraries like the
+# others, where the graphics pipeline library is on: foliage of a kind seen for the first time is drawn after a short
+# link, and its optimised pipeline is built behind it. 0: as before, each such pipeline is built whole (0.2 to 1.1 s)
+# while its foliage waits or is left out of the picture. The log's line "mesh pipelines are ..." says which is in use.
+# gpl_mesh = 1
 
 # Textures and memory.
 # ASTC texture decoding: native (the GPU's own ASTC support), gpu (a compute shader), cpu, or auto (native when the GPU

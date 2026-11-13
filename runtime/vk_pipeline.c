@@ -83,7 +83,12 @@ static struct {
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
     int gpl;                           // draws whose pipeline is building get a fast-linked one (vk_caps.gpl)
-    struct { uint64_t links, fb_links, wlinks, flinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, ready_mesh, ready_recorded, ready_fresh, ready_logged, lib_logged, hints, hint_libs, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max; } g;
+    int mesh_lib;                      // mesh pipelines are linked from stage libraries too (mesh_lib_init, mesh_libs)
+    struct { uint64_t links, fb_links, wlinks, flinks, dlinks, pr_added, lib_slow[4], ready_n[6], ready_nofast, ready_mesh, ready_recorded, ready_fresh, ready_logged, lib_logged, hints, hint_libs, requeued, link_fail, defer, lib_n[4], lib_fail, swaps, slow, pre_used[4]; double pr_added_ms, lib_slow_ms[4], ready_ms, ready_max, link_ms, link_max, lib_ms[4], lib_max[4], dlink_ms, dlink_max;
+             // mesh pipelines' share of the counts above: m_links fast links and their link time; of the ready_mesh
+             // pipelines a draw missed, m_ready_fast became usable through a fast link, m_ready_ms after the miss in
+             // all; m_lib_*: [0] their task and mesh libraries, [1] their fragment shader libraries (lib_build)
+             uint64_t m_links, m_ready_fast, m_lib_n[2]; double m_link_ms, m_link_max, m_ready_ms, m_ready_max, m_lib_ms[2], m_lib_max[2]; } g;
     int vs_outs_all;                   // NX2NAVI_VS_OUTS: 0 union of paired fragment inputs, 1 (all) all 32 output locations
     int dyn_vi, dyn_clamp, dyn_poly, dyn_blend_en, dyn_blend_eq, dyn_wmask, dyn_a2c;
     int f_logic_op, f_depth_clamp, f_fill_non_solid, f_dual_src, f_full_subgroups;
@@ -918,6 +923,45 @@ static void keys_open(void);
 static void cu_open(void);
 static void prebuild_start(void);
 
+// ---- stage libraries for mesh pipelines (NX2NAVI_GPL_MESH, default 1; 0: each mesh pipeline is built whole, as before)
+// A mesh pipeline (task and mesh stages: the game's foliage, grass and terrain) used to be left out of the stage
+// libraries: each new one was a whole build, 0.2 to 1.1 s the first time foliage of a kind appeared, and its draws
+// waited or were left out of the picture until it was done. With the setting on such a pipeline is made like a vertex
+// pipeline ("graphics pipeline library" below): linked at its first use from libraries, with the whole build behind.
+//  - Its pre-rasterization library holds the task and mesh stages with the viewport and rasterization state, keyed by
+//    both shaders (PrKey.vs, PrKey.ts). A mesh pipeline has no vertex input state, so it is linked from three
+//    libraries and none of them is a vertex input library (gpl_link).
+//  - Its layout is a stage-independent pair like a vertex pipeline's (mesh_pair_layout): set 0 holds the mesh stage's
+//    bindings and the task stage's after them, set 1 the fragment stage's. Without libraries all three share set 0.
+//  - Its fragment shader library is the one a vertex pipeline with the same fragment shader uses, unless the key says
+//    otherwise (FsKey): the inputs no mesh output feeds are filled in the module (fill, points), and on a device
+//    with a per-draw shading rate the rate is dynamic state of every mesh pipeline, which the pre-rasterization and
+//    the fragment shader state both hold, so both libraries list it (vrs). The fragment output library is shared.
+//  - The pre-rasterization library lists the dynamic states a whole mesh pipeline lists (mesh_dyn): not the vertex
+//    input, its strides, the topology or primitive restart, which a pipeline with a mesh stage may not list. So does
+//    a fragment shader library that is a mesh pipeline's alone (vrs). A library shared with vertex pipelines still
+//    lists those four: they belong to the vertex input state, which no library of a mesh pipeline holds, and what a
+//    library lists as dynamic counts only for the state the library itself holds.
+// Off, with the reason in the start's log line: without the graphics pipeline library, on a device that draws no mesh
+// pipeline (no mesh shaders, or the mesh fallback), and where mesh pipelines alone are built without the driver's
+// optimiser (noopt_flag_for): a fragment library shared with vertex pipelines would be an optimised one.
+static VkPipelineCreateFlags noopt_flag_for(int mesh);
+
+static void mesh_lib_init(const VkCtx *c) {
+    const char *why = !c->has_mesh_shader ? "this GPU has no mesh shaders"
+                    : c->mesh_fallback ? "mesh draws go through the mesh fallback (mesh_fallback = 1)"
+                    : !vk_caps.gpl ? "the graphics pipeline library is off"
+                    : !cfg_bool("NX2NAVI_GPL_MESH") ? "NX2NAVI_GPL_MESH=0"
+                    : noopt_flag_for(1) != noopt_flag_for(0) ? "they alone are built without the driver's optimiser "
+                                                               "(NX2NAVI_VK_NOOPT), which a shared library would not be"
+                    : NULL;
+    P.mesh_lib = !why;
+    if (why) rt_log("vk_pipeline: mesh pipelines are built whole, without stage libraries: %s", why);
+    else rt_log("vk_pipeline: mesh pipelines are linked from stage libraries like vertex pipelines: the task and mesh "
+                "stages in one pre-rasterization library, a fast link at the first draw, the whole build behind it "
+                "(NX2NAVI_GPL_MESH=0 builds each whole, as before)");
+}
+
 static int ensure_init(void) {
     if (P.ready) return 1;
     if (!vk_init()) return 0;
@@ -942,6 +986,7 @@ static int ensure_init(void) {
     P.vs_outs_all = vo && !strcmp(vo, "all");
     if (P.indep) rt_log("vk_pipeline: stage-independent layouts: vertex set 0, fragment set 1, %s set pushed; vertex outputs: %s",
                         P.push_stage == GFX_STAGE_VS ? "vertex" : "fragment", P.vs_outs_all ? "all 32 locations" : "union of paired fragment inputs");
+    mesh_lib_init(c);
     // vk_device.c enables every feature the GPU reports in this chain, so the query tells what is enabled.
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT e3 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
     VkPhysicalDeviceProvokingVertexFeaturesEXT pvf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT,
@@ -2664,6 +2709,16 @@ static VkShaderStageFlags stage_bit(int stage) {
 
 static int is_mesh(const VkPipeState *s) { return s->vs && gfx_shader_stage(s->vs) == GFX_STAGE_MS; }
 
+// 1 when a mesh pipeline entered now is linked from stage libraries (comment at mesh_lib_init): it then gets a
+// stage-independent layout (pipe_miss), which is how the rest of the file tells (no_libs).
+static int mesh_libs(void) { return P.mesh_lib && P.indep; }
+
+int vk_pipeline_mesh_libs(void) { return ensure_init() && mesh_libs(); }
+
+// 1 for a mesh pipeline of layout l that has no stage libraries and so no fast link: every build of it is its whole
+// build. A vertex pipeline is never one (gpl_link itself refuses the shared layout the probe can give it).
+static int no_libs(const VkPipeState *s, const Layout *l) { return is_mesh(s) && !(l && l->set1); }
+
 // Where a shader's translation came from (gfx_shader_origin), for the log.
 static const char *origin_name(const GfxShader *s) {
     static const char *const name[3] = {"from the shader cache", "a previous translator's", "translated in this session"};
@@ -3105,6 +3160,55 @@ static uint32_t vs_outs(const GfxShader *vs, const GfxShader *fs, GfxShaderIo io
     return mask;
 }
 
+// What a mesh module writes (spirv_mesh_outputs), kept per mesh shader: the library keys of a mesh pipeline need it
+// at every lookup (lib_keys), and reading it walks the module's declarations with two tables of its id bound.
+#define MESH_OUTS_CAP 1024
+static struct {
+    PlatMutex lock;
+    const GfxShader *ms[MESH_OUTS_CAP];
+    uint32_t mask[MESH_OUTS_CAP];
+    uint8_t points[MESH_OUTS_CAP];
+    uint32_t n;
+} MSO = {.lock = PLAT_MUTEX_INIT};
+
+static uint32_t mesh_outs(const GfxShader *ms, int *points) {
+    uint32_t j = (uint32_t)(((uintptr_t)ms >> 4) * 0x9e3779b1u) & (MESH_OUTS_CAP - 1), mask;
+    plat_mutex_lock(&MSO.lock);
+    while (MSO.ms[j] && MSO.ms[j] != ms) j = (j + 1) & (MESH_OUTS_CAP - 1);
+    if (MSO.ms[j]) {
+        mask = MSO.mask[j], *points = MSO.points[j];
+        plat_mutex_unlock(&MSO.lock);
+        return mask;
+    }
+    plat_mutex_unlock(&MSO.lock);
+    uint64_t n = 0;
+    const uint32_t *w = gfx_shader_spirv(ms, &n);
+    *points = 0;
+    mask = w ? spirv_mesh_outputs(w, n, points) : ~0u;   // as create_graphics takes a module it cannot read
+    plat_mutex_lock(&MSO.lock);
+    for (j = (uint32_t)(((uintptr_t)ms >> 4) * 0x9e3779b1u) & (MESH_OUTS_CAP - 1); MSO.ms[j] && MSO.ms[j] != ms;)
+        j = (j + 1) & (MESH_OUTS_CAP - 1);
+    if (!MSO.ms[j] && MSO.n + 1 < MESH_OUTS_CAP * 3 / 4)   // a full table: read again next time
+        MSO.ms[j] = ms, MSO.mask[j] = mask, MSO.points[j] = (uint8_t)*points, MSO.n++;
+    plat_mutex_unlock(&MSO.lock);
+    return mask;
+}
+
+// The inputs of fragment shader fs that mesh shader ms does not write, which the fragment module of their pipeline
+// gets filled in (spirv_fs_fill_inputs; create_graphics works the same mask out for a whole build), and in *points
+// whether they are filled as a point sprite's. 0 and no points when nothing is filled.
+static uint32_t mesh_fill(const GfxShader *ms, const GfxShader *fs, int *points) {
+    GfxShaderIo fin[32];
+    *points = 0;
+    if (!fs) return 0;
+    int pts = 0;
+    uint32_t need = gfx_shader_inputs(fs, fin), have = mesh_outs(ms, &pts), missing = 0;
+    for (int i = 0; i < 32; i++)
+        if (need >> i & 1 && !fin[i].packed && !(have >> i & 1)) missing |= 1u << i;
+    if (missing) *points = pts;
+    return missing;
+}
+
 // ---- pipeline cache table
 
 static Pipe *pipe_find(const void *key, size_t size, uint64_t h) {
@@ -3482,6 +3586,25 @@ void vk_pipeline_line_width(VkCommandBuffer cb, const VkPipeState *s, float widt
     vkCmdSetLineWidth(cb, w);
 }
 
+// What a mesh pipeline's task stage bindings are moved by in layout l: past the mesh stage's in a stage-independent
+// layout, where the two share set 0 (mesh_pair_layout), and past the fragment stage's in the shared set (pipe_miss).
+static uint32_t task_off(const VkPipeState *s, const Layout *l, uint32_t fs_off) {
+    return l->set1 ? binding_span(s->vs) - 1 : fs_off + (s->fs ? binding_span(s->fs) - 1 : 0);
+}
+
+// The dynamic states of a mesh pipeline into out (room for P.n_dyn + 1): P.dyn without the vertex input, its strides,
+// the topology and primitive restart, which a pipeline with a mesh stage must not list, and with the fragment
+// shading rate where the device sets one per draw (vk_exec_draw.c mesh_shading_rate). Returns their number.
+static uint32_t mesh_dyn(VkDynamicState *out) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < P.n_dyn; i++)
+        if (P.dyn[i] != VK_DYNAMIC_STATE_VERTEX_INPUT_EXT && P.dyn[i] != VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE &&
+            P.dyn[i] != VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY && P.dyn[i] != VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE)
+            out[n++] = P.dyn[i];
+    if (vk_ctx()->has_vrs) out[n++] = VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR;
+    return n;
+}
+
 static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Layout *l, uint32_t fs_off) {
     VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE;
     uint64_t vw, fw, vm_hash = 0, fm_hash = 0;   // the hashes: of the final modules, for the PIPE_FEEDBACK 2 line
@@ -3513,10 +3636,10 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         mesh = 0;   // a vertex pipeline from here on
     }
     VkShaderModule tm = VK_NULL_HANDLE;
-    if (mesh && s->ts) {   // the task stage's bindings follow the fragment stage's (pipe_miss)
+    if (mesh && s->ts) {   // the task stage's bindings follow another stage's in its set (task_off)
         uint64_t tw;
         const uint32_t *tcode = gfx_shader_spirv(s->ts, &tw);
-        uint32_t toff = fs_off + (s->fs ? binding_span(s->fs) - 1 : 0);
+        uint32_t toff = task_off(s, l, fs_off);
         uint32_t *t = tcode && toff ? spirv_rebind(tcode, tw, toff) : NULL;
         tm = make_module(t ? t : tcode, tw, 0);
         free(t);
@@ -3646,15 +3769,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         mdyn[P.n_dyn] = VK_DYNAMIC_STATE_LINE_WIDTH;
         dy.dynamicStateCount = P.n_dyn + 1, dy.pDynamicStates = mdyn;
     }
-    if (mesh) {   // a mesh pipeline must not list vertex input, topology or primitive restart as dynamic
-        uint32_t n = 0;
-        for (uint32_t i = 0; i < P.n_dyn; i++)
-            if (P.dyn[i] != VK_DYNAMIC_STATE_VERTEX_INPUT_EXT && P.dyn[i] != VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE &&
-                P.dyn[i] != VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY && P.dyn[i] != VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE)
-                mdyn[n++] = P.dyn[i];
-        if (vk_ctx()->has_vrs) mdyn[n++] = VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR;   // vk_exec_draw.c mesh_shading_rate
-        dy.dynamicStateCount = n, dy.pDynamicStates = mdyn;
-    }
+    if (mesh) dy.dynamicStateCount = mesh_dyn(mdyn), dy.pDynamicStates = mdyn;
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->n_color,
                                         .pColorAttachmentFormats = (const VkFormat *)k->color,
                                         .depthAttachmentFormat = (VkFormat)k->depth, .stencilAttachmentFormat = (VkFormat)k->stencil};
@@ -3719,7 +3834,10 @@ out:
 // pre-rasterization library uses {set 0, null} and the fragment shader library {null, set 1}. The fast link runs on the
 // thread of the draw that needs it (no link-time optimisation); the optimised pipeline is the job pipe_miss queued
 // (a monolithic build with the same modules), which replaces the fast one in the Pipe when done. Libraries and fast
-// pipelines live until vk_pipeline_shutdown.
+// pipelines live until vk_pipeline_shutdown. No library is made to be optimised at its link: the optimised pipeline is
+// that whole build, so the links take what the libraries hold as it is.
+// A mesh pipeline is linked from three of them, its pre-rasterization library holding the task and mesh stages
+// (comment at mesh_lib_init).
 // Background build signalling, both with P.lock: work_cv wakes the pipeline workers, done_cv wakes threads waiting for a
 // pipeline or a stage library to be published.
 static PlatCond work_cv = PLAT_COND_INIT, done_cv = PLAT_COND_INIT;
@@ -3735,8 +3853,12 @@ static Lib *libs[LIB_BUCKETS];
 typedef struct { uint32_t kind, topo_class, attr_fmt[32], attr_off[32]; uint8_t attr_bind[32], rate[17], pad[3]; } ViKey;
 typedef struct { uint32_t kind, missing; const GfxShader *vs; uint8_t clamp, poly_mode, minus_w, water_projective;
                  uint8_t lines;   // key_lines: the library lists the line width as dynamic state
+                 const GfxShader *ts;   // a mesh pipeline's library (vs is its mesh stage): its task stage, or NULL
                  GfxShaderIo fin[32]; } PrKey;
-typedef struct { uint32_t kind; uint8_t dsb, samples, a2c, water_projective; const GfxShader *fs; } FsKey;
+// fill, points, vrs: zero for a vertex pipeline. A mesh pipeline's: the inputs filled in the module and whether as a
+// point sprite's (mesh_fill), and 1 when the library lists the fragment shading rate as dynamic state (mesh_dyn).
+typedef struct { uint32_t kind; uint8_t dsb, samples, a2c, water_projective; const GfxShader *fs;
+                 uint32_t fill; uint8_t points, vrs, pad[2]; } FsKey;
 typedef struct { uint32_t kind; uint8_t n_color, samples, a2c, logic_op, blend_en, fbl, pad[2]; uint32_t color[8], depth, stencil, wmask;
                  uint8_t blend[8][6]; } FoKey;   // fbl: GKey.fbl, the feedback loop flags of the library (gpl_feedback)
 
@@ -3765,13 +3887,23 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri,
                                        .flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | noopt_flag(), .pDynamicState = &dy};
     VkDynamicState ldyn[sizeof P.dyn / sizeof P.dyn[0] + 1];
-    if (kind == LIB_PR && ((const PrKey *)key)->lines) {   // the rasterization state is this library's: as create_graphics
+    int mesh = is_mesh(s);   // the libraries of a mesh pipeline (comment at mesh_lib_init)
+    if (kind == LIB_PR && mesh) {   // what a whole mesh pipeline lists: as create_graphics
+        dy.dynamicStateCount = mesh_dyn(ldyn), dy.pDynamicStates = ldyn;
+        pi.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | noopt_flag_for(1);
+    } else if (kind == LIB_PR && ((const PrKey *)key)->lines) {   // the rasterization state is this library's: as create_graphics
         memcpy(ldyn, P.dyn, P.n_dyn * sizeof *ldyn);
         ldyn[P.n_dyn] = VK_DYNAMIC_STATE_LINE_WIDTH;
         dy.dynamicStateCount = P.n_dyn + 1, dy.pDynamicStates = ldyn;
+    } else if (kind == LIB_FS && ((const FsKey *)key)->vrs) {
+        // The shading rate is part of the pre-rasterization and of the fragment shader state: a mesh pipeline's
+        // libraries of both kinds list it as dynamic state, as a state dynamic in one library has to be in every
+        // other library that holds it. Such a library is a mesh pipeline's alone, so it takes that pipeline's list.
+        dy.dynamicStateCount = mesh_dyn(ldyn), dy.pDynamicStates = ldyn;
     }
-    VkShaderModule m = VK_NULL_HANDLE;
+    VkShaderModule m = VK_NULL_HANDLE, tm = VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo st = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pName = "main"};
+    VkPipelineShaderStageCreateInfo mst[2];   // a mesh pipeline's pre-rasterization stages: mesh, then task
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rq;
     VkVertexInputAttributeDescription va[32];
     VkVertexInputBindingDescription vb[17];
@@ -3810,6 +3942,27 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
             vi.vertexBindingDescriptionCount = v.n_bind, vi.pVertexBindingDescriptions = vb;
         }
         pi.pVertexInputState = &vi, pi.pInputAssemblyState = &ia;
+    } else if (kind == LIB_PR && mesh) {
+        // The task and mesh stages as create_graphics builds them: the mesh module as translated, the task module with
+        // its bindings moved past the mesh stage's (task_off in a stage-independent layout); the mesh stage alone
+        // takes the subgroup pin there, so here too. No vertex outputs are added: what a fragment shader reads and
+        // the mesh stage does not write is filled in the fragment module (FsKey.fill).
+        uint64_t vw, tw = 0;
+        const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
+        if (!vcode || !(m = make_module(vcode, vw, 0))) goto out;
+        mst[0] = st, mst[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT, mst[0].module = m;
+        pin_subgroup32(&mst[0], &rq, vcode, vw);
+        pi.stageCount = 1;
+        if (s->ts) {
+            const uint32_t *tcode = gfx_shader_spirv(s->ts, &tw);
+            uint32_t toff = binding_span(s->vs) - 1;
+            patched = tcode && toff ? spirv_rebind(tcode, tw, toff) : NULL;
+            if (!tcode || !(tm = make_module(patched ? patched : tcode, tw, 0))) goto out;
+            mst[1] = st, mst[1].stage = VK_SHADER_STAGE_TASK_BIT_EXT, mst[1].module = tm;
+            pi.stageCount = 2;
+        }
+        pi.pStages = mst, pi.pViewportState = &vp, pi.pRasterizationState = &rs;
+        pi.layout = lay;
     } else if (kind == LIB_PR) {
         const PrKey *pk = key;
         uint64_t vw, sw, n2 = 0;
@@ -3827,17 +3980,22 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         pi.layout = lay;
     } else if (kind == LIB_FS) {
         if (s->fs) {
+            const FsKey *fk = key;
             uint64_t fw, sw, n2 = 0;
             const uint32_t *fcode = gfx_shader_spirv(s->fs, &fw), *scode = fcode;
             sw = fw;
-            uint32_t *d = NULL;
+            uint32_t *d = NULL, *filled = NULL;
+            if (fk->fill && fcode) {   // a mesh pipeline's: before the other rewrites, as create_graphics
+                if ((filled = spirv_fs_fill_inputs(fcode, fw, fk->fill, fk->points, &n2))) fcode = filled, fw = n2;
+                else LOG_ONCE("vk_pipeline: cannot fill fragment inputs the mesh stage lacks (mask %#x)", fk->fill);
+            }
             if (k->dsb && fcode) {
                 if ((d = spirv_dual_source(fcode, fw, &n2))) fcode = d, fw = n2;
                 else LOG_ONCE("vk_pipeline: SRC1 blend factors but the fragment shader writes no colour output 1");
             }
             patched = fcode ? spirv_set(fcode, fw, 1) : NULL;
-            free(d);
-            if (!patched || !(m = water_pair_module(patched, fw, !k->a2c, ((const FsKey *)key)->water_projective))) goto out;
+            free(d), free(filled);
+            if (!patched || !(m = water_pair_module(patched, fw, !k->a2c, fk->water_projective))) goto out;
             st.stage = VK_SHADER_STAGE_FRAGMENT_BIT, st.module = m;
             pin_subgroup32(&st, &rq, scode, sw);
             pi.stageCount = 1, pi.pStages = &st;
@@ -3870,12 +4028,14 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
     pi.pNext = fb_chain(&fci, &fb, pi.pNext);
     static const char *const kind_name[4] = {"a vertex input library", "a pre-rasterization library",
                                              "a fragment shader library", "a fragment output library"};
-    crash_note(kind_name[kind], s->vs, s->fs, NULL);
+    crash_note(kind == LIB_PR && mesh ? "a pre-rasterization library of task and mesh stages" : kind_name[kind], s->vs,
+               s->fs, mesh ? s->ts : NULL);
     if (pipe_create(1, &pi, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
     plat_crash_context(NULL);
     if (pipe && (kind == LIB_PR || kind == LIB_FS)) fb_note(FB_LIBRARY, &fb);   // the shader libraries: the others compile nothing
 out:
     if (m) vkDestroyShaderModule(P.device, m, NULL);
+    if (tm) vkDestroyShaderModule(P.device, tm, NULL);
     free(patched);
     return pipe;
 }
@@ -3948,6 +4108,12 @@ static VkPipeline lib_build(Lib *b, int kind, const VkPipeState *s, const GKey *
         plat_mutex_lock(&P.lock);
         P.g.lib_n[kind]++, P.g.lib_ms[kind] += ms;
         if (ms > P.g.lib_max[kind]) P.g.lib_max[kind] = ms;
+        int mesh = is_mesh(s) && (kind == LIB_PR || kind == LIB_FS);   // a mesh pipeline's shader library
+        if (mesh) {
+            int i = kind == LIB_FS;
+            P.g.m_lib_n[i]++, P.g.m_lib_ms[i] += ms;
+            if (ms > P.g.m_lib_max[i]) P.g.m_lib_max[i] = ms;
+        }
         int added = kind == LIB_PR && ((const PrKey *)(const void *)b->key)->missing;
         if (added) P.g.pr_added++, P.g.pr_added_ms += ms;
         if (ms >= 25) P.g.lib_slow[kind]++, P.g.lib_slow_ms[kind] += ms;
@@ -3957,7 +4123,9 @@ static VkPipeline lib_build(Lib *b, int kind, const VkPipeState *s, const GKey *
             const uint8_t *id = sh ? gfx_shader_input_id(sh) : NULL;
             P.g.lib_logged++;
             rt_log("vk_pipeline: gpl: a %s library took %.0f ms: shader %02x%02x%02x%02x, %s%s",
-                   kind == LIB_PR ? "pre-rasterization" : "fragment shader", ms, id ? id[0] : 0, id ? id[1] : 0,
+                   kind == LIB_FS ? (mesh ? "fragment shader (of a mesh pipeline)" : "fragment shader")
+                                  : mesh ? "pre-rasterization (task and mesh stages)" : "pre-rasterization",
+                   ms, id ? id[0] : 0, id ? id[1] : 0,
                    id ? id[2] : 0, id ? id[3] : 0, origin_name(sh),
                    added ? "; outputs were added for its fragment shader, a module the preparation did not build"
                    : sh && gfx_shader_origin(sh) == 2 ? "; nothing was prepared from a shader first translated now"
@@ -4030,8 +4198,13 @@ static void libs_destroy(void) {
     }
 }
 
-// The four library keys of pipeline s (key k).
+// The four library keys of pipeline s (key k). A mesh pipeline (one with stage libraries: no_libs is 0) has no use
+// for the first, and what tells its two shader libraries from a vertex pipeline's is here: the pre-rasterization
+// key names the mesh stage and the task stage and adds no outputs (a mesh shader is in no vertex output union), the
+// fragment key carries what is filled in the module and the dynamic shading rate (FsKey). Neither takes a water
+// correction, as create_graphics gives a mesh pipeline none.
 static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, FsKey *fk, FoKey *ok) {
+    int mesh = is_mesh(s);
     memset(v, 0, sizeof *v);
     v->kind = LIB_VI, v->topo_class = k->topo_class;
     memcpy(v->attr_fmt, k->attr_fmt, sizeof v->attr_fmt), memcpy(v->attr_off, k->attr_off, sizeof v->attr_off);
@@ -4040,12 +4213,18 @@ static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, F
     GfxShaderIo fin[32];
     pk->kind = LIB_PR, pk->vs = s->vs, pk->clamp = k->clamp, pk->poly_mode = k->poly_mode, pk->minus_w = k->minus_w;
     pk->lines = (uint8_t)key_lines(k);
-    pk->missing = vs_union_missing(s, fin);
+    if (mesh) pk->ts = s->ts;
+    else pk->missing = vs_union_missing(s, fin);
     for (int i = 0; i < 32; i++)
         if (pk->missing >> i & 1) pk->fin[i] = fin[i];
     memset(fk, 0, sizeof *fk);
     fk->kind = LIB_FS, fk->fs = s->fs, fk->dsb = k->dsb, fk->samples = k->samples, fk->a2c = k->a2c;
-    pk->water_projective = fk->water_projective = (uint8_t)water_mode(s, k);
+    if (mesh) {
+        int points = 0;
+        fk->fill = mesh_fill(s->vs, s->fs, &points);
+        fk->points = (uint8_t)points, fk->vrs = vk_ctx()->has_vrs != 0;
+    }
+    pk->water_projective = fk->water_projective = mesh ? 0 : (uint8_t)water_mode(s, k);
     memset(ok, 0, sizeof *ok);
     ok->kind = LIB_FO, ok->n_color = k->n_color, ok->samples = k->samples, ok->a2c = k->a2c, ok->logic_op = k->logic_op;
     ok->blend_en = k->blend_en, ok->fbl = k->fbl, ok->depth = k->depth, ok->stencil = k->stencil, ok->wmask = k->wmask;
@@ -4073,11 +4252,17 @@ static int gpl_feedback(void) {
 // build 0 (drawing thread): links only when the shader libraries exist (vertex input and fragment output libraries,
 // which hold no shader, are built here); *final 0 = not yet, a worker builds them. build 1 (worker): builds the
 // missing libraries and links with P.lock released. VK_NULL_HANDLE with *final 1 when GPL cannot express the pipeline
-// (shared layout; a feedback loop with NX2NAVI_GPL_FEEDBACK=0) or a build failed.
+// (shared layout, which is also a mesh pipeline's without stage libraries; a feedback loop with
+// NX2NAVI_GPL_FEEDBACK=0) or a build failed.
+// A mesh pipeline is linked from three libraries: the pre-rasterization one with its task and mesh stages, the
+// fragment shader one and the fragment output one. It has no vertex input state, and a complete pipeline needs that
+// state only where its pre-rasterization state holds a vertex shader. The link names no state of its own and no
+// dynamic state: what is dynamic is what the libraries were made with.
 static VkPipeline gpl_link(const VkPipeState *s, const GKey *k, const Layout *lc, int build, int *final) {
     Layout *l = (Layout *)lc;
     *final = 1;
     if (!l->set1 || (k->fbl && !gpl_feedback())) return VK_NULL_HANDLE;
+    int mesh = is_mesh(s);
     uint64_t t0 = qpc();
     ViKey vk_;
     PrKey pk;
@@ -4092,31 +4277,36 @@ static VkPipeline gpl_link(const VkPipeState *s, const GKey *k, const Layout *lc
         if (!build) *final = 0, P.g.defer++;
         return VK_NULL_HANDLE;
     }
-    lib[0] = lib_get(LIB_VI, s, k, l, &vk_, sizeof vk_, 1, &miss);
+    lib[0] = mesh ? VK_NULL_HANDLE : lib_get(LIB_VI, s, k, l, &vk_, sizeof vk_, 1, &miss);
     lib[3] = lib_get(LIB_FO, s, k, l, &ok, sizeof ok, 1, &miss);
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (lib[0] && lib[1] && lib[2] && lib[3]) {
-        VkPipelineLibraryCreateInfoKHR li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = 4,
-                                             .pLibraries = lib};
+    double link_ms = 0;
+    if ((mesh || lib[0]) && lib[1] && lib[2] && lib[3]) {
+        VkPipelineLibraryCreateInfoKHR li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR,
+                                             .libraryCount = mesh ? 3 : 4, .pLibraries = mesh ? lib + 1 : lib};
         VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &li,
                                            .layout = l->layout};
         if (build) plat_mutex_unlock(&P.lock);
         uint64_t t1 = qpc();
         char what[160];   // the parts that differ between links: a link that crashes the driver names its case
         snprintf(what, sizeof what,
-                 "a library link (fragment shader %s, %u colour targets, depth format %u, stencil format %u, %u samples, "
-                 "vertex outputs added %#x)", s->fs ? "yes" : "none", k->n_color, k->depth, k->stencil, k->samples,
-                 pk.missing);
-        crash_note(what, s->vs, s->fs, NULL);
+                 "a library link (%sfragment shader %s, %u colour targets, depth format %u, stencil format %u, %u samples, "
+                 "vertex outputs added %#x)", mesh ? "task and mesh stages, " : "", s->fs ? "yes" : "none", k->n_color,
+                 k->depth, k->stencil, k->samples, pk.missing);
+        crash_note(what, s->vs, s->fs, mesh ? s->ts : NULL);
         if (vkCreateGraphicsPipelines(P.device, VK_NULL_HANDLE, 1, &pi, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
         plat_crash_context(NULL);
         double ms = ms_since(t1);   // the link alone: library builds are counted apart
         if (build) plat_mutex_lock(&P.lock);
-        P.g.link_ms += ms;
+        P.g.link_ms += ms, link_ms = ms;
         if (ms > P.g.link_max) P.g.link_max = ms;
     }
     if (pipe) P.g.links++, P.g.fb_links += k->fbl != 0;
     else if (!P.g.link_fail++) rt_log("vk_pipeline: gpl: fast link failed; such draws wait or skip as without GPL");
+    if (pipe && mesh) {
+        P.g.m_links++, P.g.m_link_ms += link_ms;
+        if (link_ms > P.g.m_link_max) P.g.m_link_max = link_ms;
+    }
     double total = ms_since(t0);
     if (!build && total > 5.0 && P.g.slow++ < 16)
         rt_log("vk_pipeline: gpl: fast link on the drawing thread took %.1f ms", total);
@@ -4415,10 +4605,12 @@ static double now_ms(void) { return (double)plat_now_ns() / 1e6; }
 // Caller holds P.lock.
 // p, which a draw missed, has its first usable pipeline: how long that took is how long its draws were skipped or
 // waited. fast 0: it had no fast link and this is the optimised build. Caller holds P.lock.
-// The summary (save_with) counts what a slow one can be: a mesh pipeline (no stage libraries, so its whole build), one
-// the key file names whose prebuild had not come to it, one with a shader translated in this session (nothing of it
-// was prepared, so its libraries compile cold). The first READY_LOGS that took READY_SLOW_MS or longer get a line
-// each with those facts, so a log says which pipelines left their draws out of the picture and for which reason.
+// The summary (save_with) counts what a slow one can be: a mesh pipeline (its task and mesh library is the largest
+// to compile, and without stage libraries, no_libs, this is its whole build), one the key file names whose prebuild
+// had not come to it, one with a shader translated in this session (nothing of it was prepared, so its libraries
+// compile cold). The first READY_LOGS that took READY_SLOW_MS or longer get a line each with those facts, so a log
+// says which pipelines left their draws out of the picture and for which reason. The mesh pipelines are also counted
+// by themselves: how many became usable through a fast link, and after how long.
 #define READY_SLOW_MS 50.0
 #define READY_LOGS 48
 static void ready_note(Pipe *p, int fast) {
@@ -4435,6 +4627,10 @@ static void ready_note(Pipe *p, int fast) {
     int fresh = gfx_shader_origin(j->s.vs) == 2 || (j->s.fs && gfx_shader_origin(j->s.fs) == 2) ||
                 (j->s.ts && gfx_shader_origin(j->s.ts) == 2);
     P.g.ready_mesh += (uint64_t)mesh, P.g.ready_recorded += j->prebuild, P.g.ready_fresh += (uint64_t)fresh;
+    if (mesh) {
+        P.g.m_ready_fast += fast != 0, P.g.m_ready_ms += ms;
+        if (ms > P.g.m_ready_max) P.g.m_ready_max = ms;
+    }
     if (ms < READY_SLOW_MS || P.g.ready_logged >= READY_LOGS) return;
     P.g.ready_logged++;
     const uint8_t *vi = gfx_shader_input_id(j->s.vs), *fi = j->s.fs ? gfx_shader_input_id(j->s.fs) : NULL;
@@ -4444,8 +4640,8 @@ static void ready_note(Pipe *p, int fast) {
            "%02x%02x%02x%02x (%s), fragment shader %s (%s)%s%s",
            ms, mesh ? "mesh" : "vertex",
            fast ? "fast-linked, so the time went to its stage libraries (the lines \"a ... library took\" name the slow ones)"
-                : mesh ? "which has no stage libraries: this is its whole build"
-                       : "which got no fast link: this is its whole build",
+                : no_libs(&j->s, p->lay) ? "which has no stage libraries: this is its whole build"
+                                         : "which got no fast link: this is its whole build",
            j->prebuild ? "pipeline-keys.bin names it and its prebuild had not come to it" : "not in pipeline-keys.bin before",
            mesh ? "mesh" : "vertex", vi[0], vi[1], vi[2], vi[3], origin_name(j->s.vs), fid, origin_name(j->s.fs),
            j->k.fbl ? "; feedback loop" : "", P.g.ready_logged == READY_LOGS ? " (the last such line of this run)" : "");
@@ -4492,7 +4688,7 @@ static void u_run(LibJob *lj) {
 // worker linked every new pipeline of a burst, one after another at 5 to 10 ms each. On a first visit to Kokiri
 // Forest (RTX 5090, libraries in the driver's cache) 180 of the 444 pipelines draws missed took over 50 ms to become
 // usable, the longest 1.3 s, and their draws were missing from every frame until then; with the library workers
-// linking, 23 did, 19 of them mesh pipelines, which have no fast link.
+// linking, 23 did, 19 of them mesh pipelines, which had no fast link then (they have one with mesh_libs).
 static int fast_workers(void) {
     static int on = -1;
     if (on < 0) on = cfg_bool("NX2NAVI_PIPE_FAST_WORKERS");
@@ -4505,7 +4701,7 @@ static Job *fast_take(void) {
     if (!P.gpl || !fast_workers()) return NULL;
     for (Job *j = A.head, *prev = NULL; j; prev = j, j = j->next) {
         Pipe *p = j->p;
-        if (p->info.pipeline || p->fast_tried || p->link_queued || !p->lay || is_mesh(&j->s)) continue;
+        if (p->info.pipeline || p->fast_tried || p->link_queued || !p->lay || no_libs(&j->s, p->lay)) continue;
         if (prev) prev->next = j->next;
         else A.head = j->next;
         if (A.tail == j) A.tail = prev;
@@ -4768,7 +4964,7 @@ static void pipe_worker(void *arg) {
         // Step 1 for a job a draw waits for: its stage libraries and the fast link. Step 2, the optimised build, goes to
         // the head of the low queue, so a burst of new pipelines gets every fast link before any optimised build.
         if (P.gpl && (!j->prebuild || j->demanded) && !j->p->info.pipeline && !j->p->fast_tried && j->p->lay &&
-            !is_mesh(&j->s)) {
+            !no_libs(&j->s, j->p->lay)) {
             int final;
             VkPipeline f = gpl_link(&j->s, &j->k, j->p->lay, 1, &final);   // releases P.lock while building
             j->p->fast_tried = 1;
@@ -4874,16 +5070,16 @@ static void promote(Pipe *p) {
     }
 }
 
-// A draw waits up to wait_ms for the pipeline of job j, which has no fast link (a mesh pipeline, a pipeline without
-// stage libraries, or one whose link failed) and so needs its whole build. While the job is still queued the wait
-// buys nothing: the draw queue is first in, first out, and the jobs before it are the fast links and builds of other
-// draws' misses, so on a burst of new pipelines the one a draw stood waiting for started last and the draw was
-// skipped at the end of its wait all the same.
+// A draw waits up to wait_ms for the pipeline of job j, which has no fast link (a pipeline without stage libraries,
+// as a mesh pipeline is with NX2NAVI_GPL_MESH=0, or one whose link failed) and so needs its whole build. While the
+// job is still queued the wait buys nothing: the draw queue is first in, first out, and the jobs before it are the
+// fast links and builds of other draws' misses, so on a burst of new pipelines the one a draw stood waiting for
+// started last and the draw was skipped at the end of its wait all the same.
 // - The job goes to the head of the draw queue and a worker is woken, so the next free worker takes it.
 // - A wait longer than TAKE_WAIT_MS is not one of a frame's budgets (vk_exec_draw.c frame_wait is at most 500 ms): the
 //   caller wants this pipeline whatever it takes (a one-shot draw with NX2NAVI_ONESHOT_BUDGET=0). With no worker idle
 //   the job is then built here at once (job_build), as a library no worker took is (lib_wait). A wait inside a
-//   budget is never turned into a build on this thread: a compile takes 0.2 to 1.1 s for a mesh pipeline, and the
+//   budget is never turned into a build on this thread: a whole mesh pipeline takes 0.2 to 1.1 s to compile, and the
 //   budget exists so that the replay thread is not held that long.
 // Caller holds P.lock; it is released while the job is built here.
 #define TAKE_WAIT_MS 500u
@@ -4914,6 +5110,21 @@ static void job_wanted(Job *j, uint32_t wait_ms) {
     plat_cond_signal(&work_cv);
 }
 
+// The stage-independent layout of a mesh pipeline that has stage libraries (mesh_libs): the mesh stage's bindings and
+// the task stage's after them in set 0, which the pre-rasterization library of the two is made with, and the fragment
+// stage's in set 1, which is the set of that fragment shader in a vertex pipeline too, so the fragment shader library
+// can be the same one. NULL with *why set. On success *B holds both lists, set 0 first (layout_pair). Caller holds
+// P.lock.
+static Layout *mesh_pair_layout(const VkPipeState *s, Bindings *B, const char **why) {
+    Bindings F = {0};
+    Layout *l = NULL;
+    if (!add_stage(B, s->vs, 0) || (s->ts && !add_stage(B, s->ts, binding_span(s->vs) - 1)) ||
+        (s->fs && !add_stage(&F, s->fs, 0))) *why = "too many bindings";
+    else if (!(l = layout_pair(B, &F))) *why = "descriptor layout creation failed";
+    B->pool |= F.pool;
+    return l;
+}
+
 // Enters a missing pipeline: built here (mode 0), or queued for a draw (1) or for the prebuild (2). Failures are
 // entered too. *queued: 1 when a job owns it. Caller holds P.lock.
 static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode, int *queued) {
@@ -4924,15 +5135,20 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
     uint32_t span = binding_span(s->vs);
     int mesh = is_mesh(s);
     if (mesh) {
-        // Mesh draws (VK_EXT_mesh_shader): one set holding the mesh stage's bindings, the fragment stage's after them and
-        // the task stage's after those (create_graphics renumbers both modules); no libraries (the GPL fast link is for
-        // vertex pipelines). They go to the workers like the others: built here, each new one stopped the frame for its
-        // whole compile (0.26-0.51 s in Kokiri Forest), and they are recorded for the boot prewarm (keys_note).
+        // Mesh draws (VK_EXT_mesh_shader). With stage libraries (mesh_libs) the layout is a stage-independent pair
+        // like a vertex pipeline's (mesh_pair_layout). Without them, and for an emulated mesh pipeline, one set holds
+        // the mesh stage's bindings, the fragment stage's after them and the task stage's after those (create_graphics
+        // renumbers both modules), and the pipeline has no fast link. They go to the workers like the others: built
+        // here, each new one stopped the frame for its whole compile (0.26-0.51 s in Kokiri Forest), and they are
+        // recorded for the boot prewarm (keys_note).
         uint32_t fspan = s->fs ? binding_span(s->fs) : 1;
         int emu = !vk_ctx()->has_mesh_shader && mesh_emu_on();
         if (!vk_ctx()->has_mesh_shader && !emu) why = "the GPU has no mesh shaders (mesh_emulation = 1 emulates them)";
         else if ((s->fs && gfx_shader_stage(s->fs) != GFX_STAGE_FS) || (s->ts && gfx_shader_stage(s->ts) != GFX_STAGE_TS)) why = "stage mismatch";
-        else if (!add_stage(&B, s->vs, 0) || (s->fs && !add_stage(&B, s->fs, span - 1)) ||
+        else if (!emu && mesh_libs()) {
+            l = mesh_pair_layout(s, &B, &why);
+            span = 1;   // the fragment module keeps its bindings, in set 1
+        } else if (!add_stage(&B, s->vs, 0) || (s->fs && !add_stage(&B, s->fs, span - 1)) ||
                  (s->ts && !add_stage(&B, s->ts, span - 1 + fspan - 1))) why = "too many bindings";
         else if (!(l = emu ? layout_get_emu(&B) : layout_get(&B))) why = "descriptor layout creation failed";
     } else if (gfx_shader_stage(s->vs) != GFX_STAGE_VS || (s->fs && gfx_shader_stage(s->fs) != GFX_STAGE_FS)) why = "stage mismatch";
@@ -5088,7 +5304,8 @@ static void lib_wait(const VkPipeState *s, const GKey *k, Layout *l, double end)
 // and links on its thread in microseconds instead of waiting for them or being skipped while they build. Nothing else
 // is entered, no pipeline, no optimised build and no key record: a state the scan guessed wrong costs two libraries
 // at most. The feedback loop bits, the topology and the targets do not matter here, as no shader library depends on
-// them. Returns the libraries queued.
+// them. A mesh draw is named too where mesh pipelines have stage libraries (mesh_libs): its task and mesh library is
+// the one that takes longest to make. Returns the libraries queued.
 static int hint_on(void) {
     static int on = -1;
     if (on < 0) on = cfg_bool("NX2NAVI_PIPE_AHEAD");
@@ -5096,8 +5313,11 @@ static int hint_on(void) {
 }
 
 int vk_pipeline_hint(const VkPipeState *s) {
-    if (!A.on || !U.on || !hint_on() || !s->vs || !ensure_init() || !P.gpl || !P.indep || is_mesh(s)) return 0;
-    if (gfx_shader_stage(s->vs) != GFX_STAGE_VS || (s->fs && gfx_shader_stage(s->fs) != GFX_STAGE_FS)) return 0;
+    if (!A.on || !U.on || !hint_on() || !s->vs || !ensure_init() || !P.gpl || !P.indep) return 0;
+    int mesh = is_mesh(s);
+    if (mesh ? !mesh_libs() || (s->ts && gfx_shader_stage(s->ts) != GFX_STAGE_TS) : gfx_shader_stage(s->vs) != GFX_STAGE_VS)
+        return 0;
+    if (s->fs && gfx_shader_stage(s->fs) != GFX_STAGE_FS) return 0;
     GKey k;
     gkey_fill(s, &k);
     if (k.topo_class == 3) return 0;
@@ -5106,7 +5326,9 @@ int vk_pipeline_hint(const VkPipeState *s) {
     plat_mutex_lock(&P.lock);
     if (!pipe_find(&k, sizeof k, h)) {
         Bindings B = {0}, F = {0};
-        Layout *l = add_stage(&B, s->vs, 0) && (!s->fs || add_stage(&F, s->fs, 0)) ? layout_pair(&B, &F) : NULL;
+        const char *why = NULL;
+        Layout *l = mesh ? mesh_pair_layout(s, &B, &why)
+                  : add_stage(&B, s->vs, 0) && (!s->fs || add_stage(&F, s->fs, 0)) ? layout_pair(&B, &F) : NULL;
         Lib *b[2];
         uint64_t q0 = U.queued, w0 = U.waits;
         if (l && l->set1 && workers_start() && lib_queue(s, &k, l, b)) queued = (int)(U.queued - q0);
@@ -5147,13 +5369,13 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
                       : "builds its libraries itself (NX2NAVI_PIPE_WAIT=draw)");
     }
     double end = wait_ms ? now_ms() + wait_ms : 0;
-    if (p && p->building && P.gpl && !p->info.pipeline && !p->fast_tried && !p->link_queued && p->lay && !is_mesh(s) &&
-        wait_ms && draw_build && U.on && link_queue(p, s, &k, (Layout *)p->lay)) {
+    if (p && p->building && P.gpl && !p->info.pipeline && !p->fast_tried && !p->link_queued && p->lay &&
+        !no_libs(s, p->lay) && wait_ms && draw_build && U.on && link_queue(p, s, &k, (Layout *)p->lay)) {
         // the libraries and the link on the library workers; this thread waits below without building
         p->fast_tried = 1;
         job_lower(p->job);
     } else if (p && p->building && P.gpl && !p->info.pipeline && !p->fast_tried && !p->link_queued && p->lay &&
-               !is_mesh(s)) {
+               !no_libs(s, p->lay)) {
         int final = 0, build = wait_ms != 0 && draw_build;
         uint64_t p0 = perf_begin(), t0 = qpc();
         if (build && U.on) {
@@ -5345,9 +5567,12 @@ void vk_pipeline_prewarm(void) {
 // pipelines that may never be drawn, and running out of commit ends the game (a failed allocation or a lost device).
 // auto leaves them out there and only there. A pipeline left out is made at its first draw as any new one is, from
 // pipeline-cache.bin when the preparation built it (0.5-0.8 ms on a worker), and is the install's own from then on:
-// the next start builds it at boot. Mesh pipelines are built at boot either way: they have no fast link, and a draw
-// waits for the whole build. The list's pairs still count in the vertex output unions, so the modules stay the ones
-// the preparation built.
+// the next start builds it at boot. Mesh pipelines are built at boot either way. Without stage libraries a draw
+// waits for their whole build. With them (mesh_libs) the first draw of one would be linked from its libraries, but
+// those are the largest modules the game has, and the few frames they take to come out of the caches are frames in
+// which a kind of foliage is missing from a place the player has just entered: built here, it is there from the
+// first frame. The list's pairs still count in the vertex output unions, so the modules stay the ones the
+// preparation built.
 static int seed_boot(void) {
     static int on = -1;
     if (on >= 0) return on;
@@ -5454,7 +5679,7 @@ static void prewarm_run(void) {
         }
         GKey k;
         gkey_fill(&s, &k);
-        if (!is_mesh(&s)) {   // the stage libraries lb_start prebuilds are for vertex pipelines
+        if (!is_mesh(&s)) {   // the state of the single shaders' libraries (lb_state): vertex pipelines decide it
             pr_hist[(k.clamp & 1) | (k.poly_mode & 3) << 1 | (k.minus_w & 1) << 3]++;
             fs_hist[k.samples >= 8 ? 3 : k.samples >= 4 ? 2 : k.samples >= 2 ? 1 : 0]++;
         }
@@ -7930,13 +8155,28 @@ static int save_with(uint32_t wait_ms, int exiting) {
         uint64_t rn = P.g.ready_n[0] + P.g.ready_n[1] + P.g.ready_n[2] + P.g.ready_n[3] + P.g.ready_n[4] + P.g.ready_n[5];
         rt_log("vk_pipeline: gpl: pipelines a draw missed were usable after under 4 ms %llu, 4-8 ms %llu, 8-17 ms %llu, "
                "17-50 ms %llu, 50-150 ms %llu, longer %llu (avg %.1f ms, longest %.0f ms); %llu of them had no fast link; "
-               "%llu were mesh pipelines (no stage libraries), %llu were named in pipeline-keys.bin and not prebuilt yet "
-               "(the others were new to this install), %llu had a shader translated in this session",
+               "%llu were mesh pipelines (counted by themselves below), %llu were named in pipeline-keys.bin and not "
+               "prebuilt yet (the others were new to this install), %llu had a shader translated in this session",
                (unsigned long long)P.g.ready_n[0], (unsigned long long)P.g.ready_n[1], (unsigned long long)P.g.ready_n[2],
                (unsigned long long)P.g.ready_n[3], (unsigned long long)P.g.ready_n[4], (unsigned long long)P.g.ready_n[5],
                rn ? P.g.ready_ms / (double)rn : 0.0, P.g.ready_max, (unsigned long long)P.g.ready_nofast,
                (unsigned long long)P.g.ready_mesh, (unsigned long long)P.g.ready_recorded,
                (unsigned long long)P.g.ready_fresh);
+        // The mesh pipelines by themselves: with stage libraries the first two numbers follow each other and the
+        // times are a link's; without (the start's line says why) none is linked and the time is a whole build's.
+        if (vk_ctx()->has_mesh_shader)
+            rt_log("vk_pipeline: gpl: mesh pipelines (%s): %llu fast links (avg %.2f ms, max %.2f ms); the %llu a draw "
+                   "missed were usable after avg %.1f ms, longest %.0f ms, %llu of them through a fast link (the others "
+                   "after their whole build); their libraries made in this run: %llu of task and mesh stages (avg %.1f "
+                   "ms, max %.0f ms), %llu fragment shader (avg %.1f ms, max %.0f ms)",
+                   mesh_libs() ? "linked from stage libraries" : "built whole, without stage libraries",
+                   (unsigned long long)P.g.m_links, P.g.m_links ? P.g.m_link_ms / (double)P.g.m_links : 0.0,
+                   P.g.m_link_max, (unsigned long long)P.g.ready_mesh,
+                   P.g.ready_mesh ? P.g.m_ready_ms / (double)P.g.ready_mesh : 0.0, P.g.m_ready_max,
+                   (unsigned long long)P.g.m_ready_fast, (unsigned long long)P.g.m_lib_n[0],
+                   P.g.m_lib_n[0] ? P.g.m_lib_ms[0] / (double)P.g.m_lib_n[0] : 0.0, P.g.m_lib_max[0],
+                   (unsigned long long)P.g.m_lib_n[1], P.g.m_lib_n[1] ? P.g.m_lib_ms[1] / (double)P.g.m_lib_n[1] : 0.0,
+                   P.g.m_lib_max[1]);
         if (P.g.hints)
             rt_log("vk_pipeline: gpl: looking ahead named %llu pipeline states not known yet and queued %llu stage libraries "
                    "for them", (unsigned long long)P.g.hints, (unsigned long long)P.g.hint_libs);

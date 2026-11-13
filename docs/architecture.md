@@ -182,7 +182,12 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   linked on several threads while the pool is inside optimised builds (`lib_worker`, `fast_take`); and the first
   draw of a submission that misses has the rest of the submission read ahead, which queues the stage libraries of
   every pipeline the later draws need before the replay reaches them (`runtime/vk_exec.c` `vk_exec_ahead`,
-  `vk_pipeline_hint`). Mesh pipelines have no libraries and are built whole. Compute pipelines
+  `vk_pipeline_hint`). Mesh pipelines are linked the same way (`gpl_mesh`, `vk_pipeline.c` `mesh_lib_init`): the task
+  and mesh stages make one pre-rasterization library, no vertex input library is linked (a mesh pipeline has no such
+  state), and the fragment shader and fragment output libraries are the vertex pipelines' where their keys allow (a
+  mesh pipeline's fragment library differs where the mesh stage leaves an input unwritten, and on a device that
+  sets a shading rate per draw). With `gpl_mesh = 0`, and wherever the start's
+  log says so, a mesh pipeline has no libraries and is built whole, 0.2 to 1.1 s the first time. Compute pipelines
   are compiled outside the pipeline lock, and one compile serves every thread that needs it. The boot builds the
   pipeline of every compute shader play recorded or the shader preparation listed, but keeps only those of the shaders
   dispatched most recently (`compute-used.bin`, `compute_keep`): the others go into the pipeline cache and are

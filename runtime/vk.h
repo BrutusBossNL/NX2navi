@@ -941,6 +941,9 @@ double vk_pipeline_building_ms(const VkPipeState *s);
 // The stage libraries of a draw the replay has not reached yet, queued to the workers when no pipeline is known for its
 // state (vk_pipeline.c "stage libraries ahead of their draws"). Returns the libraries queued.
 int vk_pipeline_hint(const VkPipeState *s);
+// 1 when mesh pipelines are linked from stage libraries like vertex pipelines (NX2NAVI_GPL_MESH; vk_pipeline.c
+// mesh_lib_init says where not): a new one is then usable after a link, not only after its whole build.
+int vk_pipeline_mesh_libs(void);
 // rt_boot calls it unless --shot is given; NX2NAVI_PIPE_SYNC=1 makes it a no-op. Of the probes only --probe-prewarm
 // calls it.
 void vk_pipeline_async_enable(void);
