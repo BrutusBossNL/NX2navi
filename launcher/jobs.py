@@ -531,10 +531,10 @@ class UpdateDownloadJob(Job):
         self.begin('download')
         prog = lambda d, t: self.progress('download', d / max(t, 1), f'{d / 1e6:.1f} of {t / 1e6:.1f} MB')  # noqa: E731
         folder = updater.stage_app(layout, self.release, progress=prog, cancel=self.cancelled,
-                                   version=self.ctx.version)
+                                   version=self.ctx.version, log=self.log)
         if updater.runtime_needed(layout, self.release):
             updater.stage_runtime(layout, self.release, progress=prog, cancel=self.cancelled,
-                                  version=self.ctx.version)
+                                  version=self.ctx.version, log=self.log)
         self.finish('download')
         self.begin('verify')
         if not (folder / 'launcher' / 'start.pyw').is_file():
@@ -609,7 +609,8 @@ class StageJob(Job):
         winsys.background_thread()
         self.begin('download')
         prog = lambda d, t: self.progress('download', d / max(t, 1), f'{d / 1e6:.1f} of {t / 1e6:.1f} MB')  # noqa: E731
-        updater.stage(self.ctx.layout, self.release, progress=prog, cancel=self.cancelled, version=self.ctx.version)
+        updater.stage(self.ctx.layout, self.release, progress=prog, cancel=self.cancelled, version=self.ctx.version,
+                      log=self.log)
         self.finish('download')
 
 

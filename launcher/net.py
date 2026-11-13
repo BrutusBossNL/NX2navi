@@ -277,12 +277,22 @@ def space_problem(folder, need, what):
             f'{free / 1e6:,.0f} MB free): make room there and try again')
 
 
-def download(url, dest, sha256=None, size=None, progress=None, cancel=None, headers=None, retries=4, version='dev'):
+PART_OF = '.of'   # <dest>.part.of: what the part file beside it is a part of (download)
+
+
+def download(url, dest, sha256=None, size=None, progress=None, cancel=None, headers=None, retries=4, version='dev',
+             log=None):
     """Fetch url to dest through dest.part, resuming a part file a cut connection left. progress(done, total) after
     every chunk; cancel() returning True raises Cancelled. A wrong size or sha256 deletes the file and raises
     DownloadError. A dest already holding the expected sha256 is kept without a request. NoSpace, before anything
     is written, when the disk has no room for the rest of the file (the expected size, else the size the server
-    names)."""
+    names).
+
+    A part file is resumed only as a part of the same file: dest.part.of beside it names the file it was begun
+    for, by the expected sha256 (the same file from any server) or, without one, by its address.
+    A part begun for another file under the same name (a release published again with other bytes) is deleted
+    with a line for log, where resuming it ended in "sha256 ..., expected ..." as if the download were damaged. A
+    part without that note (an older launcher's) is resumed as before."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if sha256 and dest.is_file() and sha256_file(dest) == sha256.lower():
@@ -290,6 +300,22 @@ def download(url, dest, sha256=None, size=None, progress=None, cancel=None, head
             progress(dest.stat().st_size, dest.stat().st_size)
         return dest
     part = dest.with_name(dest.name + '.part')
+    note = part.with_name(part.name + PART_OF)
+    wanted = f'sha256 {sha256.lower()}' if sha256 else url
+    if part.is_file():
+        try:
+            begun_for = note.read_text(encoding='utf-8').strip()
+        except (OSError, ValueError):
+            begun_for = ''
+        if begun_for and begun_for != wanted:
+            part.unlink(missing_ok=True)
+            if log:
+                log(f'{part.name} was begun for another file ({begun_for}), not this one ({wanted}): it is deleted '
+                    'and the download starts over')
+    try:
+        note.write_text(wanted, encoding='utf-8')
+    except OSError:   # without the note the part is resumed as it always was
+        pass
     if size:
         full = space_problem(dest.parent, size - (part.stat().st_size if part.is_file() else 0), dest.name)
         if full:
@@ -363,4 +389,5 @@ def download(url, dest, sha256=None, size=None, progress=None, cancel=None, head
             part.unlink(missing_ok=True)
             raise DownloadError(f'{url}: sha256 {digest}, expected {sha256.lower()}')
     os.replace(part, dest)
+    note.unlink(missing_ok=True)
     return dest

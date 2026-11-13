@@ -693,6 +693,47 @@ class NetTest(Tmp):
         for d, t in fetch({'Content-Length': '7'}, size=len(data)):
             self.assertEqual(t, len(data))
 
+    def test_a_part_file_of_another_download_is_not_resumed(self):
+        """A part file is resumed only for the file it was begun for (f.bin.part.of names it by the expected sha256).
+        One begun for other bytes under the same name, as when a release is published again, is deleted with a log
+        line; resumed, it ended in a sha256 error that read as a damaged download. The same file from another
+        server and a part without a note are resumed."""
+        old, new = os.urandom(6000), os.urandom(6000)
+        (self.tmp / 'f.bin').write_bytes(new)
+        srv = Server(self.tmp)
+        self.addCleanup(srv.close)
+        dest = self.tmp / 'out' / 'f.bin'
+        dest.parent.mkdir()
+        part, note = dest.with_name('f.bin.part'), dest.with_name('f.bin.part.of')
+        part.write_bytes(old[:2000])                                      # cut while the old release downloaded
+        note.write_text(f'sha256 {sha(old)}')
+        lines = []
+        net.download(srv.url + 'f.bin', dest, sha256=sha(new), size=len(new), log=lines.append)
+        self.assertEqual(dest.read_bytes(), new)
+        self.assertIsNone(srv.hits[-1][1].get('Range'))                   # from the start
+        self.assertEqual(len(lines), 1)
+        self.assertIn('f.bin.part was begun for another file', lines[0])
+        self.assertFalse(part.exists() or note.exists())                  # nothing stays beside the finished file
+        dest.unlink()
+        part.write_bytes(new[:2000])                                      # cut during this same file, on another server
+        note.write_text(f'sha256 {sha(new)}')
+        other = srv.url.replace('127.0.0.1', 'localhost')
+        net.download(other + 'f.bin', dest, sha256=sha(new), size=len(new), log=lines.append)
+        self.assertEqual(srv.hits[-1][1].get('Range'), 'bytes=2000-')
+        self.assertEqual((dest.read_bytes(), len(lines)), (new, 1))
+        dest.unlink()
+        part.write_bytes(new[:3000])                                      # left by a launcher that wrote no note
+        net.download(srv.url + 'f.bin', dest, sha256=sha(new), size=len(new), log=lines.append)
+        self.assertEqual(srv.hits[-1][1].get('Range'), 'bytes=3000-')
+        self.assertEqual(dest.read_bytes(), new)
+        with self.assertRaises(net.Cancelled):                            # a cut download says what its part is of
+            net.download(srv.url + 'f.bin', self.tmp / 'out' / 'c.bin', sha256=sha(new), cancel=lambda: True)
+        self.assertEqual((self.tmp / 'out' / 'c.bin.part.of').read_text(), f'sha256 {sha(new)}')
+        self.layout.downloads.mkdir(parents=True, exist_ok=True)
+        (self.layout.downloads / 'x.zip.part.of').write_text('sha256 0')
+        updater.prune(self.layout)                                        # and a note left behind is cleared away
+        self.assertEqual(list(self.layout.downloads.iterdir()), [])
+
     def low_disk(self, free):
         """shutil.disk_usage as net sees it, answering with free[0] bytes free."""
         import collections
@@ -716,14 +757,14 @@ class NetTest(Tmp):
             self.assertEqual(net.space_problem(dest.parent, 1 << 20, 'x'), '')            # 1 MB and the margin fit
             self.assertEqual(net.space_problem(self.tmp / 'not' / 'made' / 'yet', 1 << 20, 'x'), '')
             with self.assertRaises(net.NoSpace) as refused:                              # the expected size is known:
-                net.download(srv.url + 'f.bin', dest, size=64 << 20)                     # no request is made
+                net.download(srv.url + 'f.bin', dest, sha256=sha(data), size=64 << 20)   # no request is made
             self.assertEqual(srv.hits, [])
             self.assertIn('no room for f.bin on ', str(refused.exception))
             self.assertIn('MB needed, 42 MB free', str(refused.exception))
             self.assertEqual(part.read_bytes(), data[:1000])
             free[0] = 1 << 20
             with self.assertRaises(net.NoSpace):                                         # else the server's length is
-                net.download(srv.url + 'f.bin', dest)
+                net.download(srv.url + 'f.bin', dest, sha256=sha(data))
             self.assertEqual(len(srv.hits), 1)
             self.assertEqual(part.read_bytes(), data[:1000])                             # kept for when there is room
             free[0] = 1 << 30

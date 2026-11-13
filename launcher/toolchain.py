@@ -269,7 +269,7 @@ def install(layout, lock, progress=None, cancel=None, log=print, version='dev'):
             try:
                 net.download(mirror + p['filename'], dest, sha256=p['sha256'], size=p['csize'], cancel=cancel,
                              progress=(lambda d, t, base=done_before: progress and progress('download', base + d, total)),
-                             version=version)
+                             version=version, log=lambda line: log(f'toolchain: {line}'))
                 last_error = None
                 break
             except net.NoSpace as e:   # another server has the same file for the same full disk

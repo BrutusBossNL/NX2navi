@@ -441,6 +441,11 @@ before a mod's zip is. Without room the step stops with how much is needed and h
 stays for when there is room. A disk that fills in the middle of a download is named as full at once, not tried
 again four times.
 
+A cut download is resumed from its part file, `<name>.part`, only as a part of the same file: `<name>.part.of`
+beside it names the file the part was begun for, by the expected sha256, so the same file is resumed from any
+server. A part begun for other bytes under the same name (a release published again) is deleted with a line in
+`launcher.log` and the download starts over; a part without the note, from an older launcher, is resumed as before.
+
 ## Uninstalling
 
 Settings > Uninstall NX2navi, or Settings > Apps > NX2navi (which runs `NX2navi.exe --uninstall`): what the launcher
