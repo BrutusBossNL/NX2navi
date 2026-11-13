@@ -602,12 +602,13 @@ static const char *raw_get(const char *name);
 // first submission ends once the replay has submitted it (vk_memory.c stage_on, vk_sync.c vk_sync_recorded_wait),
 // texture checks share their write-watch queries (vk_memory.c snap_widen_n), video memory stays within the heaps'
 // budgets (vk_device.c vram_heap_limits, vk_vma_budget.c), large upload batches go to the queue early (vk_memory.c
-// vk_upload_end), frames are prepared on a thread of their own and pools the game refills every frame stay in system
-// memory (vk_backend.c, vk_memory.c hot_check). Without the key each of these keeps what 0.9.1 did.
+// vk_upload_end) and pools the game refills every frame stay in system memory (vk_memory.c hot_check). Without the
+// key each of these keeps what 0.9.1 did. Asynchronous replay (vk_backend.c, NX2NAVI_REPLAY_ASYNC) is not among them:
+// it can show a dark or flickering frame now and then, so the mode leaves it off and its row under the mode's switch
+// turns it on for a player who wants it.
 static const struct { const char *key, *value; } LOWEND[] = {
     {"MESH_EMULATION", "1"}, {"TEX_CLOBBER", "1"}, {"MIRROR_STAGE", "1"}, {"SUBMIT_FINISH_GPU", "0"}, {"SNAP_WIDEN", "8"},
-    {"VRAM_HEAP_LIMIT", "auto"}, {"VRAM_RESERVE_MB", "512"}, {"UPLOAD_BATCH_MB", "256"}, {"REPLAY_ASYNC", "1"},
-    {"MIRROR_HOT", "25"},
+    {"VRAM_HEAP_LIMIT", "auto"}, {"VRAM_RESERVE_MB", "512"}, {"UPLOAD_BATCH_MB", "256"}, {"MIRROR_HOT", "25"},
 };
 // The keys that count only while the mode is on (LOWEND_ONLY): without it each reads as unset, whatever the settings
 // file or the environment says, so nothing of the mode acts unless a player turned it on. The menu shows their rows

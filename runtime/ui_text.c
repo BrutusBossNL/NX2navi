@@ -180,7 +180,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                "decoder translated from the console. Lighter streaming while you move.",
     [UI_MENU_LOWEND_ASYNC] = "Asynchronous replay",
     [UI_MENU_LOWEND_ASYNC_DESC] = "Translates the game's GPU commands on a thread of their own instead of the game's, so "
-                                "the game prepares the next frame meanwhile.",
+                                "the game prepares the next frame meanwhile. Off by default: it can show a dark or "
+                                "flickering frame now and then.",
     [UI_MENU_LOWEND_PASS_TIMES] = "Pass times in the log",
     [UI_MENU_LOWEND_PASS_TIMES_DESC] = "GPU time of every render pass and dispatch goes to the log, with the largest "
                                      "viewport each kind of pass draws with. Costs a little frame time.",

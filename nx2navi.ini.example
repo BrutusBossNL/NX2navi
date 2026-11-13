@@ -355,10 +355,10 @@
 # stays within what the driver reports free (vram_heap_limit = auto, vram_reserve_mb = 512), large texture upload
 # batches go to the GPU early (upload_batch_mb = 256; every batch goes at 64 MiB of staging at the latest with or
 # without it, so only a value below 64 acts), game memory is copied for the GPU while a frame is recorded and
-# the game waits less for the GPU (mirror_stage = 1, submit_finish_gpu = 0), frames are prepared on a thread of their
-# own (replay_async = 1, which can show a dark or flickering frame now and then), pools the game refills every frame
-# stay in system memory (mirror_hot = 25), and a texture read after another image was drawn over its memory gets
-# memory of its own (tex_clobber = 1). 0, the default: each of these stays as it was in 0.9.1, and none of these keys
+# the game waits less for the GPU (mirror_stage = 1, submit_finish_gpu = 0), pools the game refills every frame stay
+# in system memory (mirror_hot = 25), and a texture read after another image was drawn over its memory gets memory of
+# its own (tex_clobber = 1). Frames prepared on a thread of their own (replay_async) stay off in this mode too, as they
+# can show a dark or flickering frame now and then; its row under the mode's switch turns them on. 0, the default: each of these stays as it was in 0.9.1, and none of these keys
 # is read. Read at start.
 # low_end_gpu = 0
 # Textures the game released that are kept as they are (1 to 16384); past this count only those that lose nothing
