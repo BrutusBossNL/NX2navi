@@ -6310,10 +6310,12 @@ static int compute_warm_remember(const ComputeWarmKey *key, int completed) {
 }
 
 static void compute_warm_clear(void) {
+    plat_mutex_lock(&compute_warm_lock);
     for (size_t i = 0; i < COMPUTE_WARM_BUCKETS; i++) {
         for (ComputeWarmEntry *e = compute_warm[i], *n; e; e = n) n = e->next, free(e);
         compute_warm[i] = NULL;
     }
+    plat_mutex_unlock(&compute_warm_lock);
 }
 
 // A compute pipeline for cs in layout l; VK_NULL_HANDLE on failure. No lock needed (P.cache is driver-synchronised).
@@ -6331,12 +6333,10 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l, int cache
     if (over) code = over, words = ow;
     uint32_t *fog = spirv_fog_keep_froxels(code, words);
     if (fog) free(over), over = fog, code = fog;
-    VkShaderModule m = make_module(code, words, 0);
-    if (!m) return free(over), VK_NULL_HANDLE;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rqc;
     VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
                                       .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main"},
                                       .layout = l->layout, .flags = noopt_flag()};
     if (cached_only) ci.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
     pin_subgroup32(&ci.stage, &rqc, code, words);
@@ -6353,14 +6353,16 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l, int cache
         rt_sha256(code, (size_t)words * 4, warm_key.code);
         warm_key.layout = l->layout, warm_key.words = words;
         warm_key.flags = ci.flags, warm_key.stage_flags = ci.stage.flags;
-        if (compute_warm_remember(&warm_key, 0)) {
+        if (compute_warm_remember(&warm_key, 0)) {   // before the module: a reused request makes none
             *already_warm = 1;
             __atomic_fetch_add(&compute_warm_reused, 1, __ATOMIC_RELAXED);
-            vkDestroyShaderModule(P.device, m, NULL);
             free(over);
             return VK_NULL_HANDLE;
         }
     }
+    VkShaderModule m = make_module(code, words, 0);
+    if (!m) return free(over), VK_NULL_HANDLE;
+    ci.stage.module = m;
     VkPipeline pipe = VK_NULL_HANDLE;
     VkPipelineCreationFeedbackCreateInfo fci;
     VkPipelineCreationFeedback fb;
@@ -7435,7 +7437,8 @@ static void lb_report(const char *how) {
            "%llu vertex/fragment skipped (graphics pipeline library off), %llu skipped (the driver crashed on them before, "
            "shader-prepare-skip.txt), %llu large compute shaders left to their first dispatch (NX2NAVI_LIB_PREBUILD_BIG), %zu "
            "queued for the background builder (NX2NAVI_LIB_PREBUILD_BIG_BG), %llu large compute shaders not built because "
-           "no run has dispatched them; process working set %.0f MB", how, (unsigned long long)LB.done, LB.n,
+           "no run has dispatched them; %llu compute requests the same as one built before, not built again "
+           "(NX2NAVI_COMPUTE_WARM_REUSE); process working set %.0f MB", how, (unsigned long long)LB.done, LB.n,
            now_ms() - LB.t0, (unsigned long long)LB.built[0], LB.built[0] ? LB.ms[0] / LB.built[0] : 0.0,
            (unsigned long long)LB.have[0], (unsigned long long)LB.built[1], LB.built[1] ? LB.ms[1] / LB.built[1] : 0.0,
            (unsigned long long)LB.have[1], (unsigned long long)LB.built[2], LB.built[2] ? LB.ms[2] / LB.built[2] : 0.0,
@@ -7444,7 +7447,8 @@ static void lb_report(const char *how) {
            (unsigned long long)LB.warmed[2], LB.warmed[2] ? LB.warm_ms[2] / LB.warmed[2] : 0.0,
            (unsigned long long)(LB.fail[0] + LB.fail[1] + LB.fail[2]),
            (unsigned long long)LB.noshader, (unsigned long long)LB.nolib, (unsigned long long)LB.skipped,
-           (unsigned long long)LB.deferred, BG.n, (unsigned long long)LB.big_unused, (double)mem_proc);
+           (unsigned long long)LB.deferred, BG.n, (unsigned long long)LB.big_unused,
+           (unsigned long long)__atomic_load_n(&compute_warm_reused, __ATOMIC_RELAXED), (double)mem_proc);
     plat_mutex_unlock_shared(&LB.stat);
 }
 
@@ -8615,9 +8619,6 @@ static int cache_save(uint32_t wait_ms, int exiting) {
 // Returns cache_save's answer.
 static int save_with(uint32_t wait_ms, int exiting) {
     if (P.ready) keys_flush(), pb_flush(), cu_flush(), cf_log();
-    uint64_t reused = __atomic_load_n(&compute_warm_reused, __ATOMIC_RELAXED);
-    if (reused) rt_log("vk_pipeline: %llu duplicate compute warm requests reused a successful identical request",
-                       (unsigned long long)reused);
     if (P.ready && P.gpl) {
         rt_log("vk_pipeline: gpl: %llu fast links (%llu by workers, %llu of those by the library workers for skipped draws; "
                "%llu of pipelines with a feedback loop; avg %.2f ms, "
