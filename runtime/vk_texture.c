@@ -993,6 +993,36 @@ static int shadow_scale_of(const nvn_texdesc *d, const TexVkFormat *f, uint32_t 
     return d->width * (uint32_t)scale <= most ? scale : 1;
 }
 
+// NX2NAVI_SHADOW_PCF (default 0): every depth-compare sampler filters linearly. Through a nearest filter each of the
+// game's shadow compares tests one texel and returns 0 or 1, so a shadow edge is a staircase of shadow map texels, and
+// the sun cascades follow the camera, so the stairs crawl along the ground as it moves (Hyrule Field's hills). Through a
+// linear filter the GPU tests the 2x2 texels around the coordinate and blends the four results (percentage-closer
+// filtering), which the game's own four compares then smooth further. With NX2NAVI_SHADOW_SCALE above 1 the samplers
+// filter linearly anyway (make_sampler). Read once: samplers live until shutdown.
+static int shadow_pcf(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = cfg_bool("NX2NAVI_SHADOW_PCF");
+        rt_log("vk: depth-compare samplers: %s (NX2NAVI_SHADOW_PCF=%d)",
+               on ? "linear, each compare blends the 2x2 texels around it" : "the game's filters", on);
+    }
+    return on;
+}
+
+// The filters of the depth-compare samplers made, each kind once (8 at most): whether NX2NAVI_SHADOW_PCF changes
+// anything shows in the log (with every one already linear it does not). Caller holds the lock.
+static void compare_sampler_note(const samp_par *d) {
+    static uint32_t seen[8];
+    static int n;
+    uint32_t kind = (uint32_t)d->minf | (uint32_t)d->magf << 8 | (uint32_t)d->cmp_func << 16 | 1u << 24;
+    for (int i = 0; i < n; i++)
+        if (seen[i] == kind) return;
+    if (n == 8) return;
+    seen[n++] = kind;
+    rt_log("vk: depth-compare sampler: min filter %u, mag filter %u (0 nearest, 1 linear, more: mipmapped), function %u",
+           (unsigned)d->minf, (unsigned)d->magf, (unsigned)d->cmp_func);
+}
+
 // ---- ASTC as BC1 (NX2NAVI_ASTC_BC1, vk_astc.c)
 // A texture the CPU provides whose ASTC blocks all decode opaque is held as BC1, not BC3: the encoder then writes only
 // the colour half of the BC3 blocks it would have written (bc3_encode.comp), which BC1 decodes to the same texels, in
@@ -5698,8 +5728,10 @@ static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
         si.compareOp = compare_op(d->cmp_func);
         // A depth-compare sampler set to nearest returns 0 or 1 per tap, and the game's shaders smooth shadow edges by
         // a few taps spaced for its own shadow map texels. With NX2NAVI_SHADOW_SCALE those taps cover a fraction of the
-        // area and the edges turn hard and stepped; linear filtering makes every tap a 2x2 PCF instead.
-        if (shadow_scale() > 1) si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        // area and the edges turn hard and stepped; linear filtering makes every tap a 2x2 PCF instead. NX2NAVI_SHADOW_PCF
+        // does the same at the game's own map size (shadow_pcf).
+        compare_sampler_note(d);
+        if (shadow_scale() > 1 || shadow_pcf()) si.magFilter = si.minFilter = VK_FILTER_LINEAR;
     }
     VkSamplerCustomBorderColorCreateInfoEXT cb = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT};
     VkSamplerReductionModeCreateInfo rm = {.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO};

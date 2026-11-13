@@ -627,6 +627,12 @@
 # where an object meets the ground and softer the further its shadow falls. Done in the translated shaders (translator
 # patch 0010), so the shader cache is rebuilt once after an update. Read at start.
 # pcss = 0
+# Shadow edge filtering, 0 or 1. Default: off. 1 makes every shadow-map test blend the 2x2 shadow map texels around
+# it (hardware percentage-closer filtering) instead of testing one texel where the game's sampler asks for nearest
+# filtering: shadow edges turn from stair steps of shadow-map texels into soft ramps, and crawl less on the ground as the
+# camera moves. Costs a little GPU time. With shadow_scale above 1 it is on anyway. The log lists the filters of the
+# game's shadow samplers ("depth-compare sampler:"); where they are already linear this changes nothing. Read at start.
+# shadow_pcf = 0
 
 # NVIDIA DLSS / DLAA for the 3D scene, on NVIDIA RTX GPUs with the DLSS model from NVIDIA's DLSS SDK next to the
 # executable (Windows: nvngx_dlss.dll next to nx2navi.exe; Linux: libnvidia-ngx-dlss.so.<version> next to nx2navi, with the
