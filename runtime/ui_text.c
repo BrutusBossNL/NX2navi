@@ -297,6 +297,12 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_MODE_DOCKED] = "Docked", [UI_MENU_MODE_HANDHELD] = "Handheld",
     [UI_MENU_ASSUME_FOCUS] = "Keep running out of focus",
     [UI_MENU_ASSUME_FOCUS_DESC] = "Keeps the game running when you switch to another window.",
+    [UI_MENU_TEXT_SPEED] = "Text speed",
+    [UI_MENU_TEXT_SPEED_DESC] = "How fast the game's message windows show their text. Fast types three times as fast; "
+                                "instant shows each page at once. Text the game does not let you hurry, such as "
+                                "lines timed to a cutscene or a voice, keeps its speed.",
+    [UI_MENU_TEXT_SPEED_NORMAL] = "Normal", [UI_MENU_TEXT_SPEED_FAST] = "Fast",
+    [UI_MENU_TEXT_SPEED_INSTANT] = "Instant",
 
     [UI_MENU_MODS_BUILTIN] = "Built into the port", [UI_MENU_MODS_INSTALLED] = "Installed mods",
     [UI_MENU_MODS_NONE] = "No mods yet. Unpack a mod into the mods folder, one folder per mod with its romfs folder "
@@ -1071,6 +1077,12 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_MODE_DOCKED] = "В док-станции", [UI_MENU_MODE_HANDHELD] = "Портативный",
     [UI_MENU_ASSUME_FOCUS] = "Работать без фокуса",
     [UI_MENU_ASSUME_FOCUS_DESC] = "Игра продолжает работать, когда вы переключаетесь на другое окно.",
+    [UI_MENU_TEXT_SPEED] = "Скорость текста",
+    [UI_MENU_TEXT_SPEED_DESC] = "Как быстро окна сообщений игры показывают текст. Быстро: в три раза быстрее; "
+                                "мгновенно: каждая страница сразу целиком. Текст, который игра не даёт ускорить, "
+                                "например реплики в такт сценке или голосу, идёт с обычной скоростью.",
+    [UI_MENU_TEXT_SPEED_NORMAL] = "Обычная", [UI_MENU_TEXT_SPEED_FAST] = "Быстро",
+    [UI_MENU_TEXT_SPEED_INSTANT] = "Мгновенно",
 
     [UI_MENU_MODS_BUILTIN] = "Встроенные в порт", [UI_MENU_MODS_INSTALLED] = "Установленные моды",
     [UI_MENU_MODS_NONE] = "Модов пока нет. Распакуйте мод в папку mods, каждый мод в свою папку с папкой romfs внутри, и "
@@ -1691,6 +1703,12 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
     [UI_MENU_ASSUME_FOCUS] = "Continuar rodando fora de foco",
     [UI_MENU_ASSUME_FOCUS_DESC] = "Mantém o jogo rodando quando você troca de janela.",
+    [UI_MENU_TEXT_SPEED] = "Velocidade do texto",
+    [UI_MENU_TEXT_SPEED_DESC] = "A rapidez com que as janelas de mensagem do jogo mostram o texto. Rápida escreve três "
+                                "vezes mais rápido; instantânea mostra cada página de uma vez. Textos que o jogo não "
+                                "deixa apressar, como falas sincronizadas com uma cena ou uma voz, mantêm a velocidade.",
+    [UI_MENU_TEXT_SPEED_NORMAL] = "Normal", [UI_MENU_TEXT_SPEED_FAST] = "Rápida",
+    [UI_MENU_TEXT_SPEED_INSTANT] = "Instantânea",
     [UI_MENU_FPS_DISPLAY] = "Taxa do monitor", [UI_MENU_FPS_DISPLAY_HZ] = "Taxa do monitor (%.0f Hz)",
     [UI_MENU_FPS_UNLIMITED] = "Sem limite",
     [UI_MENU_FPS_RTSS] = "limitado pelo RivaTuner Statistics Server",
@@ -2464,6 +2482,11 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_MODE_HANDHELD] = "掌机模式",
     [UI_MENU_ASSUME_FOCUS] = "后台保持运行",
     [UI_MENU_ASSUME_FOCUS_DESC] = "切换到其他窗口时游戏继续运行。",
+    [UI_MENU_TEXT_SPEED] = "文字速度",
+    [UI_MENU_TEXT_SPEED_DESC] = "游戏对话框显示文字的速度。快速为三倍速度；即时则每页立即全部显示。"
+                                "游戏不允许加快的文字（例如与过场动画或语音同步的台词）保持原速。",
+    [UI_MENU_TEXT_SPEED_NORMAL] = "正常", [UI_MENU_TEXT_SPEED_FAST] = "快速",
+    [UI_MENU_TEXT_SPEED_INSTANT] = "即时",
     [UI_MENU_VOLUME] = "音量",
     [UI_MENU_MENU_SOUNDS] = "菜单音效", [UI_MENU_MENU_SOUNDS_DESC] = "本菜单的音效音量。",
     [UI_MENU_VOLUME_DESC] = "游戏总音量。",

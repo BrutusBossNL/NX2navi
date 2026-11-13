@@ -757,6 +757,12 @@
 # lang = en-US
 # System mode reported to the game: docked or handheld.
 # operation_mode = docked
+# Speed of the game's message windows (game 1.1.1; live): normal (the game's), fast (three times as fast; the
+# pauses the text holds stay as long) or instant (each page shows at once, as the game shows it when you press the
+# button that turns the page while it types).
+# Messages the game does not let you hurry, such as text timed against a cutscene or a voice, keep their speed.
+# Needs a game built with this version (the launcher's Rebuild the Game); the menu row shows once it is.
+# text_speed = normal
 # Language of the settings menu and the overlay: en, ru, pt-BR or zh-Hans. Default: the Windows display language, English if
 # it is none of them.
 # menu_lang = en

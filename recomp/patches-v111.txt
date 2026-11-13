@@ -251,3 +251,26 @@ site occlusion_off main 11b82f4 39400008 2a1f03e8   # its update's store
 set sprint NX2NAVI_SPRINT_BUTTON_PATCH 1
 site sprint main 4ae798 f940014a f940014a 9527c9ea   # ldr x10, [x10] -> ldr x10, [x10]; bl page+0xf40
 site sprint main c07f3c 39400108 39400108 950a63fd   # ldrb w8, [x8] -> ldrb w8, [x8]; bl page+0xf30
+
+# Text speed (runtime/text_speed.c). The message window (its update main+0x774b00) shows its text through a typewriter
+# object at window +0x2b0 (its step main+0xafe140): each frame the step adds speed (+0x4c) times the frame's step (s0)
+# to a reveal position (+0x60) and shows every character whose extent that position passed. The message's tags (group 1,
+# main+0xafdff0) hold the script: type 0 waits a number of frames (+0x58, the reveal stops until it has run out), type 1
+# sets the speed to the base (+0x50) times its value, type 2 shows the rest at once, type 3 starts a timer (+0x5c) after
+# which the window turns the page by itself. A press of the decide button while the text types (window +0x348) shows the
+# page at once, ignoring the waits (typewriter +0x72 = 2), unless the window marked the message unskippable (+0x34a):
+# a message with a type 3 tag, and some window types (main+0x76eb40), are, so text timed against a cutscene, a voice or
+# a sound is never hurried. Both sites keep to that rule.
+# Instant: where the update tests the decide press for that (main+0x774b74, tbz w20), the page's byte +0x20c is ORed in,
+# so the game's own skip runs on the first frame of every page it lets the player skip; the test of +0x34a after it is
+# the game's. The same site stores the typewriter (x8, loaded at main+0x774b48) at page +0x200 while the message may be
+# skipped, 0 otherwise: x10 = [x19 +0x34a] - 1 is all ones for 0 and 0 for 1. x9 and x10 are written before they are
+# read again on every path from the site, and no word writes the flags.
+# Fast: where the step loads the speed (main+0xafe1d8), s1 becomes s1 + s1 * eq * (page +0x208), eq being 1 when the
+# typewriter (x19) is the one at page +0x200 (clz of the difference is 64 only for equal values) and +0x208 the
+# factor less one, so only a skippable message window types faster; its waits keep their length. x22, x27, s2 and s8
+# are written by the next words of the step before anything reads them (d8 is saved by its prologue), and no word
+# writes the flags. The set runs only while text_speed is not normal.
+set text_speed NX2NAVI_TEXT_SPEED_PATCH 1
+site text_speed main 774b74 36000074 @page:x9 394d2a6a d100054a 8a0a010a f901012a 39483129 2a140129 36000069   # tbz w20, #0, #0x774b80 -> adrp x9, page; ldrb w10, [x19, #0x34a]; sub x10, x10, #1; and x10, x8, x10; str x10, [x9, #0x200]; ldrb w9, [x9, #0x20c]; orr w9, w9, w20; tbz w9, #0, #0x774b80
+site text_speed main afe1d8 bd404e61 bd404e61 @page:x22 f94102db cb13037b dac0137b d346ff7b 9e220362 bd420ac8 1e280842 1f020421   # ldr s1, [x19, #0x4c]; adrp x22, page; ldr x27, [x22, #0x200]; sub x27, x27, x19; clz x27, x27; lsr x27, x27, #6; scvtf s2, x27; ldr s8, [x22, #0x208]; fmul s2, s2, s8; fmadd s1, s1, s2, s1
