@@ -15,7 +15,6 @@
 #include <string.h>
 
 #include "cfg.h"
-#include "coop.h"
 #include "cheats.h"
 #include "fs.h"
 #include "kernel.h"
@@ -325,7 +324,6 @@ void rt_frame_presented(const tex_t *t, uint64_t n) {
     stats_line();
     fflush(stdout);
     fflush(stderr);
-    coop_shutdown();   // leaves the room, before the process ends
     input_rumble_hd_stop();   // a controller on HD rumble gets the neutral value before the exit
     fs_save_flush();
     vk_pipeline_prewarm_marker_clear();   // an orderly end, not a driver crash in the boot's builds (vk_pipeline.c pm_skipped)

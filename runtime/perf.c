@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "bugcap.h"
 #include "flight.h"
 #include "gfx.h"
 #include "host.h"
@@ -830,6 +831,7 @@ void perf_present(uint64_t frame) {
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);
     if (flight_on) flight_frame(frame, now, d, frame_ns, counts);
+    bugcap_frame(frame, now, d, rep);   // F8: a bug capture (bugcap.c); otherwise one record into its ring
     if (!(rt_trace & RT_TRACE_PERF)) {
         memset(frame_ns, 0, sizeof frame_ns);
         last = now;

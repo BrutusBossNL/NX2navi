@@ -46,8 +46,6 @@ from other projects, with its license, is listed in [THIRD_PARTY_NOTICES.md](../
   lines reach the log in the order it logged them: a line waits for the queue's lock, and one that finds the queue
   full is written after everything queued before it. A fatal error, the crash report and the end of the process write
   the queue out first (`rt_log_sync`). `NX2NAVI_LOG_ASYNC=0` writes each line where it is logged.
-- Co-op (`coop.c`, `steam.c`, `coop_game.c`, [coop.md](coop.md)): a host thread that owns the Steam library and a room of
-  up to four players; the game side reads Link and the game's flags at the present. It never holds a virtual core.
 - OS calls the host makes go through `runtime/platform/` (`platform.h`, `win32.c`).
 
 #### Threads and cores
@@ -308,8 +306,9 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   is tight and after 1 s while it is critical. `mem_budget_test_vram_mb` and `mem_budget_test_ram_mb` pretend a side is
   that small, to test what gives memory back on a large machine; they leave the texture cache's own rules alone.
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
-  `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
-  (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.
+  `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`), a flight recorder
+  (`NX2NAVI_FLIGHT`) and bug captures, which a player's F8 writes and a test run starts from (`bugcap.c`,
+  [bug-capture.md](bug-capture.md)). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.
 
 Maxwell behaviour the back end has to match: [maxwell.md](maxwell.md).
 

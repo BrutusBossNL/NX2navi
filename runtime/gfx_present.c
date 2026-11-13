@@ -17,7 +17,6 @@
 
 #include "audren.h"
 #include "cfg.h"
-#include "coop.h"
 #include "flight.h"
 #include "flight_flash.h"
 #include "fs.h"
@@ -97,7 +96,6 @@ void gfx_window_closed(void) {
     vk_pipeline_save_exit();
     prof_write();   // plat_exit runs no atexit handlers
     rtss_limit_restore();   // RivaTuner Statistics Server's profile as it was
-    coop_shutdown();   // leaves the room, before the process ends
     input_rumble_hd_stop();   // a controller on HD rumble gets the neutral value: nothing renews or stops it after the exit
     fs_save_flush();   // last: the game's threads still run until plat_exit, and a Commit after this one is refused
     if (restart) {
@@ -739,6 +737,65 @@ int vk_present_captured(const uint8_t **px, int *w, int *h, VkFormat *fmt) {
 
 static float g_pic[4];   // gfx_picture_rect
 static volatile int32_t g_pic_ok;
+
+// ---- vk_present_grab (vk.h): one presented frame's pixels for a bug capture. The request is taken by the next
+// present (g_pl held), which copies the read-back buffer and calls back; the PNG is made by the caller's own thread.
+static void (*volatile g_grab_cb)(VkGrab *g, void *ctx);
+static void *g_grab_ctx;
+
+int vk_present_grab(void (*cb)(VkGrab *g, void *ctx), void *ctx) {
+    plat_rmutex_lock(&g_pl);
+    int ok = !g_grab_cb;
+    if (ok) g_grab_ctx = ctx, g_grab_cb = cb;
+    plat_rmutex_unlock(&g_pl);
+    return ok;
+}
+
+void vk_present_grab_cancel(void) {
+    plat_rmutex_lock(&g_pl);
+    g_grab_cb = NULL;
+    plat_rmutex_unlock(&g_pl);
+}
+
+void vk_present_grab_rgba(const VkGrab *g, uint8_t *out) {
+    size_t n = (size_t)g->w * (size_t)g->h * 4;
+    if (g->hdr) {
+        vk_hdr_to_srgb8(g->px, out, n / 4, g->a2r);
+        return;
+    }
+    for (size_t i = 0; i < n; i += 4) {
+        out[i] = g->px[i + (g->bgra ? 2 : 0)];
+        out[i + 1] = g->px[i + 1];
+        out[i + 2] = g->px[i + (g->bgra ? 0 : 2)];
+        out[i + 3] = 255;
+    }
+}
+
+void vk_present_grab_free(VkGrab *g) {
+    if (g) free(g->px);
+    free(g);
+}
+
+// The present that took the request: the read-back buffer holds this frame (g_cap_ptr, the fence waited for).
+static void grab_deliver(int image_w, int image_h) {
+    void (*cb)(VkGrab *g, void *ctx) = g_grab_cb;
+    void *ctx = g_grab_ctx;
+    g_grab_cb = NULL;
+    size_t n = (size_t)g_cap_w * (size_t)g_cap_h * 4;
+    VkGrab *g = calloc(1, sizeof *g);
+    if (g && (g->px = malloc(n))) {
+        memcpy(g->px, g_cap_ptr, n);
+        g->w = g_cap_w, g->h = g_cap_h;
+        g->bgra = g_sc_fmt == VK_FORMAT_B8G8R8A8_UNORM || g_sc_fmt == VK_FORMAT_B8G8R8A8_SRGB;
+        g->hdr = g_sc_hdr != 0, g->a2r = g_sc_fmt == VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+        g->image_w = image_w, g->image_h = image_h, g->scaler = g_scaler;
+        if (__atomic_load_n(&g_pic_ok, __ATOMIC_ACQUIRE)) memcpy(g->pic, g_pic, sizeof g->pic);
+    } else {
+        free(g);
+        g = NULL;
+    }
+    cb(g, ctx);   // NULL: no memory for the copy
+}
 
 // The captured swapchain image as a PNG (the menu's test hook), RGBA with opaque alpha. From an HDR10 swapchain the
 // log also gets the luminance in nits of the picture's rectangle (vk_hdr_luminance_stats: the black floor of a dark
@@ -1563,7 +1620,8 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
             next_ns = plat_now_ns() + (uint64_t)(every * 1e9);
         }
     }
-    int cap = (g_capture || menu_shot) && ensure_capture_buffer();
+    int grab = src && g_grab_cb;   // a bug capture asked for this frame (vk_present_grab)
+    int cap = (g_capture || menu_shot || grab) && ensure_capture_buffer();
     int thumb = src && g_th_n && ensure_thumbs();
 
     VkCommandBuffer cb = g_cb[slot];
@@ -1728,6 +1786,11 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         g_cap_h = (int)g_sc_ext.height;
         g_cap_valid = 1;
         if (menu_shot) save_capture(menu_shot);
+        if (grab) grab_deliver(cw, ch);
+    } else if (grab) {   // no read-back buffer: the request ends without pixels
+        void (*cb)(VkGrab *g, void *ctx) = g_grab_cb;
+        g_grab_cb = NULL;
+        cb(NULL, g_grab_ctx);
     }
 out:
     plat_rmutex_unlock(&g_pl);

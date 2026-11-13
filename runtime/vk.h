@@ -284,6 +284,22 @@ void vk_sync_flush_held(void);    // queue lock held: the held submissions go to
 // NX2NAVI_ASPECT); the rest is black.
 void gfx_fit_rect(int cw, int ch, int dw, int dh, int out[4]);
 void vk_present_capture(int on);
+// The next presented frame, as the window gets it with the overlay on it, for a bug capture (bugcap.c): its pixels
+// are copied (px, malloc'd, as the swapchain holds them) and cb gets them on the presenting thread right after that
+// present; cb owns g and frees it with vk_present_grab_free. vk_present_grab_rgba: the pixels as RGBA bytes, an HDR10
+// picture converted to sRGB, into out (w * h * 4). One request at a time: 0 while one waits.
+typedef struct {
+    uint8_t *px;
+    int w, h;                 // the swapchain image
+    int bgra, hdr, a2r;       // its bytes' order; an HDR10 swapchain, and whether it is A2R10G10B10
+    int image_w, image_h;     // the game image this present showed
+    int scaler;               // how it was scaled to the window: 0 not, 1 bilinear, 2 FSR 1, 3 bilinear + sharpening
+    float pic[4];             // where the picture sits in the swapchain image, in fractions: x, y, w, h
+} VkGrab;
+int vk_present_grab(void (*cb)(VkGrab *g, void *ctx), void *ctx);
+void vk_present_grab_cancel(void);   // the request is dropped: once this returns, cb has run or never will
+void vk_present_grab_rgba(const VkGrab *g, uint8_t *out);
+void vk_present_grab_free(VkGrab *g);
 int vk_present_captured(const uint8_t **px, int *w, int *h, VkFormat *fmt);
 
 // The window system's part of device creation (gfx_window_win.c with Win32, gfx_window_sdl.c with SDL): the instance

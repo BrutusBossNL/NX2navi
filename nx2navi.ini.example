@@ -821,21 +821,6 @@
 # The key of the application's uploaded art asset (Rich Presence > Art Assets) shown as the status's large image.
 # discord_image = nx2navi_512x512
 
-[coop]
-# Co-op, experimental: play with friends over Steam, each in their own game and save (docs/coop.md). The game signs in
-# to Steam as its test app, so Steam shows you as playing Spacewar; it needs Steam running and Steam's library file
-# steam_api64.dll beside ocarina.exe, which the launcher copies there from a Steam game you have installed. Rooms are
-# made and joined in the menu's Co-op tab, never from this file.
-# 0 = off, the game uses no network. Takes effect at once.
-# coop_steam = 0
-# In a room, share progress, items and songs with the other players; your save is copied to coop-backup in the profile
-# folder first. 0 = only names, positions and chat.
-# coop_share = 1
-# Show the other players' names where their Link stands (needs DLSS, FSR or TAA on).
-# coop_names = 1
-# Show new chat lines, and who joined or left, over the game while the menu is closed.
-# coop_chat = 1
-
 [audio]
 # none mixes without opening an audio device.
 # audio = default

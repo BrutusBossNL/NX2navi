@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bugcap.h"
 #include "cfg.h"
 #include "cfg_private.h"
 #include "discord_app.h"
@@ -36,6 +37,7 @@ static const char *const known[] = {
     "CORES", "TM_DISPATCH", "NVN2_CS_TABLE", "SKIP_SHADERS", "MOVIE_DEBAND", "MOVIE_FPS", "MOVIE_SKIP", "MOVIE_OVERLAY", "MOVIES", "NPLN", "NVN2_PROGRAMS", "NVN_TRAP", "OCARINA_REALTIME", "ONESHOT_BUDGET", "ONESHOT_WAIT_MS", "OCARINA_STEP", "PHYSICS_STEPS", "PHYSICS_STEPS_FULL", "PICKUP_COUNT", "WATER_STEPS", "SOUND_STEPS", "FLOOR_PROBE", "FLOOR_SCAN", "FLOOR_WATCH", "FLOOR_CARRY", "MOVIE_PTS", "STEP_STEADY", "VI_HZ", "VI_VRR", "TIME_DUMP", "SHADER_DUMP", "SHOT_AFTER", "SHOT_DIR", "SHOT_EVERY",   // Switch 2 port: movie skip (romfs.c), NVN2 proc traps (nvn_procs.c)
     "AA", "AA_LOG", "AB", "AMIIBO_DIR", "ANISO", "APP_POOL", "ASPECT", "ASPECT_PATCH", "ASSUME_FOCUS", "ASTC", "ASTC_BC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CATCHUP", "AUDIO_CHANNELS", "AUDIO_DEVICE", "AUDIO_GAME_PRIO", "AUDIO_OFF", "AUDIO_PREFILL_MS", "AUDIO_RAMP", "AUDIO_STATS",
     "BARRIER_GAME", "MESH_AHEAD", "MESH_FALLBACK", "MESH_FALLBACK_MB", "MESH_FALLBACK_WORKERS", "PROBE_MESHFB_DIR",
+    "CAPTURE_AT", "CAPTURE_DIR", "CAPTURE_REPLAY", "CAPTURE_REPLAY_CAMERA",   // bug captures and their replays (bugcap.c)
     "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
@@ -84,13 +86,14 @@ static const char *const known[] = {
     "MEM_BUDGET_TEST_VRAM_MB", "MEM_BUDGET_TEST_RAM_MB",
     "TEX_COMPACT", "TEX_COMPACT_MIN_MB", "TEX_COMPACT_FRAME_MB",   // texture compaction (vk_texture.c); no menu row
     "STANDIN_FILTER",   // the filter of the scene upscaler's stand-in (vk_tonemap.c); no menu row
-    "COOP_STEAM", "COOP_SHARE", "COOP_NAMES", "COOP_CHAT",   // co-op (coop.c, coop_game.c, ui/coop_page.cpp)
     // retired: the settings of the co-op of versions up to 0.9.2; read by nothing, listed so that a file which still
-    // sets them logs no unknown key. COOP was that co-op's switch: the new one's is COOP_STEAM, so that a "coop = 1"
-    // left in a file from then turns nothing on
+    // sets them logs no unknown key
     "COOP", "COOP_BETA", "COOP_NAME", "COOP_SERVER", "COOP_PORT", "COOP_ROOM", "COOP_AUTO", "COOP_DROP",
     "COOP_PROGRESS", "COOP_ITEMS", "COOP_SONGS", "COOP_QUEST", "COOP_KEYS", "COOP_RUPEES", "COOP_AMMO",
     "COOP_TEST_SET", "COOP_ACCEPT", "COOP_REMOVE", "COOP_RESET_POOLS",
+    // retired: the settings of the co-op through Steam that the main branch held for a while after 0.9.2 and no
+    // release shipped; listed like the ones above, for the file of someone who built from it then and turned it on
+    "COOP_STEAM", "COOP_SHARE", "COOP_NAMES", "COOP_CHAT",
 };
 
 // The nx2navi.ini section a key cfg_set may write goes to when the file lacks it (nx2navi.ini.example's sections).
@@ -120,7 +123,6 @@ static const struct { const char *key, *section; } sections[] = {
     {"LOW_LATENCY", "display"},
     {"DEVICE_PROFILE", "display"}, {"ASSUME_FOCUS", "display"},
     {"DISCORD_RPC", "discord"}, {"DISCORD_APP_ID", "discord"}, {"DISCORD_IMAGE", "discord"},
-    {"COOP_STEAM", "coop"}, {"COOP_SHARE", "coop"}, {"COOP_NAMES", "coop"}, {"COOP_CHAT", "coop"},
     {"SHADOW_SCALE", "display"}, {"SHADOW_RANGE", "display"}, {"CONTACT_SHADOWS", "display"},
     {"PCSS", "display"},
     {"SHADOW_PCF", "display"},
@@ -291,11 +293,6 @@ static const CfgMeta metas[] = {
     {"DISCORD_RPC", "1", "0|1", LIVE},
     {"DISCORD_APP_ID", NX2NAVI_DISCORD_APP_ID_DEFAULT, NULL, LIVE},
     {"DISCORD_IMAGE", NX2NAVI_DISCORD_IMAGE_DEFAULT, NULL, LIVE},
-    // Co-op (coop.c): COOP_STEAM is its switch, off until the player turns it on; then the game signs in to Steam as its test app and can make
-    // or join a room. In a room: COOP_SHARE shares progress, items and songs with the other players (coop_game.c),
-    // COOP_NAMES shows the other players' names where they stand, COOP_CHAT shows the chat's lines over the game.
-    {"COOP_STEAM", "0", "0|1", LIVE}, {"COOP_SHARE", "1", "0|1", LIVE}, {"COOP_NAMES", "1", "0|1", LIVE},
-    {"COOP_CHAT", "1", "0|1", LIVE},
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
     {"REPLAY_PIPE", "0", "0..4", RESTART},
@@ -1166,7 +1163,10 @@ static int find_ini(void) {
     return 1;
 }
 
+// A replay of a bug capture (bugcap.c) runs on the capture's settings and leaves the player's nx2navi.ini as it is:
+// nothing is saved, whatever the run sets.
 int cfg_save(void) {
+    if (bugcap_replay_dir()) return 1;
     if (find_ini()) return cfg_save_to(ini_path);
     __atomic_store_n(&save_ok, 0, __ATOMIC_RELEASE);
     return 0;
@@ -1176,7 +1176,7 @@ int cfg_save(void) {
 // about 900 characters, and then the keys that are no settings of this version, which do nothing. A report's log then
 // shows which settings its run had and which of the file's lines had no effect; before, it held only the count of
 // keys, and a player who had added a line this version does not read could take it for the cause of what changed.
-static void log_file_settings(void) {
+static void log_file_settings(const char *file) {
     char line[1024];
     size_t k = 0;
     for (int i = 0; i < n_entries; i++) {
@@ -1189,26 +1189,40 @@ static void log_file_settings(void) {
         size_t vl = strlen(value);
         if (vl > 200) vl = 200;   // a long value (a list of mods) is cut: the line shows that the key is set
         if (k && k + strlen(key) + vl + 5 > 900) {
-            rt_log("cfg: nx2navi.ini sets: %s", line);
+            rt_log("cfg: %s sets: %s", file, line);
             k = 0;
         }
         k += (size_t)snprintf(line + k, sizeof line - k, "%s%s = %.*s", k ? ", " : "", key, (int)vl, value);
     }
-    if (k) rt_log("cfg: nx2navi.ini sets: %s", line);
+    if (k) rt_log("cfg: %s sets: %s", file, line);
     if (n_unknown)
-        rt_log("cfg: nx2navi.ini has %d key%s that %s no setting of this version and %s nothing: %s%s", n_unknown,
+        rt_log("cfg: %s has %d key%s that %s no setting of this version and %s nothing: %s%s", file, n_unknown,
                n_unknown == 1 ? "" : "s", n_unknown == 1 ? "is" : "are", n_unknown == 1 ? "does" : "do", unknown_keys,
                unknown_cut ? ", ..." : "");
 }
 
 static void load_ini(void) {
+    // NX2NAVI_CAPTURE_REPLAY=<a bug capture's folder>: the settings that capture was taken with (its settings.ini) stand
+    // in for nx2navi.ini, which is neither read nor written in such a run; the environment still wins over them
+    const char *replay = bugcap_replay_dir();
+    if (replay) {
+        char path[1100];
+        snprintf(path, sizeof path, "%s/settings.ini", replay);
+        int ok = cfg_load(path);
+        rt_log(ok ? "cfg: replay of the bug capture in %s: its settings.ini (%d keys) in place of nx2navi.ini, which this run does not write"
+                  : "cfg: replay of the bug capture in %s: no settings.ini there, so every setting has its default (%d keys); "
+                    "nx2navi.ini is not read or written",
+               replay, n_entries);
+        if (ok) log_file_settings("the capture's settings.ini");
+        return;
+    }
     if (!find_ini()) return;
     if (!cfg_load(ini_path)) {
         rt_log("cfg: no settings file at %s", ini_path);
         return;
     }
     rt_log("cfg: read %s: %d keys", ini_path, n_entries);
-    log_file_settings();
+    log_file_settings("nx2navi.ini");
     for (int i = 0; i < n_entries; i++) {
         char var[128];
         snprintf(var, sizeof var, PREFIX "%s", entries[i].key);

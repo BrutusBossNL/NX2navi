@@ -28,7 +28,7 @@
 // NX2NAVI_DUMP_RAW=1: also save each copied image's native texel bytes as .bin, for numerical analysis.
 // NX2NAVI_DUMP_KEY=<key> (Windows): each press of that key in the game window dumps the next frame to
 // NX2NAVI_DUMP_DIR/f<frame>. Keys: pause (also 1), scrolllock, insert, home, end, pageup, pagedown, f2-f7, f9, f12 (F1, F8,
-// F10 and F11 are the menu, the flight recorder, the overlay and fullscreen). The game still gets a key it has bound.
+// F10 and F11 are the menu, the bug capture, the overlay and fullscreen). The game still gets a key it has bound.
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
