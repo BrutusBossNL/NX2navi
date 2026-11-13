@@ -368,7 +368,9 @@ that folder is there already, and the archive stays; a mod folder whose files si
 that held the mod's own folder) gets them moved up; a `romfs`, `romfslite`, `exefs` or `cheats` folder put straight into
 the mods folder becomes a mod of its own, *Unnamed mod*. An archive that would write outside its folder is refused.
 Nothing is deleted. Add a Mod and Add a Mod Folder do the same for an archive or folder the player picks, which is
-unpacked or copied into the mods folder under a free name; Open Mods Folder opens it.
+unpacked or copied into the mods folder under a free name; Open Mods Folder opens it. The picked mod is put together
+in a folder beside the mods folder (`.adding-mod`) and moves in with one rename once it is complete, so a copy that
+stops halfway (a full disk, the launcher closed) leaves no half mod for the game to load (`mods.add`).
 
 Each mod has an On/Off row; its description says what it changes (how many game files, code patches, cheats), which
 other mod changes the same files and which of the two wins, and why the game leaves it off when it does: a code module

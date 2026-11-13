@@ -5117,6 +5117,71 @@ class ModsTest(Tmp):
         self.assertTrue((src / 'Picked.zip').is_file())   # the player's download stays where it was
         with self.assertRaises(self.mods.ModError):
             self.mods.add(self.game, src / 'Folder Mod' / 'Inner' / 'exefs' / 'E0F3CCFAF50065AE.ips')
+        self.assertEqual(list(self.game.glob(self.mods.STAGING + '*')), [])   # nothing stays beside the mods folder
+
+    def test_a_mod_that_does_not_arrive_whole_leaves_nothing(self):
+        """A copy that stops halfway (a full disk, the launcher closed) or an archive that cannot be unpacked
+        leaves no folder in the mods folder, which the game would load as a mod, and none beside it."""
+        src = self.tmp / 'Downloads' / 'Big Mod'
+        (src / 'romfs').mkdir(parents=True)
+        for n in range(4):
+            (src / 'romfs' / f'{n}.txt').write_text('x')
+        self.file('Kept/romfs/k.txt')
+        real_copytree = shutil.copytree
+        for stop in (OSError(28, 'No space left on device'), KeyboardInterrupt()):
+            copied = []
+
+            def copy(a, b, stop=stop, copied=copied):
+                if len(copied) == 2:
+                    raise stop
+                copied.append(b)
+                return shutil.copy2(a, b)
+
+            def copytree(a, b, *args, copy=copy, **kw):   # shutil.copytree with a copy that stops at the third file
+                if args or kw:   # shutil's own call for a folder inside, which hands the copy on
+                    return real_copytree(a, b, *args, **kw)
+                return real_copytree(a, b, copy_function=copy)
+            with mock.patch.object(shutil, 'copytree', copytree), self.assertRaises(type(stop)):
+                self.mods.add(self.game, src)
+            self.assertEqual(len(copied), 2)                              # two files had arrived
+            self.assertEqual(self.tree(), ['Kept/romfs/k.txt'])
+            self.assertEqual(list(self.game.glob(self.mods.STAGING + '*')), [])
+        (src.parent / 'Broken.zip').write_bytes(b'PK\x03\x04 not a zip')
+        with self.assertRaises(self.mods.ModError):
+            self.mods.add(self.game, src.parent / 'Broken.zip')
+        self.assertEqual(self.tree(), ['Kept/romfs/k.txt'])
+        self.assertEqual([m.name for m in self.mods.scan(self.game)], ['Kept'])
+        self.assertEqual(self.mods.add(self.game, src).name, 'Big Mod')   # and the same mod goes in whole after
+        self.assertEqual(len(self.tree()), 5)
+
+    def test_a_mod_is_put_together_beside_the_mods_folder(self):
+        """While a mod is copied the mods folder does not hold it; it moves in under a name that is free then; and
+        what a stopped launcher left beside the mods folder long ago is removed."""
+        src = self.tmp / 'Downloads' / 'Late'
+        (src / 'romfs').mkdir(parents=True)
+        (src / 'romfs' / 'a.txt').write_text('a')
+        left = self.game / self.mods.STAGING
+        (left / 'mod' / 'romfs').mkdir(parents=True)
+        old = time.time() - 2 * self.mods.STAGING_STALE
+        os.utime(left, (old, old))
+        fresh = self.game / (self.mods.STAGING + ' 2')                    # another add still at work
+        fresh.mkdir()
+        seen = []
+        real_copytree = shutil.copytree
+
+        def copytree(a, b, *args, **kw):
+            if not seen:                                                  # the first call; shutil calls it per folder
+                seen.append((Path(b), self.tree()))
+                (self.folder / 'Late' / 'romfs').mkdir(parents=True)      # a folder of that name comes meanwhile
+            return real_copytree(a, b, *args, **kw)
+        with mock.patch.object(shutil, 'copytree', copytree):
+            target = self.mods.add(self.game, src)
+        self.assertEqual(seen[0][1], [])                                  # nothing in the mods folder while copying
+        self.assertEqual(seen[0][0].parent.parent, self.game)             # it was put together beside it
+        self.assertEqual(target.name, 'Late 2')
+        self.assertEqual(self.tree(), ['Late 2/romfs/a.txt'])            # the folder that came holds no file
+        self.assertFalse(left.exists())
+        self.assertEqual(list(self.game.glob(self.mods.STAGING + '*')), [fresh])
 
     def test_code_waits_for_a_build_that_saw_it(self):
         import make_game

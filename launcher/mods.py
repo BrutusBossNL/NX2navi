@@ -21,12 +21,14 @@ Mods that change the game's code (code cheats, ExeFS patches) need the game buil
 code_waiting() names the enabled ones whose files the last build did not take in (build-cache/mod-code.json), and
 Play rebuilds the game first then. The build reads them from <game>/mods only.
 """
+import errno
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -475,9 +477,52 @@ def prepare(game_dir, log=None):
     return done
 
 
+STAGING = '.adding-mod'   # beside the mods folder: where add() puts a mod together before it moves in
+STAGING_STALE = 24 * 3600   # seconds after which a staging folder is one a stopped launcher left
+
+
+def _staging(folder):
+    """A new, empty folder for add() to put a mod together in. It is beside the mods folder, not in it: the game
+    and the launcher take every folder of the mods folder for a mod, and beside it is the same disk, so the
+    finished mod moves in with one rename. The mods folder itself when nothing can be made beside it. What a
+    launcher that was stopped in the middle left there a day ago or longer is removed."""
+    try:
+        for old in folder.parent.glob(STAGING + '*'):
+            if old.is_dir() and time.time() - old.stat().st_mtime > STAGING_STALE:
+                shutil.rmtree(old, ignore_errors=True)
+        stage = _unique(folder.parent, STAGING)
+        stage.mkdir()
+    except OSError:
+        stage = _unique(folder, STAGING)
+        stage.mkdir()
+    return stage
+
+
+def _move_in(made, folder, name):
+    """Rename the finished mod folder made into the mods folder under name, or the first free name after it (looked
+    for now, not before the copy: a folder of that name may have come meanwhile). Returns where it is."""
+    for attempt in range(3):
+        target = _unique(folder, name)
+        try:
+            os.rename(made, target)
+            return target
+        except OSError as e:
+            if e.errno == errno.EXDEV:   # the mods folder is on another disk than its parent (a mount, a junction)
+                shutil.move(str(made), str(target))
+                return target
+            if attempt == 2:
+                raise
+            time.sleep(0.3)   # a scanner still holds a file just written
+
+
 def add(game_dir, src, log=None):
     """Add an archive or a folder the player picked as a mod: unpacked or copied into the mods folder under its name
-    (a free one), in order for the game. Returns the new mod's folder."""
+    (a free one), in order for the game. Returns the new mod's folder.
+
+    The mod is put together in a folder beside the mods folder (_staging) and moves in only when it is complete. A
+    copy that stops halfway (a full disk, a file that cannot be read, the launcher closed) leaves nothing in the
+    mods folder: copied straight into it, the half that had arrived was a mod of its own, switched on, at the
+    game's next start."""
     src = Path(src)
     folder = ensure_mods_dir(game_dir)
     if src.is_dir():
@@ -487,18 +532,24 @@ def add(game_dir, src, log=None):
         except ValueError:
             pass
         name = src.name if src.name.lower() not in MOD_TOP else UNNAMED
-        target = _unique(folder, name)
-        if src.name.lower() in MOD_TOP:   # the player picked the mod's romfs (or atmosphere) folder itself
-            target.mkdir()
-            shutil.copytree(src, target / src.name.lower() if src.name.lower() in LOOSE_PARTS else target / src.name)
-        else:
-            shutil.copytree(src, target)
     elif src.suffix.lower() in ARCHIVES:
-        target = _unique(folder, src.stem.strip().rstrip('.') or UNNAMED)
-        unpack(src, target)
+        name = src.stem.strip().rstrip('.') or UNNAMED
     else:
         raise ModError('it is no archive (.zip, .7z or .rar) and no folder')
-    unwrap(target)
+    stage = _staging(folder)
+    try:
+        made = stage / 'mod'
+        if not src.is_dir():
+            unpack(src, made)
+        elif src.name.lower() in MOD_TOP:   # the player picked the mod's romfs (or atmosphere) folder itself
+            made.mkdir()
+            shutil.copytree(src, made / src.name.lower() if src.name.lower() in LOOSE_PARTS else made / src.name)
+        else:
+            shutil.copytree(src, made)
+        unwrap(made)
+        target = _move_in(made, folder, name)
+    finally:   # also on Ctrl+C and when the window closes: nothing half made stays
+        shutil.rmtree(stage, ignore_errors=True)
     if log:
         log(f'mods: added {src} as {target.name}')
     return target
