@@ -4,6 +4,9 @@
 #pragma once
 #include <stdint.h>
 
+// Validate native bow/bomb capacities and stock; optionally spend one bomb for a newly fired arrow.
+int cheats_bomb_arrow_ammo(int consume);
+
 #ifdef __cplusplus
 extern "C" {
 #endif

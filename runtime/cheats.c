@@ -239,6 +239,16 @@ static int basic_owned(uint32_t hash, uint32_t expected) {
     return a && rd(a, 1, &value) && value == 1;
 }
 
+int cheats_bomb_arrow_ammo(int consume) {
+    if (!g_movement_build) return 0;
+    uint64_t bombs=basic_int(0xdb1bcd4f,1007),bag=basic_int(0xe753508b,972),quiver=basic_int(0x418db791,971);
+    uint64_t stock,cap,bow;
+    if (!bombs || !bag || !quiver || !rd(bombs,4,&stock) || !rd(bag,4,&cap) || !rd(quiver,4,&bow) ||
+        !cap || cap>9999 || !bow || bow>9999 || !stock || stock>cap) return 0;
+    if (consume) { wr(bombs,4,stock-1); wr(bombs+4,4,stock-1); }
+    return 1;
+}
+
 static const uint32_t bottle_valid_hash[CHEAT_BOTTLE_SLOTS] = {0xf39ce410, 0x000ff6ea, 0xf63b1194, 0xb7f052ce, 0xe27b136d};
 static const uint32_t bottle_item_hash[CHEAT_BOTTLE_SLOTS] = {0x7d48df76, 0x1edd164a, 0xb80c70a8, 0xe4c1b1fc, 0x365e1953};
 static const uint32_t bottle_values[] = {0xbe69de49, 0xeaba6067, 0x049d37c1, 0xf383d6e5, 0x1c293517,

@@ -3,12 +3,13 @@
 The settings menu's Cheats tab offers built-in policies on game 1.1.1, identified by the main build ID
 `E0F3CCFAF50065AE`. Other builds keep the existing imported-cheat interface without these built-ins. Every
 toggle defaults to off; sprint speed, spin range and spin charging default to normal. Settings persist in
-`nx2navi.ini`. NX2navi 0.9.2 is the port release used for the spin gameplay measurements below; the supported
-game version remains 1.1.1. The contribution is also integrated with the subsequent upstream main changes.
+`nx2navi.ini`. The current integration uses NX2navi 0.10.1; the supported game version remains 1.1.1.
+The earlier spin measurements below used NX2navi 0.9.2.
 
 | Group | Options |
 |---|---|
-| Link | Infinite health, magic and rupees; unlimited air jumps; sprint speed normal / 2× / 3.5× / 5×; spin attack range normal / 1.5× / 2× / 2.5×; magic spin charging normal / instant. |
+| Link | Infinite health, magic and rupees; unlimited air jumps; sprint speed normal / 2× / 3.5× / 5× |
+| Equipment | Bomb arrows; spin attack range normal / 1.5x / 2x / 2.5x; magic spin charging normal / instant. |
 | Inventory | Separate infinite magic beans and business seeds; contents of each unlocked bottle, up to five. |
 | Ammunition | Separate infinite arrows, bombs, bombchus, Deku nuts, slingshot seeds and Deku sticks. |
 | Timers | Freeze the supported shared countdown at its current remaining time. |
@@ -27,6 +28,17 @@ jumps. Sprint Speed scales the native sprint action without changing ordinary mo
 game speed. Lower speeds can suit confined locations better. Text refers to actions rather than physical
 controller buttons. Labels and help follow the selected menu language: English, Russian, Brazilian Portuguese
 or Simplified Chinese.
+
+Bomb Arrows is a live Equipment toggle (`bomb_arrows`, off by default). It converts Link's normal arrows into
+explosive arrows while a bow, bomb bag and bomb stock are available. Nocking or cancelling an arrow costs no
+bomb; firing consumes one bomb and the game consumes its normal arrow. Existing infinite-resource policies
+can refill those stocks independently. Fire, ice and light arrows retain their original behavior.
+
+A small animated black charcoal aura identifies the arrow. It follows the arrow through the scene camera
+without requiring DLSS, FSR or frame generation. The marker is a projected overlay and does not sample scene
+depth. It disappears on impact. The impact queues a native Item_Bomb actor on the framework thread and uses
+the game's chemical detonation path; it does not simulate explosion damage with direct health writes.
+An arrow already fired remains explosive if the option is subsequently disabled.
 
 Spin Attack Range multiplies the native collision geometry for the equipped sword's spin attack. Each sword
 keeps its own base reach. The game controls the attack window, updates its physics shape and restores ordinary
@@ -74,3 +86,11 @@ All 70 original save, backup and transaction files were unchanged by hash compar
 timing checks, not an enemy-hit or every-sword combat test. Other swords share the native calculation but were
 not individually exercised; a separate locked-upgrade save was not tested live. Other events' timer branches,
 Linux and other game builds remain unvalidated.
+
+On the 0.10.1 Windows integration, isolated save-copy sessions verified normal-arrow wall impacts with real native
+bomb explosions. With refill policies disabled, three fired arrows reduced the quiver from 30 to 27 and bombs
+from 20 to 17. The black marker was exercised with and without DLSS. All 70 original save, backup and transaction
+files remained unchanged by hash comparison. Enemy-hit behavior and every scene have not been individually
+exercised. `python tests/bomb_arrows_check.py` additionally checks shooter ownership and reference generations,
+elemental-arrow exclusion, cancellation without a bomb cost, one-shot consumption, asynchronous request timing,
+native actor/detonation arguments, and CPU/stack preservation.

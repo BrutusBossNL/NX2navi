@@ -146,6 +146,18 @@ int main(void) {
         }
     }
 
+    // Reserving a bomb must neither spend arrows twice nor grant missing equipment.
+    uint64_t bag=basic_int(0xe753508b,972),quiver=basic_int(0x418db791,971);
+    u32(stocks[0],2);u32(stocks[0]+4,2);u32(stocks[1],7);u32(stocks[1]+4,7);
+    assert(cheats_bomb_arrow_ammo(0) && get32(stocks[0])==2);
+    assert(cheats_bomb_arrow_ammo(1) && get32(stocks[0])==1 && get32(stocks[0]+4)==1);
+    assert(get32(stocks[1])==7 && get32(stocks[1]+4)==7);
+    assert(cheats_bomb_arrow_ammo(1) && get32(stocks[0])==0);
+    assert(!cheats_bomb_arrow_ammo(1) && get32(stocks[0])==0);
+    u32(stocks[0],2);u32(bag,0);assert(!cheats_bomb_arrow_ammo(1) && get32(stocks[0])==2);
+    u32(bag,30);u32(quiver,0);assert(!cheats_bomb_arrow_ammo(1) && get32(stocks[0])==2);
+    u32(quiver,30);u32(stocks[0],31);assert(!cheats_bomb_arrow_ammo(1));u32(stocks[0],2);
+
     uint64_t beans = entry(0xd0, 0xb003124d, 1032, 40, 28);
     uint64_t owned = entry(0x10, 0x6d39c600, 8896, 24, 22);
     basic_run(13); assert(get32(beans) == 0);
