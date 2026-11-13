@@ -67,8 +67,8 @@ static const char *const NAMES[] = {"game", "off", "fxaa", "smaa"};
 static int temporal(void) { return cfg_bool("NX2NAVI_DLAA") && (vk_dlaa_available() || vk_dlaa_fsr3()); }
 
 static struct {
-    uint64_t frame_read;
-    int mode;              // this frame's (vk_aa_mode)
+    uint64_t frame_read;   // atomic: the frame whose first vk_aa_mode call took the setting
+    int mode;              // atomic: this frame's (vk_aa_mode)
     int said;              // taa was last logged as waiting for DLSS or FSR
     int composed;          // the last composition seen was replaced (vk_aa_composed): the passes before it may go
     uint64_t frames_on, composes;   // frames with a replacement asked for, compositions replaced
@@ -77,10 +77,15 @@ static struct {
 
 static void work_idle(uint64_t frame);
 
+// Every compute dispatch asks (vk_exec_draw.c aa_dispatch), on whichever thread records it, and the replay workers
+// record at once: the first call of a frame claims it with a compare-and-swap, and only that one frees the idle work
+// images (work_idle, which two threads would have freed twice) and takes the setting. A call that finds the frame
+// claimed gets the mode as it stands.
 int vk_aa_mode(void) {
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-    if (f == A.frame_read) return A.mode;
-    A.frame_read = f;
+    uint64_t seen = __atomic_load_n(&A.frame_read, __ATOMIC_ACQUIRE);
+    if (f == seen || !__atomic_compare_exchange_n(&A.frame_read, &seen, f, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return __atomic_load_n(&A.mode, __ATOMIC_ACQUIRE);
     work_idle(f);
     const char *v = cfg_value("NX2NAVI_AA");
     int want = VK_AA_GAME;
@@ -92,13 +97,13 @@ int vk_aa_mode(void) {
         A.said = said;
         if (said) rt_log("aa: taa needs DLSS or FSR at work (dlaa = 1): the game's SMAA stays");
     }
-    A.mode = want;
-    if (A.mode != VK_AA_GAME && !A.none_told && ++A.frames_on == 3600 && !A.composes) {
+    __atomic_store_n(&A.mode, want, __ATOMIC_RELEASE);
+    if (want != VK_AA_GAME && !A.none_told && ++A.frames_on == 3600 && !A.composes) {
         A.none_told = 1;   // a game version or a frame without the passes this file knows: nothing is replaced
         rt_log("aa: aa = %s found none of the game's SMAA passes in %llu frames: the picture stays the game's",
-               NAMES[A.mode], (unsigned long long)A.frames_on);
+               NAMES[want], (unsigned long long)A.frames_on);
     }
-    return A.mode;
+    return want;
 }
 
 int vk_aa_skip_ok(void) { return A.composed; }
