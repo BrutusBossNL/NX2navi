@@ -193,7 +193,8 @@ static void once(volatile int32_t *flag, const char *fmt, uint32_t v) {
 // default 0.6). HD rumble is strong at low amplitude, an ERM motor hardly turns there, so weak values are lifted by the
 // curve (0.1 -> 0.25) and the strength scales the result (saturating at 65535; 0.66 and up reach full drive at 130 %).
 // Both are live settings (the menu): read again whenever cfg_version changes.
-static float rumble_strength = 1.3f, rumble_curve = 0.6f;
+#define RUMBLE_STRENGTH_DEFAULT 1.3f   // cfg.c RUMBLE_STRENGTH's default, as a factor
+static float rumble_strength = RUMBLE_STRENGTH_DEFAULT, rumble_curve = 0.6f;
 static volatile int32_t rumble_cfg_logged;
 static unsigned rumble_cfg_seen = ~0u;
 static float cfg_float(const char *name, float lo, float hi) {
@@ -300,7 +301,9 @@ static float light_share(float f) { return f > 160 ? (f < 320 ? log2f(f / 160) :
 
 // Switch HD rumble as it is, for a gamepad whose actuators take it (input.h input_rumble_hd_on; NX2NAVI_RUMBLE_HD):
 // each side's newest value goes on with both bands' frequency and amplitude, the amplitude scaled by the rumble
-// strength alone (100 % = as the game sent it; the curve is for motors). A side the game has not updated for 250 ms,
+// strength over its default alone: the default strength is above 100 % to make up for what two motors lose, and an
+// actuator that plays the value itself needs none of that, so at the default it gets the game's amplitude exactly and
+// the setting makes it weaker or stronger from there (the curve is for motors). A side the game has not updated for 250 ms,
 // or any side while vibration is not permitted, is at rest. input.c writes the reports and no longer drives that
 // gamepad's motors, so rumble_update's own call below reaches only the DualShock 3 reader then. Under vib_lock.
 static void hd_update(uint64_t now) {
@@ -311,7 +314,7 @@ static void hd_update(uint64_t now) {
         v[s] = (RumbleHdValue){vib_last[s].amp_low, vib_last[s].freq_low, vib_last[s].amp_high, vib_last[s].freq_high};
         live[s] = vib_allowed && vib_at[s] && now - vib_at[s] <= RUMBLE_STALE_NS;
     }
-    input_rumble_hd(v, live, rumble_strength);
+    input_rumble_hd(v, live, rumble_strength / RUMBLE_STRENGTH_DEFAULT);
 }
 
 // Switch HD rumble -> SDL_RumbleGamepad. Each side's two bands split by frequency between the heavy (low) and the light

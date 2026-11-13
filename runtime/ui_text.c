@@ -324,7 +324,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "Also vibrates the triggers on Xbox controllers.",
     [UI_MENU_RUMBLE_HD] = "HD vibration (Switch)",
     [UI_MENU_RUMBLE_HD_DESC] = "Sends the game's detailed vibration to a Switch Pro Controller or Joy-Con as it is. "
-                               "The vibration strength still applies: 100 % is the game's own.",
+                               "The vibration strength still applies: its default is the game's own.",
     [UI_MENU_RUMBLE_HD_NEEDS] = "Needs a Switch Pro Controller or Joy-Con",
     [UI_MENU_PAD_LAYOUT] = "Button layout",
     [UI_MENU_PAD_LAYOUT_DESC] = "Sets which button acts as A. Nintendo: by position, A right, B bottom, X top, Y "
@@ -1027,7 +1027,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "Вибрация также на курках контроллера Xbox.",
     [UI_MENU_RUMBLE_HD] = "HD-вибрация (Switch)",
     [UI_MENU_RUMBLE_HD_DESC] = "Передаёт детальную вибрацию игры на Switch Pro Controller или Joy-Con без изменений. "
-                               "Сила вибрации по-прежнему действует: 100 % — как в игре.",
+                               "Сила вибрации по-прежнему действует: значение по умолчанию — как в игре.",
     [UI_MENU_RUMBLE_HD_NEEDS] = "Нужен Switch Pro Controller или Joy-Con",
     [UI_MENU_PAD_LAYOUT] = "Раскладка кнопок",
     [UI_MENU_PAD_LAYOUT_DESC] = "Какая кнопка работает как A. Nintendo: по положению, A справа, B снизу, X сверху, "
@@ -1607,7 +1607,7 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "Também vibra os gatilhos do controle Xbox.",
     [UI_MENU_RUMBLE_HD] = "Vibração HD (Switch)",
     [UI_MENU_RUMBLE_HD_DESC] = "Envia a vibração detalhada do jogo a um Pro Controller do Switch ou Joy-Con como ela "
-                               "é. A intensidade da vibração continua valendo: 100 % é a do jogo.",
+                               "é. A intensidade da vibração continua valendo: o valor padrão é a do jogo.",
     [UI_MENU_RUMBLE_HD_NEEDS] = "Requer um Pro Controller do Switch ou Joy-Con",
     [UI_MENU_PAD_LAYOUT] = "Layout dos botões",
     [UI_MENU_PAD_LAYOUT_DESC] = "Define qual botão funciona como A. Nintendo: pela posição, A à direita, B embaixo, "
@@ -2337,7 +2337,7 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_TRIGGERS] = "扳机振动（Xbox）",
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "同时震动 Xbox 手柄的扳机。",
     [UI_MENU_RUMBLE_HD] = "HD 振动（Switch）",
-    [UI_MENU_RUMBLE_HD_DESC] = "将游戏的细腻振动原样发送到 Switch Pro 手柄或 Joy-Con。振动强度仍然有效：100% 即游戏原本的强度。",
+    [UI_MENU_RUMBLE_HD_DESC] = "将游戏的细腻振动原样发送到 Switch Pro 手柄或 Joy-Con。振动强度仍然有效：默认值即游戏原本的强度。",
     [UI_MENU_RUMBLE_HD_NEEDS] = "需要 Switch Pro 手柄或 Joy-Con",
     [UI_MENU_PAD_LAYOUT] = "按键布局",
     [UI_MENU_PAD_LAYOUT_DESC] = "设置哪个按键作为 A 键。Nintendo：按位置，A 在右、B 在下、X 在上、Y 在左。Xbox 和 PlayStation："
