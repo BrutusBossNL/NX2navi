@@ -469,7 +469,9 @@ frame, uneven frame times one steady step, and game time follows the clock. It c
 sites do: at 144 fps each of 64 water objects gets its ripple steps and the day its seconds, at 120, 144 and 240 fps
 the water managers and floors of the set `owater` get 60 fixed steps a second with only s0 changed, and a step of one
 frame gives what the game computes. It also checks that each of those sites in `recomp/patches-v111.txt` ends in one
-`bl` to its page slot. No game files.
+`bl` to its page slot, and runs the physics solver step count's words of the original and the sets `osolver` and
+`osolverfull` (`physics_steps` 0, 1 and 2), lifted as the generator lifts them: the game's 4 and 8 at 60 and 30 fps
+for all three, rounded up by `osolver` and at least 4 every update by `osolverfull` above 60 fps. No game files.
 
 A change to how the mixer applies volumes (`runtime/audio_mixer.c` `accumulate_ramp`, the voice and splitter paths
 of `audio_mixer_render`) or to what it owes the device after a stall (`ring_pull`, `audio_mixer_owed`) passes

@@ -42,7 +42,9 @@
 # highfps_fix = 1
 # Above 60 fps the game's physics solved contacts and friction in fewer steps a second than at 60, and in none at all
 # in a frame shorter than 1/240 s, so things standing on moving platforms were left behind. 1 rounds the step count
-# up instead; 0 is the game's own count.
+# up instead; 0 is the game's own count. 2 also gives every frame at least the 4 steps of a 60 fps frame, which costs
+# more physics time above 60 fps (576 steps a second at 144 fps, 960 at 240, against about 288 and 240 with 1) and is
+# a candidate fix for Link left behind on the Deku Tree's floating platform. Read at start.
 # physics_steps = 1
 # The number in the window that shows a pick-up (a rupee) counts up by whole steps a frame, and above 60 fps the game
 # rounded that step down to nothing: the window stayed until the area was left and its counting sound went on. 1 lets

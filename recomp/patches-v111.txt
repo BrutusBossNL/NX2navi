@@ -60,6 +60,26 @@ site ostep main 3cdfc0 1e380008 952b4be8   # fcvtzs w8, s0 -> bl page+0xf60
 # parent keeps it across its call), and x30 is the function's own saved one.
 site ostep main 475f8 1e380009 95396656   # fcvtzs w9, s0 -> bl page+0xf50
 
+# Physics solver steps, at least a 60 fps frame's (physics_steps = 2, runtime/frame_rate.c frame_step_init switches
+# this set on and osolver off): the step setup below with the count of osolver, ceil(frames per update * count - 0.25),
+# raised to the count itself, the steps of one 60 Hz frame. Above 60 fps the rounded-up count still gives fewer
+# solver steps an update (2 at 120 to 160 fps, 1 at 240) while their number a second stays near 240; with this set
+# every update gets the 60 Hz frame's 4, each covering a quarter of the update's time, so a run at 240 fps solves 960
+# steps a second, 576 at 144. Link stood on the Deku Tree's floating platform (B1, Obj_Deku_MoveFloor_A_01, drifting
+# under GroundControlActor_WaveLoop) is carried by it fully at 60 fps, about a tenth at 160 and not at all at 240,
+# which follows the steps an update and not those a second; whether this mends the carry needs a run. At 60 and 30
+# fps the count is the game's (4 and 8). The first two sites are osolver's; at the third the cut becomes fmax s0, s0,
+# s1 (s1 the count, made a float by the scvtf before the fmadd) and the round up, so w1 = max(ceil(s0), count). s0
+# and s1 are not read before the call's callee (the world's main+0x3a24c20) and the code after it write them, and
+# none of the words reads or writes the flags.
+set osolverfull NX2NAVI_PHYSICS_STEPS_FULL 0
+site osolverfull main 38aebe4 bd440d02 1e2a1002            # ldr s2, [x8, #0x40c] (0.001) -> fmov s2, #0.25
+site osolverfull main 38aebf0 1f010800 1f218800            # fmadd s0, s0, s1, s2 -> fnmsub s0, s0, s1, s2
+site osolverfull main 38aebf4 1e380001 1e214800 1e280001   # fcvtzs w1, s0 -> fmax s0, s0, s1; fcvtps w1, s0
+site osolverfull main 38afd10 bd440d02 1e2a1002            # the same three in the second copy
+site osolverfull main 38afd1c 1f010800 1f218800
+site osolverfull main 38afd20 1e380001 1e214800 1e280001
+
 # Physics solver steps: the physics system's step setup (main+0x38aeb80, and the same code in main+0x38afc10) gives the
 # rigid body world its solver step count for the frame, trunc(frames per update * count + 0.001) with the count at
 # system +0x244 (4, set by the constructor main+0x38ae800), and the world keeps the result's inverse beside it (world

@@ -96,6 +96,20 @@ void frame_step_init(void) {
         atomic_store_explicit(ostep_page, bits, memory_order_release);
         rt_log("frame rate: the game's frames per update follow the display interval (set ostep)");
     }
+    // physics_steps (patches-v111.txt osolver and osolverfull): 0 the game's solver step count, trunc(frames per update
+    // * 4 + 0.001); 1 (the default) that count rounded up; 2 rounded up and at least the 4 of a 60 Hz frame, every
+    // update. The two sets patch the same words; this start keeps one of them on.
+    int solver = rt_patch_set("osolver"), solver_full = rt_patch_set("osolverfull");
+    if (solver_full >= 0) {
+        const char *e = cfg_get("NX2NAVI_PHYSICS_STEPS");
+        int full = (e && !strcmp(e, "2")) || rt_patch_enabled(solver_full);
+        rt_patch_switch(solver_full, full);
+        if (full && solver >= 0) rt_patch_disable(solver);
+        rt_log("frame rate: physics solver steps an update: %s",
+               full ? "rounded up and at least a 60 fps frame's 4 (physics_steps = 2)"
+               : solver >= 0 && rt_patch_enabled(solver) ? "rounded up (physics_steps = 1)"
+                                                          : "the game's own count (physics_steps = 0)");
+    }
     if (realtime < 0) {
         rt_log("frame rate: no patch table, shipping 30 fps whole-vsync steps");
         return;

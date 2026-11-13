@@ -129,6 +129,25 @@ static uint32_t sim(uint64_t object, float seconds) {
     memcpy(&quotient, &c.v[0], 4);
     return cut_fcvtzs(quotient);   // the game's fcvtzs after the site
 }
+// The physics solver step count (patches-v111.txt osolver and osolverfull, lifted by frame_step_check.py): the step
+// setup's words from the literal load to the cut, run on the frames per update in s0 and the count (4) in s1 as the
+// game loads them, x8 pointing at the literal 0.001 the original loads. Returns w1, the steps.
+void solver_game(Cpu *c);
+void solver_osolver(Cpu *c);
+void solver_osolverfull(Cpu *c);
+static uint32_t solver_steps(void (*fn)(Cpu *), float frames) {
+    static float literal[0x410 / 4];
+    literal[0x40c / 4] = 0.001f;
+    Cpu c;
+    memset(&c, 0, sizeof c);
+    uint32_t bits;
+    memcpy(&bits, &frames, 4);
+    c.v[0] = bits, c.v[1] = 4, c.x[8] = (uint64_t)(uintptr_t)literal, c.x[1] = ~0ull;
+    fn(&c);
+    CHECK(c.x[1] >> 32 == 0, "the solver count leaves x1's upper half %#llx", (unsigned long long)c.x[1]);
+    return (uint32_t)c.x[1];
+}
+
 int main(int argc, char **argv) {
     int mean = argc > 1 && !strcmp(argv[1], "mean");
     if (mean) steady = "0";
@@ -340,6 +359,25 @@ int main(int argc, char **argv) {
         CHECK(!sound_gate_take(&g, 0, 0.75f) && sound_gate_take(&g, 0, NAN) && g.owed == 0.0f &&
                   sound_gate_take(&g, 0, 0.0f), "NaN and 0 run as the game has them and clear what is owed");
         fake_manager = 0;
+    }
+    // The solver step count: at 60 and 30 fps all three give the game's 4 and 8 (also with the steady step a little
+    // off them); above 60 fps the game's count falls to 1 and to 0, osolver's rounds up (2 at 144 fps, 1 at 240), and
+    // osolverfull's keeps every update at the 60 Hz frame's 4.
+    {
+        const struct { float frames; uint32_t game, up, full; } want[] = {
+            {1.0f, 4, 4, 4}, {2.0f, 8, 8, 8}, {0.98f, 3, 4, 4}, {1.02f, 4, 4, 4}, {60.0f / 144.0f, 1, 2, 4},
+            {60.0f / 160.0f, 1, 2, 4}, {0.25f, 1, 1, 4}, {60.0f / 300.0f, 0, 1, 4}, {1.5f, 6, 6, 6}};
+        for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
+            uint32_t g = solver_steps(solver_game, want[i].frames), u = solver_steps(solver_osolver, want[i].frames),
+                     f = solver_steps(solver_osolverfull, want[i].frames);
+            CHECK(g == want[i].game && u == want[i].up && f == want[i].full,
+                  "%.4f frames an update: solver steps %u / %u / %u, not %u / %u / %u", want[i].frames, g, u, f,
+                  want[i].game, want[i].up, want[i].full);
+        }
+        // steps a second at 144 and 240 fps: osolver 288 and 240, osolverfull 576 and 960
+        printf("frame_step_check: solver steps a second at 144 / 240 fps: physics_steps 1 %u / %u, 2 %u / %u\n",
+               144 * solver_steps(solver_osolver, 60.0f / 144.0f), 240 * solver_steps(solver_osolver, 0.25f),
+               144 * solver_steps(solver_osolverfull, 60.0f / 144.0f), 240 * solver_steps(solver_osolverfull, 0.25f));
     }
     printf("frame_step_check: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;

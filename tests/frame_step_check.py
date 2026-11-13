@@ -11,8 +11,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MSYS_BIN = Path(r'C:\msys64\ucrt64\bin')
-sys.path[:0] = [str(ROOT / 'recomp')]
+sys.path[:0] = [str(ROOT), str(ROOT / 'recomp')]
+from lifter import Lifter  # noqa: E402
 from patches import load  # noqa: E402
+from tools.check_content import GENERATED_MARKER  # noqa: E402
 
 PAGE = 0x4ea0000   # the patch page of 1.1.1, main+0x4ea0000
 # The sites that call frame_rate.c's hosts, as recomp/patches-v111.txt has them: set, module offset, the original word,
@@ -54,17 +56,55 @@ def check_sites():
     return bad
 
 
+# The solver step count's words at the step setup's first copy (main+0x38aebe4..0x38aebf4; the second copy at
+# main+0x38afd10 has the same words): the original's, the set osolver's and the set osolverfull's, lifted as the
+# generator lifts them into one C function each, with the scvtf between them (main+0x38aebec) that every variant keeps.
+SOLVER_SITES = (0x38aebe4, 0x38aebf0, 0x38aebf4)
+SOLVER_COPY = (0x38afd10, 0x38afd1c, 0x38afd20)
+SCVTF = 0x5e21d821   # scvtf s1, s1
+
+
+def solver_functions():
+    table = load(ROOT / 'recomp/patches-v111.txt', [('main', 0x7000000000, PAGE)])
+    names = {i: t[0] for i, t in enumerate(table.sets)}
+    variants = {'game': [], 'osolver': [], 'osolverfull': []}
+    for site, copy in zip(SOLVER_SITES, SOLVER_COPY):
+        alts = {names[key]: (words, have) for key, words, have in table.sites['main'][site]}
+        copies = {names[key]: (words, have) for key, words, have in table.sites['main'][copy]}
+        assert set(alts) == {'osolver', 'osolverfull'} and alts == copies, (hex(site), alts, copies)
+        original = alts['osolver'][1]
+        variants['game'].append([original])
+        for name in ('osolver', 'osolverfull'):
+            variants[name].append(alts[name][0])
+    lift = Lifter(0, simd='c')
+    out = [f'// {GENERATED_MARKER}: the solver step count words lifted by tests/frame_step_check.py.',
+           '#include "cpu.h"', '#include "simd.h"', '']
+    for name, sites in variants.items():
+        body = []
+        for k, words in enumerate(sites):
+            for w in words:
+                insn = lift.lift(w, 0x7000000000 + SOLVER_SITES[k])
+                assert insn.kind == 'op', (name, hex(w), insn.kind)
+                body.append('    ' + insn.code)
+            if k == 0:
+                body.append('    ' + lift.lift(SCVTF, 0x70038aebec).code)
+        out.append(f'void solver_{name}(Cpu *c) {{\n' + '\n'.join(body) + '\n}\n')
+    return '\n'.join(out)
+
+
 def main():
     work = ROOT / 'build' / 'test' / 'frame_step'
     work.mkdir(parents=True, exist_ok=True)
     (work / 'layout.h').write_text(LAYOUT)
     exe = work / ('frame_step_check.exe' if os.name == 'nt' else 'frame_step_check')
+    solver = work / 'solver_sites.c'
+    solver.write_text(solver_functions())
     env = dict(os.environ)
     if os.name == 'nt' and MSYS_BIN.exists():
         env['PATH'] = str(MSYS_BIN) + os.pathsep + env.get('PATH', '')
     subprocess.check_call([compiler(), '-O1', '-Wall', '-Wno-unused-function', '-fno-strict-aliasing',
                            '-I', str(ROOT / 'runtime'), '-I', str(work),
-                           str(ROOT / 'tests' / 'frame_step_check.c'), '-o', str(exe), '-lm'], env=env)
+                           str(ROOT / 'tests' / 'frame_step_check.c'), str(solver), '-o', str(exe), '-lm'], env=env)
     rc = subprocess.run([str(exe)], env=env).returncode
     return subprocess.run([str(exe), 'mean'], env=env).returncode or rc or check_sites()
 
