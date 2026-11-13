@@ -2695,6 +2695,35 @@ int vk_dlaa_resized_take(void) {
     return 1;
 }
 
+// What DLSS holds while nothing uses it (NX2NAVI_DLSS_IDLE_FREE 1 or 2, the default 1). With the upscaler switched off
+// in the menu, the sizes kept their images and features for the rest of the run, since only an evaluation frees a size
+// (stale_sizes): at a 5120x2142 output that is the output, sharpening, mask, class and distance images, about 0.4 GiB,
+// and about 0.5 GiB per feature. With frame generation off and DLSS on, the HUD-less picture (hudless) stayed the same
+// way. After IDLE_FREE_PRESENTS presents without their use they go here, on the replaying thread that makes every
+// other NGX call, without waiting for the GPU: the last evaluation that used them is that many presents back, and the
+// CPU is never more than a few ahead. A feature made later is made with none alive, the case release_kept leaves
+// clean. What it costs: switching DLSS on again more than IDLE_FREE_PRESENTS presents after switching it off makes
+// the size's images and feature again, which its first evaluation waits for, as at the first frame DLSS ran in a run.
+#define IDLE_FREE_PRESENTS 600
+static uint64_t off_at;   // D.presents when DLSS went off
+static void idle_release(void) {
+    if (!idle_free()) return;
+    if (D.hl && D.presents - D.hl_at >= IDLE_FREE_PRESENTS && !D.hl_fresh) {
+        rt_log("dlaa: the HUD-less picture for frame generation went unused for %d presents: freed", IDLE_FREE_PRESENTS);
+        hl_destroy();
+    }
+    if (D.on || D.presents - off_at < IDLE_FREE_PRESENTS) return;
+    int n = 0;
+    for (int i = 0; i < DLSS_SIZES; i++)
+        if (D.sizes[i].out || D.sizes[i].feat) {
+            rt_log("dlaa: the DLSS size %ux%u -> %ux%u went unused for %d presents with the upscaler off: freed",
+                   D.sizes[i].w, D.sizes[i].h, D.sizes[i].ow, D.sizes[i].oh, IDLE_FREE_PRESENTS);
+            destroy_size(&D.sizes[i]), n++;
+        }
+    if (n)   // frame generation's motion vectors were a size's (evaluate); none is handed out this late (fg_current)
+        D.last = NULL, D.host = NULL, D.fg_fresh = 0, D.fg_mv_view = VK_NULL_HANDLE, D.fg_mv = (VkFfxImage){0};
+}
+
 void vk_dlaa_frame(void) {
     static unsigned cfg_seen;
     static int cfg_known;
@@ -2714,6 +2743,7 @@ void vk_dlaa_frame(void) {
     if (on != D.on) {
         rt_log("dlaa: %s", on ? "on" : "off");
         D.on = on;
+        off_at = D.presents;
         // either way the next DLAA frame starts a new history from an unjittered frame
         D.reset = 1, D.cam_prev_ok = 0, D.jit_ok = D.jit_used = D.armed = D.done = D.gbuf = D.ended = D.up = 0;
         D.hold = 0;
@@ -2721,6 +2751,7 @@ void vk_dlaa_frame(void) {
         memset(&F, 0, sizeof F);
         return;
     }
+    idle_release();
     if (!dl_active()) return;
     if (D.share_off) D.share_off--;
     if (!D.done && D.armed) D.share_off = 120;   // vk_dlaa_pass: the output pass without the mode's share for a while
