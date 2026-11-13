@@ -117,7 +117,9 @@ python/                  python.org's embeddable Python 3.14.9 with tkinter, num
 app/current.txt          the version the stub starts; app/previous.txt the one before it
 app/<version>/           launcher/, runtime/, recomp/, tools/, bin/nx2navi_xlate.exe, VERSION,
                          toolchain.lock.json (the pinned build tools), feed.json (where updates come from), and in a
-                         release made with --prompt-art, prompt-art/ (the button art the prompts are drawn from); a
+                         release made with --prompt-art, prompt-art/ (the button art the prompts are drawn from);
+                         in one made with --pgo, data/pgo-v111.profdata and .json (the execution profile the game's
+                         code is compiled with, and its record); a
                          release staged in the background also holds staged.json and the Python it brings,
                          python.staged/, until it installs
 pydeps/                  zbic, downloaded from PyPI on this PC
@@ -161,6 +163,12 @@ A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the too
      (it reads UCRT64's headers; `make_game.py` `fast_clang` checks that both report the same version and target).
    - The lifted code is compiled for the processor's own level, x86-64-v3 (AVX2, FMA) or v2 (`cpu_level`): the game
      runs on the PC that builds it, and a generic build would do every fused multiply-add of the game in software.
+   - A version with an execution profile (`app/<version>/data/pgo-v111.profdata`) compiles the lifted code at -O2
+     with it, and the runtime files it compiles here too (`pgo_profile`; the prebuilt runtime was compiled with it
+     when the release was made). The first build after the update that brings a profile, or another one, compiles
+     every file again. The profile is left out, and the code is built as without one, when its record names another
+     `recomp/` than the version's or the compiler cannot read it, which one trial compile finds out before the
+     others start ([building.md](building.md), "Profile-guided build").
 3. **Prepare the Shaders**: make_game.py translates every shader of the game, in its default bind state,
    into the game's shader cache and builds its stage library or compute pipeline into the driver's own cache
    (`tools/prepare_shaders.py`), so play stops for them far less often. Variants met in play with another bind state are
@@ -453,6 +461,12 @@ game folder is the default `<launcher>\game`. The dump is never touched.
    the archive's size and sha256 and each file's sha256, and writes `dlssg-NOTICE.txt` with the two licence texts;
    `make_game.py` copies the whole set beside the game. `--streamline SDK` takes an SDK folder on disk instead (its
    files must be the pinned ones).
+
+   `--pgo FILE` puts an execution profile and its record in the release (`app/<version>/data`), and the prebuilt
+   runtime is compiled with it; the release stops when the record names another `recomp/` than the checkout's, and
+   when the release's compiler, the one players build with, cannot read the profile
+   ([building.md](building.md), "Profile-guided build"). The profile is derived from the game's code and never goes
+   into the repository.
 
    `--prompt-art FOLDER ...` puts the button art in the release (`app/<version>/prompt-art`): folders that hold
    `XGamepad`, `P5Gamepad` and `Keyboard_Mouse` (the Source folders of button prompt art packs), or those three
