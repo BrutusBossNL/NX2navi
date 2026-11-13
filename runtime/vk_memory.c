@@ -5097,7 +5097,8 @@ VkCommandBuffer vk_upload_begin(void) {
 // NX2NAVI_UPLOAD_BATCH_MB (256 with low_end_gpu = 1; 0, the default, = no limit of its own): once the open batch's
 // staging buffers hold that much, the outermost vk_upload_end submits it. It does so too once the batch's staging
 // reaches STG_FLUSH, so that an area load's staging stays inside the staging pool's blocks (the staging pool's
-// comment). A save load made thousands of textures between two replay submissions, and every one of them went into
+// comment): 0 therefore means STG_FLUSH (64 MiB), not "never", and a value above STG_FLUSH changes nothing, the
+// low-end mode's 256 and the settings menu's 128 to 1024 included. A save load made thousands of textures between two replay submissions, and every one of them went into
 // one batch: about 1.5 GB of raw ASTC blocks plus the decoder's work in a single submission,
 // which AMD's 23.10 driver on an RX 580 refused with VK_ERROR_OUT_OF_DEVICE_MEMORY. Submitted early, a batch still
 // precedes the replay submission that uses its textures (the queue keeps order), and its staging is freed as it retires.
@@ -5168,19 +5169,27 @@ void vk_mem_oom_report(const char *what, VkResult r) {
 // which it waits for in order (a wait covers all the queue's work submitted ahead of that batch, tens of ms on a heavy
 // frame, with cmd_lock held). Only when none of that makes room (the open batch's own staging, staging buffers their
 // callers hold, the blocks' fragmentation) does the pool grow by a block, and the log says so.
-// A discrete GPU keeps STG_MIN_BLOCKS blocks; an integrated one, whose host memory is the machine's RAM and where low
-// memory ended the game before (vk_mem_give_back), keeps STG_MIN_BLOCKS_UMA, and its loads wait for batches sooner.
+// A discrete GPU keeps STG_MIN_BLOCKS blocks, 256 MiB of host memory for the whole run (128 MiB up to 0.9.2); an
+// integrated one, whose host memory is the machine's RAM and where low memory ended the game before
+// (vk_mem_give_back), keeps STG_MIN_BLOCKS_UMA, 128 MiB, and its loads wait for batches sooner.
 #define STG_BLOCK (64ull << 20)
 #define STG_MIN_BLOCKS 4
 #define STG_MIN_BLOCKS_UMA 2
 static VmaPool stg_pool;
 static int stg_pool_tried;
 static uint64_t stg_room_cache, stg_room_wait, stg_room_new;   // cmd_lock: how stg_create found room (rt_log below)
+static uint64_t stg_wait_ticks, stg_wait_max;                  // cmd_lock: qpc ticks stg_create waited for batches
 
 // vmaCreateBuffer of a staging buffer (*ai names stg_pool) inside the pool's blocks: when they are full, the kept
 // staging buffers and the arena's idle chunks go, then the oldest batch in flight is waited for and retired, until the
 // buffer fits. chunk: the buffer is an arena chunk, and VK_INCOMPLETE says that a retired batch gave chunks back to
 // arena_free, to take one of those instead. Without a batch to wait for (or once the device is lost) the pool grows.
+// The wait runs with cmd_lock held, and cannot leave it: the caller is inside vk_upload_begin .. vk_upload_end with
+// the open batch's command buffer in hand, and the staging buffer it asks for belongs to that batch, so letting go of
+// the lock would let another thread submit the batch under it. Meanwhile a replay submission that wants to send its
+// uploads (vk_upload_flush) waits for the lock; its own commands would queue behind the same batches, so what it
+// loses is recording time, not GPU time. How long that is on a load is not measured anywhere yet: the waits are
+// timed here and logged (the first four, then at every doubling of their count), so a played session's log says.
 static VkResult stg_create(VkCtx *c, const VkBufferCreateInfo *bi, const VmaAllocationCreateInfo *ai, VkBuffer *b,
                            VmaAllocation *a, VmaAllocationInfo *info, int chunk) {
     VmaAllocationCreateInfo in = *ai;
@@ -5198,13 +5207,23 @@ static VkResult stg_create(VkCtx *c, const VkBufferCreateInfo *bi, const VmaAllo
         }
         if (ninflight && !vk_device_is_lost()) {
             int before = ninflight;
+            uint64_t w0 = qpc();
             VkResult w = vkWaitForFences(c->device, 1, &inflight[0].fence, VK_TRUE, UINT64_MAX);
             if (w != VK_SUCCESS) {
                 vk_device_lost_check(w, "the wait for an upload batch");
                 rt_fatal("vk: the wait for an upload failed (%d)", (int)w);
             }
+            uint64_t took = qpc() - w0;
+            stg_wait_ticks += took;
+            if (took > stg_wait_max) stg_wait_max = took;
             retire(c, 0);
             stg_room_wait++;
+            if (stg_room_wait <= 4 || !(stg_room_wait & (stg_room_wait - 1)))
+                rt_log("vk: a staging buffer of %.1f MiB waited %.1f ms for an upload batch to finish, with the upload "
+                       "lock held (%llu such waits so far, %.0f ms in all, the longest %.1f ms; %d batches still in "
+                       "flight). A replay submission that sends its uploads waits for that lock",
+                       bi->size / 1048576.0, qpc_ms(took), (unsigned long long)stg_room_wait, qpc_ms(stg_wait_ticks),
+                       qpc_ms(stg_wait_max), ninflight);
             if (chunk && narena_free) {
                 r = VK_INCOMPLETE;
                 break;

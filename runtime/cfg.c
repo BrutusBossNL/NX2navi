@@ -318,7 +318,9 @@ static const CfgMeta metas[] = {
     {"FOLIAGE", "full", "full|reduced|off", RESTART},   // vk_exec_draw.c foliage_skip
     {"VRAM_HEAP_LIMIT", "0", NULL, RESTART},   // vk_device.c vram_heap_limits: auto, 0 or MiB
     {"VRAM_RESERVE_MB", "0", "0..4096", RESTART},   // vk_vma_budget.c: video memory kept free of VMA's allocations
-    {"UPLOAD_BATCH_MB", "0", NULL, RESTART},   // vk_memory.c: MiB of staging before a batch goes early, 0 no limit
+    // vk_memory.c vk_upload_end: MiB of staging before a batch goes early. 0: at 64 MiB, the staging pool's own limit
+    // (STG_FLUSH), which also holds for every value above it
+    {"UPLOAD_BATCH_MB", "0", NULL, RESTART},
     {"MESH_EMULATION", "0", "0|1", RESTART}, {"MESH_EMU_MB", "256", "32..2048", RESTART},
     {"MESH_EMU_TASKS", "16384", "256..262144", RESTART}, {"MESH_EMU_BATCH", "1", "0|1", RESTART}, {"VEC_INDEX_FIX", "0", "0|auto|1", RESTART},
     {"GUEST_OPT", "1", "1|2", RESTART},   // tools/make_game.py: the next Rebuild the Game
