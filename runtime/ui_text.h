@@ -175,7 +175,10 @@ typedef enum {
     // Menu tab
     UI_MENU_MENU_LANG, UI_MENU_MENU_LANG_DESC, UI_MENU_MENU_LANG_AUTO,
     UI_MENU_DISCORD_RPC, UI_MENU_DISCORD_RPC_DESC, UI_MENU_LOW_END_GPU, UI_MENU_LOW_END_GPU_DESC,
-    UI_MENU_REPLAY_WORKERS, UI_MENU_REPLAY_WORKERS_DESC,   // the Game tab, English only
+    // the Game tab's Testing rows (ui/menu.cpp tab_game), English only
+    UI_MENU_REPLAY_WORKERS, UI_MENU_REPLAY_WORKERS_DESC, UI_MENU_REPLAY_PIPE, UI_MENU_REPLAY_PIPE_DESC,
+    UI_MENU_REPLAY_SMALL, UI_MENU_REPLAY_SMALL_DESC, UI_MENU_TAIL_EARLY, UI_MENU_TAIL_EARLY_DESC,
+    UI_MENU_NEEDS_WORKERS, UI_MENU_NEEDS_PIPE,   // why a row is greyed out
 
     // Language names, each in its own language and the same in every row (game language and menu language lists)
     UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_JA, UI_MENU_LANGNAME_FR, UI_MENU_LANGNAME_DE, UI_MENU_LANGNAME_IT,

@@ -67,11 +67,31 @@ typedef struct { uint64_t addr, size; int back; } Range;   // back: written into
 // for the newest such submission). Write-backs of the mirrors note it in vk_memory.c; the lazily written ones fetch on
 // the CPU's first access.
 static volatile int32_t ex_results;   // VK_RES_* bits
+static int tail_results;              // those noted while the submission's tail records (vk_exec.c "the early tail")
+int vk_exec_tail_results(void) { int r = tail_results; tail_results = 0; return r; }
 void vk_exec_note_results(int kind) {
+    if (vk_exec_tail()) tail_results |= kind;
     __atomic_fetch_or(&ex_results, kind, __ATOMIC_RELAXED);
     vk_gpu_passes_result(kind);   // NX2NAVI_GPU_PASSES: where in the submission it is done
 }
 int vk_exec_take_results(void) { return __atomic_exchange_n(&ex_results, 0, __ATOMIC_RELAXED); }
+
+// An inline uniform update in a submission's tail (vk_exec_draw.c op_update_ub, vk_exec.c "the early tail"): the GPU
+// copies the bytes into the pool's mirror where the stream has the update, and guest memory gets them here, with the
+// results the game reads, in place of a write-back.
+typedef struct { uint64_t addr; uint32_t size; uint8_t data[]; } UbWrite;
+static void ub_write_cb(void *arg) {
+    UbWrite *w = arg;
+    memcpy((void *)(uintptr_t)w->addr, w->data, w->size);
+    free(w);
+}
+void vk_exec_tail_ub(uint64_t fence, uint64_t addr, const void *data, uint32_t size) {
+    UbWrite *w = malloc(sizeof *w + size);
+    if (!w) rt_fatal("vk: out of memory");
+    w->addr = addr, w->size = size;
+    memcpy(w->data, data, size);
+    vk_completion_add_result(fence, ub_write_cb, w);
+}
 
 static void guest_written_cb(void *arg) {
     Range *r = arg;
@@ -114,8 +134,9 @@ static void event_cb(void *arg) {
 
 // NVNcounterData = {counter, timestamp}; timestamps are Tegra 19.2 MHz ticks (the base of GetSystemTick).
 // keep: the 4-byte quarters of the record the write leaves as they are (bit n: bytes 4n to 4n + 3), 0 none.
-static void write_counter(uint64_t addr, uint64_t counter, unsigned keep) {
-    uint64_t rec[2] = {counter, (uint64_t)((unsigned __int128)kern_now_ns() * 12 / 625)};
+// ahead_ns: the timestamp is that much past now (a tail timestamp the GPU has not reached yet, counter_cb), else 0.
+static void write_counter(uint64_t addr, uint64_t counter, unsigned keep, uint64_t ahead_ns) {
+    uint64_t rec[2] = {counter, (uint64_t)((unsigned __int128)(kern_now_ns() + ahead_ns) * 12 / 625)};
     if (!keep) {
         memcpy((void *)(uintptr_t)addr, rec, sizeof rec);
         return;
@@ -127,14 +148,16 @@ static void write_counter(uint64_t addr, uint64_t counter, unsigned keep) {
 // Reports other than samples passed (timestamps; the statistics counters are not modelled) write a counter of 0. The
 // counter word matters: Ocarina writes {1, 0} into a record from the CPU, reports TIMESTAMP_TOP into it and gates
 // clears on it differing from a zero record (mode 1), clears that must not run.
-static void report_write(uint64_t addr, uint64_t seq, uint64_t counter);   // below, with the pending table
+static void report_write(uint64_t addr, uint64_t seq, uint64_t counter, uint64_t ahead_ns);   // below, with the pending table
 
-typedef struct { uint64_t addr, seq; } CounterWrite;
+// tail: the submission's value for a timestamp reported in its tail (vk_exec.c "the early tail"), else 0
+typedef struct { uint64_t addr, seq, tail; } CounterWrite;
 
 static void counter_cb(void *arg) {
     CounterWrite *w = arg;
     if (vk_sync_effect_late()) __atomic_fetch_add(&late_counters, 1, __ATOMIC_RELAXED);
-    report_write(w->addr, w->seq, 0);
+    // A timestamp of the tail, written while the GPU still runs the tail: the time the tail is expected to end at
+    report_write(w->addr, w->seq, 0, w->tail ? vk_sync_tail_pending_ns(w->tail) : 0);
     free(w);
 }
 
@@ -308,7 +331,7 @@ static unsigned clear_quarters(const Pending *e) { return e->clr_seq >= e->seq ?
 
 // Completion thread, or the thread whose wait runs the results: report seq to addr goes into guest memory, but for
 // the quarters a small clear replayed after it has filled.
-static void report_write(uint64_t addr, uint64_t seq, uint64_t counter) {
+static void report_write(uint64_t addr, uint64_t seq, uint64_t counter, uint64_t ahead_ns) {
     int lk = __atomic_load_n(&clr_any, __ATOMIC_ACQUIRE);
     unsigned keep = 0;
     if (lk) {
@@ -317,7 +340,7 @@ static void report_write(uint64_t addr, uint64_t seq, uint64_t counter) {
         if (e && seq <= e->clr_seq) keep = e->clr_mask;
         if (keep) __atomic_fetch_add(&CS.kept, 1, __ATOMIC_RELAXED);
     }
-    write_counter(addr, counter, keep);
+    write_counter(addr, counter, keep, ahead_ns);
     if (lk) plat_mutex_unlock(&clr_lock);
     pending_written(addr, seq);
 }
@@ -644,7 +667,7 @@ static void oq_cb(void *arg) {
         if (s->lost && !oq_count) oq_count = 1;
         if (s->addr) {
             if (vk_sync_effect_late()) __atomic_fetch_add(&late_counts, 1, __ATOMIC_RELAXED);
-            report_write(s->addr, s->seq, oq_count);
+            report_write(s->addr, s->seq, oq_count, 0);
         }
     }
     free(s->q), free(s);
@@ -893,10 +916,13 @@ static void report_counter(VkExec *ex, const p_report_counter *p) {
     clear_note_report(p->addr);
     if (samples) oq_report(ex, p->addr);
     else {
+        // a timestamp in the tail is the one result a tail may hand the CPU: its time is written ahead (counter_cb)
+        int ts_tail = vk_exec_tail() && p->type == NVN_COUNTER_TYPE_TIMESTAMP, keep = tail_results;
         vk_exec_note_results(VK_RES_COUNTER);
+        if (ts_tail) tail_results = keep;
         CounterWrite *a = malloc(sizeof *a);
         if (!a) rt_fatal("vk: out of memory");
-        *a = (CounterWrite){p->addr, report_seq};
+        *a = (CounterWrite){p->addr, report_seq, ts_tail ? ex->fence : 0};
         vk_completion_add_result(ex->fence, counter_cb, a);
     }
     Pending *e = pending_slot(p->addr, 1);
