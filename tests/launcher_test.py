@@ -657,6 +657,42 @@ class NetTest(Tmp):
         with self.assertRaises(net.DownloadError):
             net.download(srv.url + 'missing.bin', self.tmp / 'out' / 'm.bin')
 
+    def test_the_download_total(self):
+        """progress gets the whole file's size as its total: the expected size, else the length the server names
+        plus what the part file holds, else the bytes so far. A resumed answer without a length gave the part
+        file's size as the total, so the bar passed 100 %."""
+        data = os.urandom(2 * net.CHUNK + 500)
+        have = 1000
+
+        class Answer(io.BytesIO):   # what net.request returns: the rest of the file after a Range request
+            status = 206
+            length = None
+
+            def __init__(self, headers):
+                super().__init__(data[have:])
+                self.headers = headers
+
+        def fetch(headers, **kw):
+            dest = self.tmp / 'total' / 'f.bin'
+            shutil.rmtree(dest.parent, ignore_errors=True)
+            dest.parent.mkdir()
+            dest.with_name('f.bin.part').write_bytes(data[:have])
+            seen = []
+            with mock.patch.object(net, 'request', lambda url, h, timeout, version: Answer(headers)):
+                net.download('https://example.invalid/f.bin', dest, progress=lambda d, t: seen.append((d, t)), **kw)
+            self.assertEqual(dest.read_bytes(), data)
+            self.assertEqual(seen[-1][0], len(data))
+            return seen
+
+        for d, t in fetch({}):                                            # no length, no expected size
+            self.assertEqual(t, d)                                        # (the part's 1000 bytes as the total before)
+        for d, t in fetch({'Content-Length': str(len(data) - have)}):     # the length of the rest
+            self.assertEqual(t, len(data))
+        for d, t in fetch({}, size=len(data)):                            # the expected size, whatever the server says
+            self.assertEqual(t, len(data))
+        for d, t in fetch({'Content-Length': '7'}, size=len(data)):
+            self.assertEqual(t, len(data))
+
     def test_plain_http_redirects_and_oversize(self):
         with self.assertRaises(net.DownloadError):                        # refused before any connection
             net.request('http://example.invalid/f.bin')

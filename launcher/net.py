@@ -262,7 +262,12 @@ def download(url, dest, sha256=None, size=None, progress=None, cancel=None, head
                 status = getattr(r, 'status', 200)
                 if have and status != 206:   # the server ignores Range: start over
                     have = 0
-                total = int(r.headers.get('Content-Length') or 0) + have or size or 0
+                # The whole file's size for progress: the expected one, else what the server says is still to come
+                # plus what the part file holds, else unknown (0: progress then gets the bytes so far as the total).
+                # "length + have or size or 0" took the part file's size for the whole when a resumed answer named
+                # no length, and the bar ran past its end.
+                coming = int(r.headers.get('Content-Length') or 0)
+                total = size or (coming + have if coming else 0)
                 with open(part, 'ab' if have else 'wb') as f:
                     done = have
                     while True:
