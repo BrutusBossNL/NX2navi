@@ -9,7 +9,7 @@ import threading
 import time
 import traceback
 
-from . import build, feed, gamefiles, locks, net, toolchain, updater, versions, winsys
+from . import build, feed, gamefiles, locks, net, paths, toolchain, updater, versions, winsys
 
 RECHECK = 3600   # seconds between update checks while the launcher stays open, hidden during play included
 
@@ -456,6 +456,9 @@ class InstallJob(Job):
         return build.install_args(self.ctx.layout, self.dump, self.game_dir)
 
     def run(self):
+        too_long = paths.long_path_problem(self.game_dir)   # the window asks first (begin_install); the command line here
+        if too_long:
+            raise build.BuildError(too_long)
         self.ensure_tools('tools')
         self.make_game(self.args(),
                        {s: s for s in ('check', 'exefs', 'romfs', 'lift', 'compile', 'shaders', 'prompts', 'scan')})

@@ -135,6 +135,12 @@ game/                    the built game, unless another folder was chosen (its l
 A path the Windows ANSI code page cannot hold breaks the MSYS2 tools, so the toolchain then goes to
 `C:\NX2navi\toolchain` instead (`launcher/paths.py`).
 
+Windows and the build tools stop at 260 characters for a file's whole path, and the files of a built game need up to
+128 below the game folder (the prompt folders' resource table is the longest). Begin Installation and the install
+job therefore refuse a game folder whose own path is longer than 130 characters, with both lengths
+(`paths.long_path_problem`). Longer paths are not supported: the launcher does not use Windows' long path form, and
+the compiler, the linker and `tar` would not take it.
+
 ## Installing
 
 `jobs.InstallJob`, one row per step:

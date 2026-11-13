@@ -39,6 +39,7 @@ from tkinter import filedialog
 
 from .. import NAME, build, feed, gameini, gamefiles, jobs, locks, mods, saves, steam, versions, winsys
 from ..context import Context
+from ..paths import long_path_problem
 from . import art, picture, sound
 
 W, H = 1000, 640
@@ -966,6 +967,11 @@ class App:
             self.choose_dump()
             return
         gd = self.game_dir()
+        too_long = long_path_problem(gd)   # told here, not as a missing file halfway through the build
+        if too_long:
+            self.message = App.friendly(too_long)
+            self.render()
+            return
         drop_partial_image(gd)   # before the free space is measured
         if free_gb(gd) < 34 and not (Path(gd) / 'romfs' / 'romfs.bin').is_file():
             self.message = f'{drive_of(gd)} has {free_gb(gd):.0f} GB free; the game needs about 34 GB.'

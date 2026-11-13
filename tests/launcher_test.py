@@ -5130,6 +5130,38 @@ class BeginInstallTest(Tmp):
         self.assertIn('31 GB free', rows['Install Folder'].desc[0])
         self.assertIn('(31 GB free)', rows['Begin Installation'].desc[0])
 
+    def test_a_game_folder_whose_path_is_too_long_is_refused_first(self):
+        """Windows and the build tools stop at 260 characters for a file's whole path, and the game folder's own
+        files need 128 below it: a deeper folder is refused at Begin Installation and by the install job with the
+        lengths, where the build stopped in the middle with a file "not found". No limit elsewhere."""
+        from launcher import paths
+        most = paths.WINDOWS_PATH_MAX - 1 - paths.LONGEST_IN_GAME
+        fits = 'C:\\' + 'g' * (most - 3)
+        deep = fits + 'g'
+        with mock.patch.object(paths.os, 'name', 'nt'), \
+                mock.patch.object(paths.os.path, 'abspath', lambda p: p):   # as Windows gives these paths back
+            self.assertEqual(paths.long_path_problem(fits), '')
+            self.assertEqual(paths.long_path_problem(''), '')
+            said = paths.long_path_problem(deep)
+            self.assertIn(f'is {most + 1} characters long', said)
+            self.assertIn(f'at most {most} characters', said)
+        with mock.patch.object(paths.os, 'name', 'posix'):
+            self.assertEqual(paths.long_path_problem('/' + 'g' * 4000), '')
+        if os.name != 'nt':
+            return
+        App, a = mock_app(self, deep)
+        a.settings['dump'] = str(self.tmp / 'game.nup')
+        a.game_dir.return_value = deep
+        App.begin_install(a)
+        a.run_job.assert_not_called()
+        self.assertTrue(a.message.startswith('The path of the game folder is'))
+        ctx = JobTest.make_ctx(self, 'ok')
+        self.addCleanup(ctx._file.close)
+        j = jobs.InstallJob(ctx, self.tmp / 'g.nup', deep).run_inline()
+        self.assertEqual(j.result, 'failed')
+        self.assertIn('characters long', j.error)
+        self.assertEqual(j.step('tools').state, jobs.PENDING)         # before the build tools are fetched
+
 
 class UpdateTextTest(Tmp):
     def test_the_updates_row_does_not_promise_a_few_minutes(self):
