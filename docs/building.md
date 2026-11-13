@@ -489,6 +489,13 @@ and end a sprint, ZL, the button kept from the game only during play (the bottom
 Link the player does not control, and the set switched off with the button off but never over a start that kept it
 off. No game files.
 
+A change to the text speed (`runtime/text_speed.c`, the set `text_speed` of `recomp/patches-v111.txt`, its call in
+`runtime/ov_input.c` `npad_states`) passes `python tests\text_speed_check.py`, which lifts the set's replacement words
+with `recomp/lifter.py` and runs them with `text_speed.c` against a stand-in message window and typewriter: the page
+words each setting writes and the set it switches, the skip site's decide bit and typewriter word for a message the
+player may skip and one the game keeps from skipping, the speed site's factor for that typewriter and no other, the
+registers and flags both sites leave alone, and a start that kept the set off. No game files.
+
 A change to the mouse camera (`runtime/mouse_direct.c`, the mouse path of `runtime/input.c`, the set `mouse_direct` of
 `recomp/patches-v111.txt` or `patches-v143.txt`) passes `python tests\mouse_direct_check.py --cc <clang> --deps
 <ucrt64>\include`, which builds `mouse_direct.c`, and `input.c` with `--deps`, with the rest of the runtime stubbed and
