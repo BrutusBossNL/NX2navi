@@ -368,7 +368,7 @@
 # left. In play the game took released textures back within a minute or not at all; one taken back after its drop is
 # made again and shows its stand-in for a frame. A texture whose content only the GPU made waits twice as long, and one
 # the GPU drew into since its last copy back to game memory stays. 0: released textures stay up to tex_released_mb for
-# the whole session (as before 0.10). Default: 180; vram_use = high sets 0. Read at start.
+# the whole session (as before 0.10). Default: 180. Read at start.
 # tex_released_hold = 180
 # Megabytes the released textures may hold (0: no bound). Past it the oldest go even when young; while tex_released_hold
 # is on, young ones may stay past it, up to twice it, as long as video memory and the system's commit have room.
@@ -589,15 +589,6 @@
 # cpu or astc_bc = 0) and the budget is under 20480 MiB, auto goes one step lower, as they take four times the memory.
 # The log says what was picked ("texture detail:"). Read at start.
 # texture_detail = auto
-# Video memory use (the Screen tab's row): low or high. low, the default, lets go of released textures once nothing has
-# used them for tex_released_hold (180 s), and frees what DLSS, frame generation's HUD-less picture, FSR 1 and SMAA
-# held once they have been switched off for a while (about 0.9 GiB with DLSS off at 5120x2142). high keeps both for the
-# whole session (tex_released_hold = 0: released textures up to tex_released_mb), so switching those features on again
-# makes nothing. balanced, the default before 0.10, means low. The low of the 0.10 previews traded memory for work
-# done again; its values are keys of their own: tex_released_mb = 1024, tex_vram_pressure = 70 and pipe_seed_boot = 0
-# (0.3-0.6 GiB of video memory and 2-4 GB of commit less, but a first visit to an area misses objects for a frame
-# while their pipelines are made). Read at start.
-# vram_use = low
 # Sun shadow map size: game (the game's own, which changes with the view and drops to about 400 near the ground, so
 # leaf shadows look blocky and jump) or a fixed 256, 512, 768, 1024, 1536 or 2048. Above 960 the texture heap grows with
 # it. 256 is coarser than the game's own and is for integrated GPUs short of memory bandwidth. Read at start.

@@ -279,8 +279,8 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   for content only the GPU made (`vk_texture.c` `drop_aged`, `vk_tex_release.h`, `tex_released_hold`). The size bound
   (a quarter of the video memory budget) stays as the safety net for a burst of area changes, and young textures may
   pass it, up to twice it, while the card and the system's commit have room. Times are wall seconds from a clock of
-  the presents, not present counts. `vram_use = high` (`cfg.c` `vram_use_value`) turns the hold off and keeps what a
-  switched-off upscaler or SMAA holds; the default, low, frees both.
+  the presents, not present counts. What a switched-off upscaler or SMAA held is freed after it has gone unused for a
+  while (`vk_dlaa.c` `idle_release`, `vk_fsr.c` `idle_note`, `vk_aa.c` `work_idle`).
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
   `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
   (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.

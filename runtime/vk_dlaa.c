@@ -2825,7 +2825,7 @@ static int up_holds(void) {
 
 static void retire_idle(void) {
     uint64_t now = __atomic_load_n(&D.presents, __ATOMIC_RELAXED);
-    if (!idle_free() || cfg_vram_keep()) return;   // as idle_release: vram_use = high keeps them
+    if (!idle_free()) return;   // as idle_release
     if (inputs_on()) {   // the upscaler runs, or frame generation alone makes its inputs from a size (D.fgo)
         retire_off_at = 0;
         return;
@@ -3034,7 +3034,7 @@ int vk_dlaa_resized_take(void) {
 #define IDLE_FREE_PRESENTS 600
 static uint64_t off_at;   // D.presents when DLSS went off
 static void idle_release(void) {
-    if (!idle_free() || cfg_vram_keep()) return;   // vram_use = high keeps them
+    if (!idle_free()) return;
     if (D.hl && D.presents - D.hl_at >= IDLE_FREE_PRESENTS && !D.hl_fresh) {
         rt_log("dlaa: the HUD-less picture for frame generation went unused for %d presents: freed", IDLE_FREE_PRESENTS);
         hl_destroy();

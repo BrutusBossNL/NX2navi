@@ -51,7 +51,7 @@ static struct {
 #define IDLE_FREE 600
 static void free_images(VkCtx *c);
 static void idle_note(unsigned slot) {
-    if (!F.img[0] || cfg_vram_keep()) return;   // vram_use = high keeps them
+    if (!F.img[0]) return;
     F.since |= 1u << (slot % SLOTS);
     if (++F.idle < IDLE_FREE || (F.since & F.used_slots) != F.used_slots) return;
     rt_log("vk: FSR's images unused for %u presents: freed (%ux%u)", F.idle, F.w, F.h);

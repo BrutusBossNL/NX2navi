@@ -78,7 +78,7 @@ static const char *const known[] = {
     "UPLOAD_BATCH_MB", "VRAM_HEAP_LIMIT", "VRAM_RESERVE_MB", "TEX_CLOBBER", "LOW_END_GPU",
     "ZSTD_CHECK", "ZSTD_NATIVE",
     "BIND_REUSE", "DYN_DELTA", "STG_ARENA", "SUBMIT_BATCH", "SUBMIT_THREAD", "ASTC_GPU_DESWIZZLE", "ASTC_SCRATCH_KEEP", "ASTC_ARENA", "ASTC_BC1",
-    "TEXUP_LOG_MS", "DYN_RES", "DYN_RES_TARGET", "DYN_RES_STEP", "TEXTURE_DETAIL", "VRAM_USE",
+    "TEXUP_LOG_MS", "DYN_RES", "DYN_RES_TARGET", "DYN_RES_STEP", "TEXTURE_DETAIL", "VRAM_USE",   // vram_use: the removed Video memory use row, read by nothing
     "RECORDER_CORE", "RECORDER_PRIO", "REPLAY_TIME", "LOCK_TIME", "POOL_CREATE_BUDGET", "POOL_CREATE_MS", "POOL_FINI_IDLE", "POOL_LOAD_BACKLOG", "POOL_LOAD_MS",
     "VMA_BLOCK_MB", "SYNC_WAKE_ALL", "LOG_ASYNC", "DEVICE_LOST_AT", "STAGING_FAIL_AT", "VRAM_BALLAST_MB",
     "TEX_COMPACT", "TEX_COMPACT_MIN_MB", "TEX_COMPACT_FRAME_MB",   // texture compaction (vk_texture.c); no menu row
@@ -109,7 +109,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"FULLSCREEN", "display"}, {"WINDOW_SIZE", "display"}, {"PERF_OVERLAY", "display"}, {"VK_PRESENT", "display"},
     {"GPU_INDEX", "display"}, {"MONITOR", "display"}, {"OUTPUT_RES", "display"}, {"GAME_ASPECT", "display"}, {"GAME_RES", "display"}, {"RENDER_SCALE", "display"}, {"UPSCALER", "display"},
     {"SHARPNESS", "display"}, {"STANDIN_FILTER", "display"}, {"SCENE_SHARE", "display"}, {"ASPECT", "display"}, {"FOV", "display"}, {"ANISO", "display"},
-    {"TEXTURE_DETAIL", "display"}, {"VRAM_USE", "display"},
+    {"TEXTURE_DETAIL", "display"},
     {"COLOR_PRESET", "display"},
     {"COLOR_BRIGHTNESS", "display"}, {"COLOR_CONTRAST", "display"}, {"COLOR_SATURATION", "display"},
     {"COLOR_GAMMA", "display"}, {"HDR", "display"}, {"HDR_LIVE", "display"}, {"HDR_PEAK_NITS", "display"}, {"HDR_GAME_NITS", "display"},
@@ -213,10 +213,6 @@ static const CfgMeta metas[] = {
     {"ASPECT", "fit", "fit|stretch", LIVE}, {"FOV", "100", "70..140", LIVE},
     {"ANISO", "16", "game|2|4|8|16", LIVE},   // vk_texture.c sampler_features, vk_sampler_aniso_live; 16: the game asks 1x or 2x
     {"TEXTURE_DETAIL", "auto", "auto|full|reduced|low", RESTART},   // vk_texture.c "texture detail", read at the first texture
-    // video memory use: low, the default, keeps released textures for the hold and frees what features switched off
-    // hold; high sets the VRAMHIGH defaults below and keeps those (cfg_vram_keep: vk_dlaa.c idle_release, vk_fsr.c
-    // idle_note, vk_aa.c work_idle). balanced, the default before 0.10, reads as low.
-    {"VRAM_USE", "low", "low|high", RESTART},
     // colour adjustment (vk_color.c); the preset is the menu's, the four values are what the present uses
     {"COLOR_PRESET", "default", "default|vivid|clarity|custom", LIVE}, {"COLOR_BRIGHTNESS", "0", "-30..30", LIVE},
     {"COLOR_CONTRAST", "100", "70..150", LIVE}, {"COLOR_SATURATION", "100", "50..200", LIVE},
@@ -369,7 +365,7 @@ static const CfgMeta metas[] = {
     // textures and memory
     {"ASTC", "auto", "auto|gpu|native|cpu", RESTART}, {"MEMORY", "auto", "auto|import|mirror|verify", RESTART},
     {"TEX_ALIAS", "1", "0|1", RESTART}, {"DEPTH_INIT_INLINE", "1", "0|1", RESTART}, {"DEPTH_ALIAS_LOG", "0", "0|1", RESTART}, {"TEX_DISUSE", "1", "0|1|2", RESTART}, {"TEX_DISUSE_EVICT", "0", "0|1", RESTART}, {"TEX_GEN_UNDO", "1", "0|1", RESTART}, {"TEX_REUSE", "1", "0|1", RESTART}, {"TEX_SPLIT_FILL", "1", "0|1|2", RESTART}, {"TEX_VRAM_PRESSURE", "80", "0..100", RESTART},
-    // vk_texture.c drop_aged: seconds a released texture is kept unused (vk_tex_release.h); vram_use = high sets 0
+    // vk_texture.c drop_aged: seconds a released texture is kept unused (vk_tex_release.h)
     {"TEX_RELEASED_HOLD", "180", "0..900", RESTART}, {"ASTC_BC", "", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},
     {"TEX_CLOBBER", "0", "0|1", RESTART},
     {"LOW_END_GPU", "0", "0|1", RESTART},   // LOWEND below
@@ -658,40 +654,6 @@ static const char *lowend_value(const char *key) {
     return NULL;
 }
 
-// vram_use (NX2NAVI_VRAM_USE, the Screen tab's Video memory use row): low, the default, or high. low keeps a released
-// texture until it has gone unused for the hold (vk_texture.c drop_aged, TEX_RELEASED_HOLD 180 s; vk_tex_release.h has
-// the take-back figures behind it: in play the game took released textures back within a minute or not at all) and
-// frees what a switched-off upscaler or SMAA holds.
-// high sets the VRAMHIGH defaults for the keys the player does not set, after the device profile and the low-end mode:
-// TEX_RELEASED_HOLD 0, released textures stay up to the size bound (a quarter of the video memory budget) for the whole
-// session, as before 0.10; and it keeps what a switched-off feature holds (cfg_vram_keep). balanced, the default before
-// 0.10, and anything else read as low.
-// What the low of the 0.10 previews set and did cost something stays to be set on its own:
-// - TEX_RELEASED_MB 1024: released textures keep at most 1 GiB; those the game takes back after a drop are made and
-//   uploaded or decoded again and show their stand-in for a frame (81 to 218 in each 3600 presents of a session on an
-//   RTX 5090, vk_texture.c released_cap_bytes).
-// - TEX_VRAM_PRESSURE 70: textures that come back intact give way from 70% of the budget on, not 80% (sweep_pressure),
-//   and are made again when next used.
-// - PIPE_SEED_BOOT 0: the shared list's pipelines this install never drew are made at their first draw, not at the
-//   start, which leaves out 0.3-0.6 GiB of video memory and 2-4 GB of commit; a session so set missed 1,091 pipelines
-//   at a draw, 115 of them for 8 to 34 ms, and their draws were skipped (vk_pipeline.c seed_boot).
-// Unsampled live textures are not dropped in either (tex_disuse_evict stays 0): that eviction left the ground flat and
-// see-through for good (vk_texture.c disuse_evict_on).
-static const struct { const char *key, *value; } VRAMHIGH[] = {
-    {"TEX_RELEASED_HOLD", "0"},
-};
-static const char *vram_use_value(const char *key) {
-    const char *set = raw_get(PREFIX "VRAM_USE");
-    if (!set || strcmp(set, "high")) return NULL;
-    for (size_t i = 0; i < sizeof VRAMHIGH / sizeof *VRAMHIGH; i++)
-        if (!strcasecmp(VRAMHIGH[i].key, key)) return VRAMHIGH[i].value;
-    return NULL;
-}
-int cfg_vram_keep(void) {
-    const char *set = cfg_get(PREFIX "VRAM_USE");
-    return set && !strcmp(set, "high");
-}
-
 static int profile_of(void) {
     int p = __atomic_load_n(&profile, __ATOMIC_ACQUIRE);
     if (p >= 0) return p;
@@ -722,8 +684,7 @@ static const char *cfg_get_now(const char *name) {
     if (profile_of())
         for (size_t i = 0; i < sizeof DECK / sizeof *DECK; i++)
             if (!strcasecmp(DECK[i].key, name + PREFIX_LEN)) return DECK[i].value;
-    const char *low = lowend_value(name + PREFIX_LEN);
-    return low ? low : vram_use_value(name + PREFIX_LEN);
+    return lowend_value(name + PREFIX_LEN);
 }
 
 // Whether name's value comes from the player (the environment or nx2navi.ini), not a profile or the table.
@@ -825,7 +786,6 @@ const char *cfg_default(const char *key) {
             if (!strcasecmp(DECK[i].key, name)) return DECK[i].value;
     const char *low = lowend_value(name);
     if (low) return low;
-    if ((low = vram_use_value(name))) return low;
     const CfgMeta *m = cfg_meta(key);
     return m ? m->def : NULL;
 }

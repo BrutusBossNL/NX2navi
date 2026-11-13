@@ -26,7 +26,7 @@
 // past it the oldest released textures go even when young. With the hold on, young ones past it are kept while the card
 // and the system have room (trl_room), up to TRL_ROOM_TIMES the bound: the old Balanced dropped 31 young ones in a
 // burst of area changes at its bound of 4 GiB on a card with 20 GiB free, and each was made again within a minute. The
-// hold empties that excess within minutes, so the room it takes is temporary; without the hold (vram_use = high) the
+// hold empties that excess within minutes, so the room it takes is temporary; without the hold (tex_released_hold = 0) the
 // bound acts as before.
 #pragma once
 #include <stdint.h>

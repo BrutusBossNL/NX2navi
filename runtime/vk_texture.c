@@ -2661,7 +2661,7 @@ static void drop_overwritten(void) {
 }
 
 // ---- released textures by age (vk_tex_release.h has the take-back figures behind the hold)
-// NX2NAVI_TEX_RELEASED_HOLD (seconds, default TRL_HOLD_S, at most TRL_HOLD_MAX_S; 0 = no hold; vram_use = high sets 0):
+// NX2NAVI_TEX_RELEASED_HOLD (seconds, default TRL_HOLD_S, at most TRL_HOLD_MAX_S; 0 = no hold):
 // a released entry that owns memory goes once it has gone unused that long, twice that for content only the GPU made,
 // whatever the size bound says. Unused counts from the release or the last sample of the released image, whichever is
 // later, in seconds of the wall clock (secs_since). The rules drop_stale keeps hold here too: not before stale_after
