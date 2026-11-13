@@ -303,10 +303,24 @@ NVN_API(nvnMemoryPoolBuilderSetFlags) { ((pool_builder_t *)arg_p(c, 0))->flags =
 // Pool setup imports, mirrors and maps memory in the back end (the driver, VirtualAlloc): up to 20 ms on the game's
 // loader threads, which held a virtual core through it while job workers waited (NX2NAVI_CORE_DIAG). The thread gives
 // the core up, as for any blocking host call.
+static void pool_finalize(pool_t *o);
+
 NVN_API(nvnMemoryPoolInitialize) {
     NVN_BLOCKING();
     pool_t *o = arg_p(c, 0);
     const pool_builder_t *s = arg_p(c, 1);
+    // A pool object initialized again without Finalize: the back end's record of the old pool (its import, a VRAM
+    // mirror, a physical pool's device-local memory, its device address table record and its GPU address range) was
+    // left behind for good, since nothing names it any more. It is finalized first, as nvnTextureInitialize does
+    // for a texture; the back end lets the memory go once the GPU is past the submissions that may use it.
+    if (o->magic == NVN_POOL_MAGIC) {
+        static uint64_t again;
+        uint64_t n = __atomic_add_fetch(&again, 1, __ATOMIC_RELAXED);
+        if (n <= 4 || !(n & (n - 1)))
+            rt_log("nvn: MemoryPoolInitialize: pool %p (%#llx bytes) initialized again without Finalize, finalized first "
+                   "(%llu so far)", (void *)o->mem, (unsigned long long)o->size, (unsigned long long)n);
+        pool_finalize(o);
+    }
     memset(o, 0, sizeof *o);
     o->magic = NVN_POOL_MAGIC;
     o->flags = s->flags;
@@ -333,9 +347,7 @@ NVN_API(nvnMemoryPoolInitialize) {
     ret_x(c, ok);
 }
 // void nvnMemoryPoolFinalize(NVNmemoryPool *p)
-NVN_API(nvnMemoryPoolFinalize) {
-    NVN_BLOCKING();   // as nvnMemoryPoolInitialize
-    pool_t *o = arg_p(c, 0);
+static void pool_finalize(pool_t *o) {
     if (o->magic != NVN_POOL_MAGIC) return;
     motion_owner_forget_range((uint64_t)(uintptr_t)o->mem,o->size);
     if (pool_gpu_visible(o)) index_del(o);
@@ -344,6 +356,11 @@ NVN_API(nvnMemoryPoolFinalize) {
     o->mem = o->game_mem;
     o->span = 0;
     o->magic = 0;
+}
+
+NVN_API(nvnMemoryPoolFinalize) {
+    NVN_BLOCKING();   // as nvnMemoryPoolInitialize
+    pool_finalize(arg_p(c, 0));
 }
 static uint64_t flush_stat[2][3][2];   // nvn_flush_stats
 
