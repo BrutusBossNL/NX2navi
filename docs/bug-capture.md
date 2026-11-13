@@ -89,9 +89,11 @@ What the game does in such a run (`NX2NAVI_CAPTURE_REPLAY`, environment only):
 - Three seconds later the game changes area as its own doors do (`dbg_warp`), to the start position of the capture's
   area that is nearest to the captured place; when the save already starts within 60 m of it, there is no teleport.
   A refused teleport (an event still running after the load) is asked again, up to six times.
-- Link runs to the captured `x z` (`dbg_route_to`), walking the last three metres, steered by the game's own camera, and counts as there within half a
-  metre. He is walked, not put: his position cannot be written (`debug_tools.c`). When something is in the way he
-  sidesteps, and after ten tries the walk is given up where he is.
+- Link runs to the captured `x z` (`dbg_route_to`), steered by the game's own camera and walking the last three
+  metres, and counts as there within half a metre. He is walked, not put: his position cannot be written
+  (`debug_tools.c`). When something is in the way he sidesteps, and after ten tries the walk is given up where he is.
+  When he does not move at all for two seconds, the game holds him (a conversation that began where the teleport
+  arrived, on a save that had not been there): A is pressed until he moves, and the walk is asked for again.
 - The free camera is turned on standing (the pad still plays the game) and put at `camera_pos`, `camera_yaw`,
   `camera_pitch`. `NX2NAVI_CAPTURE_REPLAY_CAMERA=0` leaves the game's camera.
 - Three seconds later the log says `capture: replay of <name> ready: ...` with how far Link is from the captured
@@ -99,8 +101,14 @@ What the game does in such a run (`NX2NAVI_CAPTURE_REPLAY`, environment only):
   `replay_player_off_metres`, `replay_walk` and `replay_camera`.
 
 What a replay does not bring back: the time of day, enemies and other actors, Link's pose and what he holds, an event
-or cutscene that was running, and progress made since the last save (the save is the one on disk at the press; the
-flags that differed are in `flags.tsv`). A capture taken at the title screen or while loading has no area: its replay
+or cutscene that was running, the camera's field of view where the game had changed it (the comparison shows both),
+and progress made since the last save (the save is the one on disk at the press; the flags that differed are in
+`flags.tsv`).
+
+Measured on the PC the feature was written on (RX 7900 XT, a 1720x720 test window, HDR on): a capture is written in
+0.6 to 0.8 s and holds about 3.5 MB; a replay of a capture taken three metres from where the save starts took 45 s
+from start to its own capture, with Link 0.4 m from the captured place and the camera's position and angles equal to
+the last digit; one that teleports to another area and ends a conversation on the way took about 100 s. A capture taken at the title screen or while loading has no area: its replay
 applies the settings and stops.
 
 Without the script: set `NX2NAVI_CAPTURE_REPLAY` to the folder and start the game with `--profile <a copy of a
