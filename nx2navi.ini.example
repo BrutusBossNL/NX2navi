@@ -402,6 +402,10 @@
 # The texture memory a compaction moves per frame at most, in MiB (1 to 32); a texture larger than this never moves.
 # Default: 8. Read at start.
 # tex_compact_frame_mb = 8
+# A texture of 1 MiB or more is copied out of the game's memory by several threads at once when it is first drawn,
+# instead of by the thread that draws alone (the same bytes, 2 to 3 times sooner). 0: one thread, as before 0.10.
+# Read at start.
+# par_jobs = 1
 # Low-end GPU mode (experimental; also in the settings menu's Game tab). For older graphics cards, and ones short of
 # video memory: 1 turns on the settings written for them and measured on a Radeon RX 580, for every key below that
 # this file does not set itself. Mesh shaders run as compute where the card has none (mesh_emulation), video memory

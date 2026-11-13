@@ -23,6 +23,7 @@
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "nvn_tex.h"
+#include "par_jobs.h"
 #include "tex.h"
 #include "vk.h"
 #include "vk_dlaa.h"
@@ -3754,14 +3755,14 @@ static void upload(Tex *e) {
         }
         if (gdsw && !sk) {
             if (held && check) opq = astc_copy_opaque(e, stg, t->mem, size, &bc1_dec);
-            else if (held) memcpy(stg, t->mem, size);
+            else if (held) par_memcpy(stg, t->mem, size);   // large blocks over the par_jobs pool
             else memset(stg, 0, size);
         } else if (gdsw) {
             VkDeviceSize at = 0;
             for (k = 0; k < n; k++) {   // astc_bl_regions checked that each lies inside the storage
                 VkDeviceSize nb = vk_astc_region_bytes(&ar[k], (uint32_t)bw, (uint32_t)bh);
                 if (held && check) opq &= astc_copy_opaque(e, stg + at, t->mem + ar[k].src, nb, &bc1_dec);
-                else if (held) memcpy(stg + at, t->mem + ar[k].src, nb);
+                else if (held) par_memcpy(stg + at, t->mem + ar[k].src, nb);
                 else memset(stg + at, 0, nb);
                 ar[k].src = at, at += nb;
             }
@@ -3776,7 +3777,7 @@ static void upload(Tex *e) {
             tmps[k - k0] = tmp;
             if (!held) {
                 memset(tmp ? tmp : dst, 0, raw);
-            } else if (nvn_deswizzle(d, lv + sk, ly, t->mem, tmp ? tmp : dst, rb)) {
+            } else if (nvn_deswizzle_mt(d, lv + sk, ly, t->mem, tmp ? tmp : dst, rb)) {   // large levels: par_jobs.c
                 log_limited(&n_bad, "texture %#llx fmt %#x target %d: level %u layer %u has no CPU layout; uploaded as zeros",
                             (unsigned long long)e->pub.addr, d->format, d->target, lv + sk, ly);
                 memset(tmp ? tmp : dst, 0, raw);
