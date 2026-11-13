@@ -759,13 +759,13 @@ static void world_clock(double dt, double step) {
 // 32-byte entries at +0x30, each starting with the group; a group's transform is three rows of four floats at +0x88,
 // +0x98 and +0xa8 (main+0x386a7e8..0x386a800), its translation in their fourth lanes. Each update the probe reads every
 // group's translation and Link's position (Player +0x31c, player_pos), and logs the step, Link's position and how far
-// he moved since the last update, and the FLOOR_PROBE_NEAR groups nearest to him (within FLOOR_PROBE_RADIUS
-// horizontally), moved or not, each with its translation and how far it moved since the last present; with no group
-// that near, one line in 30 presents still gives Link alone. At 60 fps the moves of Link and of the group under him
-// match while he stands on it. Each line also gives the time manager's base step, game speed and first two time
+// he moved since the last update, and FLOOR_PROBE_NEAR groups within FLOOR_PROBE_RADIUS of him horizontally (those
+// that moved since the last present first, nearest first, then the nearest still ones), each with its translation and
+// how far it moved; with no group that near, one line in 30 presents still gives Link alone. At 60 fps the moves of
+// Link and of the group under him match while he stands on it. Each line also gives the time manager's base step, game speed and first two time
 // categories. The value is the number of lines to write (1 means 4000); off it costs one test per present.
-#define FLOOR_PROBE_RADIUS 8.0f
-#define FLOOR_PROBE_NEAR 4   // the groups a line names: the nearest, moved or not
+#define FLOOR_PROBE_RADIUS 12.0f
+#define FLOOR_PROBE_NEAR 6   // the groups a line names: the moving ones first, then the nearest still ones
 // The manager holds a few thousand groups (5345 in the Deku Tree; most entries are empty), and a readability check per
 // read costs a system call: at one per group a present the probe made every frame about 1.9 s. So the entries and the
 // groups' rows are read in two batched copies a present (memory.c mem_copy_readable: one lock, no system call for
@@ -857,6 +857,9 @@ static void floor_probe(void) {
         memcpy(last, t, sizeof t);
         float d2 = (t[0] - link[0]) * (t[0] - link[0]) + (t[2] - link[2]) * (t[2] - link[2]);
         if (d2 >= FLOOR_PROBE_RADIUS * FLOOR_PROBE_RADIUS) continue;
+        // a moving group sorts before every still one, so a moving floor is never crowded out by the still map pieces
+        // nearer to Link (a group's translation is its pivot, which for a moved floor can be metres from its surface)
+        if (m[0] == 0 && m[1] == 0 && m[2] == 0) d2 += FLOOR_PROBE_RADIUS * FLOOR_PROBE_RADIUS;
         if (nn == FLOOR_PROBE_NEAR && d2 >= near_d2[nn - 1]) continue;   // insertion by distance, the farthest drops
         int at = nn < FLOOR_PROBE_NEAR ? nn++ : nn - 1;
         while (at > 0 && near_d2[at - 1] > d2) {
