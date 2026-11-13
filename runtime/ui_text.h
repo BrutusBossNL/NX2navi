@@ -30,6 +30,11 @@ typedef enum {
     UI_MENU_WINDOW_SIZE, UI_MENU_WINDOW_SIZE_DESC, UI_MENU_WINDOW_SIZE_CUSTOM,
     UI_MENU_PRESENT_DESC, UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE,
     UI_MENU_PRESENT_IN_USE,   // "in use: %s" under the value when the swapchain got another mode than the setting
+    // Low latency without frame generation (ui/menu.cpp row_low_latency, vk_lowlat.c). The last four are the row's
+    // notes: why it is greyed out (no such driver mode, DLSS frame generation's own, a frame generation presents the
+    // frames) or set and not in use (the driver refused it)
+    UI_MENU_LOW_LATENCY, UI_MENU_LOW_LATENCY_DESC, UI_MENU_LOW_LATENCY_BOOST,
+    UI_MENU_LOW_LATENCY_NO_DRIVER, UI_MENU_LOW_LATENCY_DLSSG, UI_MENU_LOW_LATENCY_FG, UI_MENU_LOW_LATENCY_FAILED,
     UI_MENU_GPU, UI_MENU_GPU_DESC, UI_MENU_GPU_AUTO,
     UI_MENU_PERF_OVERLAY, UI_MENU_PERF_OVERLAY_DESC, UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL,
     UI_PERF_LINE_FPS,

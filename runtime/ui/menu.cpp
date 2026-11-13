@@ -58,6 +58,7 @@ extern "C" {
 #include "ui/menu.h"
 #include "ui_text.h"
 #include "vk_dlssg.h"
+#include "vk_lowlat.h"
 // host.h and vk.h pull in cpu.h, which is C only: the functions the menu needs from them, as declared there.
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vk_queue_lock(void);
@@ -878,6 +879,24 @@ static const char *vsync_note(void) {
     return note;
 }
 
+// Low latency without frame generation (NX2NAVI_LOW_LATENCY, vk_lowlat.c, at once): off, on, and on with boost where
+// the driver's mode is NVIDIA's (AMD's has no boost; a 2 set there shows as on, which is what it does). Greyed out with
+// the reason where it cannot run: a driver with neither mode, a run in which DLSS frame generation brings its own, and
+// NVIDIA's while a frame generation presents the frames (vk_lowlat_status). Set and refused by the driver, it says so.
+static void row_low_latency(void) {
+    static const char *const values[] = {"0", "1", "2"};
+    const char *names[] = {menu_text(UI_MENU_OFF), menu_text(UI_MENU_ON), menu_text(UI_MENU_LOW_LATENCY_BOOST)};
+    const int st = vk_lowlat_status(), n = st == VK_LOWLAT_AMD ? 2 : 3;
+    int cur = cfg_int("NX2NAVI_LOW_LATENCY");
+    cur = cur < 0 ? 0 : cur >= n ? n - 1 : cur;
+    if (st == VK_LOWLAT_NO_DRIVER) opt_disable_next(UI_MENU_LOW_LATENCY_NO_DRIVER);
+    else if (st == VK_LOWLAT_DLSSG) opt_disable_next(UI_MENU_LOW_LATENCY_DLSSG);
+    else if (st == VK_LOWLAT_FG) opt_disable_next(UI_MENU_LOW_LATENCY_FG);
+    const char *note = st == VK_LOWLAT_FAILED && cur ? menu_text(UI_MENU_LOW_LATENCY_FAILED) : nullptr;
+    int nv = opt_choice_index("NX2NAVI_LOW_LATENCY", UI_MENU_LOW_LATENCY, names, n, cur, 0, UI_MENU_LOW_LATENCY_DESC, note);
+    if (nv >= 0 && nv < n) opt_apply("NX2NAVI_LOW_LATENCY", values[nv]);
+}
+
 // ---- the tabs
 
 // The PCI vendor of the GPU the game renders on (menu_overlay_frame reads it from the device it is given; 0 before the
@@ -1271,6 +1290,7 @@ static void tab_screen(float scale) {
     // On is the default mode, mailbox with its fallbacks (gfx_present.c pick_present_mode): plain fifo would drop the
     // game to 30 at every slow frame on a 60 Hz display. A fifo already saved also reads as on.
     opt_toggle_value("NX2NAVI_VK_PRESENT", UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_DESC, "mailbox", "immediate", vsync_note());
+    row_low_latency();
     row_gpu();
     static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
     opt_choice("NX2NAVI_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
