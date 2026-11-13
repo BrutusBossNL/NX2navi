@@ -460,7 +460,7 @@ int vk_dlaa_available(void) { return vk_dlaa_wanted() && N.available; }
 // (vk_dlaa_swap_img, applied by vk_exec_draw.c tex_info): whichever shader scales, it scales DLSS's picture.
 #define OCAM_BLOCK 0x3500u   // Ocarina's scene context block (vk_dlaa_draw)
 #define OCAM_BYTES 0xb0u     // its rows 0-10: the view and the projection
-#define DLSS_SIZES 5         // DLSS features kept, one per scene and output size (D.sizes)
+#define DLSS_SIZES 5         // scene and output sizes kept, each with its work images and a DLSS feature (D.sizes)
 // A size no evaluation used for this many goes with its feature (stale_sizes): DLSS's history buffers and the work
 // images at the output size held their VRAM after a switch of the DLSS mode, until four more sizes had come and gone.
 #define SIZE_STALE 3600
@@ -468,7 +468,7 @@ static struct {
     VkExecTarget color, depth;   // the armed pair, valid in the frame it was armed
     int armed, done, gbuf;       // this frame: armed on the light target, DLAA ran, the G-buffer was drawn
     int ended, up;               // this frame: the scene is drawn (jitter over), DLSS wrote the scaled output
-    struct Size {                // a DLSS feature and its work images per scene size (dynamic resolution flips it)
+    struct Size {                // the work images of a scene size and its DLSS feature (dynamic resolution flips it)
         uint32_t w, h, ow, oh;   // render size, output size
         VkImage out, mv;
         VmaAllocation out_mem, mv_mem;
@@ -487,9 +487,17 @@ static struct {
         float pose_history[4];
         int pose_distance_valid;
         int dist_cur, dist_ok;   // as chars_cur and chars_ok
-        NgxHandle *feat;
+        NgxHandle *feat;         // created for this size; NULL while the size runs on another's (range_host) or after a release
+        int q;                   // the quality value feat was created with (perf_quality)
+        int ranged;              // feat also takes the smaller render sizes from min_w x min_h up (range_note)
+        uint32_t min_w, min_h;
         uint64_t used;           // evals count when it last ran
+        uint64_t feat_used;      // evals count when feat last ran: behind used while the size runs on another's
     } sizes[DLSS_SIZES], *last;  // last: the one the previous DLAA frame ran with
+    struct Size *host;           // the one whose feature that frame ran on: last, or the DLSS mode's (range_host)
+    int stepped;                 // this evaluation: another render size than the last one's, on the same feature
+    uint32_t ev_w, ev_h, ev_ow, ev_oh;   // the sizes of the previous evaluation, 0 before the first
+    uint64_t steps_kept, steps_made;     // changes of size that kept the history / that made a feature
     VkImage last_color;          // the target DLAA ran on last frame: another one means a new history
     NgxParam *params;
     int failed, reset;
@@ -720,6 +728,7 @@ static void destroy_size(struct Size *e) {
         if (e->dist[i]) vmaDestroyImage(c->vma, e->dist[i], e->dist_mem[i]);
     }
     if (e->feat && N.release) N.release(e->feat), feat_released = 1;
+    if (D.host == e) D.host = NULL;
     memset(e, 0, sizeof *e);
 }
 
@@ -730,8 +739,8 @@ static void free_size(struct Size *e) {
 
 // The entry for a scene and output size: its output (RGBA16F at the output size, written by DLSS, then blitted into
 // the target) and motion vectors (RG16F at the scene size, render pixels), both kept in GENERAL like every image of the
-// back end. NX2navi's dynamic resolution switches between a few sizes; each keeps its feature, the least recently used
-// goes for a new one.
+// back end. NX2navi's dynamic resolution switches between a few sizes; each keeps its images, and its own feature
+// unless it runs on the DLSS mode's (range_host); the least recently used goes for a new one.
 static struct Size *size_for(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
     struct Size *e = NULL, *lru = &D.sizes[0];
     for (int i = 0; i < DLSS_SIZES; i++) {
@@ -1277,8 +1286,10 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
     // the characters' own motion over the camera's (vk_exec_draw.c, per-object motion)
     uint64_t c0 = T.on > 0 ? kern_now_ns() : 0;
     int object_motion = D.cam_size == CAM_BLOCK;
+    // Not on a frame that starts a new history, nor on the first frame of another render size (D.stepped, evaluate):
+    // that frame was left out before the history could stay across a size, and it still is.
     if (D.cam_size == OCAM_BLOCK)
-        object_motion = vk_fg_pose_prepare(D.cam_addr, D.depth.image) && !D.reset;
+        object_motion = vk_fg_pose_prepare(D.cam_addr, D.depth.image) && !D.reset && !D.stepped;
     if (object_motion && vk_mvobj_execute(ex, D.cam_addr, e->mv_view, zv, D.depth.format, w, h)) full_barrier(cb);
     if (T.on > 0) T.cpu_mv += kern_now_ns() - c0;
     times_mark(cb, T_OBJ);
@@ -1821,16 +1832,25 @@ static void query_vram(void) {
 }
 
 // Frees the sizes other than cur that no evaluation used for SIZE_STALE evaluations: the GPU finished with them long
-// ago (the CPU is never that many presents ahead), so their images and feature go at once.
-static void stale_sizes(const struct Size *cur) {
+// ago (the CPU is never that many presents ahead), so their images and feature go at once. host is the size whose
+// feature cur ran on (cur itself, or the DLSS mode's: range_host), which stays as well. A size that is in use on
+// another's feature can still hold one of its own from before that other was made: unused as long, it goes alone.
+static void stale_sizes(const struct Size *cur, const struct Size *host) {
     if (!idle_free()) return;
     for (int i = 0; i < DLSS_SIZES; i++) {
         struct Size *s = &D.sizes[i];
-        if (s == cur || !s->out || D.evals < s->used + SIZE_STALE) continue;
-        rt_log("dlaa: the DLSS feature at %ux%u -> %ux%u went unused for %d frames: freed", s->w, s->h, s->ow, s->oh,
-               SIZE_STALE);
-        if (D.last == s) D.last = NULL;
-        free_size(s);
+        if (s == host || !s->out) continue;
+        if (s != cur && D.evals >= s->used + SIZE_STALE) {
+            rt_log("dlaa: the DLSS feature at %ux%u -> %ux%u went unused for %d frames: freed", s->w, s->h, s->ow, s->oh,
+                   SIZE_STALE);
+            if (D.last == s) D.last = NULL;
+            free_size(s);
+        } else if (s->feat && D.evals >= s->feat_used + SIZE_STALE) {
+            rt_log("dlaa: the DLSS feature at %ux%u -> %ux%u went unused for %d frames while its size ran on another "
+                   "size's: released", s->w, s->h, s->ow, s->oh, SIZE_STALE);
+            vk_queue_lock(), vkDeviceWaitIdle(vk_ctx()->device), vk_queue_unlock();
+            N.release(s->feat), s->feat = NULL, feat_released = 1;
+        }
     }
 }
 
@@ -1846,6 +1866,7 @@ static void release_kept(const struct Size *making, int all) {
         if (!n++) vk_queue_lock(), vkDeviceWaitIdle(vk_ctx()->device), vk_queue_unlock();
         N.release(s->feat), s->feat = NULL;
         if (D.last == s) D.last = NULL;
+        if (D.host == s) D.host = NULL;
     }
     if (n) rt_log("dlaa: %d DLSS feature(s) released before the one for %ux%u is made (%s); made again when used", n,
                   making->w, making->h, all ? "after a release" : "larger inputs");
@@ -2029,6 +2050,118 @@ static void fsr3_sharpen(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_
     full_barrier(cb);
 }
 
+// ---------------------------------------------------------------- one feature for a range of render sizes
+// NX2NAVI_DLSS_RANGE (nx2navi.ini dlss_range; 1 by default, 0: every render size has a feature of its own).
+// The render size changes under one output size when dynamic resolution steps it (dynres.c) and when a screen renders
+// at another share than play. With a feature per size, each new size cost a feature creation (tens of milliseconds and
+// a wait for the GPU, release_kept) and each change a new history, a frame or more of soft picture.
+// DLSS takes more than one render size on a feature. NGX's optimal settings callback (the capability parameters'
+// "DLSSOptimalSettingsCallback") answers, for an output size and a quality value, with the smallest and the largest
+// render size a feature of that mode takes ("DLSS.Get.Dynamic.Min.Render.Width" and its three siblings), both
+// included; a mode or a DLSS library without dynamic resolution answers with one size for both. An evaluation names
+// its render size as the sub-rectangle of its inputs ("DLSS.Render.Subrect.Dimensions.Width" and ".Height", which
+// evaluate sets on every frame, and where it starts in each input, "DLSS.Input.Color.Subrect.Base.X" and the like); a
+// size outside the range fails the evaluation. Feature creation has no flag for this (NVSDK_NGX_DLSS_Feature_Flags
+// holds none). NVIDIA's DLSS guide adds two things: a feature keeps the model of the size it was created with, and it
+// is to be created for the largest render size it will see, because an input larger than the one it was created for
+// makes DLSS allocate its buffers again in the middle of play.
+// So the feature of the DLSS mode the player set, the one created at that mode's own render size, also runs every
+// smaller render size from DLSS's minimum up (range_host): dynamic resolution steps down from the player's mode and
+// never above it. Such a frame is evaluated on that feature with its own images, all of them exactly its render size
+// (size_for), as the sub-rectangle at their top left, and the history stays (evaluate). A size above the feature's
+// own, below DLSS's minimum, of another shape, with another output size, or met while the player's mode is another
+// one, has a feature of its own; so has every size where DLSS reports no range.
+// A run in which the render size never changes creates its feature with the parameters it had without this, and
+// evaluates it with the same ones; the query after the creation is the only call added.
+// Two things still treat the first frame of another render size as a new start, although DLSS's history stays: the
+// per-object motion pass leaves it out (mv_pass), and frame generation is told to start anew (D.fg_reset), since the
+// depth and the motion vectors it gets are of another size than the frame before's.
+static int range_refused;   // DLSS failed an evaluation inside the range it reported (evaluate): off for this run
+
+static int range_on(void) {
+    static int m = -1;
+    if (m < 0) m = cfg_int("NX2NAVI_DLSS_RANGE") != 0;
+    return m && !range_refused;
+}
+
+// The quality value of the DLSS mode the player set (NX2NAVI_DLSS): the one perf_quality gives a scene at that mode's
+// share of the output, so the feature created at the mode's own render size carries it.
+static int setting_quality(void) {
+    const char *m = cfg_value("NX2NAVI_DLSS");
+    return !strcmp(m, "quality") ? 2 : !strcmp(m, "balanced") ? 1 : !strcmp(m, "performance") ? 0
+         : !strcmp(m, "ultra_performance") ? 3 : NGX_PERFQ_DLAA;
+}
+
+// DLSS's answer for an output size and a quality value: the render size it would pick itself (opt) and the smallest
+// and the largest a feature of that mode takes (lo, hi). 0: the DLSS library has no such callback, or it failed. Asked
+// on the replay thread with the capability parameters, like the statistics (query_vram).
+static int range_query(uint32_t ow, uint32_t oh, int q, unsigned opt[2], unsigned lo[2], unsigned hi[2]) {
+    NgxParam *c = N.capsp;
+    void *cb = NULL;
+    if (!c || !p_getp(c, "DLSSOptimalSettingsCallback", &cb) || !cb) return 0;
+    p_setu(c, "Width", ow);
+    p_setu(c, "Height", oh);
+    p_seti(c, "PerfQualityValue", q);
+    p_seti(c, "RTXValue", 0);   // older DLSS libraries expect it set
+    if (!NGX_OK(((NgxResult (*)(NgxParam *))cb)(c))) return 0;
+    if (!p_getu(c, "OutWidth", &opt[0]) || !p_getu(c, "OutHeight", &opt[1])) return 0;
+    // a library without dynamic resolution leaves these four unset: the size it picked is then all of the range
+    lo[0] = hi[0] = opt[0], lo[1] = hi[1] = opt[1];
+    p_getu(c, "DLSS.Get.Dynamic.Max.Render.Width", &hi[0]);
+    p_getu(c, "DLSS.Get.Dynamic.Max.Render.Height", &hi[1]);
+    p_getu(c, "DLSS.Get.Dynamic.Min.Render.Width", &lo[0]);
+    p_getu(c, "DLSS.Get.Dynamic.Min.Render.Height", &lo[1]);
+    return 1;
+}
+
+// After s's feature is made: whether it also runs smaller render sizes, from which size up, and one line saying so.
+// It does when it is the feature of the player's DLSS mode and its own size lies inside the range DLSS reports, above
+// the range's smallest size.
+static void range_note(struct Size *s) {
+    unsigned opt[2] = {0, 0}, lo[2] = {0, 0}, hi[2] = {0, 0};
+    s->ranged = 0;
+    if (!range_on()) return;
+    if (!range_query(s->ow, s->oh, s->q, opt, lo, hi)) {
+        rt_log("dlaa: the DLSS feature for %ux%u -> %ux%u runs its own render size only: this DLSS library gives no "
+               "optimal settings", s->w, s->h, s->ow, s->oh);
+        return;
+    }
+    const char *why = lo[0] == hi[0] && lo[1] == hi[1] ? "DLSS takes one render size for this output size and quality value"
+                      : s->q != setting_quality() ? "it is not at the render size of the DLSS mode set"
+                      : s->w < lo[0] || s->h < lo[1] || s->w > hi[0] || s->h > hi[1] ? "its own size is outside DLSS's range"
+                      : s->w == lo[0] && s->h == lo[1] ? "its own size is the smallest of DLSS's range" : NULL;
+    if (why) {
+        rt_log("dlaa: the DLSS feature for %ux%u -> %ux%u runs its own render size only: %s (quality value %d: DLSS's "
+               "range %ux%u to %ux%u, its own choice %ux%u)", s->w, s->h, s->ow, s->oh, why, s->q, lo[0], lo[1], hi[0],
+               hi[1], opt[0], opt[1]);
+        return;
+    }
+    s->ranged = 1, s->min_w = lo[0], s->min_h = lo[1];
+    rt_log("dlaa: the DLSS feature for %ux%u -> %ux%u also runs the render sizes from %ux%u up to its own, the history "
+           "kept (quality value %d: DLSS's range %ux%u to %ux%u, its own choice %ux%u)", s->w, s->h, s->ow, s->oh, lo[0],
+           lo[1], s->q, lo[0], lo[1], hi[0], hi[1], opt[0], opt[1]);
+}
+
+// The size whose feature a frame of e's size runs on: the one of the player's DLSS mode when e's render size is inside
+// what that feature takes, no larger than the size it was created for on either axis, no smaller than DLSS's minimum,
+// and of its shape within 3 % (sizes round to multiples of 8; DLSS wants the render size's shape to be the output's);
+// e itself otherwise. That feature may have been released since (release_kept): evaluate then makes it again, for its
+// own size. Of two that fit, the one the frame before ran on, whose history then carries on.
+static struct Size *range_host(struct Size *e) {
+    int q = setting_quality();
+    if (e->ranged && e->q == q) return e;   // the mode's own size
+    struct Size *host = e;
+    for (int i = 0; i < DLSS_SIZES; i++) {
+        struct Size *s = &D.sizes[i];
+        if (s == e || !s->out || !s->ranged || s->q != q || s->ow != e->ow || s->oh != e->oh) continue;
+        if (e->w > s->w || e->h > s->h || e->w < s->min_w || e->h < s->min_h) continue;
+        if ((double)e->w * s->h > 1.03 * (double)e->h * s->w || (double)e->h * s->w > 1.03 * (double)e->w * s->h) continue;
+        if (s == D.host) return s;
+        if (host == e) host = s;
+    }
+    return host;
+}
+
 // Set when the scene the upscaler runs on has another size than the last one; vk_dlaa_resized_take reads it.
 static volatile int32_t size_changed;
 
@@ -2046,13 +2179,26 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     }
     struct Size *e = size_for(cb, w, h, ow, oh);
     if (!e) return dl_fail("work image creation", 0);
-    if (e != D.last) {   // another size's history is from another moment
-        D.reset = 1, D.why[0]++, e->chars_ok = 0;
-        __atomic_store_n(&size_changed, 1, __ATOMIC_RELEASE);
-    }
     // Read once: vk_dlaa_frame runs on the present's thread and can clear fsr_frame while this replay is between the
     // checks below, which would send the rest of this function to DLSS's path without NGX after all.
     const int fsr = use_fsr();
+    // The size whose DLSS feature this frame runs on: its own, or the DLSS mode's while that one takes this render size
+    // (range_host). On another size's feature DLSS reads a sub-rectangle of this frame's render size from each input.
+    // The light target, the motion vectors and the masks are exactly that size (size_for, mask_pass) and range_host
+    // has checked it against the size the feature was created for; the depth is the light target's size by the arming
+    // (vk_dlaa_pass), and a depth that did not cover the sub-rectangle keeps the frame on its own feature.
+    const int use_range = !fsr && N.ngx_up && range_on();
+    struct Size *host = use_range && z->width >= w && z->height >= h ? range_host(e) : e;
+    const int step = D.ev_w && (w != D.ev_w || h != D.ev_h || ow != D.ev_ow || oh != D.ev_oh);
+    D.stepped = 0;
+    if (e != D.last) {
+        if (use_range && host->feat && host == D.host) {
+            // another render size on the feature the frame before ran on: DLSS's history carries on. What this size
+            // keeps of its own last frame, the characters' mask and the distances (mv_pass), is from another moment.
+            D.stepped = 1, D.steps_kept += step, e->chars_ok = e->dist_ok = 0;
+        } else D.reset = 1, D.why[0]++, e->chars_ok = 0;   // another size's history is from another moment
+        __atomic_store_n(&size_changed, 1, __ATOMIC_RELEASE);
+    } else if (use_range && host != D.host) D.reset = 1, D.why[0]++;   // the same size on another feature: the DLSS mode changed
     if (!fsr && !N.ngx_up) return;   // neither runs this frame: vk_dlaa_frame turns DLAA off at the next present
     if (!fsr && !D.params && !NGX_OK(N.alloc_params(&D.params))) return dl_fail("parameter allocation", 0);
     NgxParam *p = D.params;
@@ -2097,18 +2243,23 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
                             (int)t->format, (int)z->format);
         goto evaluated;
     }
-    if (!e->feat) {
+    float frame_ms = 0;   // FrameTimeDeltaInMsec, taken once: the evaluation can run a second time (own_feature)
+own_feature:
+    if (!host->feat) {
+        // The feature is made for the size of its entry: this frame's own, or the larger one of the DLSS mode's, which
+        // was released since (release_kept) and takes this frame's size as a sub-rectangle.
+        const uint32_t fw = host->w, fh = host->h;
         // NX2NAVI_TRACE=perf: the release of the kept features (a device idle wait) and the create, as one mark
         uint64_t t0 = perf_mark_begin();
-        if (idle_free() != 2) release_kept(e, feat_released);
+        if (idle_free() != 2) release_kept(host, feat_released);
         feat_released = 0;
         p_setu(p, "CreationNodeMask", 1);
         p_setu(p, "VisibilityNodeMask", 1);
-        p_setu(p, "Width", w);
-        p_setu(p, "Height", h);
+        p_setu(p, "Width", fw);
+        p_setu(p, "Height", fh);
         p_setu(p, "OutWidth", ow);
         p_setu(p, "OutHeight", oh);
-        p_seti(p, "PerfQualityValue", perf_quality(w, ow));
+        p_seti(p, "PerfQualityValue", perf_quality(fw, ow));
         // IsHDR | MVLowRes | AutoExposure: linear scene light, motion vectors at the render size, no exposure texture
         p_seti(p, "DLSS.Feature.Create.Flags", (1 << 0) | (1 << 1) | (1 << 6));
         p_seti(p, "DLSS.Enable.Output.Subrects", 0);
@@ -2123,13 +2274,15 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
         p_setu(p, "DLSS.Hint.Render.Preset.Balanced", (unsigned)pk);
         p_setu(p, "DLSS.Hint.Render.Preset.Performance", (unsigned)pm);
         p_setu(p, "DLSS.Hint.Render.Preset.UltraPerformance", (unsigned)pl);
-        NgxResult r = N.create(cb, NGX_FEATURE_SUPERSAMPLING, p, &e->feat);
+        NgxResult r = N.create(cb, NGX_FEATURE_SUPERSAMPLING, p, &host->feat);
         perf_mark_end(PERF_M_NGX, t0, 0);
-        if (!NGX_OK(r) || !e->feat) return dl_fail("DLSS feature creation", r);
-        D.reset = 1;
-        int q = perf_quality(w, ow), pr = q == 0 ? pm : q == 3 ? pl : pk;
+        if (!NGX_OK(r) || !host->feat) return dl_fail("DLSS feature creation", r);
+        D.reset = 1, D.steps_made += step;
+        int q = perf_quality(fw, ow), pr = q == 0 ? pm : q == 3 ? pl : pk;
         rt_log("dlaa: DLSS feature created at %ux%u -> %ux%u, quality value %d, preset %c (scene format %d, depth format "
-               "%d)", w, h, ow, oh, q, 'A' + pr - 1, (int)t->format, (int)z->format);
+               "%d)", fw, fh, ow, oh, q, 'A' + pr - 1, (int)t->format, (int)z->format);
+        host->q = q;
+        range_note(host);   // NX2NAVI_DLSS_RANGE: which other render sizes it runs
     }
     if (D.last_color != t->image) target_changed(t, mv == 1);
     NgxResourceVK rc = res_image(cv, t->image, t->format, w, h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
@@ -2155,27 +2308,52 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     p_setf(p, "MV.Scale.Y", 1.0f);
     p_setu(p, "DLSS.Render.Subrect.Dimensions.Width", w);
     p_setu(p, "DLSS.Render.Subrect.Dimensions.Height", h);
+    if (host != e) {
+        // On the feature of a larger size, the render size above is a part of what the feature was created for: it
+        // starts at the top left of the light target, the depth and the motion vectors, as it does in the bias mask.
+        static const char *const base[6] = {"DLSS.Input.Color.Subrect.Base.X", "DLSS.Input.Color.Subrect.Base.Y",
+                                            "DLSS.Input.Depth.Subrect.Base.X", "DLSS.Input.Depth.Subrect.Base.Y",
+                                            "DLSS.Input.MV.Subrect.Base.X",    "DLSS.Input.MV.Subrect.Base.Y"};
+        for (int i = 0; i < 6; i++) p_setu(p, base[i], 0);
+    }
     p_setf(p, "DLSS.Pre.Exposure", 1.0f);
     p_setf(p, "DLSS.Exposure.Scale", 1.0f);
     // The time since the previous evaluation, which DLSS weighs its history by; 60 fps before the first and after a
     // gap (a pause, a load), where no history carries over anyway.
-    uint64_t now = plat_now_ns();
-    double dt = D.last_eval_ns ? (now - D.last_eval_ns) / 1e6 : 0;
-    D.last_eval_ns = now;
-    p_setf(p, "FrameTimeDeltaInMsec", dt > 0 && dt < 100 ? (float)dt : 16.67f);
+    if (!frame_ms) {
+        uint64_t now = plat_now_ns();
+        double dt = D.last_eval_ns ? (now - D.last_eval_ns) / 1e6 : 0;
+        D.last_eval_ns = now;
+        frame_ms = dt > 0 && dt < 100 ? (float)dt : 16.67f;
+    }
+    p_setf(p, "FrameTimeDeltaInMsec", frame_ms);
     c0 = timed ? kern_now_ns() : 0;
-    NgxResult r = N.evaluate(cb, e->feat, p, NULL);
+    NgxResult r = N.evaluate(cb, host->feat, p, NULL);
     if (timed) T.cpu_ngx += kern_now_ns() - c0;
+    if (!NGX_OK(r) && host != e) {
+        // DLSS refused this render size on the feature of another, inside the range it reported (range_note). Every
+        // size has its own feature from here on, as with NX2NAVI_DLSS_RANGE=0, and this frame runs again on its own,
+        // which starts a new history.
+        rt_log("dlaa: DLSS refused the render size %ux%u on the feature created for %ux%u -> %ux%u (%08x): every render "
+               "size has its own feature for the rest of this run", w, h, host->w, host->h, ow, oh, (unsigned)r);
+        range_refused = 1;
+        if (D.stepped) D.stepped = 0, D.steps_kept -= step;
+        host = e, D.reset = 1, D.why[0]++;
+        goto own_feature;
+    }
     if (!NGX_OK(r)) return dl_fail("DLSS evaluation", r);
 evaluated:
     if (timed) times_mark(cb, T_DL1);   // through the recorder, after NGX's own commands
     // Frame generation gets the same new start with this frame's inputs (vk_dlaa_fg_inputs): a frame DLSS starts a
     // new history on (a camera cut, another scene size or target) has no motion from the frame before that holds.
-    D.fg_reset = D.reset;
+    // Another scene size is one for frame generation also where DLSS's own history stayed (D.stepped): the depth and
+    // the motion vectors it reads are of that other size.
+    D.fg_reset = D.reset || D.stepped;
     D.reset = 0;
-    D.last = e, e->used = D.evals + 1;
+    D.last = e, D.host = host, e->used = host->used = host->feat_used = D.evals + 1;
+    D.ev_w = w, D.ev_h = h, D.ev_ow = ow, D.ev_oh = oh;
     if (D.evals % 600 == 0) query_vram();
-    stale_sizes(e);
+    stale_sizes(e, host);
     full_barrier(cb);
     if (fsr && !vk_ffx_fsr4() && w < ow) fsr3_sharpen(cb, e, w, ow, oh);   // FSR 3.1 made the picture
     vk_mvcheck_output(cb, e->out, ow, oh);   // NX2NAVI_MV_CHECK (test)
@@ -2213,14 +2391,16 @@ evaluated:
                "motion, %llu with the characters' mask, %llu without a camera, %llu jittered (%llu draws moved, %llu not), "
                "%llu jitter holds; resets: %llu size, %llu camera, %llu target; reactive mask %llu, without its copy %llu; "
                "no camera: %llu without a scene-context draw, %llu not in DLSS's submission; %llu kept with zero motion, "
-               "%llu runs past %d; %llu cameras read at the draw)",
+               "%llu runs past %d; %llu cameras read at the draw; changes of scene size: %llu with the history kept, "
+               "%llu with a new feature)",
                (unsigned long long)D.evals, w, h, ow, oh, (unsigned long long)D.frames_missed,
                (unsigned long long)D.mv_frames, (unsigned long long)D.masked, (unsigned long long)D.mv_none,
                (unsigned long long)D.jittered, (unsigned long long)D.jdraws, (unsigned long long)D.jfixed,
                (unsigned long long)D.holds, (unsigned long long)D.why[0], (unsigned long long)D.why[1],
                (unsigned long long)D.why[2], (unsigned long long)R.made, (unsigned long long)R.missed,
                (unsigned long long)D.cam_none_draw, (unsigned long long)D.cam_none_snap, (unsigned long long)D.cam_kept,
-               (unsigned long long)D.cam_kept_max, KEEP_MAX, (unsigned long long)D.cam_at_draw);
+               (unsigned long long)D.cam_kept_max, KEEP_MAX, (unsigned long long)D.cam_at_draw,
+               (unsigned long long)D.steps_kept, (unsigned long long)D.steps_made);
     window_line();
 }
 

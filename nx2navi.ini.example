@@ -556,6 +556,12 @@
 # 0: none is ever freed (about 0.5 GB more video memory after the first pause). 2: as 1, and the networks that stay
 # are not made again when another is made (shows striped pause screens; for tests).
 # dlss_idle_free = 1
+# One DLSS network for the render sizes of a DLSS mode. 1: the network made for the mode's own render size also takes
+# the smaller render sizes DLSS allows on it (dynamic resolution's steps with dyn_res = 1, a screen that renders
+# smaller than play), so a change of size makes no new network and keeps the picture DLSS has built up. 0: every
+# render size has its own network and starts its picture anew. The log says for each network which render sizes it
+# takes, and counts the changes of size that kept the picture against those that made a network. Read at start.
+# dlss_range = 1
 # Per-object motion vectors for DLSS: characters, animals and moving objects get their own motion instead of the
 # camera's, so DLSS keeps their history instead of smearing or rejecting it. Costs some CPU time each frame (about 1-2 ms
 # on a laptop CPU); 0 leaves camera-only motion. Read at start.
