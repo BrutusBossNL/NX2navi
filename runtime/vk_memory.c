@@ -2824,8 +2824,9 @@ static void mirror_create(PoolRec *r) {
     r->mstate = MS_REFUSED;
     __atomic_add_fetch(&mirror_gen, 1, __ATOMIC_RELEASE);
     if (r->kind != POOL_IMPORT || !r->buf || !n) return;
+    const uint64_t lo = r->lo;   // the index is searched by it again when the mirror joins the list
     plat_mutex_lock_shared(&pool_lock);
-    int i = pidx_upper(&pool_index, r->lo) - 1;
+    int i = pidx_upper(&pool_index, lo) - 1;
     while (i >= 0 && pool_index.e[i].buf != r) i--;
     int alone = i >= 0 && (i == 0 || pool_index.maxhi[i - 1] <= pool_index.e[i].lo) &&
                 (i + 1 == pool_index.n || pool_index.e[i + 1].lo >= pool_index.e[i].hi);
@@ -2899,6 +2900,17 @@ static void mirror_create(PoolRec *r) {
         return refuse(r, MR_ALLOC, why);
     }
     plat_mutex_lock(&pool_lock);
+    // The pool may have been finalized on another thread since the check above, without a mirror to forget (its state
+    // said refused meanwhile): on the list, the mirror would outlive its record and be freed twice, or never. Its
+    // buffer goes once the GPU is past the submission being recorded, which nothing of it has reached.
+    int k = pidx_upper(&pool_index, lo) - 1;
+    while (k >= 0 && pool_index.e[k].buf != r) k--;
+    if (k < 0) {
+        plat_mutex_unlock(&pool_lock);
+        vk_defer_buffer(r->mbuf, r->malloc_);
+        r->mbuf = VK_NULL_HANDLE, r->malloc_ = NULL;
+        return;
+    }
     if (nm == mcap) grow((void **)&mlist, &mcap, sizeof *mlist);
     int at = nm;
     while (at > 0 && mlist[at - 1]->import_lo > r->import_lo) at--;
@@ -2918,7 +2930,9 @@ static void mirror_create(PoolRec *r) {
         plat_add64(&m_untwinned_bytes, (int64_t)n);
     }
     if (r->gpa_rec && gpa_late()) {
+        plat_mutex_lock(&pool_lock);   // as mirror_forget and gpa_flip_cmds, which count it down
         r->gpa_flip = 1, n_gpa_flip++;   // vk_mem_mirror_prologue, with the copy range_add queues below
+        plat_mutex_unlock(&pool_lock);
     } else if (r->gpa_rec) {
         plat_mutex_lock(&pool_lock);
         r->gpa_rec = r->twin ? vk_gpa_remap(r->import_lo, r->import_hi, r->gpa_rec, r->mbuf, r->import_lo)
