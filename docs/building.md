@@ -472,6 +472,14 @@ A change to the start's memory warning (`runtime/mem_need.h`, `runtime/memory.c`
 `python tests\mem_need_check.py [<game exe>]`, which builds the header alone and checks when the game's need counts
 as short. With the executable it also runs `--probe-memneed` (it prints the machine's commit and the answer and
 starts nothing) with `mem_need_mb` at 0, at 1 and at a value no machine has, and reads the warning line of the last.
+A change to when a start does the whole warm on the boot screen (`runtime/boot_warm.h`, `runtime/vk_pipeline.c`
+`bf_decide`) passes `python tests\boot_warm_check.py`, which builds the header alone: the warm after a driver change,
+its continuation by a later start, the end of the tries, and no second warm once one is done. The warm itself shows
+in `--probe-prewarm` on a copy of an install's caches whose `pipeline-cache.bin` has another driver's header (bytes
+8 to 15 of the file are the vendor and device ids, the 16 after them the driver's cache id): the log names the whole
+warm, the compute pipelines on every core and the library warm's answer, and `boot-warm-owed.txt` ends as "done".
+Run under an exe name the driver has not seen, the probe compiles everything, as after a real driver update. What
+the boot screen shows, and the builders' step down when the wait is cut short, need a start of the game.
 A change to how `pipeline-cache.bin` is read (`runtime/vk_cache_file.h`, `runtime/vk_pipeline.c` `cache_load`) passes
 `python tests\pipeline_cache_file_check.py`, which builds the header alone and reads a sparse file just over 2 GB
 through it: measured and read whole without a size limit, refused by its real size under one. No game files, no GPU;

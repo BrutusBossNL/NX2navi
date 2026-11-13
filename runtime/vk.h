@@ -943,10 +943,15 @@ void vk_pipeline_prewarm(void);
 // Ends the boot prebuild's crash marker (vk_pipeline.c, "boot prebuild crash marker"): boot_wait calls it when it lets
 // the game start while the prewarm goes on, so a crash in play is not taken for one in the boot's builds.
 void vk_pipeline_prewarm_marker_clear(void);
+// boot_wait calls it when it lets the game start while the prewarm goes on: the builders of the whole warm after a
+// driver change (vk_pipeline.c bf_decide) go on as in play, at idle priority and in the background's numbers.
+void vk_pipeline_prewarm_detach(void);
 typedef struct {
-    int phase;                            // 0 starting (device, key file), 1 shaders, 2 pipelines, 3 done
+    // 0 starting (device, key file), 1 shaders, 2 pipelines, 5 done. Only in the whole warm after a driver change
+    // (vk_pipeline.c bf_decide): 3 compute pipelines, 4 the prepared variants built into the driver's cache.
+    int phase;
     int64_t sh_done, sh_total, sh_translated;   // gfx_shader_prewarm_progress
-    int64_t pipe_done, pipe_total;        // pipelines built or failed of those queued
+    int64_t pipe_done, pipe_total;        // pipelines built or failed of those queued; phases 3 and 4: their counts
 } VkPrewarmProgress;
 void vk_pipeline_prewarm_progress(VkPrewarmProgress *p);   // any thread, while vk_pipeline_prewarm runs or after
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info);

@@ -46,6 +46,7 @@
 #include "mesh_emu_spirv.h"
 #include "gfx.h"
 #include "host.h"
+#include "boot_warm.h"
 #include "mem_need.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
@@ -5285,7 +5286,7 @@ static int pm_skipped(void);
 static void pm_set(void);
 
 // vk_pipeline_prewarm_progress's numbers: the phase, and the pipelines finished (built or failed) of those queued, copied
-// while prewarm_run waits for its builders.
+// while prewarm_run waits for its builders; in phases 3 and 4 (bf_wait) the compute pipelines and the prepared variants.
 static int32_t pw_phase;
 static int64_t pw_pipe_done, pw_pipe_total;
 
@@ -5298,19 +5299,39 @@ void vk_pipeline_prewarm_progress(VkPrewarmProgress *p) {
 
 static void prewarm_run(void);
 
+// The whole warm on the boot screen after a driver change (comment at bf_decide).
+static struct {
+    int on;                  // this start waits for all of it
+    int lw;                  // lb_start left the library warm's start to bf_wait
+    volatile int32_t game;   // the wait is over: the warm ended, or the boot let the game start beside it
+    char owed[PLAT_PATH_MAX * 2 + 48];   // boot-warm-owed.txt
+} BF;
+
+// 1 while the start waits for the builders of the whole warm: they run at normal priority on every core then, and as
+// in play (idle priority, the background's thread counts) from the moment the game starts.
+static int bf_waiting(void) {
+    return BF.on && !__atomic_load_n(&BF.game, __ATOMIC_ACQUIRE);
+}
+
+void vk_pipeline_prewarm_detach(void) {
+    __atomic_store_n(&BF.game, 1, __ATOMIC_RELEASE);
+}
+
+static void bf_decide(void);
+static void bf_wait(void);
+
 // The boot's share of the pipeline prebuild with the graphics pipeline library. The boot builds the recorded
 // pipelines in record order, so those met first in play (the title screen, the first places) come first, for at most
 // this long after the shaders are ready; the rest stay queued for the pool workers, which build them below normal
 // priority while the game runs. A draw that meets one of them before it is built gets a pipeline linked from stage
 // libraries at once (gpl_link), as for any new pipeline in play. After a driver update, when every pipeline is built
-// from nothing, the boot thus waits this long instead of for all of them (15 minutes and more with a long play
-// history). Without the library a draw would have to wait for a whole build, so the boot waits for all; so it does
-// with NX2NAVI_PREWARM_FULL=1.
+// from nothing, the boot waits for all of them and for the rest of the warm (bf_decide). Without the library a draw
+// would have to wait for a whole build, so the boot waits for all; so it does with NX2NAVI_PREWARM_FULL=1.
 #define PREWARM_PIPE_MS 20000.0
 
 void vk_pipeline_prewarm(void) {
     prewarm_run();
-    __atomic_store_n(&pw_phase, 3, __ATOMIC_RELEASE);
+    __atomic_store_n(&pw_phase, 5, __ATOMIC_RELEASE);
 }
 
 // NX2NAVI_PIPE_SEED_BOOT (auto, the default; 1; 0): whether the boot builds the pipelines of the shared list that this
@@ -5404,6 +5425,7 @@ static void prewarm_run(void) {
         return;
     }
     pm_set();
+    bf_decide();
     uint32_t queued = 0, dropped = 0, known = 0, listed = 0;
     int at_boot = seed_boot();
     plat_mutex_lock(&P.lock);
@@ -5462,14 +5484,12 @@ static void prewarm_run(void) {
     const char *full = cfg_get("NX2NAVI_PREWARM_FULL");
     // A cache file of another device or driver (a driver update: cache_data_read) leaves every recorded pipeline to be
     // built from nothing, and the ones the boot left after PREWARM_PIPE_MS were built beside the game: on an 8-core
-    // integrated GPU that start had 2,141 of 8,122 left after 20 s and took 296 s to finish them, with the game
-    // drawing fewer than 600 frames in its first 11 minutes. The boot waits for all of them then, with its count on
-    // the boot screen, as it does without the library; NX2NAVI_PREWARM_FULL=0 keeps the 20 s.
-    int all = (full && !strcmp(full, "1")) || (cache_foreign && queued && !(full && !strcmp(full, "0")));
-    if (P.gpl && all && cache_foreign && !(full && !strcmp(full, "1")))
-        rt_log("vk_pipeline: prewarm: the pipeline cache was written by another device or driver, so the start waits "
-               "for all %u recorded pipelines and not %d s (NX2NAVI_PREWARM_FULL=0: the rest beside the game)", queued,
-               (int)(PREWARM_PIPE_MS / 1000));
+    // integrated GPU that start had 2,141 of 8,122 left after 20 s and took 296 s to finish them. The whole warm
+    // (bf_decide) waits for all of them, with its count on the boot screen, as a start without the library does.
+    int all = (full && !strcmp(full, "1")) || (BF.on && queued);
+    if (P.gpl && all && BF.on && !(full && !strcmp(full, "1")))
+        rt_log("vk_pipeline: prewarm: the start waits for all %u recorded pipelines and not %d s (the whole warm after a "
+               "driver change)", queued, (int)(PREWARM_PIPE_MS / 1000));
     K.until = P.gpl && !all ? now_ms() + PREWARM_PIPE_MS : 0;   // before the builders start
     PlatThread *t[64];
     int nt = 0;
@@ -5512,6 +5532,7 @@ static void prewarm_run(void) {
     vk_mem_stage_log("the recorded pipelines' prebuild");
     vk_pipeline_prewarm_marker_clear();   // the boot's share is done; what the pool builds later runs during play
     lb_start(pr_hist, fs_hist);
+    if (BF.on) bf_wait();
 }
 
 // ---- boot prebuild crash marker
@@ -5574,6 +5595,65 @@ static void pm_set(void) {
 
 void vk_pipeline_prewarm_marker_clear(void) {
     if (plat_xchg32(&pm_on, 0)) plat_file_delete(PM_run);
+}
+
+// ---- the whole warm on the boot screen after a driver change
+// A start that finds pipeline-cache.bin written by another device or driver (cache_data_read: a driver update, another
+// GPU) has nothing built: not the recorded pipelines, not the compute pipelines, and the driver's own cache of stage
+// libraries is empty as well. Left to the background as on any other start, all of it was compiled beside the game:
+// an 8-core integrated GPU drew fewer than 600 frames in its first 11 minutes, with the recorded pipelines done after
+// 296 s and the compute pipelines after 570 s, the game's own compute dispatches compiling on the replay thread until
+// then. Such a start waits for all of it on the boot screen instead, with its counts (boot.c boot_wait): the recorded
+// pipelines (prewarm_run, phase 2), then the compute pipelines on up to LB_MAX_THREADS threads at normal priority
+// (lb_start, phase 3), then, when a sample says the driver's cache does not hold the prepared stage libraries
+// (lw_check), every prepared variant on up to LW_BOOT_THREADS threads (lw_worker, phase 4). The memory gate
+// (gate_wait) holds for all of them. The large compute shaders (bg_main) are not waited for: their one thread runs
+// beside the library phase.
+// It takes minutes (with nothing in the driver's cache, an RTX 5090 and 16 CPU threads: 87 s for 5,775 recorded
+// pipelines, 19 s for 4,075 compute pipelines, 317 s for 42,231 prepared variants), once per driver:
+// <dir>/boot-warm-owed.txt names the GPU and driver and counts the starts that began the warm (boot_warm.h). A start
+// that finds its own GPU and driver there with a count goes on with a warm that an earlier start did not end; what
+// was built comes back from the caches in a moment. The start whose warm ends writes "done" there, which keeps the
+// next starts ordinary ones: pipeline-cache.bin keeps the earlier driver's header until the play cache is folded
+// into it (cache_load), some starts later. After BOOT_WARM_TRIES starts that did not end the warm the file stays as
+// well, and starts on this GPU and driver are ordinary ones again. While the boot waits, the library builds write
+// the preparation's journal (journal_mark), so a variant the driver's compiler dies on is skipped from the next
+// start on (skip_init) instead of ending every start.
+// NX2NAVI_PREWARM_FULL=0 turns it off. NX2NAVI_PREWARM_WAIT_MS and a minute without progress end the wait as for any
+// prewarm (boot_wait); what is left then runs as in play (vk_pipeline_prewarm_detach). Not for a --shot image, which
+// no build timing may change and which nobody watches.
+static void bf_decide(void) {
+    const char *full = cfg_get("NX2NAVI_PREWARM_FULL");
+    char dir[PLAT_PATH_MAX * 2], key[32], line[100];
+    if ((full && !strcmp(full, "0")) || rt_config()->shot || !cache_dir(dir, sizeof dir)) return;
+    snprintf(BF.owed, sizeof BF.owed, "%s/boot-warm-owed.txt", dir);
+    gpu_key(key, sizeof key);
+    uint64_t n = 0;
+    char *f = (char *)plat_file_read(BF.owed, &n);
+    if (f) snprintf(line, sizeof line, "%.*s", (int)(n < sizeof line - 1 ? n : sizeof line - 1), f);
+    int tries = 0, what = boot_warm_decide(f ? line : NULL, key, cache_foreign, &tries);
+    if (what == BOOT_WARM_NO) {
+        if (f) plat_file_delete(BF.owed);   // another GPU's or driver's
+    } else if (what == BOOT_WARM_DONE) {
+        if (cache_foreign)
+            rt_log("vk_pipeline: the whole warm for this GPU and driver was done by an earlier start (%s); the "
+                   "pipeline cache's file keeps the earlier driver's header until the play cache is folded into it",
+                   BF.owed);
+    } else if (what == BOOT_WARM_GAVE_UP) {
+        rt_log("vk_pipeline: the whole warm after a driver change did not end in %d starts on this GPU and driver (%s): "
+               "this start builds in the background like any other. Delete %s to have it tried again", BOOT_WARM_TRIES,
+               key, BF.owed);
+    } else {
+        int len = snprintf(line, sizeof line, "%s %d\n", key, tries);
+        if (!plat_file_write_atomic(BF.owed, line, (size_t)len)) rt_log("vk_pipeline: cannot write %s", BF.owed);
+        BF.on = 1;
+        rt_log("vk_pipeline: the whole warm on the boot screen (%s, start %d of %d at most): the start waits for the "
+               "recorded pipelines, the compute pipelines and the driver's cache of stage libraries. "
+               "NX2NAVI_PREWARM_FULL=0 leaves them to the background",
+               cache_foreign ? "the pipeline cache was written by another device or driver" : "an earlier start began it",
+               tries, BOOT_WARM_TRIES);
+    }
+    free(f);
 }
 
 // ensure_init's hook: without a prewarm (NX2NAVI_PIPE_PREBUILD=0, or the device came up first elsewhere) the records
@@ -5805,19 +5885,27 @@ static struct {
     int32_t keep_n;
     int idle;                                          // build at PLAT_PRIO_IDLE (boot), normal (preparation)
     int tail_one;                                      // automatic boot policy: only worker 0 takes the warming tail
+    int bg_threads;                                    // boot: the workers that go on beside the game (lb_next)
     PlatMutex stat;
 } LB = {.stat = PLAT_MUTEX_INIT};
 static __thread int lb_me = -1;        // on a boot prebuild thread (lb_worker): its index in LB.th
+
+// The boot's builders run beside the game, at idle priority; not while the start waits for them (bf_waiting).
+static int lb_idle(void) {
+    return LB.idle && !bf_waiting();
+}
 
 // Claim a boot job without dropping one when the extra workers finish the recent-pipeline prefix. Recent pipelines
 // retain parallel creation; a single worker continues the complete tail. Explicit thread counts override this
 // policy, and installer preparation uses its own queue at full concurrency. The CAS makes the prefix boundary
 // exact even when two workers reach it together. No pipeline creation or dispatch waits on this queue lock.
+// The whole warm (bf_wait) starts more workers than go on beside a game: those end here once the game runs.
 static size_t lb_next(int worker) {
     int64_t next = __atomic_load_n(&LB.next, __ATOMIC_RELAXED);
     for (;;) {
-        if (LB.stop || (size_t)next >= LB.n ||
-            (LB.idle && LB.tail_one && worker > 0 && (size_t)next >= LB.n_keep)) return LB.n;
+        int bg = lb_idle();
+        if (LB.stop || (size_t)next >= LB.n || (bg && worker >= LB.bg_threads) ||
+            (bg && LB.tail_one && worker > 0 && (size_t)next >= LB.n_keep)) return LB.n;
         if (__atomic_compare_exchange_n(&LB.next, &next, next + 1, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
             return (size_t)next;
     }
@@ -5838,11 +5926,13 @@ static size_t lb_next(int worker) {
 #define JR_SLOTS 64   // lb_warm_prepared's thread cap
 
 static struct {
-    PlatFile *journal;     // while lb_warm_prepared builds
+    PlatFile *journal;     // while lb_warm_prepared builds, and while the start waits for the library warm (bf_wait)
+    PlatMutex jlock;       // journal: bf_wait and the process's end close it while workers write
+    char jpath[PLAT_PATH_MAX * 2 + 48];   // the boot's journal, "" without one
     uint8_t (*iid)[32];    // the skip list's variants for this GPU and driver
     size_t n;
     int loaded;
-} SK;
+} SK = {.jlock = PLAT_MUTEX_INIT};
 
 static int cache_dir(char *dir, size_t n) {   // the folder of pipeline-cache.bin and shader-prepared.bin
     snprintf(dir, n, "%s", P.cache_path);
@@ -5901,8 +5991,9 @@ static void skip_init(const char *dir) {
             out[len] = 0;   // parsed below as the list's text
         }
         if (added && plat_file_write_atomic(sp, out, len)) {
-            rt_log("vk_pipeline: the last shader preparation died while the driver built %d variants; %s now lists them "
-                   "and preparation skips them on this GPU and driver (%s)", added, sp, key);
+            rt_log("vk_pipeline: the last shader preparation, or the last start's warm on the boot screen, died while "
+                   "the driver built %d variants; %s now lists them and they are skipped ahead of play on this GPU and "
+                   "driver (%s)", added, sp, key);
             free(s), s = out, sn = len, out = NULL;
         } else if (added) {
             rt_log("vk_pipeline: cannot write %s; %s stays for the next run", sp, jp);
@@ -5945,10 +6036,44 @@ static void skip_count(void) {
 
 // Journal slot `slot`: the variant e its worker hands to the driver next, or zeros (e NULL) when the build returned.
 static void journal_mark(int slot, const GfxWarmEnt *e) {
-    if (!SK.journal || slot < 0 || slot >= JR_SLOTS) return;
+    if (slot < 0 || slot >= JR_SLOTS) return;
     uint8_t rec[JR_SLOT] = {0};
     if (e) memcpy(rec, e->iid, 32), rec[32] = e->stage;
-    plat_file_pwrite(SK.journal, rec, sizeof rec, (uint64_t)slot * JR_SLOT);
+    plat_mutex_lock(&SK.jlock);
+    if (SK.journal) plat_file_pwrite(SK.journal, rec, sizeof rec, (uint64_t)slot * JR_SLOT);
+    plat_mutex_unlock(&SK.jlock);
+}
+
+// The boot's journal, for the library builds the start waits for (bf_wait). skip_init has run (lb_start) and has
+// dealt with a leftover one.
+static void journal_open(void) {
+    char dir[PLAT_PATH_MAX * 2];
+    if (!cache_dir(dir, sizeof dir)) return;
+    snprintf(SK.jpath, sizeof SK.jpath, "%s/shader-prepare-journal.bin", dir);
+    PlatFile *j = plat_fs_create(SK.jpath, NULL);
+    if (!j) {
+        rt_log("vk_pipeline: cannot create %s: a driver crash in this start's library warm will not be recorded", SK.jpath);
+        SK.jpath[0] = 0;
+        return;
+    }
+    plat_mutex_lock(&SK.jlock);
+    SK.journal = j;
+    plat_mutex_unlock(&SK.jlock);
+}
+
+// Ends the boot's journal: when the library warm is done, when the game starts beside it (a crash in play says
+// nothing about the variant a background builder has in hand) and when the process ends in order during the wait
+// (vk_pipeline_save_exit), so that only a process that died while the start waited leaves one. The builds still in
+// flight write nothing afterwards (journal_mark).
+static void journal_close(void) {
+    if (!SK.jpath[0]) return;
+    plat_mutex_lock(&SK.jlock);
+    PlatFile *j = SK.journal;
+    SK.journal = NULL;
+    plat_mutex_unlock(&SK.jlock);
+    if (!j) return;
+    plat_file_close(j);
+    plat_file_delete(SK.jpath);
 }
 
 // Compute shaders whose pipeline a thread is compiling now (P.lock): a cold driver takes about 2 s for one of Ocarina's
@@ -6323,7 +6448,7 @@ static void lb_lock(void) {
 
 static void lb_unlock(void) {
     plat_mutex_unlock(&P.lock);
-    if (LB.idle) plat_thread_priority(PLAT_PRIO_IDLE);
+    if (lb_idle()) plat_thread_priority(PLAT_PRIO_IDLE);
 }
 
 static void lb_count(int kind, int what, double ms) {   // what: 0 built, 1 already there, 2 failed, 3 cache only
@@ -6614,10 +6739,10 @@ static void lb_compute(const GfxShader *cs, const uint8_t iid[32], int keep) {
     // at idle priority under load held that frame for seconds. The dispatch may have come between the unlock and the
     // call below, which would undo its raise, hence the look at the slot after it. Without a slot or a handle nobody
     // could raise the thread, so it compiles at normal priority.
-    if (LB.idle && flight && me) {
+    if (lb_idle() && flight && me) {
         plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
         if (cs_flight_is_wanted(cs)) plat_thread_priority(PLAT_PRIO_NORMAL);
-    } else if (LB.idle) {
+    } else if (lb_idle()) {
         plat_thread_priority(PLAT_PRIO_NORMAL);
     }
     VkPipeline pipe = compute_create(cs, l, big);
@@ -6737,7 +6862,7 @@ static void lb_report(const char *how) {
 // cache) and kept libraries.
 static void lb_worker(void *arg) {
     lb_me = (int)(intptr_t)arg;        // its handle is LB.th[lb_me]
-    plat_thread_priority(PLAT_PRIO_IDLE);
+    if (lb_idle()) plat_thread_priority(PLAT_PRIO_IDLE);
     for (;;) {
         size_t i = lb_next(lb_me);
         if (i >= LB.n) break;
@@ -6769,7 +6894,7 @@ static void lb_worker(void *arg) {
         plat_thread_priority(PLAT_PRIO_NORMAL);   // gfx_shader's cache lock, disk reads
         const GfxShader *sh = keep || LB.e[i].stage != GFX_STAGE_CS ? gfx_shader_load_input(LB.e[i].iid, 0)
                                                                     : gfx_shader_load_private(LB.e[i].iid, &owned);
-        plat_thread_priority(PLAT_PRIO_IDLE);
+        if (lb_idle()) plat_thread_priority(PLAT_PRIO_IDLE);
         if (!sh) {
             plat_mutex_lock(&LB.stat);
             LB.noshader++;
@@ -6828,14 +6953,17 @@ static void lb_state(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
 #define LW_SAMPLE 12
 #define LW_COLD_MS 15.0
 #define LW_MAX_THREADS 6
+#define LW_BOOT_THREADS 32   // while the start waits for the warm (bf_wait): every core, as the preparation
 static struct {
     GfxWarmEnt *e;
     size_t n;
     volatile int64_t next, done;
     volatile int32_t running, stop, started;
     volatile int32_t short_mem;   // the memory gate refused a build for GATE_WAIT_MS: the warm ended for this run
-    PlatThread *th[LW_MAX_THREADS + 1];
+    volatile int32_t checked;     // lw_main has returned: the workers it started, if any, are counted in running
+    PlatThread *th[LW_BOOT_THREADS + 1];
     int threads, strikes;
+    int bg_threads;               // the workers that go on beside the game (lw_worker)
     uint32_t vendor;   // the GPU's vendor id, for what a cold cache's log line adds (vk_warm_hint.h)
     double t0;
     char stamp[PLAT_PATH_MAX * 2 + 32], id[64];
@@ -6864,10 +6992,14 @@ static double lw_build(const GfxWarmEnt *e) {
 }
 
 static void lw_worker(void *arg) {
-    (void)arg;
-    plat_thread_priority(PLAT_PRIO_IDLE);
+    int me = (int)(intptr_t)arg, idle = 0;   // me: its journal slot while the start waits (bf_wait)
     no_cache = 1;   // into the driver's own cache only (see no_cache)
     for (;;) {
+        // Beside the game: idle priority, and of the workers the whole warm started only the background's count.
+        if (!bf_waiting()) {
+            if (me >= LW.bg_threads) break;
+            if (!idle) plat_thread_priority(PLAT_PRIO_IDLE), idle = 1;
+        }
         size_t i = (size_t)plat_inc64(&LW.next) - 1;
         if (i >= LW.n || LW.stop) break;
         // The memory gate (gate_wait): without room the warm waits, and after GATE_WAIT_MS it ends for this run.
@@ -6882,7 +7014,9 @@ static void lw_worker(void *arg) {
             }
             break;
         }
+        journal_mark(me, &LW.e[i]);   // from here to its clearing, a process that dies names this variant
         lw_build(&LW.e[i]);
+        journal_mark(me, NULL);
         gate_leave(held);
         int64_t d = plat_inc64(&LW.done);
         if (d % 8000 == 0)
@@ -6891,7 +7025,7 @@ static void lw_worker(void *arg) {
     }
     if (!plat_dec32(&LW.running) && !LW.stop && !LW.short_mem) {
         lw_stamp("done", LW.strikes);
-        rt_log("vk_pipeline: library warm: done, %zu prepared variants in %.0f s on %d idle threads; new pipelines "
+        rt_log("vk_pipeline: library warm: done, %zu prepared variants in %.0f s on %d threads; new pipelines "
                "link from the driver's cache from here on", LW.n, (now_ms() - LW.t0) / 1000, LW.threads);
     }
 }
@@ -6917,9 +7051,8 @@ static double lw_probe(void) {
     return ms[got / 2];
 }
 
-static void lw_main(void *arg) {
-    (void)arg;
-    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+static void lw_check(void) {
+    if (!bf_waiting()) plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
     char was[16] = "", id[64] = "";
     int strikes = 0;
     uint64_t size = 0;
@@ -6950,9 +7083,18 @@ static void lw_main(void *arg) {
     }
     LW.strikes = resume ? strikes : same && !strcmp(was, "done") ? strikes + 1 : 0;
     lw_stamp("warming", LW.strikes);
-    int cpus = (int)plat_cpu_usable(), t = cpus / 4;
+    int cpus = (int)plat_cpu_usable(), t = cpus / 4, boot = bf_waiting();
     t = t < 2 ? 2 : t > LW_MAX_THREADS ? LW_MAX_THREADS : t;
-    if (resume)
+    LW.bg_threads = t;
+    if (boot) t = cpus < 1 ? 1 : cpus > LW_BOOT_THREADS ? LW_BOOT_THREADS : cpus;
+    if (boot) {
+        char why[64];
+        if (resume) snprintf(why, sizeof why, "an earlier run began the warm and did not end it");
+        else snprintf(why, sizeof why, "a sample's median %.0f ms", median);
+        rt_log("vk_pipeline: library warm: the driver's cache does not have the prepared libraries (%s): building %zu "
+               "prepared variants into it on %d threads while the start waits (the whole warm after a driver change)",
+               why, LW.n, t);
+    } else if (resume)
         rt_log("vk_pipeline: library warm: going on with the warm an earlier run began: %zu prepared variants on %d "
                "idle threads", LW.n, t);
     else   // cold right after a finished warm on this driver says more than a first cold (vk_warm_hint.h)
@@ -6968,9 +7110,15 @@ static void lw_main(void *arg) {
     LW.running = t;
     int started = 0;
     for (int i = 0; i < t; i++)
-        if ((LW.th[1 + started] = plat_thread_new(lw_worker, NULL, "lib warm"))) started++;
+        if ((LW.th[1 + started] = plat_thread_new(lw_worker, (void *)(intptr_t)i, "lib warm"))) started++;
     LW.threads = started;
     if (plat_add32(&LW.running, started - t) == 0 && !started) rt_log("vk_pipeline: library warm: no thread started");
+}
+
+static void lw_main(void *arg) {
+    (void)arg;
+    lw_check();
+    plat_xchg32(&LW.checked, 1);
 }
 
 // Boot, once the library state is known (lb_state): the prepared list is read and the check starts on its own thread.
@@ -6998,7 +7146,7 @@ static void lw_start(void) {
 
 static void lw_stop(void) {
     plat_xchg32(&LW.stop, 1);
-    for (int i = 0; i <= LW_MAX_THREADS; i++)
+    for (int i = 0; i <= LW_BOOT_THREADS; i++)
         if (LW.th[i]) plat_thread_join(LW.th[i]), LW.th[i] = NULL;
 }
 
@@ -7010,7 +7158,8 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     const char *be = cfg_get("NX2NAVI_LIB_PREBUILD_BIG");       // SPIR-V words; LB_BIG_WORDS when unset, 0 no limit
     if (!A.on || !cfg_bool("NX2NAVI_LIB_PREBUILD")) return;
     lb_state(pr_hist, fs_hist);   // the libraries' state, also for lw_start
-    lw_start();
+    if (BF.on) BF.lw = 1;         // after the compute pipelines, with the start waiting (bf_wait)
+    else lw_start();
     LB.big_words = be && *be ? strtoull(be, NULL, 10) : LB_BIG_WORDS;
     char dir[PLAT_PATH_MAX * 2];
     if (cache_dir(dir, sizeof dir)) skip_init(dir);
@@ -7052,6 +7201,10 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     int t = te && *te ? atoi(te) : (cpus < 4 ? 1 : 2);   // idle priority; a cold driver takes ~2 s per large compute shader
     LB.tail_one = !(te && *te);
     t = t < 1 ? 1 : t > LB_MAX_THREADS ? LB_MAX_THREADS : t;
+    // The whole warm (bf_wait): no game runs beside these builds until they are done, so every core takes them, as
+    // in the preparation; should the game start first, the count above goes on (lb_next).
+    LB.bg_threads = t;
+    if (bf_waiting() && LB.tail_one) t = cpus < 1 ? 1 : cpus > LB_MAX_THREADS ? LB_MAX_THREADS : cpus;
     if ((size_t)t > n) t = (int)n;
     LB.t0 = now_ms();
     LB.running = t;
@@ -7066,11 +7219,12 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
                   P.cache_control ? "only from the pipeline caches" : "left to their first dispatch");
     rt_log("vk_pipeline: stage library prebuild: %zu compute pipelines, of which %zu stay (the shaders dispatched most "
            "recently, NX2NAVI_COMPUTE_KEEP) and the others are built into the pipeline cache and destroyed, to be created "
-           "at their first dispatch; %zu recorded variants' libraries (NX2NAVI_LIB_PREBUILD_KEEP %d); on %d idle-priority "
+           "at their first dispatch; %zu recorded variants' libraries (NX2NAVI_LIB_PREBUILD_KEEP %d); on %d %s "
            "threads; library state clamp %u, polygon mode %u, depth -w..w %u, samples %u; %s (NX2NAVI_LIB_PREBUILD_BIG)",
-           n_cs < n ? n_cs : n, LB.n_keep, n > n_cs ? n - n_cs : 0, LB.keep_n, started, LB.clamp, LB.poly, LB.minus_w,
+           n_cs < n ? n_cs : n, LB.n_keep, n > n_cs ? n - n_cs : 0, LB.keep_n, started,
+           bf_waiting() ? "normal-priority (the start waits for them)" : "idle-priority", LB.clamp, LB.poly, LB.minus_w,
            LB.samples, big);
-    if (LB.tail_one && started > 1)
+    if (LB.tail_one && started > 1 && !bf_waiting())
         rt_log("vk_pipeline: stage library prebuild: after the %zu recent compute pipelines, one worker continues the "
                "remaining list; NX2NAVI_LIB_PREBUILD_THREADS overrides this background limit", LB.n_keep);
 }
@@ -7082,6 +7236,58 @@ static void lb_stop(void) {
         if (LB.th[i]) plat_thread_join(LB.th[i]), LB.th[i] = NULL;
     LB.threads = 0;
     if (BG.th) plat_thread_join(BG.th), BG.th = NULL;   // after its current build, if one runs
+}
+
+// The whole warm's wait (comment at bf_decide), on the prewarm thread after the recorded pipelines: the compute
+// pipelines lb_start has just started, then the library warm. The counts go to the boot screen
+// (vk_pipeline_prewarm_progress). Should the boot stop waiting (vk_pipeline_prewarm_detach), this thread still sees
+// the warm to its end, which the builders then reach as in play.
+static void bf_wait(void) {
+    double t0 = now_ms();
+    if (LB.n && LB.threads) {
+        __atomic_store_n(&pw_pipe_done, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&pw_pipe_total, (int64_t)LB.n, __ATOMIC_RELAXED);
+        __atomic_store_n(&pw_phase, 3, __ATOMIC_RELEASE);
+        while (__atomic_load_n(&LB.running, __ATOMIC_ACQUIRE) > 0 && !LB.stop) {
+            plat_sleep_ms(100);
+            plat_mutex_lock_shared(&LB.stat);
+            uint64_t d = LB.done;
+            plat_mutex_unlock_shared(&LB.stat);
+            __atomic_store_n(&pw_pipe_done, (int64_t)d, __ATOMIC_RELAXED);
+        }
+    }
+    double t1 = now_ms();
+    int libs = 0;
+    if (BF.lw && !LB.stop) {
+        if (bf_waiting()) journal_open();
+        lw_start();
+        if (LW.th[0]) {
+            libs = 1;
+            __atomic_store_n(&pw_pipe_done, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&pw_pipe_total, (int64_t)LW.n, __ATOMIC_RELAXED);
+            __atomic_store_n(&pw_phase, 4, __ATOMIC_RELEASE);
+            while ((!LW.checked || LW.running > 0) && !LW.stop) {
+                plat_sleep_ms(100);
+                __atomic_store_n(&pw_pipe_done, (int64_t)LW.done, __ATOMIC_RELAXED);
+                if (!bf_waiting()) journal_close();   // the game runs
+            }
+        }
+        journal_close();
+    }
+    int stopped = LB.stop || LW.stop, beside = __atomic_load_n(&BF.game, __ATOMIC_ACQUIRE);
+    rt_log("vk_pipeline: the whole warm %s: %zu compute pipelines in %.0f ms, the driver's cache of stage libraries %s in "
+           "%.0f ms (%lld of %zu prepared variants built)%s", stopped ? "stopped with the process" : "is done", LB.n,
+           t1 - t0, !libs ? "not warmed (no prepared list, or the graphics pipeline library or NX2NAVI_LIB_WARM is off)"
+                          : LW.done ? "warmed" : "left as it is (the check found it warm, or gave the warm up)",
+           now_ms() - t1, (long long)LW.done, LW.n,
+           beside ? "; the boot had stopped waiting, so the game ran beside the end of it" : "");
+    if (!stopped) {   // done for this GPU and driver (boot_warm.h)
+        char key[32], line[64];
+        gpu_key(key, sizeof key);
+        int len = snprintf(line, sizeof line, "%s done\n", key);
+        if (!plat_file_write_atomic(BF.owed, line, (size_t)len)) rt_log("vk_pipeline: cannot write %s", BF.owed);
+    }
+    vk_pipeline_prewarm_detach();   // nothing waits from here on: later builders are the background's
 }
 
 // Preparation: one prepared variant at a time into the driver's disk cache (private shader copy, nothing kept). arg is
@@ -7775,6 +7981,7 @@ void vk_pipeline_save(void) {
 // The save as the process ends (window closed, the game's exit, a timed run's end): new builds wait while it waits up to
 // SAVE_WAIT_MS for the running ones to finish (cache_saving_at_exit).
 void vk_pipeline_save_exit(void) {
+    journal_close();   // an orderly end during the whole warm is not a driver crash
     save_with(SAVE_WAIT_MS, 1);
 }
 

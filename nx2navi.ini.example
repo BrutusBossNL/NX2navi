@@ -220,9 +220,15 @@
 #   draw, from the pipeline cache, and built at the start from then on.
 # 1: always built at the start. 0: never; a first visit to an area can then hold a frame for a moment.
 # pipe_seed_boot = auto
-# 1: the start waits until every known pipeline is built. Default 0: with the graphics pipeline library the start
-# builds them for at most 20 seconds and the rest in the background while you play.
-# prewarm_full = 0
+# How long the start waits for known pipelines on the "Preparing shaders" screen.
+# auto (default): with the graphics pipeline library the start builds them for at most 20 seconds and the rest in the
+#   background while you play. The first start after a graphics driver update (or with another GPU) waits for
+#   everything instead, because nothing is built then and the game would crawl while it all compiles beside it: every
+#   known pipeline, the compute pipelines and the driver's own shader cache. That takes minutes, once per driver; a
+#   start closed during it goes on with it the next time (three starts at most).
+# 1: every start waits until every known pipeline is built.
+# 0: never more than the 20 seconds, also after a driver update.
+# prewarm_full = auto
 # Threads that translate known shaders at start (1 to 64; default: half the CPU threads, at most 16).
 # prewarm_xlate = 8
 # After an update that brings a new shader translator, 1 keeps using the shader cache's translations from the earlier

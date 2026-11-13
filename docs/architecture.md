@@ -114,8 +114,14 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   `menu_boot_frame`). With the graphics pipeline library the boot builds recorded pipelines in record order for at
   most 20 s after the shaders are ready and leaves the rest to the pipeline workers below normal priority; a draw
   that meets one before it is built gets a fast-linked pipeline (`vk_pipeline.c` `PREWARM_PIPE_MS`).
-  `NX2NAVI_PREWARM_FULL=1`, and drivers without the library, wait for every pipeline. `NX2NAVI_PREWARM_WAIT_MS` caps
-  the whole wait, after which the rest finishes in the background.
+  `NX2NAVI_PREWARM_FULL=1`, and drivers without the library, wait for every pipeline. A start that finds the
+  pipeline cache written by another GPU or driver waits for the whole warm on that screen, since nothing is built
+  then and all of it would compile beside the game: every recorded pipeline, the compute pipelines, and the
+  prepared shader variants built into the driver's own cache when a sample says it lacks them (`vk_pipeline.c`
+  `bf_decide`, `bf_wait`). `boot-warm-owed.txt` next to the caches lets a start go on with a warm that an earlier
+  one began and did not end, three starts at most, and says when the warm for a GPU and driver is done
+  (`runtime/boot_warm.h`); `NX2NAVI_PREWARM_FULL=0` turns it off.
+  `NX2NAVI_PREWARM_WAIT_MS` caps the whole wait, after which the rest finishes in the background.
 - Translator updates: every cache key names the translator, so a new one has no translations. The cache carries the
   previous translator's (`NX2NAVI_SHADER_CARRY`, `runtime/gfx_shader.c` "Carry"): `shader-cache/identities.txt`
   lists the translators it holds translations of, and a shader the new translator has not translated yet uses the

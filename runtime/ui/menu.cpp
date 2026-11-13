@@ -2222,8 +2222,9 @@ extern "C" int menu_boot_frame(const MenuTarget *t) {
     int phase = g_boot_phase.load(std::memory_order_acquire);
     long long done = g_boot_done.load(std::memory_order_relaxed), total = g_boot_total.load(std::memory_order_relaxed);
     char step[160];
-    if (phase == 1 || phase == 2)
-        snprintf(step, sizeof step, ui_text(phase == 1 ? UI_BOOT_SHADERS : UI_BOOT_PIPELINES), done, total);
+    static const UiTextId steps[] = {UI_BOOT_SHADERS, UI_BOOT_PIPELINES, UI_BOOT_COMPUTE, UI_BOOT_DRIVER_CACHE};
+    if (phase >= 1 && phase <= 4)
+        snprintf(step, sizeof step, ui_text(steps[phase - 1]), done, total);
     else
         snprintf(step, sizeof step, "%s", ui_text(UI_BOOT_STARTING));
     const char *title = ui_text(UI_BOOT_TITLE);
@@ -2234,7 +2235,7 @@ extern "C" int menu_boot_frame(const MenuTarget *t) {
     ImFont *head = g_title_font ? g_title_font : body;
     float head_px = g_title_font ? g_title_font->FontSize * io.FontGlobalScale : body_px * 1.2f;   // as GetFontSize scales
     float frac = -1;
-    if ((phase == 1 || phase == 2) && total > 0) frac = done <= 0 ? 0 : done >= total ? 1 : (float)done / (float)total;
+    if (phase >= 1 && phase <= 4 && total > 0) frac = done <= 0 ? 0 : done >= total ? 1 : (float)done / (float)total;
     float s = (float)fmod((now - g_boot_t0) / 1e9 * 0.8, 2.0);
     skin_boot_panel(ImGui::GetForegroundDrawList(), head, head_px, body, body_px, title, step, frac, s < 1 ? s : 2 - s,
                     (float)t->width, (float)t->height, scale);
