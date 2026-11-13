@@ -3047,8 +3047,13 @@ static void idle_release(void) {
     int n = 0;
     for (int i = 0; i < DLSS_SIZES; i++) {
         struct Size *s = &D.sizes[i];
-        if (D.fgo && s == D.last) {   // frame generation's motion images without an upscaler (fg_only_frame) stay
-            if (s->feat) {            // a DLSS feature made for the same sizes (DLAA) does not
+        // Frame generation without an upscaler (fg_only_frame) makes its motion images in the size of the scene's
+        // size at every frame, and that size can change from one frame to the next: a size it used within the last
+        // IDLE_FREE_PRESENTS evaluations may still be in flight, and destroy_size does not wait for the GPU. Such a
+        // size stays, and so does the last one; a DLSS feature made for the same sizes (DLAA) goes, since the upscaler
+        // that used it has been off for that long.
+        if (D.fgo && (s == D.last || s->used + IDLE_FREE_PRESENTS > (uint64_t)D.evals)) {
+            if (s->feat) {
                 rt_log("dlaa: the DLSS feature at %ux%u went unused for %d presents with the upscaler off: released; "
                        "its size's motion images stay for frame generation", s->w, s->h, IDLE_FREE_PRESENTS);
                 N.release(s->feat), s->feat = NULL, feat_released = 1;
