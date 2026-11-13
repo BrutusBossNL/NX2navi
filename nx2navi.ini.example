@@ -560,8 +560,9 @@
 # the smaller render sizes DLSS allows on it (dynamic resolution's steps with dyn_res = 1, a screen that renders
 # smaller than play), so a change of size makes no new network and keeps the picture DLSS has built up. 0: every
 # render size has its own network and starts its picture anew. The log says for each network which render sizes it
-# takes, and counts the changes of size that kept the picture against those that made a network. Read at start.
-# dlss_range = 1
+# takes, and counts the changes of size that kept the picture against those that made a network. 0 is the default:
+# the shared network has been compiled and not yet run on a graphics card. Read at start.
+# dlss_range = 0
 # Per-object motion vectors for DLSS: characters, animals and moving objects get their own motion instead of the
 # camera's, so DLSS keeps their history instead of smearing or rejecting it. Costs some CPU time each frame (about 1-2 ms
 # on a laptop CPU); 0 leaves camera-only motion. Read at start.

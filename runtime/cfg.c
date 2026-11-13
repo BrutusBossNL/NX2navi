@@ -186,7 +186,7 @@ static const CfgMeta metas[] = {
     {"STANDIN_FILTER", "easu", "easu|bilinear", LIVE},   // vk_tonemap.c vk_tonemap_record: how the scene is scaled to the picture
     {"DLAA", "0", "0|1", LIVE}, {"DLSS", "dlaa", "dlaa|quality|balanced|performance|ultra_performance", LIVE},
     {"DLSS_PRESET", "default", "default|k|j", LIVE}, {"DLSS_IDLE_FREE", "1", "0|1|2", RESTART}, {"TAA", "dlss", "dlss|fsr3", LIVE},   // vk_dlaa.c fsr3
-    {"DLSS_RANGE", "1", "0|1", RESTART},   // vk_dlaa.c range_on: one DLSS feature for the render sizes of a mode
+    {"DLSS_RANGE", "0", "0|1", RESTART},   // vk_dlaa.c range_on: one DLSS feature for the render sizes of a mode
     {"FSR4", "0", "0|1", LIVE},   // vk_ffx.cpp vk_ffx_fsr4
     {"FSR4_FG", "0", "0|1", LIVE},   // vk_fg.cpp use4
     {"FRAMEGEN", "off", "off|fsr3|dlss", LIVE},   // vk_fg.cpp, vk_dlssg.c

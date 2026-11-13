@@ -2051,7 +2051,8 @@ static void fsr3_sharpen(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_
 }
 
 // ---------------------------------------------------------------- one feature for a range of render sizes
-// NX2NAVI_DLSS_RANGE (nx2navi.ini dlss_range; 1 by default, 0: every render size has a feature of its own).
+// NX2NAVI_DLSS_RANGE (nx2navi.ini dlss_range; 1 on; 0, the default until it has run on a card: every render size has
+// a feature of its own).
 // The render size changes under one output size when dynamic resolution steps it (dynres.c) and when a screen renders
 // at another share than play. With a feature per size, each new size cost a feature creation (tens of milliseconds and
 // a wait for the GPU, release_kept) and each change a new history, a frame or more of soft picture.
