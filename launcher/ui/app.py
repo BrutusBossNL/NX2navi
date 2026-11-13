@@ -908,8 +908,17 @@ class App:
         menu keeps it; the game reads it when it starts. On unless the file says 0, as the game reads it (cfg_bool,
         default on)."""
         def on(v):
+            # Not while the game runs, as the mods' switches (switch_mod): the game writes the same file when a menu
+            # setting changes. Each side reads the file, changes its own lines and puts a new file in place, so of
+            # two changes in the same moment the second drops the first. The game reads this setting only when it
+            # starts, and its own menu switches it meanwhile.
+            if self.game_busy(game_dir):
+                self.message = ('Quit the game first, or switch Discord Status in the game\'s menu (Game tab): the '
+                                'game writes its settings file while it runs.')
+                return
             try:
                 gameini.put(game_dir, 'discord', 'discord_rpc', '1' if v else '0')
+                self.message = ''
             except OSError as e:
                 self.message = f'The game\'s settings could not be written: {e}'
 

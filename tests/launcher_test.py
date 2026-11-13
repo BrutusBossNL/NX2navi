@@ -4799,6 +4799,37 @@ class WhilePlayingTest(Tmp):
             App.watch_game(a)
         a.root.deiconify.assert_called_once()
 
+    def test_the_games_settings_file_is_left_alone_while_it_runs(self):
+        """The game writes nx2navi.ini when a menu setting changes, so the launcher's Discord Status switch (the one
+        setting of that file the Settings screen has) changes nothing while the game runs and says why; the mods'
+        switches refuse the same way (switch_mod)."""
+        try:
+            from launcher.ui.app import App
+        except ImportError as e:
+            self.skipTest(f'no window toolkit: {e}')
+        game = self.tmp / 'game'
+        game.mkdir()
+        (game / 'nx2navi.ini').write_text('[discord]\ndiscord_rpc = 1\n', encoding='utf-8')
+        a = mock.MagicMock()
+        a.message = ''
+        a.game_busy.return_value = True
+        row = App.discord_row(a, str(game))
+        before = (game / 'nx2navi.ini').read_bytes()
+        row.on(False)
+        self.assertEqual((game / 'nx2navi.ini').read_bytes(), before)
+        self.assertTrue(row.get())                                     # the switch still shows what the file says
+        self.assertIn('Quit the game first', a.message)
+        a.game_busy.return_value = False
+        row.on(False)
+        self.assertEqual(gameini.get(game, 'discord_rpc'), '0')
+        self.assertFalse(row.get())
+        self.assertEqual(a.message, '')
+        a.game_busy.return_value = True                                # a mod's switch while the game runs
+        a.settings = {'game_dir': str(game)}
+        App.switch_mod(a, mock.Mock(), False)
+        self.assertEqual(gameini.get(game, 'MODS_DISABLED'), '')
+        self.assertIn('Quit the game first', a.mods_message)
+
     def ended(self, code, log_text):
         """watch_game after the game ended with code, its log holding log_text; (the stand-in window, the log)."""
         from launcher.ui.app import App
