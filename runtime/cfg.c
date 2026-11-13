@@ -83,10 +83,11 @@ static const char *const known[] = {
     "VMA_BLOCK_MB", "SYNC_WAKE_ALL", "LOG_ASYNC", "DEVICE_LOST_AT", "STAGING_FAIL_AT", "VRAM_BALLAST_MB",
     "TEX_COMPACT", "TEX_COMPACT_MIN_MB", "TEX_COMPACT_FRAME_MB",   // texture compaction (vk_texture.c); no menu row
     "STANDIN_FILTER",   // the filter of the scene upscaler's stand-in (vk_tonemap.c); no menu row
-    "COOP", "COOP_SHARE", "COOP_NAMES", "COOP_CHAT",   // co-op (coop.c, coop_game.c, ui/coop_page.cpp)
+    "COOP_STEAM", "COOP_SHARE", "COOP_NAMES", "COOP_CHAT",   // co-op (coop.c, coop_game.c, ui/coop_page.cpp)
     // retired: the settings of the co-op of versions up to 0.9.2; read by nothing, listed so that a file which still
-    // sets them logs no unknown key
-    "COOP_BETA", "COOP_NAME", "COOP_SERVER", "COOP_PORT", "COOP_ROOM", "COOP_AUTO", "COOP_DROP",
+    // sets them logs no unknown key. COOP was that co-op's switch: the new one's is COOP_STEAM, so that a "coop = 1"
+    // left in a file from then turns nothing on
+    "COOP", "COOP_BETA", "COOP_NAME", "COOP_SERVER", "COOP_PORT", "COOP_ROOM", "COOP_AUTO", "COOP_DROP",
     "COOP_PROGRESS", "COOP_ITEMS", "COOP_SONGS", "COOP_QUEST", "COOP_KEYS", "COOP_RUPEES", "COOP_AMMO",
     "COOP_TEST_SET", "COOP_ACCEPT", "COOP_REMOVE", "COOP_RESET_POOLS",
 };
@@ -118,7 +119,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"LOW_LATENCY", "display"},
     {"DEVICE_PROFILE", "display"}, {"ASSUME_FOCUS", "display"},
     {"DISCORD_RPC", "discord"}, {"DISCORD_APP_ID", "discord"}, {"DISCORD_IMAGE", "discord"},
-    {"COOP", "coop"}, {"COOP_SHARE", "coop"}, {"COOP_NAMES", "coop"}, {"COOP_CHAT", "coop"},
+    {"COOP_STEAM", "coop"}, {"COOP_SHARE", "coop"}, {"COOP_NAMES", "coop"}, {"COOP_CHAT", "coop"},
     {"SHADOW_SCALE", "display"}, {"SHADOW_RANGE", "display"}, {"CONTACT_SHADOWS", "display"},
     {"PCSS", "display"},
     {"MODS_DIR", "mods"}, {"MODS_ORDER", "mods"}, {"MODS_DISABLED", "mods"}, {"MODS_REBUILD", "mods"},
@@ -282,10 +283,10 @@ static const CfgMeta metas[] = {
     {"DISCORD_RPC", "1", "0|1", LIVE},
     {"DISCORD_APP_ID", NX2NAVI_DISCORD_APP_ID_DEFAULT, NULL, LIVE},
     {"DISCORD_IMAGE", NX2NAVI_DISCORD_IMAGE_DEFAULT, NULL, LIVE},
-    // Co-op (coop.c): off until the player turns it on; then the game signs in to Steam as its test app and can make
+    // Co-op (coop.c): COOP_STEAM is its switch, off until the player turns it on; then the game signs in to Steam as its test app and can make
     // or join a room. In a room: COOP_SHARE shares progress, items and songs with the other players (coop_game.c),
     // COOP_NAMES shows the other players' names where they stand, COOP_CHAT shows the chat's lines over the game.
-    {"COOP", "0", "0|1", LIVE}, {"COOP_SHARE", "1", "0|1", LIVE}, {"COOP_NAMES", "1", "0|1", LIVE},
+    {"COOP_STEAM", "0", "0|1", LIVE}, {"COOP_SHARE", "1", "0|1", LIVE}, {"COOP_NAMES", "1", "0|1", LIVE},
     {"COOP_CHAT", "1", "0|1", LIVE},
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},

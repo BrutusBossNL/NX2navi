@@ -633,7 +633,7 @@ void coop_present(Cpu *c) {
     unsigned v = cfg_version();
     if (v != G.cfg_seen) {
         G.cfg_seen = v;
-        G.on = cfg_bool("NX2NAVI_COOP");
+        G.on = cfg_bool("NX2NAVI_COOP_STEAM");
         __atomic_store_n(&X.on, G.on, __ATOMIC_RELAXED);
         G.share = cfg_bool("NX2NAVI_COOP_SHARE");
     }

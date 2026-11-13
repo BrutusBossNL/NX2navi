@@ -794,7 +794,7 @@
 # steam_api64.dll beside ocarina.exe, which the launcher copies there from a Steam game you have installed. Rooms are
 # made and joined in the menu's Co-op tab, never from this file.
 # 0 = off, the game uses no network. Takes effect at once.
-# coop = 0
+# coop_steam = 0
 # In a room, share progress, items and songs with the other players; your save is copied to coop-backup in the profile
 # folder first. 0 = only names, positions and chat.
 # coop_share = 1
