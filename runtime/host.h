@@ -459,6 +459,9 @@ int vk_pipeline_warm_shaders(void);                        // vk_pipeline.c: --w
 int vk_pipeline_prepare_pipelines(void);                   // vk_pipeline.c: --prepare-pipelines (the shared pipeline list)
 int vk_pipeline_probe_prewarm(void);                       // vk_pipeline.c: --probe-prewarm
 int vk_pipeline_probe_buildgate(void);                     // vk_pipeline.c: --probe-buildgate
+// main.c crash_handler: a fault while the boot builds pipelines or stage libraries leaves a note, which tells the
+// next start that the marker or journal it finds is a crash's and not a stopped start's (vk_pipeline.c pm_skipped).
+void vk_pipeline_crash_note(void);
 int vk_ffx_probe_cache(void);                              // vk_ffx.cpp: --probe-ffx-cache
 // vk_device.c: the drivers' own shader caches beside the exe (MESA_SHADER_CACHE_DIR, on NVIDIA's Linux driver
 // __GL_SHADER_DISK_CACHE_PATH and _SIZE) in the environment, once; before any thread can load a Vulkan driver

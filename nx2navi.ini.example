@@ -229,6 +229,10 @@
 # 1: every start waits until every known pipeline is built.
 # 0: never more than the 20 seconds, also after a driver update.
 # prewarm_full = auto
+# The most seconds that first start after a driver update waits (0: no limit). When they are up the game starts and
+# the rest is built in the background while you play, as on any other start. Closing the window while it waits is
+# safe: the next start goes on with it.
+# prewarm_full_s = 600
 # Threads that translate known shaders at start (1 to 64; default: half the CPU threads, at most 16).
 # prewarm_xlate = 8
 # After an update that brings a new shader translator, 1 keeps using the shader cache's translations from the earlier

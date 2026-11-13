@@ -5304,6 +5304,7 @@ static struct {
     int on;                  // this start waits for all of it
     int lw;                  // lb_start left the library warm's start to bf_wait
     volatile int32_t game;   // the wait is over: the warm ended, or the boot let the game start beside it
+    double t_end;            // now_ms() at which the whole warm's time on the boot screen is up; 0 no limit
     char owed[PLAT_PATH_MAX * 2 + 48];   // boot-warm-owed.txt
 } BF;
 
@@ -5491,6 +5492,8 @@ static void prewarm_run(void) {
         rt_log("vk_pipeline: prewarm: the start waits for all %u recorded pipelines and not %d s (the whole warm after a "
                "driver change)", queued, (int)(PREWARM_PIPE_MS / 1000));
     K.until = P.gpl && !all ? now_ms() + PREWARM_PIPE_MS : 0;   // before the builders start
+    // the whole warm's own limit: what it leaves goes to the pool's workers, as after PREWARM_PIPE_MS
+    if (P.gpl && BF.on && BF.t_end && !(full && !strcmp(full, "1"))) K.until = BF.t_end;
     PlatThread *t[64];
     int nt = 0;
     if (queued) warm_builder((void *)1);   // the first alone (warm_builder)
@@ -5544,29 +5547,81 @@ static void prewarm_run(void) {
 // each one is built at its first draw instead, as with NX2NAVI_PIPE_PREBUILD=0. Another driver version, or deleting
 // the file, brings the prebuild back. Only the boot's own share is covered: a crash during play, where the pool also
 // builds what the boot left, says nothing about these builds. An orderly end of the process during the boot (the
-// window closed, the guest's ExitProcess, a --seconds run) deletes the marker as well: only a process that died leaves it.
+// window closed, the guest's ExitProcess, a --seconds run) deletes the marker as well.
+// A marker left over is not yet a driver crash: a start stopped from outside (the task manager, a program that ends
+// the game, the power) leaves one too, and since the whole warm (bf_decide) the boot builds for minutes. So the crash
+// handler says which it was (vk_pipeline_crash_note: <dir>/boot-build-crash.txt, written while the boot's builds
+// run): with that file the next start skips the prebuild as before; without it the end is taken for a stopped start
+// and only counted, in the marker itself. BOOT_QUIET_ENDS such ends in a row skip the prebuild after all: a driver
+// that takes the process down without a fault our handler sees would otherwise end every start (boot_warm.h
+// boot_end_decide).
 static int cache_dir(char *dir, size_t n);
 static void gpu_key(char *out, size_t n);
-static char PM_run[PLAT_PATH_MAX * 2 + 48];
+static char PM_run[PLAT_PATH_MAX * 2 + 48], PM_crash[PLAT_PATH_MAX * 2 + 48];
 static volatile int32_t pm_on;
+static volatile int32_t jr_boot_on;   // the boot's journal of library builds is open (journal_open)
+static int pm_quiet;                  // starts in a row before this one that ended in the boot's builds without a crash report
+
+static void crash_path_init(const char *dir) {
+    if (!PM_crash[0]) snprintf(PM_crash, sizeof PM_crash, "%s/boot-build-crash.txt", dir);
+}
+
+// main.c crash_handler, before its report: a fault while the boot's pipeline builds or its journalled library builds
+// run. The file is all the next start needs; nothing here allocates.
+void vk_pipeline_crash_note(void) {
+    static const char text[] = "the process faulted while the boot built pipelines or stage libraries "
+                               "(runtime/vk_pipeline.c vk_pipeline_crash_note)\n";
+    if (!PM_crash[0] || (!__atomic_load_n(&pm_on, __ATOMIC_ACQUIRE) && !__atomic_load_n(&jr_boot_on, __ATOMIC_ACQUIRE)))
+        return;
+    plat_file_write(PM_crash, text, sizeof text - 1);
+}
+
+// 1 when the last start left the crash handler's note; asked once a start, and the note goes.
+static int crash_noted(void) {
+    static int was = -1;
+    if (was < 0) {
+        was = PM_crash[0] && plat_file_exists(PM_crash);
+        if (was) plat_file_delete(PM_crash);
+    }
+    return was;
+}
 
 static int pm_skipped(void) {
     char dir[PLAT_PATH_MAX * 2], sp[sizeof PM_run], key[32];
     if (!cache_dir(dir, sizeof dir)) return 0;
     snprintf(PM_run, sizeof PM_run, "%s/pipeline-prewarm-running.txt", dir);
     snprintf(sp, sizeof sp, "%s/pipeline-prewarm-skip.txt", dir);
+    crash_path_init(dir);
     gpu_key(key, sizeof key);
     uint64_t n = 0;
-    uint8_t *left = plat_file_read(PM_run, &n);
+    char *left = (char *)plat_file_read(PM_run, &n);
     if (left) {
-        char text[256];
-        int len = snprintf(text, sizeof text,
-                           "# The boot's pipeline prebuild did not finish on this GPU and driver (runtime/vk_pipeline.c "
-                           "pm_skipped): starts skip it\n# while this line matches. Delete this file to build ahead of play "
-                           "again.\n%s\n", key);
-        if (plat_file_write_atomic(sp, text, (size_t)len)) plat_file_delete(PM_run);
-        rt_log("vk_pipeline: the last start died while the boot built pipelines (%s was left); %s now skips that "
-               "prebuild on this GPU and driver (%s)", PM_run, sp, key);
+        char head[64];
+        snprintf(head, sizeof head, "%.*s", (int)(n < sizeof head - 1 ? n : sizeof head - 1), left);
+        int crashed = crash_noted(), quiet = 0, what = boot_end_decide(head, key, crashed, &quiet);
+        if (what == BOOT_END_OTHER) {   // another GPU or driver's builds
+            plat_file_delete(PM_run);
+        } else if (what == BOOT_END_SKIP) {
+            char text[256];
+            int len = snprintf(text, sizeof text,
+                               "# The boot's pipeline prebuild did not finish on this GPU and driver (runtime/vk_pipeline.c "
+                               "pm_skipped): starts skip it\n# while this line matches. Delete this file to build ahead of play "
+                               "again.\n%s\n", key);
+            if (plat_file_write_atomic(sp, text, (size_t)len)) plat_file_delete(PM_run);
+            if (crashed)
+                rt_log("vk_pipeline: the last start crashed while the boot built pipelines (%s was left, with the crash "
+                       "handler's note); %s now skips that prebuild on this GPU and driver (%s)", PM_run, sp, key);
+            else
+                rt_log("vk_pipeline: %d starts in a row ended while the boot built pipelines, none with a crash report "
+                       "(%s was left each time); %s now skips that prebuild on this GPU and driver (%s)", quiet, PM_run,
+                       sp, key);
+        } else {
+            pm_quiet = quiet;
+            plat_file_delete(PM_run);
+            rt_log("vk_pipeline: the last start ended while the boot built pipelines and reported no crash: taken for a "
+                   "start that was closed or stopped, and the pipelines are built again (%d in a row; at %d the prebuild "
+                   "is skipped on this GPU and driver)", pm_quiet, BOOT_QUIET_ENDS);
+        }
         free(left);
     }
     uint8_t *skip = plat_file_read(sp, &n);
@@ -5587,10 +5642,11 @@ static int pm_skipped(void) {
 
 static void pm_set(void) {
     if (!PM_run[0]) return;
-    char key[32];
+    char key[32], text[64];
     gpu_key(key, sizeof key);
+    int len = snprintf(text, sizeof text, "%s %d\n", key, pm_quiet);
     // straight to the disk: the file has to be there if the driver takes the process down a moment later
-    if (plat_file_write_atomic(PM_run, key, strlen(key))) plat_xchg32(&pm_on, 1);
+    if (plat_file_write_atomic(PM_run, text, (size_t)len)) plat_xchg32(&pm_on, 1);
 }
 
 void vk_pipeline_prewarm_marker_clear(void) {
@@ -5618,10 +5674,16 @@ void vk_pipeline_prewarm_marker_clear(void) {
 // into it (cache_load), some starts later. After BOOT_WARM_TRIES starts that did not end the warm the file stays as
 // well, and starts on this GPU and driver are ordinary ones again. While the boot waits, the library builds write
 // the preparation's journal (journal_mark), so a variant the driver's compiler dies on is skipped from the next
-// start on (skip_init) instead of ending every start.
-// NX2NAVI_PREWARM_FULL=0 turns it off. NX2NAVI_PREWARM_WAIT_MS and a minute without progress end the wait as for any
-// prewarm (boot_wait); what is left then runs as in play (vk_pipeline_prewarm_detach). Not for a --shot image, which
-// no build timing may change and which nobody watches.
+// start on (skip_init) instead of ending every start; a start that was only closed or stopped then blames no variant
+// (the crash handler's note decides, as at pm_skipped).
+// The wait has a limit, NX2NAVI_PREWARM_FULL_S seconds from here (default 600, 0 none): the 425 s above are a fast
+// machine's, and a slow one would sit on the screen for half an hour. At the limit the game starts and what is left
+// goes on as on any other start: the recorded pipelines on the pool's workers, the compute pipelines and the library
+// warm on their idle threads (vk_pipeline_prewarm_detach). The file then says "done" as well: the boot screen had its
+// turn, and the rest is the background's, as it always was. NX2NAVI_PREWARM_WAIT_MS and a minute without progress
+// end the wait the same way, as for any prewarm (boot_wait).
+// NX2NAVI_PREWARM_FULL=0 turns the whole warm off. Not for a --shot image, which no build timing may change and
+// which nobody watches.
 static void bf_decide(void) {
     const char *full = cfg_get("NX2NAVI_PREWARM_FULL");
     char dir[PLAT_PATH_MAX * 2], key[32], line[100];
@@ -5647,11 +5709,14 @@ static void bf_decide(void) {
         int len = snprintf(line, sizeof line, "%s %d\n", key, tries);
         if (!plat_file_write_atomic(BF.owed, line, (size_t)len)) rt_log("vk_pipeline: cannot write %s", BF.owed);
         BF.on = 1;
+        const char *se = cfg_get("NX2NAVI_PREWARM_FULL_S");
+        double secs = se && *se ? atof(se) : 600;
+        BF.t_end = secs > 0 ? now_ms() + secs * 1000 : 0;
         rt_log("vk_pipeline: the whole warm on the boot screen (%s, start %d of %d at most): the start waits for the "
-               "recorded pipelines, the compute pipelines and the driver's cache of stage libraries. "
-               "NX2NAVI_PREWARM_FULL=0 leaves them to the background",
+               "recorded pipelines, the compute pipelines and the driver's cache of stage libraries, for %.0f s at most "
+               "(NX2NAVI_PREWARM_FULL_S; 0 = no limit). NX2NAVI_PREWARM_FULL=0 leaves them to the background",
                cache_foreign ? "the pipeline cache was written by another device or driver" : "an earlier start began it",
-               tries, BOOT_WARM_TRIES);
+               tries, BOOT_WARM_TRIES, secs > 0 ? secs : 0.0);
     }
     free(f);
 }
@@ -5955,54 +6020,76 @@ static int hex_digit(int c) {
     return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
 }
 
-// A journal a crashed run left into the skip list, then the skip list's variants for this GPU and driver into SK.
+// The variants a leftover journal j (jn bytes, of file jp) names join the skip list's text *s (*sn bytes; NULL
+// without a list) for this GPU and driver, and the list's file sp is written again. 1 when the journal may go:
+// nothing in it, or the list holds it now.
+static int journal_fold(const uint8_t *j, uint64_t jn, const char *jp, const char *sp, const char *key, char **s,
+                        uint64_t *sn) {
+    static const char head[] =
+        "# Shader variants the graphics driver was building when the process died during preparation\n"
+        "# (runtime/vk_pipeline.c skip_init): input id, stage, GPU vendor:device:driver version. Preparation skips\n"
+        "# them on that GPU and driver. Delete this file to build them again.\n";
+    size_t cap = (*s ? *sn : sizeof head) + (jn / JR_SLOT + 1) * 128, len = 0;
+    char *out = malloc(cap);
+    int added = 0;
+    if (!out) return 1;
+    len = *s ? *sn : sizeof head - 1;
+    memcpy(out, *s ? *s : head, len);
+    if (len && out[len - 1] != '\n') out[len++] = '\n';
+    for (uint64_t o = 0; o + 33 <= jn; o += JR_SLOT) {
+        int set = 0;
+        for (int b = 0; b < 32; b++) set |= j[o + b];
+        if (!set) continue;
+        char hex[65];
+        for (int b = 0; b < 32; b++) snprintf(hex + 2 * b, 3, "%02x", j[o + b]);
+        len += (size_t)snprintf(out + len, cap - len, "%s %s %s\n", hex, stage_name(j[o + 32]), key);
+        added++;
+    }
+    out[len] = 0;   // parsed by skip_init as the list's text
+    if (added && plat_file_write_atomic(sp, out, len)) {
+        rt_log("vk_pipeline: the last shader preparation, or the last start's warm on the boot screen, died while "
+               "the driver built %d variants; %s now lists them and they are skipped ahead of play on this GPU and "
+               "driver (%s)", added, sp, key);
+        free(*s), *s = out, *sn = len;
+        return 1;
+    }
+    if (added) rt_log("vk_pipeline: cannot write %s; %s stays for the next run", sp, jp);
+    free(out);
+    return !added;
+}
+
+// A journal a run that died left into the skip list, then the skip list's variants for this GPU and driver into SK.
+// The preparation's journal (shader-prepare-journal.bin) always counts. The boot's (shader-warm-journal.bin,
+// journal_open) counts only with the crash handler's note (crash_noted): without it the start was closed or stopped
+// while it waited, and the variants it happened to be building are no one's fault.
 static void skip_init(const char *dir) {
     if (SK.loaded) return;
     SK.loaded = 1;
-    char jp[PLAT_PATH_MAX * 2 + 48], sp[PLAT_PATH_MAX * 2 + 48], key[32];
+    char jp[PLAT_PATH_MAX * 2 + 48], bj[PLAT_PATH_MAX * 2 + 48], sp[PLAT_PATH_MAX * 2 + 48], key[32];
     snprintf(jp, sizeof jp, "%s/shader-prepare-journal.bin", dir);
+    snprintf(bj, sizeof bj, "%s/shader-warm-journal.bin", dir);
     snprintf(sp, sizeof sp, "%s/shader-prepare-skip.txt", dir);
+    crash_path_init(dir);
     gpu_key(key, sizeof key);
-    uint64_t jn = 0, sn = 0;
-    uint8_t *j = plat_file_read(jp, &jn);
+    uint64_t jn = 0, bn = 0, sn = 0;
+    uint8_t *j = plat_file_read(jp, &jn), *b = plat_file_read(bj, &bn);
     char *s = (char *)plat_file_read(sp, &sn);
-    int keep_journal = 0;
-    if (j) {
-        static const char head[] =
-            "# Shader variants the graphics driver was building when the process died during preparation\n"
-            "# (runtime/vk_pipeline.c skip_init): input id, stage, GPU vendor:device:driver version. Preparation skips\n"
-            "# them on that GPU and driver. Delete this file to build them again.\n";
-        size_t cap = (s ? sn : sizeof head) + (jn / JR_SLOT + 1) * 128, len = 0;
-        char *out = malloc(cap);
-        int added = 0;
-        if (out) {
-            len = s ? sn : sizeof head - 1;
-            memcpy(out, s ? s : head, len);
-            if (len && out[len - 1] != '\n') out[len++] = '\n';
-            for (uint64_t o = 0; o + 33 <= jn; o += JR_SLOT) {
-                int set = 0;
-                for (int b = 0; b < 32; b++) set |= j[o + b];
-                if (!set) continue;
-                char hex[65];
-                for (int b = 0; b < 32; b++) snprintf(hex + 2 * b, 3, "%02x", j[o + b]);
-                len += (size_t)snprintf(out + len, cap - len, "%s %s %s\n", hex, stage_name(j[o + 32]), key);
-                added++;
-            }
-            out[len] = 0;   // parsed below as the list's text
+    if (!j || journal_fold(j, jn, jp, sp, key, &s, &sn)) plat_file_delete(jp);
+    if (b) {
+        int marked = 0;
+        for (uint64_t o = 0; o + 33 <= bn; o += JR_SLOT)
+            for (int k = 0; k < 32; k++)
+                if (b[o + k]) { marked++; break; }
+        if (marked && !crash_noted()) {
+            rt_log("vk_pipeline: the last start ended during the library warm on the boot screen, with %d variants in "
+                   "the driver's hands, and reported no crash: taken for a start that was closed or stopped; no variant "
+                   "is skipped for it", marked);
+            plat_file_delete(bj);
+        } else if (journal_fold(b, bn, bj, sp, key, &s, &sn)) {
+            plat_file_delete(bj);
         }
-        if (added && plat_file_write_atomic(sp, out, len)) {
-            rt_log("vk_pipeline: the last shader preparation, or the last start's warm on the boot screen, died while "
-                   "the driver built %d variants; %s now lists them and they are skipped ahead of play on this GPU and "
-                   "driver (%s)", added, sp, key);
-            free(s), s = out, sn = len, out = NULL;
-        } else if (added) {
-            rt_log("vk_pipeline: cannot write %s; %s stays for the next run", sp, jp);
-            keep_journal = 1;
-        }
-        free(out);
-        free(j);
     }
-    if (!keep_journal) plat_file_delete(jp);
+    free(j), free(b);
     for (char *line = s, *next; line && *line; line = next) {
         next = strchr(line, '\n');
         if (next) *next++ = 0;
@@ -6010,10 +6097,10 @@ static void skip_init(const char *dir) {
         uint8_t iid[32];
         int ok = line[0] != '#' && sscanf(line, "%64s %15s %31s", hex, st, k) == 3 && strlen(hex) == 64 &&
                  !strcmp(k, key);
-        for (int b = 0; ok && b < 32; b++) {
-            int hi = hex_digit(hex[2 * b]), lo = hex_digit(hex[2 * b + 1]);
+        for (int b2 = 0; ok && b2 < 32; b2++) {
+            int hi = hex_digit(hex[2 * b2]), lo = hex_digit(hex[2 * b2 + 1]);
             if (hi < 0 || lo < 0) ok = 0;
-            else iid[b] = (uint8_t)(hi << 4 | lo);
+            else iid[b2] = (uint8_t)(hi << 4 | lo);
         }
         uint8_t (*grown)[32] = ok ? realloc(SK.iid, (SK.n + 1) * sizeof *SK.iid) : NULL;
         if (grown) memcpy(grown[SK.n++], iid, 32), SK.iid = grown;
@@ -6044,12 +6131,13 @@ static void journal_mark(int slot, const GfxWarmEnt *e) {
     plat_mutex_unlock(&SK.jlock);
 }
 
-// The boot's journal, for the library builds the start waits for (bf_wait). skip_init has run (lb_start) and has
-// dealt with a leftover one.
+// The boot's journal, for the library builds the start waits for (bf_wait), in a file of its own: skip_init treats
+// one left over differently from the preparation's. skip_init has run (lb_start) and has dealt with a leftover one.
 static void journal_open(void) {
     char dir[PLAT_PATH_MAX * 2];
     if (!cache_dir(dir, sizeof dir)) return;
-    snprintf(SK.jpath, sizeof SK.jpath, "%s/shader-prepare-journal.bin", dir);
+    crash_path_init(dir);
+    snprintf(SK.jpath, sizeof SK.jpath, "%s/shader-warm-journal.bin", dir);
     PlatFile *j = plat_fs_create(SK.jpath, NULL);
     if (!j) {
         rt_log("vk_pipeline: cannot create %s: a driver crash in this start's library warm will not be recorded", SK.jpath);
@@ -6059,6 +6147,7 @@ static void journal_open(void) {
     plat_mutex_lock(&SK.jlock);
     SK.journal = j;
     plat_mutex_unlock(&SK.jlock);
+    __atomic_store_n(&jr_boot_on, 1, __ATOMIC_RELEASE);
 }
 
 // Ends the boot's journal: when the library warm is done, when the game starts beside it (a crash in play says
@@ -6067,6 +6156,7 @@ static void journal_open(void) {
 // flight write nothing afterwards (journal_mark).
 static void journal_close(void) {
     if (!SK.jpath[0]) return;
+    __atomic_store_n(&jr_boot_on, 0, __ATOMIC_RELEASE);
     plat_mutex_lock(&SK.jlock);
     PlatFile *j = SK.journal;
     SK.journal = NULL;
@@ -7238,50 +7328,62 @@ static void lb_stop(void) {
     if (BG.th) plat_thread_join(BG.th), BG.th = NULL;   // after its current build, if one runs
 }
 
+// 1 once the whole warm's time on the boot screen is up (BF.t_end): the builders go on as on any other start.
+static int bf_time_up(void) {
+    if (!BF.t_end || !bf_waiting() || now_ms() < BF.t_end) return 0;
+    vk_pipeline_prewarm_detach();
+    return 1;
+}
+
 // The whole warm's wait (comment at bf_decide), on the prewarm thread after the recorded pipelines: the compute
 // pipelines lb_start has just started, then the library warm. The counts go to the boot screen
-// (vk_pipeline_prewarm_progress). Should the boot stop waiting (vk_pipeline_prewarm_detach), this thread still sees
-// the warm to its end, which the builders then reach as in play.
+// (vk_pipeline_prewarm_progress). It ends with the warm, at the warm's time limit, or when the boot stops waiting
+// (vk_pipeline_prewarm_detach); in the last two the builders go on beside the game.
 static void bf_wait(void) {
     double t0 = now_ms();
+    int up = bf_time_up();   // the recorded pipelines took all of it
     if (LB.n && LB.threads) {
         __atomic_store_n(&pw_pipe_done, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&pw_pipe_total, (int64_t)LB.n, __ATOMIC_RELAXED);
         __atomic_store_n(&pw_phase, 3, __ATOMIC_RELEASE);
-        while (__atomic_load_n(&LB.running, __ATOMIC_ACQUIRE) > 0 && !LB.stop) {
+        while (__atomic_load_n(&LB.running, __ATOMIC_ACQUIRE) > 0 && !LB.stop && bf_waiting()) {
             plat_sleep_ms(100);
             plat_mutex_lock_shared(&LB.stat);
             uint64_t d = LB.done;
             plat_mutex_unlock_shared(&LB.stat);
             __atomic_store_n(&pw_pipe_done, (int64_t)d, __ATOMIC_RELAXED);
+            up |= bf_time_up();
         }
     }
     double t1 = now_ms();
     int libs = 0;
     if (BF.lw && !LB.stop) {
         if (bf_waiting()) journal_open();
-        lw_start();
+        lw_start();   // beside the game when the wait is over: the check and the warm as on any other start
         if (LW.th[0]) {
             libs = 1;
             __atomic_store_n(&pw_pipe_done, 0, __ATOMIC_RELAXED);
             __atomic_store_n(&pw_pipe_total, (int64_t)LW.n, __ATOMIC_RELAXED);
             __atomic_store_n(&pw_phase, 4, __ATOMIC_RELEASE);
-            while ((!LW.checked || LW.running > 0) && !LW.stop) {
+            while ((!LW.checked || LW.running > 0) && !LW.stop && bf_waiting()) {
                 plat_sleep_ms(100);
                 __atomic_store_n(&pw_pipe_done, (int64_t)LW.done, __ATOMIC_RELAXED);
-                if (!bf_waiting()) journal_close();   // the game runs
+                up |= bf_time_up();
             }
         }
-        journal_close();
+        journal_close();   // the warm is over, or the game runs
     }
-    int stopped = LB.stop || LW.stop, beside = __atomic_load_n(&BF.game, __ATOMIC_ACQUIRE);
-    rt_log("vk_pipeline: the whole warm %s: %zu compute pipelines in %.0f ms, the driver's cache of stage libraries %s in "
-           "%.0f ms (%lld of %zu prepared variants built)%s", stopped ? "stopped with the process" : "is done", LB.n,
-           t1 - t0, !libs ? "not warmed (no prepared list, or the graphics pipeline library or NX2NAVI_LIB_WARM is off)"
-                          : LW.done ? "warmed" : "left as it is (the check found it warm, or gave the warm up)",
-           now_ms() - t1, (long long)LW.done, LW.n,
-           beside ? "; the boot had stopped waiting, so the game ran beside the end of it" : "");
-    if (!stopped) {   // done for this GPU and driver (boot_warm.h)
+    int stopped = LB.stop || LW.stop;
+    int over = __atomic_load_n(&LB.running, __ATOMIC_ACQUIRE) <= 0 && (!libs || (LW.checked && LW.running <= 0));
+    rt_log("vk_pipeline: the whole warm %s: the compute pipelines (%zu) took %.0f ms of the wait, the driver's cache of "
+           "stage libraries %.0f ms (%s; %lld of %zu prepared variants built so far)",
+           stopped ? "stopped with the process" : over ? "is done"
+           : up ? "goes on beside the game: its time on the boot screen is up (NX2NAVI_PREWARM_FULL_S)"
+                : "goes on beside the game: the boot stopped waiting", LB.n, t1 - t0, now_ms() - t1,
+           !libs ? "not warmed: no prepared list, or the graphics pipeline library or NX2NAVI_LIB_WARM is off"
+                 : LW.done ? "being warmed" : "left as it is so far: the check found it warm, gave the warm up, or still runs",
+           (long long)LW.done, LW.n);
+    if (!stopped) {   // the boot screen's turn is over for this GPU and driver (boot_warm.h)
         char key[32], line[64];
         gpu_key(key, sizeof key);
         int len = snprintf(line, sizeof line, "%s done\n", key);
