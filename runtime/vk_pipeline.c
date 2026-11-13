@@ -55,6 +55,7 @@
 #include "tex.h"
 #include "vk_build_gate.h"
 #include "vk_cache_file.h"
+#include "vk_exec.h"
 #include "vk_save_retry.h"
 #include "vk_warm_hint.h"
 
@@ -153,7 +154,7 @@ typedef struct Pipe {
     int building;                      // a background job owns info.pipeline (under P.lock)
     struct Job *job;                   // that job while building
     const struct Layout *lay;          // graphics: the layout it was entered with
-    VkPipeline fast;                   // GPL: the fast-linked pipeline (kept until shutdown: recorded draws use it)
+    VkPipeline fast;                   // GPL: the fast-linked pipeline, until the optimised one replaces it (fast_retire)
     uint8_t fast_tried;
     uint8_t link_queued;               // a waiting draw queued its fast link to the workers (LibJob p), not yet run
     uint8_t used;                      // compute: a dispatch of this run asked for it (vk_pipeline_compute)
@@ -4955,6 +4956,37 @@ int vk_pipeline_probe_buildgate(void) {
     return fails ? 1 : 0;
 }
 
+// ---- fast-linked pipelines the optimised build replaces
+// With the graphics pipeline library a draw first gets a pipeline linked from stage libraries (p->fast), and the
+// optimised build of the same state replaces it in p->info.pipeline when it is done. The fast link was kept until the
+// process ended, so every pipeline a run drew held its fast link's driver memory as well: one play session of 13,800
+// frames made 1,108 fast links and replaced 907 of them, while the video memory outside the allocator, where the
+// driver keeps compiled pipelines, grew by 491 MiB (RTX 5090), and a 68,400-frame session grew it from 1,672 to
+// 2,485 MiB. A replaced fast link is destroyed now, once the GPU is past every submission that may have recorded it.
+// The draws read p->info.pipeline when they record (vk_exec_draw.c, the pipeline memo reads it again each time) and
+// keep no handle past the submission they record, so after the store below a draw can only have the old handle in
+// the submission being recorded, or in an earlier one: vk_sync_issued() + 1 at most. The destroy waits for one more
+// submission than that, for a recording thread that runs a submission behind (vk_rec.c). It runs on the completion
+// thread (vk_completion_add), which holds no lock of ours while it calls it; a lost device or the end of the process
+// leaves it to the driver, as everything else.
+static uint64_t fast_retired;   // P.lock: fast links destroyed so far
+
+static void fast_destroy_cb(void *arg) {
+    vkDestroyPipeline(P.device, (VkPipeline)(uintptr_t)arg, NULL);
+}
+
+// P.lock held, p->info.pipeline just replaced by the optimised pipeline: the fast link goes once the GPU is done with it.
+static void fast_retire(Pipe *p) {
+    VkPipeline old = p->fast;
+    if (!old || old == p->info.pipeline) return;
+    p->fast = VK_NULL_HANDLE;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);   // the new handle is visible before the submission count is read
+    uint64_t rf = vk_exec_recording_fence(), at = vk_sync_issued() + 2;
+    if (rf + 1 > at) at = rf + 1;
+    vk_completion_add(at, fast_destroy_cb, (void *)(uintptr_t)old);
+    fast_retired++;
+}
+
 // The whole build of job j, which the caller took off its queue, and the job's end: its pipeline is entered, the
 // threads waiting for it are woken and j is freed. lowrun: 1 on a pool worker that took j from the low queue. Caller
 // holds P.lock, which is released for the build.
@@ -4962,9 +4994,9 @@ static void job_build(Job *j, int lowrun) {
     plat_mutex_unlock(&P.lock);
     VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
     plat_mutex_lock(&P.lock);
-    if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
+    if (pipe || !j->p->fast) __atomic_store_n(&j->p->info.pipeline, pipe, __ATOMIC_SEQ_CST);   // a failed optimised build keeps the fast-linked one
     ready_note(j->p, 0);
-    if (pipe && j->p->fast) P.g.swaps++;
+    if (pipe && j->p->fast) P.g.swaps++, fast_retire(j->p);
     j->p->building = 0;
     j->p->job = NULL;
     if (pipe) {
@@ -5557,9 +5589,9 @@ static void warm_builder(void *arg) {
         plat_mutex_unlock(&P.lock);
         VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
         plat_mutex_lock(&P.lock);
-        if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
+        if (pipe || !j->p->fast) __atomic_store_n(&j->p->info.pipeline, pipe, __ATOMIC_SEQ_CST);   // a failed optimised build keeps the fast-linked one
         ready_note(j->p, 0);
-        if (pipe && j->p->fast) P.g.swaps++;
+        if (pipe && j->p->fast) P.g.swaps++, fast_retire(j->p);
         j->p->building = 0;
         j->p->job = NULL;
         if (pipe) {
@@ -8625,13 +8657,15 @@ static int save_with(uint32_t wait_ms, int exiting) {
                "max %.2f ms, %llu failed), %llu lookups by a draw found a stage library not made in this process yet and "
                "left it to a worker (whether the driver's cache has it shows in the library times below), %llu optimised "
                "pipelines swapped in (%llu queued "
-               "low after their fast link), %llu drawing-thread links over 5 ms; %llu waiting draws built their libraries "
+               "low after their fast link; %llu replaced fast links given back), %llu drawing-thread links over 5 ms; %llu "
+               "waiting draws built their libraries "
                "(avg %.2f ms, max %.2f ms)",
                (unsigned long long)P.g.links, (unsigned long long)P.g.wlinks, (unsigned long long)P.g.flinks,
                (unsigned long long)P.g.fb_links,
                P.g.links ? P.g.link_ms / P.g.links : 0.0,
                P.g.link_max, (unsigned long long)P.g.link_fail, (unsigned long long)P.g.defer,
-               (unsigned long long)P.g.swaps, (unsigned long long)P.g.requeued, (unsigned long long)P.g.slow,
+               (unsigned long long)P.g.swaps, (unsigned long long)P.g.requeued, (unsigned long long)fast_retired,
+               (unsigned long long)P.g.slow,
                (unsigned long long)P.g.dlinks, P.g.dlinks ? P.g.dlink_ms / P.g.dlinks : 0.0, P.g.dlink_max);
         uint64_t rn = P.g.ready_n[0] + P.g.ready_n[1] + P.g.ready_n[2] + P.g.ready_n[3] + P.g.ready_n[4] + P.g.ready_n[5];
         rt_log("vk_pipeline: gpl: pipelines a draw missed were usable after under 4 ms %llu, 4-8 ms %llu, 8-17 ms %llu, "
