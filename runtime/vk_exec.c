@@ -2060,8 +2060,9 @@ static void rw_main(void *arg) {
 // gave all there was (5 and 7 measured the same), so the count is half the physical cores less one: 2 on 6 cores, 3 on
 // 8, 5 on 12, at most 6. Four cores or fewer get none: a worker would take a core from the game's threads. AMD's
 // Windows driver for RX 6000 and older (vk_caps.amd_sc) gets none either, as that is where a player's device was lost
-// with workers on and the cause is not known; a number set in nx2navi.ini or the menu still applies there. Physical
-// cores of the process's affinity (plat_cpu_cores), or half the usable logical processors where that is unknown.
+// with workers on and the cause is not known; a number set in nx2navi.ini or the menu still applies there, with a
+// warning in the log (rw_init). Physical cores of the process's affinity (plat_cpu_cores), or half the usable logical
+// processors where that is unknown.
 #define RW_AUTO_MAX 6
 int vk_exec_replay_workers_auto(const char **why) {
     uint64_t all, first;
@@ -2084,6 +2085,9 @@ static void rw_init(void) {
         uint64_t all, first;
         rt_log("vk: replay workers automatic: %d for %d physical cores (%s; NX2NAVI_REPLAY_WORKERS = a number sets "
                "them)", RW.n, plat_cpu_cores(&all, &first), why);
+    } else if (RW.n && vk_caps.amd_sc) {   // the player's number stays (vk_exec_replay_workers_auto)
+        rt_log("vk: WARNING: %d replay workers set on AMD's driver for RX 6000 and older, where a game with workers lost "
+               "its device; NX2NAVI_REPLAY_WORKERS = auto or 0 avoids it", RW.n);
     }
     for (int k = 0; k < RW.n; k++) {
         RwWorker *w = calloc(1, sizeof *w);
