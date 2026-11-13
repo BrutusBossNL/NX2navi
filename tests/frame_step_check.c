@@ -45,6 +45,13 @@ int plat_mem_readable(uint64_t a, size_t n) { (void)a, (void)n; return 0; }
 void mem_kernel_access(uint64_t a, uint64_t n) { (void)a, (void)n; }
 int mem_host_readable(uint64_t a, uint64_t n) { (void)a, (void)n; return 0; }
 int mem_info(uint32_t id, uint64_t *out) { (void)id, (void)out; return 0; }   // the floor probe (off here)
+// the floor scan (off here)
+static RtGuestLayout layout_stub;
+const RtGuestLayout *mem_layout(void) { return &layout_stub; }
+uint32_t mem_query(uint64_t a, RtMemoryInfo *out) { (void)a, memset(out, 0, sizeof *out); return 1; }
+int mem_read_hold(uint64_t a, uint64_t n) { (void)a, (void)n; return 0; }
+void mem_read_release(void) {}
+int input_pad_stick_percent(double pct[2]) { pct[0] = pct[1] = 0; return 0; }
 int mem_copy_readable(uint8_t *const *dst, const uint64_t (*src)[2], int n, uint8_t *ok) {
     (void)dst, (void)src, (void)n, (void)ok;
     return 0;
