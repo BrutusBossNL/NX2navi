@@ -186,10 +186,21 @@ static uint32_t tex_rate = 256;
 // The wall clock of the presents (vk_tex_release.h TrlClock): rate_tick notes the present count about once a second,
 // so that the released textures' hold (drop_aged) and the take-back ages (vk_texture_reuse_log) count seconds, not
 // presents at whatever rate the game runs. tex_lock.
+// The seconds are seconds of play, not of the wall: a gap between two submissions counts at most PLAY_GAP_MAX_NS. A
+// window minimized for ten minutes (freeze_idle), a game stopped at a breakpoint or a long load then does not age the
+// released textures past their hold while nothing could take them back, and the first frames after it find the
+// textures the frames just before it released.
+#define PLAY_GAP_MAX_NS 1000000000ull
 static TrlClock pclock;
 static uint64_t pclock_t0;   // kern_now_ns at the first tick
+static uint64_t play_ns;     // seconds of play so far, in ns (rate_tick)
+static uint64_t play_last;   // kern_now_ns at the last submission rate_tick saw
 
-static uint32_t now_sec(void) { return pclock_t0 ? (uint32_t)((kern_now_ns() - pclock_t0) / 1000000000ull) : 0; }
+static uint32_t now_sec(void) {
+    if (!pclock_t0) return 0;
+    uint64_t gap = kern_now_ns() - play_last;
+    return (uint32_t)((play_ns + (gap < PLAY_GAP_MAX_NS ? gap : PLAY_GAP_MAX_NS)) / 1000000000ull);
+}
 
 static uint32_t secs_since(uint64_t frame) { return trl_clock_age(&pclock, frame, now_sec()); }
 
@@ -197,9 +208,11 @@ static void rate_tick(void) {   // each submission, tex_lock held
     static uint64_t t0, f0;
     static uint32_t ring[RATE_N], at;
     uint64_t t = kern_now_ns(), f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (play_last) play_ns += t - play_last < PLAY_GAP_MAX_NS ? t - play_last : PLAY_GAP_MAX_NS;
+    play_last = t;
     if (!t0) t0 = t, f0 = f, pclock_t0 = t, trl_clock_tick(&pclock, f, 0);
     if (t - t0 < 1000000000ull) return;
-    trl_clock_tick(&pclock, f, (uint32_t)((t - pclock_t0) / 1000000000ull));
+    trl_clock_tick(&pclock, f, (uint32_t)(play_ns / 1000000000ull));
     uint64_t r = (f - f0) * 256ull * 1000000000ull / ((t - t0) * 60);
     ring[at++ % RATE_N] = r < 256 ? 256 : r > 2048 ? 2048 : (uint32_t)r;
     t0 = t, f0 = f;
