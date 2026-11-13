@@ -260,6 +260,13 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   the holes of fuller ones, a few per frame and only in frames with time to spare; which blocks is decided from a
   table of what lies in them (`vk_tex_compact.h`), and the old image of a moved texture stays until no descriptor
   set and no submission can still name it (`vk_texture.c`, "the pass").
+- Memory report: beside each `mem: holes` line, `mem: by owner` splits the device-local memory the driver counts into
+  VMA's allocations by the file that made them (`vk_vma_budget.c`, "owners"; the textures further by the texture
+  cache's census), the free space inside VMA's blocks and what VMA never allocated (pipelines, descriptor memory, the
+  swapchain, DLSS and frame generation features); `mem: host` gives the host-visible allocations, the process's
+  commit and working set and the game's heap; `vk: released textures` how often released textures came back and how
+  old they were, and how many were made again after a drop (`vk_memory.c` `owner_log`). A figure that only climbs over
+  a session is a leak. `vram_use` (`cfg.c` `VRAMLOW`) trades these caches for work done again.
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
   `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
   (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.

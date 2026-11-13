@@ -2707,7 +2707,7 @@ int vk_dlaa_resized_take(void) {
 #define IDLE_FREE_PRESENTS 600
 static uint64_t off_at;   // D.presents when DLSS went off
 static void idle_release(void) {
-    if (!idle_free()) return;
+    if (!idle_free() || cfg_vram_keep()) return;   // vram_use = high keeps them
     if (D.hl && D.presents - D.hl_at >= IDLE_FREE_PRESENTS && !D.hl_fresh) {
         rt_log("dlaa: the HUD-less picture for frame generation went unused for %d presents: freed", IDLE_FREE_PRESENTS);
         hl_destroy();

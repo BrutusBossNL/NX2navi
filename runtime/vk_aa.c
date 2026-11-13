@@ -149,7 +149,7 @@ static void img_free(Img *m);
 // long pause or loading screen with smaa set also counts as unused, and the images are made again after it.
 #define WORK_IDLE 3600
 static void work_idle(uint64_t frame) {
-    if (!P.luma.img || frame - P.smaa_frame < WORK_IDLE) return;
+    if (!P.luma.img || frame - P.smaa_frame < WORK_IDLE || cfg_vram_keep()) return;   // vram_use = high keeps them
     rt_log("aa: SMAA's work images unused for %d frames: freed (%ux%u)", WORK_IDLE, P.w, P.h);
     img_free(&P.luma), img_free(&P.edges), img_free(&P.weights);
     P.w = P.h = 0;

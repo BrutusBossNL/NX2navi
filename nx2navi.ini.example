@@ -540,6 +540,14 @@
 # cpu or astc_bc = 0) and the budget is under 20480 MiB, auto goes one step lower, as they take four times the memory.
 # The log says what was picked ("texture detail:"). Read at start.
 # texture_detail = auto
+# Video memory use (the Screen tab's row): low, balanced or high. balanced, the default, frees what DLSS, frame
+# generation's HUD-less picture, FSR 1 and SMAA held once they have been switched off for a while (about 0.9 GiB with
+# DLSS off at 5120x2142); high keeps it, so switching them on again makes nothing. low also sets, unless set here:
+# tex_released_mb = 1024 (released textures keep at most 1 GiB instead of a quarter of the video memory budget; one
+# the game takes back after its drop is made and uploaded again and shows its stand-in for a frame),
+# tex_vram_pressure = 70 (textures give way from 70% of the budget) and pipe_seed_boot = 0 (0.3-0.6 GiB of video
+# memory and 2-4 GB of commit less; a first visit to an area can miss a few objects for a frame). Read at start.
+# vram_use = balanced
 # Sun shadow map size: game (the game's own, which changes with the view and drops to about 400 near the ground, so
 # leaf shadows look blocky and jump) or a fixed 256, 512, 768, 1024, 1536 or 2048. Above 960 the texture heap grows with
 # it. 256 is coarser than the game's own and is for integrated GPUs short of memory bandwidth. Read at start.
