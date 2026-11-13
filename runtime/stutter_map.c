@@ -3,10 +3,14 @@
 // list (tools/pipeline_list.py merge) and shader preparation must take in. Off by default; while it is off every hook
 // returns at its first test.
 //
-// A hitch is a frame whose interval is over 2.5 times the mean of the frames before it (a running mean of the frames
-// that were not hitches), and at least 12 ms; any frame over 25 ms is one too. At 140 fps that is a frame over 17.5 ms,
-// at 60 fps one over 25 ms. Frames within SM_LOAD_NS of an area's load count apart, as the load's: an area load
-// shows as a few long frames that are not a stutter in play.
+// A hitch is a frame that stands out from the frames around it: its interval is over 2.5 times the median of the 32
+// frames before it and at least 12 ms (or over 25 ms), and both of the next two frames are under two thirds of it
+// (a frame over SM_HITCH_SURE_NS is one whatever follows). At 140 fps that is a frame over 17.5 ms followed by shorter
+// ones. The look at the next two frames keeps a change of pace out: the game drawing its menus or a scene at a steady
+// 60 or 30 fps after 140 is a slower rate, not a run of hitches, and the median takes the new rate within 16 frames.
+// The decision waits two presents; the line and the counts carry what the frame itself waited for. Frames within
+// SM_LOAD_NS of an area's load count apart, as the load's: an area load shows as a few long frames that are not a
+// stutter in play.
 //
 // What a hitch went to comes from the frame-time summary's split (perf.c ft_frame: pipeline, translation, texture,
 // fence, pacing, replay, unattributed), with the draws that met a pipeline or a shader missing between the previous
@@ -36,7 +40,11 @@ int stutter_map_on;
 #define SM_LOAD_NS 3000000000ull           // after an area load, frames count as the load's for this long
 #define SM_HITCH_MIN_NS 12000000.0         // a hitch is at least this long...
 #define SM_HITCH_ANY_NS 25000000ull        // ...and any frame over this is one
-#define SM_HITCH_FACTOR 2.5                // times the running mean of the frames that were not hitches
+#define SM_HITCH_FACTOR 2.5                // times the median of the frames before it
+#define SM_HITCH_SURE_NS 100000000ull      // a frame this long is a hitch whatever follows it
+#define SM_MEDIAN_N 32                     // frames the median is taken over
+#define SM_AFTER 2                         // frames after a candidate that must be shorter...
+#define SM_AFTER_RATIO 1.5                 // ...by this factor
 #define SM_PIPES 4096                      // pipelines kept for the ranking (open addressing)
 #define SM_RING 256                        // draws that met something missing, between two presents
 #define SM_LINES_MAX 4000
@@ -78,17 +86,27 @@ static uint64_t ring_tail;           // present thread: draws taken so far
 static uint64_t ring_lost;
 
 // present thread
-static double mean_ns;
-static uint64_t t_first, t_report, line_sec, lines_in_sec, lines, frames_seen;
+static uint64_t recent[SM_MEDIAN_N];   // the last frames' intervals, every frame (hitches too, so a new pace is learnt)
+static uint64_t t_first, t_report, line_sec, lines_in_sec, lines, frames_seen, paced_out;
+// A frame that may be a hitch, waiting for the SM_AFTER frames after it: its line (made when it happened, with the
+// draws that met something missing then), its area and what it is charged to.
+typedef struct {
+    char line[1400];
+    uint64_t frame, d, after_max;
+    int area, load, cause, after;
+} Cand;
+static Cand cand[SM_AFTER + 1];
+static int n_cand;
 
 void stutter_map_init(void) {
     stutter_map_on = cfg_bool("NX2NAVI_STUTTER_MAP");
     if (!stutter_map_on) return;
     snprintf(areas[0].name, sizeof areas[0].name, "%s", "(before the first area)");
-    rt_log("stutter map: on (NX2NAVI_STUTTER_MAP): a hitch is a frame over %.1f times the frames before it and at "
-           "least %.0f ms, or over %llu ms; frames within %llu s of an area load count as the load's; the map every %llu "
-           "minutes and at exit", SM_HITCH_FACTOR, SM_HITCH_MIN_NS / 1e6, SM_HITCH_ANY_NS / 1000000ull,
-           SM_LOAD_NS / 1000000000ull, SM_REPORT_NS / 60000000000ull);
+    rt_log("stutter map: on (NX2NAVI_STUTTER_MAP): a hitch is a frame over %.1f times the median of the %d before it "
+           "and at least %.0f ms (or over %llu ms) whose next %d frames are under 1/%.1f of it (or one over %llu ms); "
+           "frames within %llu s of an area load count as the load's; the map every %llu minutes and at exit",
+           SM_HITCH_FACTOR, SM_MEDIAN_N, SM_HITCH_MIN_NS / 1e6, SM_HITCH_ANY_NS / 1000000ull, SM_AFTER, SM_AFTER_RATIO,
+           SM_HITCH_SURE_NS / 1000000ull, SM_LOAD_NS / 1000000000ull, SM_REPORT_NS / 60000000000ull);
 }
 
 static uint32_t id4(const uint8_t *id) {
@@ -198,6 +216,41 @@ static void take_misses(Area *a, char *line, int *o, size_t cap) {
     plat_mutex_unlock(&sm_lock);
 }
 
+// The median of the last SM_MEDIAN_N frames' intervals (fewer at the start).
+static uint64_t median_recent(void) {
+    uint64_t v[SM_MEDIAN_N], n = frames_seen < SM_MEDIAN_N ? frames_seen : SM_MEDIAN_N;
+    if (!n) return 0;
+    memcpy(v, recent, (size_t)n * sizeof v[0]);
+    for (uint64_t i = 1; i < n; i++)
+        for (uint64_t k = i; k > 0 && v[k - 1] > v[k]; k--) {
+            uint64_t t = v[k];
+            v[k] = v[k - 1], v[k - 1] = t;
+        }
+    return v[n / 2];
+}
+
+// A candidate the SM_AFTER frames after it have been seen for: a hitch, counted and its line logged, or a change of
+// pace (the frames after it as long), left out.
+static void cand_decide(const Cand *c, uint64_t now) {
+    if (c->d <= SM_HITCH_SURE_NS && (double)c->after_max * SM_AFTER_RATIO >= (double)c->d) {
+        paced_out++;
+        return;
+    }
+    Area *a = &areas[c->area];
+    if (c->load) a->load_hitch++;
+    else {
+        a->hitch++;
+        if (c->cause >= 0 && c->cause < SM_CAUSES) a->by_cause[c->cause]++, a->cause_ns[c->cause] += c->d;
+        if (c->d > a->worst_ns) a->worst_ns = c->d, a->worst_frame = c->frame;
+    }
+    uint64_t sec = (now - t_first) / 1000000000ull;
+    if (sec != line_sec) line_sec = sec, lines_in_sec = 0;
+    if (lines >= SM_LINES_MAX || lines_in_sec >= SM_LINES_PER_S) return;
+    rt_log("%s", c->line);
+    lines++, lines_in_sec++;
+    if (lines == SM_LINES_MAX) rt_log("stutter: the last such line of this run; the map's counts go on");
+}
+
 void stutter_frame(uint64_t frame, uint64_t now, uint64_t d, const uint64_t *part, const char *const *names, int n,
                    int cause) {
     if (!stutter_map_on || !d) return;
@@ -206,41 +259,38 @@ void stutter_frame(uint64_t frame, uint64_t now, uint64_t d, const uint64_t *par
     Area *a = &areas[ai];
     a->ns += d, a->frames++;
     a->over25 += d > SM_HITCH_ANY_NS;
+    // this frame is one of the frames after each waiting candidate
+    for (int i = 0; i < n_cand;) {
+        Cand *c = &cand[i];
+        if (d > c->after_max) c->after_max = d;
+        if (++c->after < SM_AFTER) {
+            i++;
+            continue;
+        }
+        cand_decide(c, now);
+        memmove(&cand[i], &cand[i + 1], (size_t)(n_cand - i - 1) * sizeof cand[0]);   // at most two others
+        n_cand--;
+    }
+    uint64_t med = median_recent();
+    recent[frames_seen % SM_MEDIAN_N] = d;
     frames_seen++;
-    double lim = mean_ns * SM_HITCH_FACTOR;
+    double lim = (double)med * SM_HITCH_FACTOR;
     if (lim < SM_HITCH_MIN_NS) lim = SM_HITCH_MIN_NS;
-    int hitch = (frames_seen > 30 && (double)d > lim) || d > SM_HITCH_ANY_NS;
-    if (!hitch) {
-        mean_ns = mean_ns > 0 ? mean_ns + ((double)d - mean_ns) / 32.0 : (double)d;
+    int maybe = (frames_seen > SM_MEDIAN_N && (double)d > lim) || d > SM_HITCH_ANY_NS;
+    if (!maybe || n_cand >= SM_AFTER + 1) {
         take_misses(a, NULL, NULL, 0);
     } else {
-        int load = now - __atomic_load_n(&load_at, __ATOMIC_RELAXED) < SM_LOAD_NS;
-        if (load) a->load_hitch++;
-        else {
-            a->hitch++;
-            if (cause >= 0 && cause < SM_CAUSES) a->by_cause[cause]++, a->cause_ns[cause] += d;
-            if (d > a->worst_ns) a->worst_ns = d, a->worst_frame = frame;
-        }
-        char line[1400];
-        int o = 0;
-        uint64_t sec = (now - t_first) / 1000000000ull;
-        if (sec != line_sec) line_sec = sec, lines_in_sec = 0;
-        int say = lines < SM_LINES_MAX && lines_in_sec < SM_LINES_PER_S;
-        if (say) {
-            o = snprintf(line, sizeof line, "stutter: frame %llu at %.1f s, %.1f ms (frames about %.1f ms) in %s%s:",
-                         (unsigned long long)frame, (now - t_first) / 1e9, d / 1e6, mean_ns / 1e6, a->name,
-                         load ? ", after its load" : "");
-            for (int c = 0; c < n && o < (int)sizeof line - 40; c++)
-                if (part[c] >= 500000) o += snprintf(line + o, sizeof line - (size_t)o, " %s %.1f", names[c], part[c] / 1e6);
-            if (cause >= 0 && cause < n && o < (int)sizeof line - 40)
-                o += snprintf(line + o, sizeof line - (size_t)o, " (charged to %s)", names[cause]);
-        }
-        take_misses(a, say ? line : NULL, &o, sizeof line);
-        if (say) {
-            rt_log("%s", line);
-            lines++, lines_in_sec++;
-            if (lines == SM_LINES_MAX) rt_log("stutter: the last such line of this run; the map's counts go on");
-        }
+        Cand *c = &cand[n_cand++];
+        c->frame = frame, c->d = d, c->after_max = 0, c->after = 0, c->area = ai, c->cause = cause;
+        c->load = now - __atomic_load_n(&load_at, __ATOMIC_RELAXED) < SM_LOAD_NS;
+        int o = snprintf(c->line, sizeof c->line, "stutter: frame %llu at %.1f s, %.1f ms (frames about %.1f ms) in %s%s:",
+                         (unsigned long long)frame, (now - t_first) / 1e9, d / 1e6, med / 1e6, a->name,
+                         c->load ? ", after its load" : "");
+        for (int k = 0; k < n && o < (int)sizeof c->line - 40; k++)
+            if (part[k] >= 500000) o += snprintf(c->line + o, sizeof c->line - (size_t)o, " %s %.1f", names[k], part[k] / 1e6);
+        if (cause >= 0 && cause < n && o < (int)sizeof c->line - 40)
+            o += snprintf(c->line + o, sizeof c->line - (size_t)o, " (charged to %s)", names[cause]);
+        take_misses(a, c->line, &o, sizeof c->line);
     }
     if (now - t_report >= SM_REPORT_NS) {
         t_report = now;
@@ -278,8 +328,9 @@ void stutter_report(const char *tag) {
     }
     char line[1400];
     int o = snprintf(line, sizeof line, "stutter map (%s): %.1f min of play in %d areas; %llu hitches in play and %llu "
-                     "after area loads; in play by cause:", tag, ns / 6e10, na, (unsigned long long)hitch,
-                     (unsigned long long)load);
+                     "after area loads; %llu long frames were a change of pace (the frames after them as long), not "
+                     "hitches; in play by cause:", tag, ns / 6e10, na, (unsigned long long)hitch, (unsigned long long)load,
+                     (unsigned long long)paced_out);
     for (int c = 0; c < SM_CAUSES; c++)
         if (cause[c]) o += snprintf(line + o, sizeof line - (size_t)o, " %s %llu", cause_short[c], (unsigned long long)cause[c]);
     rt_log("%s", line);

@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pipeline_list  # noqa: E402
 
 HEAD = re.compile(r'stutter map \(([^)]*)\): ([\d.]+) min of play in (\d+) areas; (\d+) hitches in play and (\d+) after '
-                  r'area loads; in play by cause:(.*)$')
+                  r'area loads; (?:(\d+) long frames were a change of pace.*?not hitches; )?in play by cause:(.*)$')
 AREA = re.compile(r'stutter map:   (.+?): ([\d.]+) min at (\d+) fps; hitches (\d+) \(([\d.]+) a minute(.*?)\), worst '
                   r'([\d.]+) ms \(frame (\d+)\); over 25 ms (\d+); after its loads (\d+); draws that met a pipeline '
                   r'missing (\d+), a shader (\d+), ([\d.]+) ms on the replay thread')
@@ -81,9 +81,10 @@ def report(logs, out):
         if not block:
             lines += ['No stutter map in this log (stutter_map = 1 in nx2navi.ini turns it on).', '']
             continue
-        tag, mins, nareas, hitch, load, causes = block['head']
+        tag, mins, nareas, hitch, load, paced, causes = block['head']
         lines += [f'{float(mins):.1f} min of play in {nareas} areas ({tag}): **{hitch} hitches in play**, {load} right '
-                  f'after area loads. In play by cause:{causes}.', '']
+                  f'after area loads' + (f', {paced} long frames left out as a change of pace' if paced else '')
+                  + f'. In play by cause:{causes}.', '']
         lines += ['| Area | Minutes | fps | Hitches | a minute | Causes | Worst ms | Pipelines met missing | Shaders met '
                   'missing |', '|---|---|---|---|---|---|---|---|---|']
         for a in block['areas']:

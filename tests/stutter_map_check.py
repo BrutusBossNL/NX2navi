@@ -23,7 +23,8 @@ def main():
     src = C_SOURCE.read_text(encoding='utf-8')
     # the format strings the parser depends on must still be in the runtime
     for piece in ('stutter map (%s): %.1f min of play in %d areas; %llu hitches in play and %llu ',
-                  '"after area loads; in play by cause:"', 'stutter map:   %s: %.1f min at %.0f fps; hitches %llu (%.2f a minute',
+                  '"after area loads; %llu long frames were a change of pace (the frames after them as long), not "',
+                  '"hitches; in play by cause:"', 'stutter map:   %s: %.1f min at %.0f fps; hitches %llu (%.2f a minute',
                   '"; %s %llu, %.1f ms avg"', '"), worst %.1f ms (frame %llu); over 25 ms %llu; after its "',
                   '"loads %llu; draws that met a pipeline missing %llu, a shader %llu, %.1f ms on the replay thread"',
                   'stutter: frame %llu at %.1f s, %.1f ms (frames about %.1f ms) in %s%s:', '" (charged to %s)"',
@@ -37,7 +38,8 @@ def main():
         '[host] ' + c_fmt('stutter: frame %llu at %.1f s, %.1f ms (frames about %.1f ms) in %s%s:', 1300, 80.0, 60.0, 7.0,
                           'Kakariko Village', ', after its load') + ' unattributed 55.0 (charged to unattributed)',
         '[host] ' + c_fmt('stutter map (%s): %.1f min of play in %d areas; %llu hitches in play and %llu '
-                          'after area loads; in play by cause:', 'exit', 12.5, 2, 3, 1) + ' pipeline 2 texture 1',
+                          'after area loads; %llu long frames were a change of pace (the frames after them as long), not '
+                          'hitches; in play by cause:', 'exit', 12.5, 2, 3, 1, 7) + ' pipeline 2 texture 1',
         '[host] ' + c_fmt('stutter map:   %s: %.1f min at %.0f fps; hitches %llu (%.2f a minute', 'Kakariko Village', 10.0,
                           139.6, 3, 0.3)
         + c_fmt('; %s %llu, %.1f ms avg', 'pipeline', 2, 30.2) + c_fmt('; %s %llu, %.1f ms avg', 'texture', 1, 19.0)
@@ -74,7 +76,8 @@ def main():
         out = Path(d) / 'map.md'
         stutter_map.report([log], out)
         text = out.read_text(encoding='utf-8')
-        assert '**3 hitches in play**' in text and '| Kakariko Village | 10.0 | 140 |' in text, text
+        assert block['head'][5] == '7' and block['head'][6] == ' pipeline 2 texture 1', block['head']
+        assert '7 long frames left out' in text and '**3 hitches in play**' in text and '| Kakariko Village | 10.0 | 140 |' in text, text
     print('stutter_map_check: ok')
     return 0
 
