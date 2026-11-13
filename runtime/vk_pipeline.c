@@ -5489,8 +5489,8 @@ static void prewarm_run(void) {
     // (bf_decide) waits for all of them, with its count on the boot screen, as a start without the library does.
     int all = (full && !strcmp(full, "1")) || (BF.on && queued);
     if (P.gpl && all && BF.on && !(full && !strcmp(full, "1")))
-        rt_log("vk_pipeline: prewarm: the start waits for all %u recorded pipelines and not %d s (the whole warm after a "
-               "driver change)", queued, (int)(PREWARM_PIPE_MS / 1000));
+        rt_log("vk_pipeline: prewarm: the start waits for the %u recorded pipelines as long as the whole warm after a "
+               "driver change may take, and not %d s", queued, (int)(PREWARM_PIPE_MS / 1000));
     K.until = P.gpl && !all ? now_ms() + PREWARM_PIPE_MS : 0;   // before the builders start
     // the whole warm's own limit: what it leaves goes to the pool's workers, as after PREWARM_PIPE_MS
     if (P.gpl && BF.on && BF.t_end && !(full && !strcmp(full, "1"))) K.until = BF.t_end;
