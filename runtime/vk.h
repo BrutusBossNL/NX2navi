@@ -759,6 +759,21 @@ void vk_texture_stats(uint64_t *images, uint64_t *uploads, uint64_t *reuploads);
 typedef struct { uint64_t live, released, own_live, own_released, bytes_live, bytes_released; } VkTexCensus;
 void vk_texture_census(VkTexCensus *s);
 void vk_texture_census_log(uint64_t frame);         // vk_memory.c vram_log: the live entries' memory by kind and format
+// The holes in VMA's blocks that hold textures (vk_texture.c "compaction", vk_tex_compact.h), for vk_memory.c holes_log.
+// A VkBlockRow is an allocation of another kind that the caller knows to lie in one of VMA's blocks (a VRAM mirror):
+// the block's device memory handle and size, the allocation's size and memory type.
+typedef struct { uint64_t mem, block_size, bytes; uint32_t type; } VkBlockRow;
+// Of the device-local memory type whose blocks hold the most texture memory (type): the blocks that hold a texture,
+// their sizes and the textures and rows in them; the textures that could move to another block or be dropped (marks 0:
+// the texture pool's marks do not tell which textures are sampled, and none counts as movable); the blocks at most half
+// full by what is listed, and those of them that hold nothing but such textures, which are what a compaction could
+// give back to the driver.
+typedef struct {
+    uint32_t type, marks, blocks, sparse, emptiable;
+    uint64_t block_bytes, tex_bytes, other_bytes, move_bytes, drop_bytes;
+    uint64_t sparse_bytes, sparse_listed, emptiable_bytes, emptiable_move, emptiable_drop;
+} VkTexHoles;
+void vk_texture_holes(const VkBlockRow *other, int nother, VkTexHoles *h);
 void vk_texture_want_room(uint64_t bytes);          // a VRAM mirror that did not fit: idle textures make that much room
 int vk_texture_commit_low(void);                    // the system's commit was low at the last check (vk_texture.c)
 // vk_mem_vram's device-local use less the free space inside VMA's blocks (vk_memory.c), for the evictions

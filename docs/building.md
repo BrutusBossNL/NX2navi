@@ -634,6 +634,13 @@ builds the header alone and replays an area change after a loading screen from a
 half-resolution passes are per-frame again at once, a lookup table, a volume's slices and an icon capture still wait,
 and an image taken over by another texture starts without the history of the one before. No GPU, no game files.
 
+A change to how the holes in the allocator's blocks are counted or to which blocks a texture compaction empties
+(`runtime/vk_tex_compact.h`: `tcp_tally`, `tcp_stats`, `tcp_plan`) passes `python tests	ex_compact_check.py`, which
+builds the header alone: a block with one allocation that stays is never chosen, the block that takes the fewest moved
+bytes goes first, what moves fits the free bytes outside the chosen blocks, a plan under its smallest gain is no plan,
+and 400 random tables keep those rules. The part of `runtime/vk_texture.c` that builds the table is not built by it.
+No GPU, no game files.
+
 A change to which frames FSR 3.1 frame generation is told are camera cuts (`runtime/vk_fg_reset.h`, `runtime/vk_fg.cpp`
 `generate` and `vk_fg_frame`) passes `python tests\fg_reset_check.py`, which builds the header alone and checks that each
 frame id gets its own frame's cut, that an id never noted or no longer held counts as a cut, and that a slot rewritten

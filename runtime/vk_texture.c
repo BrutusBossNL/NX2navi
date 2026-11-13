@@ -27,6 +27,7 @@
 #include "vk.h"
 #include "vk_dlaa.h"
 #include "vk_exec.h"
+#include "vk_tex_compact.h"
 #include "prof.h"
 #include "platform/platform.h"
 
@@ -47,6 +48,8 @@ typedef struct Tex {
     TexVkFormat f;
     VmaAllocation alloc;          // own memory; NULL when bound into pool memory
     uint64_t bytes;               // the size of alloc (0 without own memory), for the released entries' total
+    uint64_t blk_mem, blk_size;   // where alloc lies (own_memory): the device memory handle and size of its block
+    uint8_t blk_type, blk_own;    // that memory's type; blk_own: memory of its own, not a part of one of VMA's blocks
     VmaAllocation bound_to;       // the pool memory it is bound into
     uint32_t wgen;                // page generation of the last upload check
     uint32_t checked;             // submit_epoch of the last check from a draw binding
@@ -1188,6 +1191,16 @@ static VkResult vma_image(VkCtx *c, const VkImageCreateInfo *ci, const ImgKey *i
     return image_alloc(c, ci, own, img, alloc);
 }
 
+// e has memory of its own (e->alloc): its size, and the block of VMA's it lies in, which the block table reads
+// without asking VMA for every entry (compact_table). An allocation keeps its place for as long as it lives.
+static void own_memory(VkCtx *c, Tex *e) {
+    VmaAllocationInfo2 own;
+    vmaGetAllocationInfo2(c->vma, e->alloc, &own);
+    e->bytes = own.allocationInfo.size;
+    e->blk_mem = (uint64_t)(uintptr_t)own.allocationInfo.deviceMemory, e->blk_size = own.blockSize;
+    e->blk_type = (uint8_t)own.allocationInfo.memoryType, e->blk_own = own.dedicatedMemory != 0;
+}
+
 // defer_init: the caller records the image's first transition (init_image or alias_copy).
 // ---------------------------------------------------------------- overwritten pool memory (NX2NAVI_TEX_CLOBBER)
 // The game places transient render targets over each other in its memory pools, and the replay binds their images
@@ -1436,11 +1449,7 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
             return NULL;
         }
     }
-    if (e->alloc) {
-        VmaAllocationInfo own;
-        vmaGetAllocationInfo(c->vma, e->alloc, &own);
-        e->bytes = own.size;
-    }
+    if (e->alloc) own_memory(c, e);
     e->bc1_try = (uint8_t)bc1_try;
     e->reusable = e->alloc && gpu_only;
     e->gw_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
@@ -3445,12 +3454,10 @@ static int astc_reformat(Tex *e, VkCommandBuffer cb, int bc) {
     if (relink) ru_unlink(e);
     if (e->released) rel_bytes -= e->bytes;
     if (e->retiring) retiring_bytes -= e->bytes;
-    VmaAllocationInfo own;
-    vmaGetAllocationInfo(c->vma, a, &own);
-    e->bytes = own.size;
+    e->pub.image = img, e->alloc = a, e->reused = 0;
+    own_memory(c, e);
     if (e->released) rel_bytes += e->bytes;
     if (e->retiring) retiring_bytes += e->bytes;
-    e->pub.image = img, e->alloc = a, e->reused = 0;
     e->pub.format = e->f.vk = ci.format;
     e->f.astc_bc = (uint8_t)bc;
     e->ik = nk;
@@ -5755,6 +5762,120 @@ int vk_sampler_params(int id, samp_par *out) {
     if (ok) *out = sslots[id].p;
     unlock();
     return ok;
+}
+
+// ---------------------------------------------------------------- compaction (vk_tex_compact.h)
+// The block table: which of VMA's blocks hold textures, and what else is known to lie in them (the caller's rows: the
+// VRAM mirrors, vk_memory.c mirror_rows). VMA does not say what a block holds, so the table is built from the entries'
+// own allocations (Tex.blk_mem, own_memory); memory of another kind in a block is not in it.
+//
+// What may be done with a texture's allocation (compact_what):
+//  - drop: a released entry the size cap would drop too (drop_stale's rule: it comes back intact, was released
+//    stale_after presents ago, and no lookup reaches it);
+//  - move: an entry whose image holds what its storage holds and nothing else (comes_back_intact: the CPU provides it,
+//    the GPU never wrote it), uploaded, with no upload waiting, that no command ever wrote (wr_fence) and no shader
+//    sampled for COMPACT_IDLE presents (samp_frame, by the pool's marks: without them nothing moves), single-sampled,
+//    not depth or stencil, and not larger than `most`;
+//  - stay: everything else, and every row of the caller.
+// The table is of one memory type, the device-local one whose blocks hold the most texture memory: a move lands in the
+// type it came from, and the allocator's free bytes are counted per heap.
+#define COMPACT_SPARSE_PCT 50
+#define COMPACT_IDLE PRESENTS(600)
+#define COMPACT_TEX_MAX ((uint64_t)8 << 20)
+
+typedef struct {
+    TcpBlock *b;
+    int nb, cb;
+    TcpAlloc *a;
+    Tex **ae;          // per allocation: its entry; NULL for a row that is not a texture's
+    int na, ca;
+    nvn_hmap by_mem;   // device memory handle -> 1 + the block's index in b
+    uint32_t type;     // the memory type the table is of
+    uint64_t tex_bytes, other_bytes;
+    int marks;         // the pool's marks tell which textures are sampled (compact_marks)
+} CompTable;
+
+static int compact_marks(void) {
+    return vk_pool_marks_enabled() && !__atomic_load_n(&vk_pool_marks_missed, __ATOMIC_RELAXED) && marks_reads >= 2;
+}
+
+static int compact_what(const Tex *e, uint64_t now, int marks, uint64_t most) {
+    if (!e->pub.image || e->pub.gone || e->retiring || !comes_back_intact(e)) return TCP_STAY;
+    if (e->released && now - e->rel_frame >= stale_after(e) && idle(e, now)) return TCP_DROP;
+    if (!marks || !e->uploaded || e->up_retry || e->wr_fence || e->clobbered || e->pub.samples > 1 || e->f.depth ||
+        e->f.stencil || e->bytes > most)
+        return TCP_STAY;
+    return now - e->samp_frame >= COMPACT_IDLE ? TCP_MOVE : TCP_STAY;
+}
+
+static void table_add(CompTable *t, uint64_t mem, uint64_t size, uint64_t bytes, int what, Tex *e) {
+    void *v = nvn_hm_get(&t->by_mem, &mem);
+    uint32_t bi = v ? (uint32_t)((uintptr_t)v - 1) : (uint32_t)t->nb;
+    if (!v) {
+        if (t->nb == t->cb) {
+            t->cb = t->cb ? t->cb * 2 : 256;
+            if (!(t->b = realloc(t->b, sizeof *t->b * (size_t)t->cb))) rt_fatal("vk: out of memory for the block table");
+        }
+        t->b[t->nb] = (TcpBlock){.id = mem, .size = size};
+        nvn_hm_put(&t->by_mem, &mem, (void *)(uintptr_t)(++t->nb));
+    }
+    if (t->na == t->ca) {
+        t->ca = t->ca ? t->ca * 2 : 4096;
+        t->a = realloc(t->a, sizeof *t->a * (size_t)t->ca), t->ae = realloc(t->ae, sizeof *t->ae * (size_t)t->ca);
+        if (!t->a || !t->ae) rt_fatal("vk: out of memory for the block table");
+    }
+    t->a[t->na] = (TcpAlloc){.block = bi, .what = (uint8_t)what, .bytes = bytes};
+    t->ae[t->na++] = e;
+}
+
+static void table_free(CompTable *t) {
+    free(t->b), free(t->a), free(t->ae), free(t->by_mem.keys), free(t->by_mem.vals);
+    memset(t, 0, sizeof *t);
+}
+
+// tex_lock held. other[0..nother): allocations of another kind the caller knows, which stay.
+static void compact_table(CompTable *t, const VkBlockRow *other, int nother, uint64_t most) {
+    VkCtx *c = vk_ctx();
+    memset(t, 0, sizeof *t);
+    nvn_hm_init(&t->by_mem, 8);
+    uint64_t by_type[VK_MAX_MEMORY_TYPES] = {0}, best = 0, now = frames_now();
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        const Tex *e = by_key.vals[i];
+        if (e && e->bytes && !e->blk_own && e->blk_type < VK_MAX_MEMORY_TYPES) by_type[e->blk_type] += e->bytes;
+    }
+    for (uint32_t ty = 0; c && ty < c->mem_props.memoryTypeCount && ty < VK_MAX_MEMORY_TYPES; ty++)
+        if ((c->mem_props.memoryTypes[ty].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && by_type[ty] > best)
+            best = by_type[ty], t->type = ty;
+    if (!best) return;
+    t->marks = compact_marks();
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        Tex *e = by_key.vals[i];
+        if (!e || !e->bytes || e->blk_own || e->blk_type != t->type) continue;
+        table_add(t, e->blk_mem, e->blk_size, e->bytes, compact_what(e, now, t->marks, most), e);
+        t->tex_bytes += e->bytes;
+    }
+    for (int i = 0; i < nother; i++) {
+        if (other[i].type != t->type) continue;
+        table_add(t, other[i].mem, other[i].block_size, other[i].bytes, TCP_STAY, NULL);
+        t->other_bytes += other[i].bytes;
+    }
+    tcp_tally(t->b, t->nb, t->a, t->na);
+}
+
+void vk_texture_holes(const VkBlockRow *other, int nother, VkTexHoles *h) {
+    memset(h, 0, sizeof *h);
+    lock();
+    CompTable t;
+    compact_table(&t, other, nother, COMPACT_TEX_MAX);
+    TcpStats s;
+    tcp_stats(t.b, t.nb, COMPACT_SPARSE_PCT, &s);
+    *h = (VkTexHoles){.type = t.type, .marks = t.marks, .blocks = s.blocks, .sparse = s.sparse, .emptiable = s.emptiable,
+                      .block_bytes = s.block_bytes, .tex_bytes = t.tex_bytes, .other_bytes = t.other_bytes,
+                      .move_bytes = s.move_bytes, .drop_bytes = s.drop_bytes, .sparse_bytes = s.sparse_bytes,
+                      .sparse_listed = s.sparse_listed, .emptiable_bytes = s.emptiable_bytes,
+                      .emptiable_move = s.emptiable_move, .emptiable_drop = s.emptiable_drop};
+    table_free(&t);
+    unlock();
 }
 
 // ---------------------------------------------------------------- statistics and shutdown

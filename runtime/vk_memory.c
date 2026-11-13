@@ -964,6 +964,8 @@ static int shadow_check_on(void);
 static int dead_pending(void);
 
 static void vram_log(uint64_t frame);
+#define HOLES_PERIOD 3600   // frames between two "mem: holes" lines (holes_log)
+static void holes_log(uint64_t frame);
 static void outside_watch(uint64_t frame);
 static void up_ts_log(uint64_t frame);
 
@@ -980,6 +982,7 @@ void vk_mem_census(uint64_t frame) {
     if (dmabuf_on && frame % 60 == 0) span_gc(frame, 0);
     static uint64_t window_start;
     if ((rt_trace & RT_TRACE_PERF) && frame % 600 == 0) vram_log(frame), mirror_pool_log(frame);
+    if (frame && frame % ((rt_trace & RT_TRACE_PERF) ? 600 : HOLES_PERIOD) == 0) holes_log(frame);
     if ((rt_trace & RT_TRACE_PERF) && frame % 60 == 0) outside_watch(frame), up_ts_log(frame), vk_gtl_log(frame, 60);
     if ((rt_trace & RT_TRACE_PERF) && !vk_mirror_on) dirty_frame(frame);
     if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
@@ -4600,6 +4603,65 @@ static void vram_use_log(VkCtx *c, uint64_t frame, const VmaBudget *vb, const Vk
            (unsigned long long)frame, usage / M, blocks / M, t->bytes_live / M, t->bytes_released / M, mir / M, phys / M,
            scratch / M, held / M, allocs > known ? (allocs - known) / M : 0.0, blocks > allocs ? (blocks - allocs) / M : 0.0,
            usage > blocks ? (usage - blocks) / M : 0.0, ds);
+}
+
+// The VRAM mirrors that lie in VMA's blocks, for the texture block table (vk_texture.c "compaction"): a mirror in a
+// block keeps the block. malloc'd, *n rows; NULL with none. Read under the shared pool lock: a mirror comes onto the
+// list and leaves it, with its allocation, under the exclusive one (mirror_create, mirror_evict, mirror_forget).
+static VkBlockRow *mirror_rows(VkCtx *c, int *n) {
+    VkBlockRow *rows = NULL;
+    *n = 0;
+    plat_mutex_lock_shared(&pool_lock);
+    if (nm) rows = malloc(sizeof *rows * (size_t)nm);
+    for (int i = 0; rows && i < nm; i++) {
+        const PoolRec *r = mlist[i];
+        if (!r->malloc_) continue;
+        VmaAllocationInfo2 ai;
+        vmaGetAllocationInfo2(c->vma, r->malloc_, &ai);
+        if (ai.dedicatedMemory) continue;   // memory of its own: in no block
+        rows[(*n)++] = (VkBlockRow){(uint64_t)(uintptr_t)ai.allocationInfo.deviceMemory, ai.blockSize,
+                                    ai.allocationInfo.size, ai.allocationInfo.memoryType};
+    }
+    plat_mutex_unlock_shared(&pool_lock);
+    return rows;
+}
+
+// Every HOLES_PERIOD frames (600 with NX2NAVI_TRACE=perf), in every run: how much of VMA's device-local blocks is
+// holes, and how much of that a compaction of the textures could give back. The first two figures are VMA's own
+// (blocks and allocations, memory of its own counted in both). The rest is of the memory type the textures use most,
+// from the block table (vk_texture.c compact_table): the blocks that hold a texture, with the textures and VRAM
+// mirrors in them; what is left of those blocks is holes and whatever else VMA placed there, which the table cannot
+// tell apart. A block at most half full by what is listed is "sparse"; when everything listed in it is a texture that
+// could be copied elsewhere or dropped (vk_tex_compact.h), emptying it gives the whole block back. That last sum is the
+// most a compaction could return now: less when such a block holds memory of another kind too.
+// Without the perf trace the vram lines above are not logged, and a player's log of a long session said nothing about
+// the holes: four traced sessions of one PC ended with 1.4 to 2.2 GiB free inside 8.3 to 9.6 GiB of blocks.
+static void holes_log(uint64_t frame) {
+    VkCtx *c = vk_ctx();
+    if (!c) return;
+    int n;
+    VkBlockRow *rows = mirror_rows(c, &n);
+    VkTexHoles h;
+    vk_texture_holes(rows, n, &h);
+    free(rows);
+    VmaBudget vb[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(c->vma, vb);
+    uint64_t blocks = 0, allocs = 0;
+    for (uint32_t i = 0; i < c->mem_props.memoryHeapCount && i < VK_MAX_MEMORY_HEAPS; i++)
+        if (c->mem_props.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            blocks += vb[i].statistics.blockBytes, allocs += vb[i].statistics.allocationBytes;
+    const double M = 1048576.0;
+    uint64_t listed = h.tex_bytes + h.other_bytes;
+    rt_log("mem: holes frame %llu: device-local VMA blocks %.0f MiB hold %.0f MiB of allocations, %.0f MiB free inside "
+           "them; memory type %u: %u blocks with textures, %.0f MiB: textures %.0f MiB (%.0f MiB could move, %.0f MiB "
+           "be dropped%s), VRAM mirrors %.0f MiB, free or of another kind %.0f MiB; %u of them at most half full, %.0f "
+           "MiB holding %.0f MiB; %u of those, %.0f MiB, hold nothing but textures that could move (%.0f MiB) or be "
+           "dropped (%.0f MiB)", (unsigned long long)frame, blocks / M, allocs / M,
+           blocks > allocs ? (blocks - allocs) / M : 0.0, h.type, h.blocks, h.block_bytes / M, h.tex_bytes / M,
+           h.move_bytes / M, h.drop_bytes / M, h.marks ? "" : "; the texture pool's marks are not in use, so none counts "
+           "as unsampled", h.other_bytes / M, h.block_bytes > listed ? (h.block_bytes - listed) / M : 0.0, h.sparse,
+           h.sparse_bytes / M, h.sparse_listed / M, h.emptiable, h.emptiable_bytes / M, h.emptiable_move / M,
+           h.emptiable_drop / M);
 }
 
 // With NX2NAVI_TRACE=perf every 60 frames: a line when the device-local memory VMA did not allocate (vram_use_log's
