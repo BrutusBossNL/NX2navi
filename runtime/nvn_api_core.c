@@ -236,17 +236,20 @@ NVN_API(nvnDeviceRegisterFastClearDepth) { ret_x(c, 0); }
 NVN_API(nvnDeviceGetImageHandle) { ret_x(c, (uint64_t)(int64_t)(int)arg_x(c, 1)); }
 // NVNtextureHandle nvnDeviceGetTextureHandle(const NVNdevice *d, int texture_id, int sampler_id):
 // texture id (20 bits) | sampler id << 20, the encoding the replay decodes (NVN_HANDLE_TEX / NVN_HANDLE_SAMP)
-// An id out of range (-1: the game had no texture to give, as when its render-target heap is full) gets the handle of
-// the last texture slot, which no game registers (its pool has 32,768), so a draw through it samples the stand-in as
-// for any slot without a texture, and sampler 0. Ending the game here turned one missing texture into a crash.
+// An id out of range (-1: the game had no texture to give, as when its render-target heap is full) gets texture
+// slot 0 and sampler slot 0: the first 256 slots of both pools are reserved (nvnDeviceGetInteger 0x11 and 0x12 above)
+// and no game registers into them, so slot 0 holds the stand-in. That holds for a draw that binds the handle, where
+// handle 0 is "no texture" (vk_exec_draw.c), and for a shader that takes the handle out of a uniform buffer and
+// indexes the pool arrays with it: slot 0 is inside their VK_POOL_TEX entries, which a slot past them is not.
+// Ending the game here turned one missing texture into a crash.
 NVN_API(nvnDeviceGetTextureHandle) {
     int tid = (int)arg_x(c, 1), sid = (int)arg_x(c, 2);
     if (tid < 0 || tid >= (1 << 20) || sid < 0 || sid >= (1 << 12)) {
         static int said;
         if (said < 8 && ++said)
-            rt_log("nvn: texture handle asked for with ids out of range (texture %d, sampler %d): the handle of an "
-                   "empty slot is given, which draws the stand-in", tid, sid);
-        if (tid < 0 || tid >= (1 << 20)) tid = (1 << 20) - 1;
+            rt_log("nvn: texture handle asked for with ids out of range (texture %d, sampler %d): the handle of the "
+                   "reserved slot 0 is given, which draws the stand-in", tid, sid);
+        if (tid < 0 || tid >= (1 << 20)) tid = 0;
         if (sid < 0 || sid >= (1 << 12)) sid = 0;
     }
     ret_x(c, (uint64_t)tid | (uint64_t)sid << 20);
