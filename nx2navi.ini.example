@@ -641,8 +641,9 @@
 # (VK_AMD_anti_lag), whichever the driver has. On a driver with neither the setting does nothing. While it is on the
 # driver holds the game to fps_limit, in place of the game's own limiter and of RivaTuner Statistics Server (rtss).
 # With framegen = dlss on Windows, DLSS Frame Generation's own low latency is used and this setting is not; with
-# framegen = fsr3 it runs on AMD GPUs and is off on NVIDIA ones while frames are generated. Changes while the game runs
-# take effect at once.
+# framegen = fsr3 it runs on AMD GPUs and is off on NVIDIA ones while frames are generated. Turning it on takes effect
+# at the next start: a run that starts with 0 leaves the driver's mode off the graphics device altogether. In a run
+# that started with it on, changes take effect at once.
 # low_latency = 0
 
 # HDR output, two kinds (both need HDR on in Windows, "Use HDR", or a Wayland compositor with colour management;

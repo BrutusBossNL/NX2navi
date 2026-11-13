@@ -14,8 +14,10 @@ void vk_lowlat_release(void);
 // What the menu's row shows (ui/menu.cpp row_low_latency). The first two are the paths that can run; the others say
 // why none does: the driver has neither extension, DLSS Frame Generation's interposer owns low latency in this run
 // (vk_dlssg.c, NX2NAVI_REFLEX), a frame generation presents the frames in the window swapchain's place, or the driver
-// refused the mode or never ended its sleep (the log says which).
-enum { VK_LOWLAT_NV, VK_LOWLAT_AMD, VK_LOWLAT_NO_DRIVER, VK_LOWLAT_DLSSG, VK_LOWLAT_FG, VK_LOWLAT_FAILED };
+// refused the mode or never ended its sleep (the log says which), or the driver has a mode but the run started with
+// the setting off, so the device was made without it (vk_device.c create_device): the next start with it on has it.
+enum { VK_LOWLAT_NV, VK_LOWLAT_AMD, VK_LOWLAT_NO_DRIVER, VK_LOWLAT_DLSSG, VK_LOWLAT_FG, VK_LOWLAT_FAILED,
+       VK_LOWLAT_RESTART };
 int vk_lowlat_status(void);
 // The direct path is in effect now: the setting is on and nothing else owns the presents. Any thread, one atomic load.
 int vk_lowlat_on(void);

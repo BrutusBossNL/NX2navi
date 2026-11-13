@@ -513,14 +513,22 @@ static int create_device(void) {
     // Low latency without frame generation (vk_lowlat.c): NVIDIA's extension, which needs VK_KHR_present_id enabled
     // with it, or AMD's, whose calls need its feature. Each only where the driver lists it; a driver lists one of them
     // at most. Not on a device the DLSS Frame Generation proxies make (vk_dlssg_create_device): that path's own
-    // low-latency plugin asks for what it needs there, and the direct path stays off for the run.
+    // low-latency plugin asks for what it needs there, and the direct path stays off for the run. And only in a run
+    // that starts with NX2NAVI_LOW_LATENCY on: with it off the device is made exactly as before the mode existed, and
+    // a driver that lists one of the two is only remembered (lists_low_latency), so the menu can say that turning the
+    // setting on takes a restart.
+    g_vk.lists_low_latency = 0;
     if (!vk_dlssg_dpa() && n_ext + 2 <= sizeof ext / sizeof *ext) {
-        if (has_ext(ep, ne, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
+        int nv = has_ext(ep, ne, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        int amd = !nv && has_ext(ep, ne, VK_AMD_ANTI_LAG_EXTENSION_NAME);
+        if (cfg_int("NX2NAVI_LOW_LATENCY") <= 0) {
+            g_vk.lists_low_latency = nv || amd;
+        } else if (nv) {
             g_vk.has_low_latency2 = 1;
             ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
             ext[n_ext++] = VK_NV_LOW_LATENCY_2_EXTENSION_NAME;
             CHAIN(pid, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
-        } else if (has_ext(ep, ne, VK_AMD_ANTI_LAG_EXTENSION_NAME)) {
+        } else if (amd) {
             g_vk.has_anti_lag = 1;
             ext[n_ext++] = VK_AMD_ANTI_LAG_EXTENSION_NAME;
             CHAIN(antilag, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD);

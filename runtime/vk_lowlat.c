@@ -1,4 +1,6 @@
-// Low latency without frame generation (NX2NAVI_LOW_LATENCY: 0 off, 1 on, 2 on with boost; default 0; live).
+// Low latency without frame generation (NX2NAVI_LOW_LATENCY: 0 off, 1 on, 2 on with boost; default 0). In a run that
+// starts with it on, a change takes effect at once; a run that starts with it off makes its device without the
+// drivers' extensions (vk_device.c create_device), so turning it on then takes a restart.
 //
 // A frame's delay from the pad to the screen has two parts the runtime can shorten. The first is the time the frame
 // waits after it is drawn: the frame limit used to hold a finished picture back until its slot (vk_backend.c
@@ -503,6 +505,12 @@ void vk_lowlat_init(VkCtx *c) {
             return;
         }
         rt_log("lowlat: VK_AMD_anti_lag is enabled but its entry point is missing");
+    }
+    if (c->lists_low_latency) {
+        L.why = VK_LOWLAT_RESTART;
+        rt_log("lowlat: the driver has a low-latency mode; this run started with NX2NAVI_LOW_LATENCY off and made its "
+               "device without it, so the setting takes effect at the next start");
+        return;
     }
     rt_log("lowlat: this driver has neither VK_NV_low_latency2 nor VK_AMD_anti_lag: no low-latency mode%s",
            level ? " (NX2NAVI_LOW_LATENCY does nothing here)" : "");

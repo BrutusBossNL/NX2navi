@@ -233,6 +233,8 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   limit back while a movie plays, while no present goes out, and for the rest of the run when the frames show that the
   driver does not hold it. DLSS Frame Generation brings its own low latency (`vk_dlssg.c`), and the direct path is off
   in such a run; NVIDIA's is also off while another frame generation presents the frames.
+  The device gets the drivers' extensions only in a run that starts with the setting on (`vk_device.c`
+  `create_device`): turning it on takes a restart, and with it off the device is made as it was before the mode.
 - ASTC textures are uploaded as they are where the device samples ASTC, and decoded by a compute shader everywhere
   else (`vk_astc.c`); under 20 GiB of video memory the decoder encodes them to BC3.
 - Texture detail (`texture_detail`, `vk_texture.c` "texture detail"): on a card with little video memory the large

@@ -57,6 +57,7 @@ typedef struct VkCtx {
         has_low_latency2,                   // VK_NV_low_latency2 with VK_KHR_present_id, which it needs (vk_lowlat.c)
         has_present_id,                     // ... and the presentId feature: presents may carry a frame's number
         has_anti_lag,                       // VK_AMD_anti_lag with its antiLag feature (vk_lowlat.c)
+        lists_low_latency,                  // the driver lists one of the two, left out: the run started with the mode off
         has_mesh_queries;                   // meshShaderQueries, kept while NX2NAVI_GPU_PASSES or NX2NAVI_DUMP is set
     int mesh_fallback;                      // task and mesh programs run as compute passes and are drawn from buffers
                                             // (mesh_fallback: auto without has_mesh_shader; vk_exec_draw.c "mesh fallback")

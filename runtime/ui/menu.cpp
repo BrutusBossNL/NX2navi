@@ -883,6 +883,7 @@ static const char *vsync_note(void) {
 // the driver's mode is NVIDIA's (AMD's has no boost; a 2 set there shows as on, which is what it does). Greyed out with
 // the reason where it cannot run: a driver with neither mode, a run in which DLSS frame generation brings its own, and
 // NVIDIA's while a frame generation presents the frames (vk_lowlat_status). Set and refused by the driver, it says so.
+// In a run that started with it off the driver's mode is not on the device: the row can be set and says "after restart".
 static void row_low_latency(void) {
     static const char *const values[] = {"0", "1", "2"};
     const char *names[] = {menu_text(UI_MENU_OFF), menu_text(UI_MENU_ON), menu_text(UI_MENU_LOW_LATENCY_BOOST)};
@@ -892,7 +893,8 @@ static void row_low_latency(void) {
     if (st == VK_LOWLAT_NO_DRIVER) opt_disable_next(UI_MENU_LOW_LATENCY_NO_DRIVER);
     else if (st == VK_LOWLAT_DLSSG) opt_disable_next(UI_MENU_LOW_LATENCY_DLSSG);
     else if (st == VK_LOWLAT_FG) opt_disable_next(UI_MENU_LOW_LATENCY_FG);
-    const char *note = st == VK_LOWLAT_FAILED && cur ? menu_text(UI_MENU_LOW_LATENCY_FAILED) : nullptr;
+    const char *note = st == VK_LOWLAT_FAILED && cur ? menu_text(UI_MENU_LOW_LATENCY_FAILED)
+                     : st == VK_LOWLAT_RESTART && cur ? menu_text(UI_MENU_AFTER_RESTART) : nullptr;
     int nv = opt_choice_index("NX2NAVI_LOW_LATENCY", UI_MENU_LOW_LATENCY, names, n, cur, 0, UI_MENU_LOW_LATENCY_DESC, note);
     if (nv >= 0 && nv < n) opt_apply("NX2NAVI_LOW_LATENCY", values[nv]);
 }
