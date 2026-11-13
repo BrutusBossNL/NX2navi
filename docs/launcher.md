@@ -419,6 +419,13 @@ default proxy handling, which reads `HTTPS_PROXY` and `HTTP_PROXY` (and `NO_PROX
 them, the proxy set in Windows' Internet settings. Only HTTP proxies work; a SOCKS proxy does not. An address that needs
 a user name and password takes them in the variable, as in `HTTPS_PROXY=http://user:password@host:port`.
 
+Before a download writes its first byte the disk is asked for room (`net.space_problem`): the rest of the file, by
+its expected size or else the length the server names, and 32 MB beyond it. The same is asked before the build tools
+are fetched (their downloads and their unpacked size, from the lock), before an update's archive is unpacked and
+before a mod's zip is. Without room the step stops with how much is needed and how much is free, and a part file
+stays for when there is room. A disk that fills in the middle of a download is named as full at once, not tried
+again four times.
+
 ## Uninstalling
 
 Settings > Uninstall NX2navi, or Settings > Apps > NX2navi (which runs `NX2navi.exe --uninstall`): what the launcher

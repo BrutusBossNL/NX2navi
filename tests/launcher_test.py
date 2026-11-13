@@ -693,6 +693,82 @@ class NetTest(Tmp):
         for d, t in fetch({'Content-Length': '7'}, size=len(data)):
             self.assertEqual(t, len(data))
 
+    def low_disk(self, free):
+        """shutil.disk_usage as net sees it, answering with free[0] bytes free."""
+        import collections
+        usage = collections.namedtuple('usage', 'total used free')
+        return mock.patch.object(net.shutil, 'disk_usage', lambda path: usage(10 ** 12, 0, free[0]))
+
+    def test_the_free_space_is_asked_before_a_download(self):
+        """A download whose rest does not fit the disk stops before a byte is written, says how much is needed and
+        how much is free, and keeps its part file for when there is room; a disk that fills in the middle is named
+        as full at once instead of being tried four times."""
+        data = os.urandom(5000)
+        (self.tmp / 'f.bin').write_bytes(data)
+        srv = Server(self.tmp)
+        self.addCleanup(srv.close)
+        dest = self.tmp / 'out' / 'f.bin'
+        dest.parent.mkdir()
+        part = dest.with_name('f.bin.part')
+        part.write_bytes(data[:1000])
+        free = [40 << 20]
+        with self.low_disk(free):
+            self.assertEqual(net.space_problem(dest.parent, 1 << 20, 'x'), '')            # 1 MB and the margin fit
+            self.assertEqual(net.space_problem(self.tmp / 'not' / 'made' / 'yet', 1 << 20, 'x'), '')
+            with self.assertRaises(net.NoSpace) as refused:                              # the expected size is known:
+                net.download(srv.url + 'f.bin', dest, size=64 << 20)                     # no request is made
+            self.assertEqual(srv.hits, [])
+            self.assertIn('no room for f.bin on ', str(refused.exception))
+            self.assertIn('MB needed, 42 MB free', str(refused.exception))
+            self.assertEqual(part.read_bytes(), data[:1000])
+            free[0] = 1 << 20
+            with self.assertRaises(net.NoSpace):                                         # else the server's length is
+                net.download(srv.url + 'f.bin', dest)
+            self.assertEqual(len(srv.hits), 1)
+            self.assertEqual(part.read_bytes(), data[:1000])                             # kept for when there is room
+            free[0] = 1 << 30
+            net.download(srv.url + 'f.bin', dest, sha256=sha(data), size=len(data))
+            self.assertEqual(dest.read_bytes(), data)
+            self.assertEqual(srv.hits[-1][1].get('Range'), 'bytes=1000-')
+
+        class Full(io.BytesIO):   # an answer whose bytes cannot be written: the disk filled meanwhile
+            status, length, headers = 200, None, {}
+
+            def read(self, n=-1):
+                raise OSError(28, 'No space left on device')
+
+        with mock.patch.object(net, 'request', lambda url, h, timeout, version: Full()), \
+                mock.patch.object(net.time, 'sleep') as slept, self.assertRaises(net.NoSpace) as refused:
+            net.download('https://example.invalid/g.bin', self.tmp / 'out' / 'g.bin')
+        slept.assert_not_called()
+        self.assertIn('is full: g.bin could not be written', str(refused.exception))
+        with mock.patch.object(net.shutil, 'disk_usage', side_effect=OSError('no such drive')):
+            self.assertEqual(net.space_problem(dest.parent, 1 << 40, 'x'), '')            # cannot be asked: not refused
+
+    def test_the_free_space_is_asked_before_an_unpack(self):
+        z = make_app_zip(self.tmp, '0.9.0', extra={'big.bin': bytes(3 << 20)})
+        free = [2 << 20]
+        with self.low_disk(free):
+            with self.assertRaises(updater.UpdateError) as refused:
+                updater.safe_extract(z, self.tmp / 'x')
+            self.assertIn('no room for the files of NX2navi-app-0.9.0.zip', str(refused.exception))
+            self.assertFalse((self.tmp / 'x').exists())                                  # nothing was unpacked
+            from launcher import mods
+            with self.assertRaises(mods.ModError) as refused:
+                mods.unpack(z, self.tmp / 'mod')
+            self.assertIn('no room for its files', str(refused.exception))
+            self.assertFalse((self.tmp / 'mod').exists())
+            lock = {'packages': [{'name': 'p', 'version': '1', 'filename': 'p.pkg.tar.zst', 'sha256': '0' * 64,
+                                  'csize': 5 << 20, 'isize': 50 << 20}]}
+            with mock.patch.object(net, 'download') as fetched, self.assertRaises(toolchain.ToolchainError) as refused:
+                toolchain.install(self.layout, lock, log=lambda line: None)
+            fetched.assert_not_called()                                                  # asked before the first download
+            self.assertIn('no room for the build tools', str(refused.exception))
+            self.assertIn('(91 MB needed, 2 MB free)', str(refused.exception))            # 5 + 50 MiB and the margin
+            free[0] = 1 << 30
+            updater.safe_extract(z, self.tmp / 'x')
+        self.assertEqual((self.tmp / 'x' / 'big.bin').stat().st_size, 3 << 20)
+
     def test_plain_http_redirects_and_oversize(self):
         with self.assertRaises(net.DownloadError):                        # refused before any connection
             net.request('http://example.invalid/f.bin')

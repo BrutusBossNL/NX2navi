@@ -60,7 +60,8 @@ def runtime_id(layout):
 
 
 def safe_extract(zip_path, dest):
-    """Unpack a zip into dest, refusing absolute names and names that climb out of it."""
+    """Unpack a zip into dest, refusing absolute names and names that climb out of it, and, before anything is
+    written, a zip whose files do not fit the disk (net.space_problem)."""
     dest = Path(dest)
     root = dest.resolve()
     with zipfile.ZipFile(zip_path) as z:
@@ -71,6 +72,10 @@ def safe_extract(zip_path, dest):
             target = (dest / name).resolve()
             if target != root and root not in target.parents:
                 raise UpdateError(f'{Path(zip_path).name}: unsafe path {info.filename}')
+        full = net.space_problem(dest, sum(info.file_size for info in z.infolist()),
+                                 f'the files of {Path(zip_path).name}')
+        if full:
+            raise UpdateError(full)
         z.extractall(dest)
 
 

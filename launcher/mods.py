@@ -32,7 +32,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from . import gameini
+from . import gameini, net
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import mod_files  # noqa: E402
@@ -409,6 +409,9 @@ def unpack(archive, dest):
             try:
                 with zipfile.ZipFile(archive) as z:
                     _safe_members(z.namelist())
+                    full = net.space_problem(dest, sum(i.file_size for i in z.infolist()), 'its files')
+                    if full:   # told before a file is written, not as an error halfway through
+                        raise ModError(full)
                     z.extractall(dest)
             except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as e:
                 raise ModError(f'it is not a zip file the launcher can read ({e})')
