@@ -718,6 +718,13 @@ static int marks_tell(void);
 // The presents a released entry must have gone unused before its image may go to another texture (create_tex): the
 // pool's marks reach an entry a few presents after the draw that sampled it.
 #define REUSE_UNUSED 16
+// The same for an overwritten entry while the card is past the VRAM pressure's share of its budget (over_share): what
+// the marks need and no more. A mark is read at most MARKS_RB copies of MARKS_EVERY submissions after its draw
+// (vk_exec_draw.c vk_exec_pool_marks), three frames of six submissions, so after eight presents without a stamp none
+// is on its way. At 3840x2160 the targets moved in 16 presents hold 3.1 GiB, which a 16 GiB card does not have beside
+// the 10 GiB of a town.
+#define REUSE_UNUSED_FULL 8
+static int over_share;   // sweep_pressure: the driver's figure of the memory in use is past that share
 // The released entries of one parameter set create_tex looks at, newest release first. While the game's layout moves
 // in every frame, each frame releases every target of a set and none of them is unused yet for REUSE_UNUSED presents:
 // with 128 looked at, eight targets of one set a frame hid every older entry behind the young ones and each texture
@@ -1512,7 +1519,8 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
             if (q->rel_epoch == submit_epoch || now - q->rel_frame < 2) { n_reuse_young++; continue; }
             int over = q->overwritten && marks;
             // still drawn with or sampled: its content is asked for
-            if (over ? sampled_lately(q, now, REUSE_UNUSED) : used_lately(q, now, REUSE_UNUSED)) {
+            if (over ? sampled_lately(q, now, over_share ? REUSE_UNUSED_FULL : REUSE_UNUSED)
+                     : used_lately(q, now, REUSE_UNUSED)) {
                 n_reuse_used++;
                 continue;
             }
@@ -2705,10 +2713,11 @@ static int sampled_lately(const Tex *e, uint64_t now, uint64_t within) { return 
 // drop makes it again that way, so an entry something still uses stays; so does one the image reuse would take
 // (create_tex, REUSE_UNUSED).
 // full: the card is past the VRAM pressure's share of its budget by the driver's own figure (sweep_pressure). The
-// wait is then OVERWRITTEN_FULL presents, the time the image reuse leaves an entry alone: an image no texture took in
-// that time holds nothing the game can ask for, and the memory it keeps for ten seconds more is what the next image
-// fails for.
-#define OVERWRITTEN_FULL (REUSE_UNUSED + 2)
+// wait is then OVERWRITTEN_FULL presents, four times what the image reuse leaves an entry alone for there: an image no
+// texture took in that time holds nothing the game can ask for, and the memory it keeps for ten seconds more is what
+// the next image fails for. Not sooner: at ten presents this took the images the reuse was about to hand on, 7,301 in
+// a run at 3840x2160 that then made 7,672 images and reused 5,226.
+#define OVERWRITTEN_FULL (REUSE_UNUSED_FULL * 4)
 static uint64_t n_over_full;   // since the last perf line: of n_over_drops, dropped with the card that full
 static void drop_overwritten(int full) {
     static int used_too = -1;
@@ -3365,7 +3374,8 @@ static void sweep_pressure(void) {   // tex_lock held
         // at 100 % of its budget by this figure was at 81 % by the other, 3.1 GiB of it holes, and nothing gave way.
         uint64_t cap = released_cap_bytes(), keep = cap, vused = 0, vbudget = 0;
         int vexact, vknown = vk_mem_vram(&vused, &vbudget, &vexact);
-        drop_overwritten(vknown && vram_pressure && vused > vbudget / 100 * (uint64_t)vram_pressure);
+        over_share = vknown && vram_pressure && vused > vbudget / 100 * (uint64_t)vram_pressure;
+        drop_overwritten(over_share);
         drop_aged();
         // the bound, or more of it while the hold empties the released entries within minutes and the card and the
         // system have room (vk_tex_release.h trl_keep): a young entry dropped there is one the game may still take back
