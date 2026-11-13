@@ -763,7 +763,10 @@ static void world_clock(double dt, double step) {
 // how far it moved: at 60 fps the two moves match while he stands on it. The value is the number of lines to write
 // (1 means 4000); off it costs one test per present. The guest memory is read where the host can read it directly.
 #define FLOOR_PROBE_RADIUS 8.0f
-#define FLOOR_PROBE_GROUPS 16384
+// Every read checks that the host can read the address (mem_host_readable), which costs a system call: a count read
+// from a manager that is not one yet (the title screen) walked up to 16,384 groups a present, about 1.9 s a frame. So
+// the walk waits for the player, and a count above FLOOR_PROBE_GROUPS is taken for a wrong manager and skipped.
+#define FLOOR_PROBE_GROUPS 512
 static int floor_probe_left = -1;   // lines still to write; -1 before the setting was read
 static float *floor_last;            // the groups' translations at the last update (x, y, z each)
 static uint32_t floor_last_n;
@@ -788,23 +791,31 @@ static void floor_probe(void) {
         if (floor_probe_left) rt_log("floor probe: on for %d lines", floor_probe_left);
     }
     if (!floor_probe_left) return;
+    float link[3];
+    int link_ok = player_pos(link);
+    if (!link_ok) {   // no player (the title screen, a load): nothing to log, and the manager may not be one yet
+        floor_link_ok = 0;
+        return;
+    }
     uint64_t g = direct_ptr(MOD_MAIN_BASE + 0x4c7df00), p = direct_ptr(g), q = p ? direct_ptr(p + 0xc0) : 0,
              mgr = q ? direct_ptr(q + 0x130) : 0;
     uint32_t count = 0;
     uint64_t array = 0;
     if (!mgr || !direct_read(mgr + 0x28, &count, 4) || !(array = direct_ptr(mgr + 0x30))) return;
-    if (count > FLOOR_PROBE_GROUPS) count = FLOOR_PROBE_GROUPS;
+    if (count > FLOOR_PROBE_GROUPS) {
+        static int told;
+        if (!told++) rt_log("floor probe: a ground group count of %u is not plausible: skipped until it is", count);
+        return;
+    }
     if (!floor_last) floor_last = calloc(FLOOR_PROBE_GROUPS * 3, sizeof(float));
-    float link[3];
-    int link_ok = player_pos(link);
     int best = -1;
     float best_d2 = FLOOR_PROBE_RADIUS * FLOOR_PROBE_RADIUS, best_t[3] = {0}, best_m[3] = {0};
     for (uint32_t i = 0; i < count && floor_last; i++) {
         uint64_t grp = direct_ptr(array + 32ull * i);
-        float t[3], *last = floor_last + 3 * i;
-        if (!grp || !direct_read(grp + 0x88 + 12, &t[0], 4) || !direct_read(grp + 0x98 + 12, &t[1], 4) ||
-            !direct_read(grp + 0xa8 + 12, &t[2], 4) || !isfinite(t[0]) || !isfinite(t[1]) || !isfinite(t[2]))
-            continue;
+        float t[3], rows[12], *last = floor_last + 3 * i;   // the three rows in one read: one readability check
+        if (!grp || !direct_read(grp + 0x88, rows, sizeof rows)) continue;
+        t[0] = rows[3], t[1] = rows[7], t[2] = rows[11];
+        if (!isfinite(t[0]) || !isfinite(t[1]) || !isfinite(t[2])) continue;
         float m[3] = {t[0] - last[0], t[1] - last[1], t[2] - last[2]};
         int moved = i < floor_last_n && (m[0] != 0 || m[1] != 0 || m[2] != 0);
         memcpy(last, t, sizeof t);
