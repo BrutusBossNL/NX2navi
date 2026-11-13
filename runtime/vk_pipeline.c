@@ -7478,7 +7478,20 @@ static void lb_state(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
 // and "done" with the driver and a count of the times the cache was cold again right after a finished warm. At two in
 // a row the driver does not keep stage libraries at all and warming stops being tried (NX2NAVI_LIB_WARM=0 turns it off;
 // =force warms at every start).
+// The check times builds, which a busy CPU only makes longer: as the guest starts beside the boot's background builds,
+// a sample built at below-normal priority read a warm cache as cold on an RTX 5080 (0.9.2, a median of 136 ms on 16
+// logical processors), and the whole list of 42,231 libraries was built again in 873 s on 4 idle threads, although
+// --warm-shaders gave all of them back in 10.6 s and the driver's cache file did not change. So the sample is built
+// at normal priority, into the driver's cache only (no_cache: a library our own pipeline cache holds would read fast
+// whatever the driver has), and a sample that says cold is built again 10 s later before the cache counts as cold,
+// except while the start waits for the whole warm after a driver change, where cold is the expected answer. The cache
+// counts as warm when LW_WARM_SHARE of the sample was fast: a cache the driver has partly evicted (a size limit keeps
+// some of the libraries and drops others) is to be warmed, and one or two fast builds say little.
+// shader-warm.txt also keeps how far a warm came ("warming <driver> <strikes> <variant>"), written every 8,000 variants:
+// a run that ends before the warm does is followed by one that goes on from there, not from the first variant again,
+// which on a PC whose sessions were shorter than a warm under play (15 minutes) began the list again at every start.
 #define LW_SAMPLE 12
+#define LW_WARM_SHARE 0.75
 #define LW_COLD_MS 15.0
 #define LW_MAX_THREADS 6
 #define LW_BOOT_THREADS 32   // while the start waits for the warm (bf_wait): every core, as the preparation
@@ -7489,6 +7502,7 @@ static struct {
     volatile int32_t running, stop, started;
     volatile int32_t short_mem;   // the memory gate refused a build for GATE_WAIT_MS: the warm ended for this run
     volatile int32_t checked;     // lw_main has returned: the workers it started, if any, are counted in running
+    size_t from;                  // the variant this run's warm began at (an earlier run's progress, lw_check)
     PlatThread *th[LW_BOOT_THREADS + 1];
     int threads, strikes;
     int bg_threads;               // the workers that go on beside the game (lw_worker)
@@ -7497,11 +7511,14 @@ static struct {
     char stamp[PLAT_PATH_MAX * 2 + 32], id[64];
 } LW;
 
-static void lw_stamp(const char *state, int strikes) {
-    char line[128];
-    int n = snprintf(line, sizeof line, "%s %s %d\n", state, LW.id, strikes);
+// at: for "warming", the variant a later run goes on from (all before it are built).
+static void lw_stamp_at(const char *state, int strikes, size_t at) {
+    char line[160];
+    int n = snprintf(line, sizeof line, "%s %s %d %zu\n", state, LW.id, strikes, at);
     if (!plat_file_write_atomic(LW.stamp, line, (size_t)n)) rt_log("vk_pipeline: cannot write %s", LW.stamp);
 }
+
+static void lw_stamp(const char *state, int strikes) { lw_stamp_at(state, strikes, 0); }
 
 // One prepared vertex or fragment variant's library into the driver's cache; its time in ms, negative when the
 // variant is on the skip list, not in the shader cache or of another stage.
@@ -7547,9 +7564,13 @@ static void lw_worker(void *arg) {
         journal_mark(me, NULL);
         gate_leave(held);
         int64_t d = plat_inc64(&LW.done);
-        if (d % 8000 == 0)
-            rt_log("vk_pipeline: library warm: %lld of %zu prepared variants in %.0f s", (long long)d, LW.n,
-                   (now_ms() - LW.t0) / 1000);
+        if (d % 8000 == 0) {
+            // the workers take the variants in order, each holds at most one unbuilt: all below this are built
+            size_t at = LW.from + (size_t)(d > LW.threads ? d - LW.threads : 0);
+            lw_stamp_at("warming", LW.strikes, at);
+            rt_log("vk_pipeline: library warm: %lld of %zu prepared variants in %.0f s (up to variant %zu)", (long long)d,
+                   LW.n - LW.from, (now_ms() - LW.t0) / 1000, at);
+        }
     }
     if (!plat_dec32(&LW.running) && !LW.stop && !LW.short_mem) {
         lw_stamp("done", LW.strikes);
@@ -7558,8 +7579,9 @@ static void lw_worker(void *arg) {
     }
 }
 
-// The median time of LW_SAMPLE prepared fragment libraries spread over the list; negative without that many.
-static double lw_probe(void) {
+// The median time of LW_SAMPLE prepared fragment libraries spread over the list, in ms, and in *fast how many were
+// under LW_COLD_MS, in *got how many were built; negative without enough of them.
+static double lw_time_sample(int *fast, int *got_out) {
     double ms[LW_SAMPLE];
     int got = 0;
     size_t step = LW.n / LW_SAMPLE ? LW.n / LW_SAMPLE : 1, at = (size_t)(plat_now_ns() / 1000) % step;
@@ -7570,7 +7592,9 @@ static double lw_probe(void) {
             if (t >= 0) ms[got++] = t;
             break;
         }
+    *fast = 0, *got_out = got;
     if (got < LW_SAMPLE / 2) return -1;
+    for (int i = 0; i < got; i++) *fast += ms[i] <= LW_COLD_MS;
     for (int i = 1; i < got; i++)
         for (int j = i; j > 0 && ms[j] < ms[j - 1]; j--) {
             double t = ms[j];
@@ -7579,59 +7603,88 @@ static double lw_probe(void) {
     return ms[got / 2];
 }
 
+// 1 when the sample says the driver's cache has the prepared libraries.
+static int lw_warm_sample(int fast, int got) {
+    return got > 0 && fast >= (int)(got * LW_WARM_SHARE + 0.999);
+}
+
+// lw_time_sample at normal priority, and once more 10 s later when it says cold, unless the start waits (bf_waiting).
+// The better of the two counts. The thread goes back to below normal afterwards when the game runs beside it.
+static double lw_probe(int *fast, int *got) {
+    plat_thread_priority(PLAT_PRIO_NORMAL);
+    double t = lw_time_sample(fast, got);
+    if (t >= 0 && !lw_warm_sample(*fast, *got) && !LW.stop && !bf_waiting()) {
+        for (int i = 0; i < 100 && !LW.stop; i++) plat_sleep_ms(100);
+        int f2 = 0, g2 = 0;
+        double t2 = lw_time_sample(&f2, &g2);
+        if (t2 >= 0 && lw_warm_sample(f2, g2) >= lw_warm_sample(*fast, *got) && f2 * (*got) > (*fast) * g2)
+            t = t2, *fast = f2, *got = g2;
+    }
+    if (!bf_waiting()) plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+    return t;
+}
+
 static void lw_check(void) {
     if (!bf_waiting()) plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+    no_cache = 1;   // the sample's libraries go into the driver's cache only, as the workers' do (see no_cache)
     char was[16] = "", id[64] = "";
     int strikes = 0;
+    unsigned long long at = 0;
     uint64_t size = 0;
     char *f = (char *)plat_file_read(LW.stamp, &size);
     if (f && size < 200) {
         char line[200];
         memcpy(line, f, size), line[size] = 0;
-        if (sscanf(line, "%15s %63s %d", was, id, &strikes) < 2) was[0] = 0;
+        if (sscanf(line, "%15s %63s %d %llu", was, id, &strikes, &at) < 2) was[0] = 0;   // no count: from the start
     }
     free(f);
     int same = !strcmp(id, LW.id), resume = same && !strcmp(was, "warming");
     const char *mode = cfg_value("NX2NAVI_LIB_WARM");
-    double median = resume ? 0 : lw_probe();
+    // A resumed warm is not sampled: the variants the earlier run built are in the driver's cache and the rest are not,
+    // so a sample would read the cache as warm or cold by how far it came. It goes on from where it stopped.
+    int fast = 0, got = 0;
+    double median = resume ? 0 : lw_probe(&fast, &got);
     if (LW.stop) return;
-    int cold = median > LW_COLD_MS || !strcmp(mode, "force");
+    int cold = (median >= 0 && !lw_warm_sample(fast, got)) || !strcmp(mode, "force");
+    LW.from = resume && at < LW.n ? (size_t)at : 0;
+    LW.next = (int64_t)LW.from;
     if (!resume && !cold) {
         if (same && strikes) lw_stamp("done", 0);   // the driver kept them this time
-        rt_log("vk_pipeline: library warm: the driver's cache has the prepared libraries (a sample's median %.1f ms)",
-               median);
+        rt_log("vk_pipeline: library warm: the driver's cache has the prepared libraries (%d of %d sampled built in "
+               "under %.0f ms, median %.1f ms)", fast, got, LW_COLD_MS, median);
         return;
     }
     if (!resume && same && strikes >= 2 && strcmp(mode, "force")) {
-        rt_log("vk_pipeline: library warm: the prepared libraries are cold again (a sample's median %.0f ms) after two "
-               "finished warms on this driver: it does not keep them, so pipelines compile when a draw first needs "
-               "them (NX2NAVI_LIB_WARM=force warms anyway).%s", median,
+        rt_log("vk_pipeline: library warm: the prepared libraries are cold again (%d of %d sampled fast, median %.0f "
+               "ms) after two finished warms on this driver: it does not keep them, so pipelines compile when a draw "
+               "first needs them (NX2NAVI_LIB_WARM=force warms anyway).%s", fast, got, median,
                lw_cold_hint(LW.vendor, LW_COLD_GAVE_UP, LW_ON_WINDOWS));
         return;
     }
     LW.strikes = resume ? strikes : same && !strcmp(was, "done") ? strikes + 1 : 0;
-    lw_stamp("warming", LW.strikes);
+    lw_stamp_at("warming", LW.strikes, LW.from);
     int cpus = (int)plat_cpu_usable(), t = cpus / 4, boot = bf_waiting();
     t = t < 2 ? 2 : t > LW_MAX_THREADS ? LW_MAX_THREADS : t;
     LW.bg_threads = t;
     if (boot) t = cpus < 1 ? 1 : cpus > LW_BOOT_THREADS ? LW_BOOT_THREADS : cpus;
     if (boot) {
         char why[64];
-        if (resume) snprintf(why, sizeof why, "an earlier run began the warm and did not end it");
-        else snprintf(why, sizeof why, "a sample's median %.0f ms", median);
+        if (resume) snprintf(why, sizeof why, "an earlier run began the warm, which goes on from variant %zu", LW.from);
+        else snprintf(why, sizeof why, "%d of %d sampled fast, median %.0f ms", fast, got, median);
         rt_log("vk_pipeline: library warm: the driver's cache does not have the prepared libraries (%s): building %zu "
                "prepared variants into it on %d threads while the start waits (the whole warm after a driver change)",
-               why, LW.n, t);
+               why, LW.n - LW.from, t);
     } else if (resume)
-        rt_log("vk_pipeline: library warm: going on with the warm an earlier run began: %zu prepared variants on %d "
-               "idle threads", LW.n, t);
+        rt_log("vk_pipeline: library warm: going on with the warm an earlier run began, from variant %zu of %zu, on %d "
+               "idle threads", LW.from, LW.n, t);
     else   // cold right after a finished warm on this driver says more than a first cold (vk_warm_hint.h)
-        rt_log("vk_pipeline: library warm: the driver's cache does not have the prepared libraries (a sample's median "
-               "%.0f ms; a driver update or a change of what they are built with): building %zu prepared variants "
-               "into it on %d idle threads while the game runs. Until it is done, a pipeline a draw first needs may "
-               "compile, which skips that draw for some frames or makes it wait.%s", median, LW.n, t,
+        rt_log("vk_pipeline: library warm: the driver's cache does not have the prepared libraries (%d of %d sampled "
+               "fast, median %.0f ms; a driver update or a change of what they are built with): building %zu prepared "
+               "variants into it on %d idle threads while the game runs. Until it is done, a pipeline a draw first "
+               "needs may compile, which skips that draw for some frames or makes it wait.%s", fast, got, median, LW.n,
+               t,
                lw_cold_hint(LW.vendor,
-                            median <= LW_COLD_MS ? LW_WARM_FORCED   // warm, but lib_warm = force
+                            lw_warm_sample(fast, got) ? LW_WARM_FORCED   // warm, but lib_warm = force
                             : same && !strcmp(was, "done") ? LW_COLD_AFTER_WARM : LW_COLD_FIRST,
                             LW_ON_WINDOWS));
     LW.t0 = now_ms();
@@ -7809,6 +7862,7 @@ static void bf_wait(void) {
             while ((!LW.checked || LW.running > 0) && !LW.stop && bf_waiting()) {
                 plat_sleep_ms(100);
                 __atomic_store_n(&pw_pipe_done, (int64_t)LW.done, __ATOMIC_RELAXED);
+                __atomic_store_n(&pw_pipe_total, (int64_t)(LW.n - LW.from), __ATOMIC_RELAXED);   // a resumed warm's rest
                 up |= bf_time_up();
             }
         }
