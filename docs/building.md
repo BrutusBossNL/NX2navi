@@ -638,8 +638,8 @@ A change to how the holes in the allocator's blocks are counted or to which bloc
 (`runtime/vk_tex_compact.h`: `tcp_tally`, `tcp_stats`, `tcp_plan`) passes `python tests	ex_compact_check.py`, which
 builds the header alone: a block with one allocation that stays is never chosen, the block that takes the fewest moved
 bytes goes first, what moves fits the free bytes outside the chosen blocks, a plan under its smallest gain is no plan,
-and 400 random tables keep those rules. The part of `runtime/vk_texture.c` that builds the table is not built by it.
-No GPU, no game files.
+and 400 random tables keep those rules. The part of `runtime/vk_texture.c` that builds the table and moves the images
+(`NX2NAVI_TEX_COMPACT`) is not built by it. No GPU, no game files.
 
 A change to which frames FSR 3.1 frame generation is told are camera cuts (`runtime/vk_fg_reset.h`, `runtime/vk_fg.cpp`
 `generate` and `vk_fg_frame`) passes `python tests\fg_reset_check.py`, which builds the header alone and checks that each

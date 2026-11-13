@@ -774,6 +774,14 @@ typedef struct {
     uint64_t sparse_bytes, sparse_listed, emptiable_bytes, emptiable_move, emptiable_drop;
 } VkTexHoles;
 void vk_texture_holes(const VkBlockRow *other, int nother, VkTexHoles *h);
+// Texture compaction (NX2NAVI_TEX_COMPACT; vk_texture.c "the pass"): idle textures move out of sparsely used blocks
+// so that the blocks go back to the driver. vk_mem_census asks at each present whether the holes are due a look
+// and, when they are, hands over the VRAM mirrors' rows for the plan; the allocator's free callback reports each
+// device memory it gives back (vk_headroom.c on_free; any thread).
+int vk_texture_compact_on(void);
+int vk_texture_compact_due(void);
+void vk_texture_compact_plan(const VkBlockRow *other, int nother);
+void vk_texture_block_freed(uint64_t mem);
 void vk_texture_want_room(uint64_t bytes);          // a VRAM mirror that did not fit: idle textures make that much room
 int vk_texture_commit_low(void);                    // the system's commit was low at the last check (vk_texture.c)
 // vk_mem_vram's device-local use less the free space inside VMA's blocks (vk_memory.c), for the evictions

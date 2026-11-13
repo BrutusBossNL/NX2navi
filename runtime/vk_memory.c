@@ -966,6 +966,7 @@ static int dead_pending(void);
 static void vram_log(uint64_t frame);
 #define HOLES_PERIOD 3600   // frames between two "mem: holes" lines (holes_log)
 static void holes_log(uint64_t frame);
+static void compact_look(void);
 static void outside_watch(uint64_t frame);
 static void up_ts_log(uint64_t frame);
 
@@ -983,6 +984,7 @@ void vk_mem_census(uint64_t frame) {
     static uint64_t window_start;
     if ((rt_trace & RT_TRACE_PERF) && frame % 600 == 0) vram_log(frame), mirror_pool_log(frame);
     if (frame && frame % ((rt_trace & RT_TRACE_PERF) ? 600 : HOLES_PERIOD) == 0) holes_log(frame);
+    if (vk_texture_compact_due()) compact_look();   // NX2NAVI_TEX_COMPACT: 0 at once with the setting off
     if ((rt_trace & RT_TRACE_PERF) && frame % 60 == 0) outside_watch(frame), up_ts_log(frame), vk_gtl_log(frame, 60);
     if ((rt_trace & RT_TRACE_PERF) && !vk_mirror_on) dirty_frame(frame);
     if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
@@ -4624,6 +4626,18 @@ static VkBlockRow *mirror_rows(VkCtx *c, int *n) {
     }
     plat_mutex_unlock_shared(&pool_lock);
     return rows;
+}
+
+// NX2NAVI_TEX_COMPACT, when vk_texture_compact_due says the holes are due a look: the texture cache gets the mirrors'
+// rows, taken here because the pool lock is not to be taken under the texture lock, and plans a pass or not
+// (vk_texture.c vk_texture_compact_plan).
+static void compact_look(void) {
+    VkCtx *c = vk_ctx();
+    if (!c) return;
+    int n;
+    VkBlockRow *rows = mirror_rows(c, &n);
+    vk_texture_compact_plan(rows, n);
+    free(rows);
 }
 
 // Every HOLES_PERIOD frames (600 with NX2NAVI_TRACE=perf), in every run: how much of VMA's device-local blocks is

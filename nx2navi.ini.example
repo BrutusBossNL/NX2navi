@@ -328,6 +328,20 @@
 # which game memory gets no copy in video memory (memory = mirror), which costs far more frame time than a texture
 # uploaded again. 0: textures never give way for video memory.
 # tex_vram_pressure = 80
+# Texture compaction (experimental). Video memory is taken in blocks (vma_block_mb), and a block goes back to the
+# driver only once everything in it is freed: after a long session the blocks hold textures scattered between holes,
+# and the game holds a gigabyte or two of video memory it does not use. 1: textures no shader sampled for ten seconds
+# are copied on the GPU out of the emptiest blocks into the holes of fuller ones, a few per frame and only in frames
+# with time to spare, so those blocks go back. Nothing on screen moves and nothing is loaded again. The log's
+# "mem: holes" line says how much there is to gain, a "texture compaction: pass" line what each pass gave back.
+# 0, the default: off. Read at start.
+# tex_compact = 0
+# The free space inside the blocks, in MiB (64 to 65536), from which a compaction pass starts; one block's worth while
+# video memory is above tex_vram_pressure. Default: 256. Read at start.
+# tex_compact_min_mb = 256
+# The texture memory a compaction moves per frame at most, in MiB (1 to 32); a texture larger than this never moves.
+# Default: 8. Read at start.
+# tex_compact_frame_mb = 8
 # Low-end GPU mode (experimental; also in the settings menu's Game tab). For older graphics cards, and ones short of
 # video memory: 1 turns on the settings written for them and measured on a Radeon RX 580, for every key below that
 # this file does not set itself. Mesh shaders run as compute where the card has none (mesh_emulation), video memory

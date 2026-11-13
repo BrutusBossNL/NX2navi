@@ -253,6 +253,13 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   starts at, and uploads, views and sampler LOD clamps count from there. A texture a shader reads by texel position, or
   whose size it uses, is made whole (`gfx_shader.c` `reflect_exact`). `auto` picks by the device-local budget.
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.
+- Holes in video memory: the allocator takes device memory in blocks and gives a block back only when it is empty,
+  so a long session leaves textures scattered between holes the driver still counts. The log's `mem: holes` line
+  says how much that is and how much could come back (`vk_memory.c` `holes_log`). With `NX2NAVI_TEX_COMPACT=1`
+  (off by default) textures no shader sampled for ten seconds are copied on the GPU out of the emptiest blocks into
+  the holes of fuller ones, a few per frame and only in frames with time to spare; which blocks is decided from a
+  table of what lies in them (`vk_tex_compact.h`), and the old image of a moved texture stays until no descriptor
+  set and no submission can still name it (`vk_texture.c`, "the pass").
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
   `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
   (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.
