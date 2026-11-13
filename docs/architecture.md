@@ -186,7 +186,9 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   and mesh stages make one pre-rasterization library, no vertex input library is linked (a mesh pipeline has no such
   state), and the fragment shader and fragment output libraries are the vertex pipelines' where their keys allow (a
   mesh pipeline's fragment library differs where the mesh stage leaves an input unwritten, and on a device that
-  sets a shading rate per draw). With `gpl_mesh = 0`, and wherever the start's
+  sets a shading rate per draw). Their libraries need the mesh and task stage together, so they are made from the
+  pipeline records and not from the single prepared shaders: the preparation and every boot build those of the
+  listed and recorded mesh pipelines into the caches (`mesh_pre_note`). With `gpl_mesh = 0`, and wherever the start's
   log says so, a mesh pipeline has no libraries and is built whole, 0.2 to 1.1 s the first time. Compute pipelines
   are compiled outside the pipeline lock, and one compile serves every thread that needs it. The boot builds the
   pipeline of every compute shader play recorded or the shader preparation listed, but keeps only those of the shaders

@@ -5556,6 +5556,140 @@ void vk_pipeline_prewarm(void) {
     __atomic_store_n(&pw_phase, 5, __ATOMIC_RELEASE);
 }
 
+// ---- mesh pipelines' stage libraries ahead of their draws
+// The shader preparation and the boot build the stage libraries of single shaders (lb_library): one vertex or one
+// fragment shader is all such a library holds. A mesh pipeline's pre-rasterization library holds its mesh stage and
+// its task stage together, and its fragment shader library depends on what that mesh stage leaves unwritten (FsKey),
+// so these are taken from the pipeline records, which name all three shaders: every recorded mesh pipeline the boot
+// queues (prewarm_run) and every listed one the preparation builds (seed_pipelines) notes its two shader libraries
+// here, each key once. They are built once and destroyed, as the single shaders' libraries are, which leaves them in
+// the pipeline caches and the driver's own: a mesh pipeline of the same stages that a draw meets later (other
+// targets, another blend state or sample count, or a recorded one the boot has not come to) then finds its libraries
+// there and is linked in milliseconds, where it was compiled whole before.
+//  - preparation (mesh_pre_run, from seed_pipelines): on every core, before the pipeline cache is saved, so that
+//    file holds them too; they are as many as the list has mesh stage pairs, not the tens of thousands of single
+//    shaders' libraries that are kept out of it.
+//  - boot (mesh_pre_start, from lb_start): one thread beside the game at idle priority, behind the memory gate
+//    (gate_wait); NX2NAVI_LIB_PREBUILD=0 leaves it out with the rest of that prebuild.
+typedef struct {
+    VkPipeState s;
+    GKey k;
+    int kind;                          // LIB_PR or LIB_FS
+    uint64_t h;                        // key_hash of the key
+    uint32_t size;
+    union { PrKey pr; FsKey fs; } key;
+} MeshPre;
+static struct {
+    MeshPre *e;
+    uint32_t n, cap, n_pr;             // n_pr: the pre-rasterization libraries among them
+    volatile int64_t next;
+    volatile int32_t stop;
+    int boot;                          // the builder runs beside the game: idle priority, the memory gate
+    PlatThread *th;                    // the boot's builder
+    PlatMutex stat;
+    uint64_t built, have, fail;        // have: a draw had made the library by the time its turn came
+    double ms, max, t0;
+} MP = {.stat = PLAT_MUTEX_INIT};
+
+// Notes the two shader libraries of mesh pipeline s (key k), a pipeline with stage libraries (mesh_libs), for
+// mesh_pre_worker. Caller holds P.lock; no builder runs yet.
+static void mesh_pre_note(const VkPipeState *s, const GKey *k) {
+    ViKey v;
+    PrKey pk;
+    FsKey fk;
+    FoKey ok;
+    lib_keys(s, k, &v, &pk, &fk, &ok);
+    const void *key[2] = {&pk, &fk};
+    const uint32_t size[2] = {sizeof pk, sizeof fk};
+    for (int i = 0; i < 2; i++) {
+        int kind = i ? LIB_FS : LIB_PR;
+        uint64_t h = key_hash(key[i], size[i]);
+        uint32_t j = 0;
+        while (j < MP.n && !(MP.e[j].kind == kind && MP.e[j].h == h && !memcmp(&MP.e[j].key, key[i], size[i]))) j++;
+        if (j < MP.n) continue;
+        if (MP.n == MP.cap) {
+            uint32_t cap = MP.cap ? MP.cap * 2 : 64;
+            MeshPre *t = realloc(MP.e, cap * sizeof *t);
+            if (!t) return;
+            MP.e = t, MP.cap = cap;
+        }
+        MeshPre *e = &MP.e[MP.n++];
+        memset(e, 0, sizeof *e);
+        e->s = *s, e->k = *k, e->kind = kind, e->h = h, e->size = size[i];
+        memcpy(&e->key, key[i], size[i]);
+        MP.n_pr += kind == LIB_PR;
+    }
+}
+
+static void mesh_pre_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        int idle = MP.boot && !bf_waiting();   // as the boot's other builders: normal priority while the start waits
+        plat_thread_priority(idle ? PLAT_PRIO_IDLE : PLAT_PRIO_NORMAL);
+        int64_t i = plat_inc64(&MP.next) - 1;
+        if (i >= (int64_t)MP.n || MP.stop) break;
+        MeshPre *e = &MP.e[i];
+        double held = 0;
+        if (MP.boot && !gate_wait("mesh library prebuild", &MP.stop, &held)) {
+            char g[256];
+            if (!MP.stop)
+                rt_log("vk_pipeline: mesh library prebuild: ends here, at %lld of %u libraries: no commit headroom for "
+                       "another build (%s). The others are built when a draw first needs them", (long long)i, MP.n,
+                       gate_text(g, sizeof g));
+            break;
+        }
+        const char *why = NULL;
+        Bindings B = {0};
+        plat_thread_priority(PLAT_PRIO_NORMAL);   // P.lock is never held at idle priority: the replay takes it
+        plat_mutex_lock(&P.lock);
+        int have = lib_find(e->h, &e->key, e->size) != NULL;
+        Layout *l = have ? NULL : mesh_pair_layout(&e->s, &B, &why);
+        VkPipelineLayout lay = l ? half_layout(l, e->kind == LIB_FS) : VK_NULL_HANDLE;
+        plat_mutex_unlock(&P.lock);
+        if (idle) plat_thread_priority(PLAT_PRIO_IDLE);
+        VkPipeline pipe = VK_NULL_HANDLE;
+        double t0 = now_ms(), ms = 0;
+        if (lay) pipe = lib_create(e->kind, &e->s, &e->k, lay, &e->key);
+        if (pipe) {
+            ms = now_ms() - t0;
+            vkDestroyPipeline(P.device, pipe, NULL);
+            __atomic_fetch_add(&cache_merges, 1, __ATOMIC_RELAXED);   // autosave_once: no pipeline count tells of it
+        }
+        if (MP.boot) gate_leave(held);
+        plat_mutex_lock(&MP.stat);
+        if (have) MP.have++;
+        else if (!pipe) MP.fail++;
+        else MP.built++, MP.ms += ms, MP.max = ms > MP.max ? ms : MP.max;
+        plat_mutex_unlock(&MP.stat);
+    }
+    if (MP.boot)
+        rt_log("vk_pipeline: mesh library prebuild %s: of the %u shader libraries of the recorded mesh pipelines (%u of "
+               "task and mesh stages, %u fragment shader) %llu built into the caches (avg %.1f ms, longest %.0f ms; a "
+               "few milliseconds each when the caches held them), %llu made by a draw first, %llu failed; %.0f ms",
+               MP.stop ? "stopped" : "done", MP.n, MP.n_pr, MP.n - MP.n_pr, (unsigned long long)MP.built,
+               MP.built ? MP.ms / (double)MP.built : 0.0, MP.max, (unsigned long long)MP.have,
+               (unsigned long long)MP.fail, now_ms() - MP.t0);
+}
+
+// Boot: the noted libraries on one thread beside the game.
+static void mesh_pre_start(void) {
+    if (!MP.n || MP.th || MP.next) return;
+    MP.boot = 1, MP.t0 = now_ms();
+    MP.th = plat_thread_new(mesh_pre_worker, NULL, "mesh lib prebuild");
+}
+
+// Preparation: the noted libraries on up to `threads` threads; returns when all are built.
+static void mesh_pre_run(int threads) {
+    if (!MP.n) return;
+    PlatThread *t[16];
+    int n = 0;
+    MP.boot = 0, MP.t0 = now_ms();
+    for (int i = 0; i < threads && i < 16 && (uint32_t)i < MP.n; i++)
+        if ((t[n] = plat_thread_new(mesh_pre_worker, NULL, "mesh lib prebuild"))) n++;
+    if (!n) mesh_pre_worker(NULL);
+    for (int i = 0; i < n; i++) plat_thread_join(t[i]);
+}
+
 // NX2NAVI_PIPE_SEED_BOOT (auto, the default; 1; 0): whether the boot builds the pipelines of the shared list that this
 // install has never drawn (keys_open_seed), 1, or leaves them to their first draw, 0. Built at boot they are there
 // when a draw first needs them, which is what the list is for, and every one is a pipeline the driver holds for the
@@ -5682,6 +5816,8 @@ static void prewarm_run(void) {
         if (!is_mesh(&s)) {   // the state of the single shaders' libraries (lb_state): vertex pipelines decide it
             pr_hist[(k.clamp & 1) | (k.poly_mode & 3) << 1 | (k.minus_w & 1) << 3]++;
             fs_hist[k.samples >= 8 ? 3 : k.samples >= 4 ? 2 : k.samples >= 2 ? 1 : 0]++;
+        } else if (mesh_libs()) {   // a mesh pipeline's libraries are built with its own state (mesh_pre_start)
+            mesh_pre_note(&s, &k);
         }
         if (!at_boot && i >= K.own_n && !is_mesh(&s)) {   // of the shared list alone: made at its first draw (seed_boot)
             listed++;
@@ -7382,6 +7518,7 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     const char *te = cfg_get("NX2NAVI_LIB_PREBUILD_THREADS");   // no fixed default: 2 when unset (1 under 4 CPUs)
     const char *be = cfg_get("NX2NAVI_LIB_PREBUILD_BIG");       // SPIR-V words; LB_BIG_WORDS when unset, 0 no limit
     if (!A.on || !cfg_bool("NX2NAVI_LIB_PREBUILD")) return;
+    mesh_pre_start();             // the recorded mesh pipelines' libraries
     lb_state(pr_hist, fs_hist);   // the libraries' state, also for lw_start
     if (BF.on) BF.lw = 1;         // after the compute pipelines, with the start waiting (bf_wait)
     else lw_start();
@@ -7456,6 +7593,8 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
 
 static void lb_stop(void) {
     lw_stop();
+    plat_xchg32(&MP.stop, 1);
+    if (MP.th) plat_thread_join(MP.th), MP.th = NULL;
     plat_xchg32(&LB.stop, 1);
     for (int i = 0; i < LB.threads; i++)
         if (LB.th[i]) plat_thread_join(LB.th[i]), LB.th[i] = NULL;
@@ -7623,7 +7762,8 @@ static void lb_warm_prepared(const char *dir) {
 // (vk_caps_gpl: AMD's Windows driver for RDNA 2 and older) a vertex pipeline's outputs come from its own pair (no
 // independent layouts), so a listed one always is the one a draw asks for. A mesh pipeline, which has no stage
 // libraries, otherwise leaves its draws out of the picture for its whole compile (0.2 to 1.1 s each on a first visit
-// of a forest, 18 of them).
+// of a forest, 18 of them). Where mesh pipelines have stage libraries (mesh_libs) the listed ones are still built
+// whole, and the libraries of their stages are built after them (mesh_pre_run), for the mesh pipelines no list names.
 // A driver whose compiler crashes on one of these would crash at every preparation: seed-pipelines-running.txt marks
 // the step, and a run that finds the marker of a run that died skips the step for good on this folder (the pipelines
 // are then built at their first draw, as without a list) until the marker is deleted.
@@ -7715,6 +7855,7 @@ static int seed_pipelines(const char *dir) {
         }
         GKey k;
         gkey_fill(&s, &k);
+        if (is_mesh(&s) && mesh_libs()) mesh_pre_note(&s, &k);
         uint64_t hk = key_hash(&k, sizeof k);
         int q = 0;
         if (pipe_find(&k, sizeof k, hk)) known++;
@@ -7742,6 +7883,19 @@ static int seed_pipelines(const char *dir) {
     while (K.left) plat_cond_wait(&done_cv, &P.lock);   // those a pool worker took
     uint32_t built = K.built - built0, failed = K.failed - failed0;
     plat_mutex_unlock(&P.lock);
+    // The listed mesh pipelines' stage libraries, before the save and inside the marker: the file then holds them,
+    // and a driver that dies on one is met by the next preparation as one that died on a listed pipeline.
+    mesh_pre_run(cpus);
+    if (MP.n) {
+        char ml[320];
+        snprintf(ml, sizeof ml, "prepare-pipelines: %u stage libraries of the listed mesh pipelines (%u of task and mesh "
+                 "stages, %u fragment shader): %llu built (avg %.1f ms, longest %.0f ms), %llu failed; %.0f ms", MP.n,
+                 MP.n_pr, MP.n - MP.n_pr, (unsigned long long)MP.built, MP.built ? MP.ms / (double)MP.built : 0.0, MP.max,
+                 (unsigned long long)MP.fail, now_ms() - MP.t0);
+        printf("%s\n", ml);
+        fflush(stdout);
+        rt_log("vk_pipeline: %s", ml);
+    }
     int saved = cache_save(5000, 0) > 0;   // explicit preparation waits for a moment with no build running
     plat_file_delete(mark);
     char msg[640];
