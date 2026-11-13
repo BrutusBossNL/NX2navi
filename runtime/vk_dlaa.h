@@ -23,8 +23,13 @@ int vk_dlaa_fsr3(void);   // the setting is on and its upscaler is AMD FSR 3.1, 
 int vk_dlaa_needs_restart(void);   // the menu's upscaler cannot start in this run
 // Frame generation (vk_fg.cpp): the depth and motion vectors of the frame DLSS or FSR 3.1 last ran on, with its jitter
 // and whether its history reset; 1 once per evaluation (0: none since the last call). The images stay valid until the
-// next frame's scene draws over them, after this present.
+// next frame's scene draws over them, after this present. Without an upscaler, while frame generation runs, the same
+// of the last frame armed for it alone (vk_dlaa.c fg_only_frame): the scene's size, a jitter of 0.
 int vk_dlaa_fg_inputs(VkFfxImage *depth, VkFfxImage *mv, float *jx, float *jy, int *reset);
+// 1 while frame generation runs without an upscaler and the frame is armed for its inputs alone (vk_dlaa.c
+// fg_only_frame): the motion passes run as for the upscaler (vk_usnap.c, vk_exec_draw.c, vk_mvprev.c), nothing is
+// jittered. Read at each present.
+int vk_dlaa_fg_only(void);
 // ... their views, and this frame's camera for DLSS Frame Generation (vk_dlssg.c): matrices for row vectors (v * M, the
 // rows stored in order), as Streamline takes them; 0 without a camera that frame.
 // znear and zfar: the view distances the depth buffer holds as 0 and 1 (1 and 0 when inverted), from the frame's own
@@ -40,8 +45,8 @@ typedef struct {
 } VkDlaaCamera;
 int vk_dlaa_fg_views(VkImageView *depth, VkImageView *mv);
 // The picture without the HUD at the size of the game's picture, in *fmt: RGBA8 UNORM bytes like it (sRGB-encoded), or
-// RGBA16F linear with HDR on; made at each evaluation while vk_dlaa_hudless_wanted (frame generation sets it); 1 once per
-// evaluation.
+// RGBA16F linear with HDR on; made at each evaluation while vk_dlaa_hudless_wanted (frame generation sets it), from the
+// upscaler's picture or, without an upscaler, from the game's own scaled picture; 1 once per evaluation.
 extern int vk_dlaa_hudless_wanted;
 int vk_dlaa_fg_hudless(VkImage *img, VkImageView *view, uint32_t *w, uint32_t *h, VkFormat *fmt);
 int vk_dlaa_fg_camera(VkDlaaCamera *c);     // ... and its temporal upscaler is AMD FSR 3.1 (NX2NAVI_TAA = fsr3) instead of DLSS

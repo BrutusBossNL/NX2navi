@@ -38,7 +38,7 @@ typedef struct Arena {
     VkBuffer buf;
     VmaAllocation alloc;
     uint8_t *map;
-    uint8_t *cpu;    // with DLSS (vk_dlaa_available), the same bytes in host memory for the CPU's reads (vk_usnap_bytes):
+    uint8_t *cpu;    // with DLSS (vk_dlaa_available) or frame generation alone (vk_dlaa_fg_only), the same bytes in host memory for the CPU's reads (vk_usnap_bytes):
                      // map is often device memory through the BAR, written fast but read back at about a microsecond a
                      // cache line. Without DLSS nothing reads them back, and the bytes go into map in one copy.
     uint64_t size;
@@ -290,7 +290,7 @@ static void copy_down(void *arg, int lo, int hi) {
 // Hyrule Field, half a millisecond of the submitting thread's time on one thread.
 static void copy_regions(Arena *a, const Reg *reg, int nreg, uint64_t total, int par) {
     uint8_t *dst = a->map;
-    if (vk_dlaa_available()) {
+    if (vk_dlaa_available() || vk_dlaa_fg_only()) {   // the motion pass reads the camera (vk_dlaa.c mv_pass)
         if (!a->cpu && !(a->cpu = malloc(a->size))) rt_fatal("vk_usnap: out of memory");
         dst = a->cpu;
     }

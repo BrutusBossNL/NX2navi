@@ -350,6 +350,9 @@ typedef enum {
     UI_MENU_FRAMEGEN_MULT_UPTO,      // printf: "%d", the highest multiplier this GPU and driver allow
     UI_MENU_FRAMEGEN_MULT_OLD_DLL,   // nx2navi_dlssg.dll is older than multi frame generation
     UI_MENU_FRAMEGEN_UNAVAILABLE, UI_MENU_FRAMEGEN_OFF_FILES,
+    // frame generation with any Upscaling choice, an upscaler or none (vk_dlaa.c fg_only_frame); through NGX (every
+    // build but the Windows one) NVIDIA's needs DLSS upscaling on at the start, its note and description there
+    UI_MENU_FRAMEGEN_DESC_ANY, UI_MENU_FRAMEGEN_DESC_NGX, UI_MENU_FRAMEGEN_NOTE_NGX,
     // the settings of the low-end GPU mode (ui/menu.cpp rows_low_end), English only
     UI_MENU_LOWEND_INTRO, UI_MENU_LOWEND_RESTART, UI_MENU_LOWEND_NOT_FOR_CARD, UI_MENU_LOWEND_MEMORY, UI_MENU_LOWEND_RENDER, UI_MENU_LOWEND_BUILD,
     UI_MENU_LOWEND_DIAG,

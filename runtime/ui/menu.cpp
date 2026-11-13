@@ -1061,7 +1061,6 @@ static void row_upscaling(void) {
     const Entry e = list[nv];
     opt_apply("NX2NAVI_UPSCALER", e.kind == FSR1 ? "fsr" : "bilinear");
     opt_apply("NX2NAVI_DLAA", e.kind >= DLSS ? "1" : "0");
-    if (e.kind < DLSS) opt_apply("NX2NAVI_FRAMEGEN", "off");   // it needs DLSS's or FSR 3.1's motion vectors (row_framegen)
     // Native is scene_share = 1. Leaving it unsets the key (the game's own share, widescreen.c PLAIN_SHARE); a share of
     // the whole picture set by hand beside DLSS or FSR stays while one of their modes is chosen
     if (e.kind == NATIVE) opt_apply("NX2NAVI_SCENE_SHARE", "1");
@@ -1210,27 +1209,31 @@ static const char *fg4_label(void) {
     snprintf(s, sizeof s, *v ? "AMD FSR 4 library (%s)" : "AMD FSR 4 library", v);
     return s;
 }
-// It is the one in use: set (NX2NAVI_FSR4_FG) with FSR 4 as the upscaler, where it runs (vk_fg.cpp use4).
+// It is the one in use: set (NX2NAVI_FSR4_FG) with FSR 4 as the upscaler, where it runs (vk_fg.cpp use4). Without an
+// upscaler (dlaa = 0) the FSR 3.1 library's runs.
 static bool fg4_chosen(void) {
-    return cfg_bool("NX2NAVI_FSR4_FG") && vk_ffx_fsr4() && vk_fg4_available() && !vk_fg4_failed();
+    return cfg_bool("NX2NAVI_FSR4_FG") && cfg_bool("NX2NAVI_DLAA") && vk_ffx_fsr4() && vk_fg4_available() &&
+           !vk_fg4_failed();
 }
 
-// Frame generation (vk_fg.cpp, at once; NVIDIA's after a restart); it needs a temporal upscaler's motion vectors
+// Frame generation (vk_fg.cpp, at once; NVIDIA's after a restart), with any Upscaling choice: vk_dlaa.c makes its depth,
+// motion vectors and picture without the HUD with an upscaler or without one (fg_only_frame)
 static void row_framegen(void) {
-    // the generated frames are made from DLSS's or FSR 3.1's motion vectors: without one of them it would do nothing,
-    // and FSR 3.1 set where it cannot load (vk_ffx_available) is none
+    // FSR 3.1 set where it cannot load (vk_ffx_available) has no frame generation
     const bool dlss = dlss_offered(), fsr = vk_ffx_framegen_available();
-    const bool upscaled = cfg_bool("NX2NAVI_DLAA") && (strcmp(cfg_value("NX2NAVI_TAA"), "fsr3") || vk_ffx_available());
+    // Through NGX (every build but the Windows one) NVIDIA's needs NGX, which comes up only with DLSS upscaling on when
+    // the game starts (vk_ngxfg_wanted): before such a start it waits for a DLSS mode under Upscaling and a restart
+    const bool via_ngx = framegen_ngx() && dlss;
+    const bool dlss_set = cfg_bool("NX2NAVI_DLAA") && strcmp(cfg_value("NX2NAVI_TAA"), "fsr3");
     const char *v = cfg_value("NX2NAVI_FRAMEGEN");
     int cur = !strcmp(v, "fsr3") ? 1 : !strcmp(v, "dlss") ? 2 : 0;
-    // what the texts promise follows what runs here: DLSS's frame generation, AMD's, both or neither
-    const UiTextId desc = dlss ? (fsr ? UI_MENU_FRAMEGEN_DESC : UI_MENU_FRAMEGEN_DESC_DLSS)
-                               : (fsr ? UI_MENU_FRAMEGEN_DESC_FSR : UI_MENU_FRAMEGEN_DESC_NONE);
-    UiTextId note = dlss ? (fsr ? UI_MENU_FRAMEGEN_NOTE : UI_MENU_FRAMEGEN_NOTE_DLSS)
-                         : (fsr ? UI_MENU_FRAMEGEN_NOTE_FSR : UI_MENU_FRAMEGEN_NOTE);   // neither: the general note
+    // what the texts promise follows what runs here: frame generation with any choice, NGX's start rule, or none
+    const UiTextId desc = !dlss && !fsr ? UI_MENU_FRAMEGEN_DESC_NONE : via_ngx ? UI_MENU_FRAMEGEN_DESC_NGX
+                                                                            : UI_MENU_FRAMEGEN_DESC_ANY;
+    // UI_TEXT_COUNT: no note
+    UiTextId note = !dlss && !fsr ? UI_MENU_FRAMEGEN_NOTE : via_ngx ? UI_MENU_FRAMEGEN_NOTE_NGX : UI_TEXT_COUNT;
     if (!dlss && !fsr && cur == 0) opt_disable_next(UI_MENU_FRAMEGEN_NEEDS_NONE);
-    else if (!upscaled) opt_disable_next(dlss ? (fsr ? UI_MENU_FRAMEGEN_NEEDS : UI_MENU_FRAMEGEN_NEEDS_DLSS)
-                                              : (fsr ? UI_MENU_FRAMEGEN_NEEDS_FSR : UI_MENU_FRAMEGEN_NEEDS_NONE));
+    else if (via_ngx && !fsr && !vk_ngxfg_wanted() && !dlss_set) opt_disable_next(UI_MENU_FRAMEGEN_NEEDS_DLSS);
     // Off, AMD's where FSR 3.1 loads and NVIDIA DLSS (vk_dlssg.c, through Streamline and nx2navi_dlssg.dll) on NVIDIA GPUs,
     // now that Reflex paces it from the frame's start and generated frames are presented; elsewhere one stays listed
     // while it is set
@@ -1239,7 +1242,8 @@ static void row_framegen(void) {
     // upscaler to FSR 4 as well; both are NX2NAVI_FRAMEGEN = fsr3, told apart by NX2NAVI_FSR4_FG.
     enum { OFF, FSR3, FSR4LIB, DLSS };
     const bool four = cur == 1 && fg4_chosen();
-    const bool four_offered = fsr && vk_ffx4_available() && vk_fg4_available() && !vk_fg4_failed();
+    const bool four_offered = fsr && cfg_bool("NX2NAVI_DLAA") && vk_ffx4_available() && vk_fg4_available() &&
+                              !vk_fg4_failed();   // beside FSR 4 upscaling only: not offered without an upscaler
     const int now = cur == 2 ? DLSS : cur == 1 ? (four ? FSR4LIB : FSR3) : OFF;
     const char *all_names[] = {menu_text(UI_MENU_FRAMEGEN_OFF), "AMD FSR 3.1", fg4_label(), "NVIDIA DLSS"};
     int kinds[4];
@@ -1261,8 +1265,9 @@ static void row_framegen(void) {
     const int st = cur != 2 || restart ? DLSSG_RUNS : ngx ? (vk_ngxfg_max() ? DLSSG_RUNS : DLSSG_NO_FILES) : vk_dlssg_status();
     if (st == DLSSG_UNAVAILABLE) note = UI_MENU_FRAMEGEN_UNAVAILABLE;
     else if (st == DLSSG_NO_FILES) note = UI_MENU_FRAMEGEN_OFF_FILES;
-    // the note under AMD's names FSR 3.1 as what it needs; the FSR 4 library's runs beside FSR 4, so it has none
-    int nv = opt_choice_index("NX2NAVI_FRAMEGEN", UI_MENU_FRAMEGEN, names, n, at, 0, desc, four && !restart ? NULL : menu_text(note));
+    // the FSR 4 library's runs beside FSR 4 and has no note of its own
+    int nv = opt_choice_index("NX2NAVI_FRAMEGEN", UI_MENU_FRAMEGEN, names, n, at, 0, desc,
+                              (four && !restart) || note == UI_TEXT_COUNT ? NULL : menu_text(note));
     if (nv >= 0 && nv < n) {
         const int k = kinds[nv];
         opt_apply("NX2NAVI_FRAMEGEN", k == OFF ? "off" : k == DLSS ? "dlss" : "fsr3");
@@ -1273,8 +1278,8 @@ static void row_framegen(void) {
             opt_apply("NX2NAVI_FSR4_FG", "0");
         }
     }
-    else if (cur == 2 && upscaled && dlss && ngx) row_framegen_mult_ngx();
-    else if (cur == 2 && upscaled && dlss) row_framegen_mult(restart);
+    else if (cur == 2 && dlss && ngx) row_framegen_mult_ngx();   // nothing while NGX's frame generation cannot run
+    else if (cur == 2 && dlss) row_framegen_mult(restart);
 }
 
 // One Resolution row for the picture's height (NX2NAVI_GAME_RES, widescreen.c picture_height: 1080, the game's 1440 or

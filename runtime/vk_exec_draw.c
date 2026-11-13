@@ -5154,7 +5154,8 @@ static PlatMutex mo_lock = PLAT_MUTEX_INIT;
 static void mvobj_draw(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSize ib_off) {
     if (MO.failed || !ex->dc->B.st_valid) return;
     if (RT_V111) {
-        if (!vk_dlaa_available() || (!pose_enabled() && !skin_enabled())) return;
+        // the upscaler, or frame generation without one (vk_dlaa_fg_only), takes the motion
+        if (!(vk_dlaa_available() || vk_dlaa_fg_only()) || (!pose_enabled() && !skin_enabled())) return;
     } else if (!vk_mvprev_on()) return;
     static int timed = -1;
     if (timed < 0) timed = rt_knob("MVOBJ_TIMES", "0");   // NX2NAVI_MVOBJ_TIMES=1: the summary's times (the clock reads cost)
