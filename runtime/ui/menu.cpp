@@ -1449,9 +1449,7 @@ static void tab_game(float scale) {
     // Testing: experimental rows, then the debug menu where the game version has it
     opt_group_text("Testing");
     // vk_exec.c rw_init and tail_enabled read these at start: each row notes the restart and the bar's Restart does
-    // it. A row whose setting does nothing without another one (rw_init) is greyed out until that one is set. The two
-    // rows under the workers are switches: on writes the value measured best (4 groups at once, groups from 16 draws),
-    // and any other value set in nx2navi.ini shows as on and stays.
+    // it. A row whose setting does nothing without another one (rw_init) is greyed out until that one is set.
     // Automatic first, the default (vk_exec.c vk_exec_replay_workers_auto), named with the count it gives on this PC
     {
         static const char *const vals[] = {"auto", "0", "1", "2", "3", "4", "5", "6", "7", "8"};
@@ -1464,9 +1462,9 @@ static void tab_game(float scale) {
     const bool workers = (!strcmp(wset, "auto") ? vk_exec_replay_workers_auto(nullptr) : atoi(wset)) > 0,
                pipe = workers && cfg_int("NX2NAVI_REPLAY_PIPE") > 0;
     if (!workers) opt_disable_next(UI_MENU_NEEDS_WORKERS);
-    opt_toggle_value("NX2NAVI_REPLAY_PIPE", UI_MENU_REPLAY_PIPE, UI_MENU_REPLAY_PIPE_DESC, "4", "0");
+    opt_slider("NX2NAVI_REPLAY_PIPE", UI_MENU_REPLAY_PIPE, 0, 4, UI_MENU_REPLAY_PIPE_DESC, 1, "%.0f");
     if (!pipe) opt_disable_next(workers ? UI_MENU_NEEDS_PIPE : UI_MENU_NEEDS_WORKERS);
-    opt_toggle_value("NX2NAVI_REPLAY_SMALL", UI_MENU_REPLAY_SMALL, UI_MENU_REPLAY_SMALL_DESC, "16", "0");
+    opt_slider("NX2NAVI_REPLAY_SMALL", UI_MENU_REPLAY_SMALL, 0, 64, UI_MENU_REPLAY_SMALL_DESC, 4, "%.0f");
     opt_toggle("NX2NAVI_TAIL_EARLY", UI_MENU_TAIL_EARLY, UI_MENU_TAIL_EARLY_DESC);
     // The debug menu, a tool for testing with English text of its own: off unless switched on here
     if (dbg_supported()) {

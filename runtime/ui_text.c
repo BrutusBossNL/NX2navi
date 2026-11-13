@@ -513,10 +513,13 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                     "frames a second on an 8-core CPU. If your game crashes with this on, set it to 0.",
     [UI_MENU_REPLAY_PIPE] = "Helpers work ahead (experimental)",
     [UI_MENU_REPLAY_PIPE_DESC] = "The game carries on with the rest of the frame while the helper threads are still "
-                                 "busy, instead of waiting for them. A small gain: 1 to 2% more frames a second.",
+                                 "busy, instead of waiting for them. The number is how many batches of work the "
+                                 "helpers may have at once; 0 turns it off. A small gain: 4 gave 1 to 2% more frames a "
+                                 "second.",
     [UI_MENU_REPLAY_SMALL] = "Helpers take small jobs (experimental)",
     [UI_MENU_REPLAY_SMALL_DESC] = "Gives the helper threads the smaller batches of drawing work too, not only the large "
-                                  "ones. A small gain: about 2% more frames a second.",
+                                  "ones. The number is the smallest batch a helper takes, counted in draw calls; 0 "
+                                  "turns it off. A small gain: 16 gave about 2% more frames a second.",
     [UI_MENU_TAIL_EARLY] = "Start next frame early (experimental)",
     [UI_MENU_TAIL_EARLY_DESC] = "The game starts on its next frame while the graphics card is still finishing the "
                                 "current one. The biggest gain of these settings: 19 to 29% more frames a second with "
