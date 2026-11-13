@@ -126,6 +126,11 @@ struct GfxShader {
     GfxShaderIo in[32], out[32];
     uint32_t local[3];
     uint32_t mvprev_banks;                                 // .res.json "mvprev_banks" (patch 0015), 0 none
+    // VS: the matrix palette (reflect_palette): the bytes of one matrix (0: none), the uniform bank or storage buffer
+    // index it is read from, and the input Locations whose integers pick the matrices
+    uint8_t pal_stride, pal_storage;
+    int16_t pal_slot;
+    uint32_t pal_joints;
     uint32_t omap;                                         // FS: .res.json "frag_out_map", the colour components it writes
                                                            // (4 bits per target, the SPH omap); 0 unknown (older translations)
     uint8_t carried;                                       // 1 + the previous identity (C.prev) that translated it; 0 the
@@ -1354,6 +1359,129 @@ out:
     free(def), free(ptr_v), free(target), free(acv);
 }
 
+// The matrix palette of a skinned vertex shader, for the motion vectors of skinned characters (vk_skin_motion.inc).
+// The game's skinning reads a joint index from an integer vertex input, multiplies it by the size of one bone matrix
+// (48 bytes, three rows of four floats; 64 for a 4x4) and reads the matrix at that byte offset of a uniform block. The
+// translation keeps that shape, so the rule is:
+//   joint value   a value loaded from an Input variable of an integer type that has a Location, and what bit casts,
+//                 integer conversions, component extracts and stores to and loads from local variables make of it;
+//   matrix offset a joint value multiplied by the constant 48 or 64 (or shifted left by 6), and what integer adds,
+//                 subtracts, shifts right and bit masks make of it (the translator turns the byte offset into a vec4
+//                 index and a component), again through local variables;
+//   palette       the uniform or storage block one of whose access chains takes a matrix offset as an index.
+// Local variables are followed whatever the order of their stores and loads. A shader whose matrix offsets reach two
+// different blocks has no palette (none does). Counted over the 1,460 vertex shaders of the 6,152 pipelines a played
+// folder recorded (game 1.1.1): 254 are drawn with an unsigned integer attribute in their vertex layout, and the rule
+// finds a palette in 253 of them (the last reads its integer attribute as a float and indexes nothing with it) and in
+// none of the other 1,206. Every palette is a uniform block of 48-byte matrices, at c6 (180 shaders) or at c7 (73), so
+// the bank cannot be told from the list of banks a shader reads. 208 of the 253 layouts also carry weights (a
+// normalised attribute beside the indices); the other 45 bind each vertex to one joint and carry none.
+static void reflect_palette(GfxShader *s) {
+    enum { P_COMPOSITE_EXTRACT = 81, P_COPY_OBJECT = 83, P_LOAD = 61, P_STORE = 62, P_ACCESS_CHAIN = 65,
+           P_IN_BOUNDS_ACCESS_CHAIN = 66, P_UCONVERT = 113, P_SCONVERT = 114, P_BITCAST = 124, P_IADD = 128,
+           P_ISUB = 130, P_IMUL = 132, P_SHR = 194, P_SAR = 195, P_SHL = 196, P_OR = 197, P_AND = 199,
+           P_FUNCTION = 54, P_DEC_BINDING = 33, P_SC_UNIFORM = 2, P_SC_STORAGE = 12 };
+    const uint32_t *w = s->spirv;
+    uint64_t n = s->words, fn = 0;
+    s->pal_stride = 0, s->pal_slot = -1;
+    if (s->stage != GFX_STAGE_VS || n < 5) return;
+    int any = 0;   // most vertex shaders read no integer input and stop here
+    for (int l = 0; l < 32 && !any; l++) any = (s->in_mask >> l & 1) && s->in[l].type != GFX_TYPE_FLOAT;
+    if (!any) return;
+    uint32_t bound = w[3] < (1u << 20) ? w[3] : (1u << 20);
+    // per id: an integer type; a pointer type's target; an integer constant 6, 48 or 64, as its value + 1; a
+    // variable's Location + 1 and Binding + 1; a block variable; the Location + 1 a joint value came from; the matrix
+    // size of a matrix offset
+    uint8_t *isint = calloc(bound, 1), *con = calloc(bound, 1), *loc = calloc(bound, 1), *block = calloc(bound, 1);
+    uint8_t *joint = calloc(bound, 1), *scaled = calloc(bound, 1);
+    uint32_t *pointee = calloc(bound, sizeof *pointee), *bind = calloc(bound, sizeof *bind);
+    uint32_t found = 0, found_bind = 0, found_joints = 0;
+    int two = 0;
+    if (!isint || !con || !loc || !block || !joint || !scaled || !pointee || !bind) goto out;
+    #define PID(x) ((x) < bound)
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) goto out;
+        const uint32_t *a = w + i;
+        if (op == P_FUNCTION) {
+            fn = i;
+            break;
+        }
+        if (op == OP_DECORATE && len >= 4 && PID(a[1])) {
+            if (a[2] == DEC_LOCATION && a[3] < 32) loc[a[1]] = (uint8_t)(a[3] + 1);
+            else if (a[2] == P_DEC_BINDING) bind[a[1]] = a[3] + 1;
+        } else if (op == OP_TYPE_INT && len >= 4 && PID(a[1])) {
+            isint[a[1]] = 1;
+        } else if (op == OP_TYPE_VECTOR && len >= 4 && PID(a[1]) && PID(a[2])) {
+            isint[a[1]] = isint[a[2]];
+        } else if (op == OP_TYPE_POINTER && len >= 4 && PID(a[1])) {
+            pointee[a[1]] = a[3];
+        } else if (op == OP_CONSTANT && len == 4 && PID(a[1]) && PID(a[2]) && isint[a[1]] &&
+                   (a[3] == 6 || a[3] == 48 || a[3] == 64)) {
+            con[a[2]] = (uint8_t)(a[3] + 1);
+        } else if (op == OP_VARIABLE && len >= 4 && PID(a[1]) && PID(a[2])) {
+            uint32_t t = pointee[a[1]];
+            if (a[3] == SC_INPUT && loc[a[2]] && PID(t) && isint[t]) joint[a[2]] = loc[a[2]];
+            else if ((a[3] == P_SC_UNIFORM || a[3] == P_SC_STORAGE) && bind[a[2]] > 1) block[a[2]] = 1;   // Binding 0: the support buffer
+        }
+        i += len;
+    }
+    if (!fn) goto out;
+    #define PJOINT(to, from) do { if (!joint[to] && joint[from]) joint[to] = joint[from], changed = 1; } while (0)
+    #define PSCALED(to, from) \
+        do { if (!scaled[to] && scaled[from]) scaled[to] = scaled[from], joint[to] = joint[from], changed = 1; } while (0)
+    for (int pass = 0, changed = 1; pass < 4 && changed; pass++) {   // again while a pass learned something: a load may
+        changed = 0;                                                 // stand before the store it reads (a loop)
+        for (uint64_t i = fn; i < n;) {
+            uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+            if (!len || i + len > n) goto out;
+            const uint32_t *a = w + i;
+            if ((op == P_ACCESS_CHAIN || op == P_IN_BOUNDS_ACCESS_CHAIN) && len >= 4 && PID(a[2]) && PID(a[3])) {
+                PJOINT(a[2], a[3]);
+                for (uint32_t k = 4; block[a[3]] && k < len; k++) {
+                    if (!PID(a[k]) || !scaled[a[k]]) continue;
+                    if (found && found_bind != bind[a[3]]) two = 1;
+                    found = scaled[a[k]], found_bind = bind[a[3]];
+                    if (joint[a[k]]) found_joints |= 1u << (joint[a[k]] - 1);
+                }
+            } else if ((op == P_LOAD || op == P_BITCAST || op == P_UCONVERT || op == P_SCONVERT || op == P_COPY_OBJECT ||
+                        op == P_COMPOSITE_EXTRACT) && len >= 4 && PID(a[2]) && PID(a[3])) {
+                PJOINT(a[2], a[3]);
+                PSCALED(a[2], a[3]);
+            } else if (op == P_STORE && len >= 3 && PID(a[1]) && PID(a[2]) && !block[a[1]]) {
+                PJOINT(a[1], a[2]);
+                PSCALED(a[1], a[2]);
+            } else if (op == P_IMUL && len >= 5 && PID(a[2]) && PID(a[3]) && PID(a[4])) {
+                for (int k = 0; k < 2; k++) {
+                    uint32_t x = a[3 + k], c = a[4 - k];
+                    if (!scaled[a[2]] && joint[x] && !scaled[x] && (con[c] == 49 || con[c] == 65))
+                        scaled[a[2]] = (uint8_t)(con[c] - 1), joint[a[2]] = joint[x], changed = 1;
+                }
+            } else if (op == P_SHL && len >= 5 && PID(a[2]) && PID(a[3]) && PID(a[4])) {
+                if (!scaled[a[2]] && joint[a[3]] && !scaled[a[3]] && con[a[4]] == 7)
+                    scaled[a[2]] = 64, joint[a[2]] = joint[a[3]], changed = 1;
+            } else if ((op == P_IADD || op == P_ISUB || op == P_SHR || op == P_SAR || op == P_AND || op == P_OR) &&
+                       len >= 5 && PID(a[2]) && PID(a[3]) && PID(a[4])) {
+                PSCALED(a[2], a[3]);
+                PSCALED(a[2], a[4]);
+            }
+            i += len;
+        }
+    }
+    #undef PJOINT
+    #undef PSCALED
+    #undef PID
+    if (!found || two || !found_joints) goto out;
+    for (int kind = GFX_RES_UBO; kind <= GFX_RES_SSBO; kind++)
+        for (int i = 0; i < s->nres[kind]; i++)
+            if ((uint32_t)s->res[kind][i].binding + 1 == found_bind && s->res[kind][i].slot >= 0) {
+                s->pal_stride = (uint8_t)found, s->pal_storage = kind == GFX_RES_SSBO;
+                s->pal_slot = s->res[kind][i].slot, s->pal_joints = found_joints;
+            }
+out:
+    free(isint), free(con), free(loc), free(block), free(joint), free(scaled), free(pointee), free(bind);
+}
+
 static void reflect_stage(GfxShader *s) {
     const char *js = s->reflection;
     char stage[8];
@@ -1375,6 +1503,7 @@ static void reflect(GfxShader *s) {
     }
     reflect_spirv(s);
     reflect_exact(s);
+    reflect_palette(s);
     patch_txd_transpose(s);
     patch_vec_index(s);
 }
@@ -2653,6 +2782,12 @@ uint32_t gfx_shader_inputs(const GfxShader *s, GfxShaderIo io[32]) {
 }
 
 uint32_t gfx_shader_mvprev_banks(const GfxShader *s) { return s->mvprev_banks; }
+
+int gfx_shader_palette(const GfxShader *s, int *slot, int *storage, uint32_t *joints) {
+    if (!s->pal_stride) return 0;
+    *slot = s->pal_slot, *storage = s->pal_storage, *joints = s->pal_joints;
+    return s->pal_stride;
+}
 
 uint32_t gfx_shader_omap(const GfxShader *s) { return s->omap; }
 

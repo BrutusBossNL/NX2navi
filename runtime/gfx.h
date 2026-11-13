@@ -142,6 +142,10 @@ uint32_t gfx_shader_inputs(const GfxShader *s, GfxShaderIo io[32]);    // Input 
 uint32_t gfx_shader_outputs(const GfxShader *s, GfxShaderIo io[32]);
 uint32_t gfx_shader_omap(const GfxShader *s);   // FS: colour components it writes, 4 bits per target (SPH omap); 0 unknown
 uint32_t gfx_shader_mvprev_banks(const GfxShader *s);   // a last-frame variant: the banks (bit n: cn) its position reads   // Output Locations (VS varyings, FS colour targets)
+// VS: the matrix palette its skinning reads (gfx_shader.c reflect_palette, which states the rule). 0: none. Else the
+// bytes of one bone matrix (48 or 64), *slot the uniform bank c[slot] it is read from, or with *storage 1 the storage
+// buffer index, and *joints the input Locations whose integer values pick the matrices.
+int gfx_shader_palette(const GfxShader *s, int *slot, int *storage, uint32_t *joints);
 void gfx_shader_local_size(const GfxShader *s, uint32_t local[3]);     // CS: the LocalSize execution mode; 1, 1, 1 otherwise
 
 // ---- back end (gfx_null.c, vk_*.c). Called by the NVN front end (nvn_api_*.c, nvn_ext.c) on guest threads.
