@@ -188,7 +188,8 @@ void vk_pass_marks_format(const char *source, uint32_t started, uint32_t finishe
 void vk_pass_marks_report(void);    // vk_device.c device_fault_report: the AMD words and the NVIDIA checkpoints, formatted
 // Draw marks (vk_crumbs.c, NX2NAVI_DRAW_CRUMBS=1 with VK_AMD_buffer_marker; off by default): a mark where the shaders
 // or the pipeline state change inside pass m, before the draw with index draw in that pass, so a lost device's report
-// names the shaders of the draws the GPU had not finished. Replay thread only; nothing while vk_draw_marks_on is 0.
+// names the shaders of the draws the GPU had not finished. From any thread that records draws (the replay and its
+// workers): the mark takes its number atomically. Nothing while vk_draw_marks_on is 0.
 extern int vk_draw_marks_on;
 void vk_draw_mark(VkCommandBuffer cb, const VkPassMark *m, const GfxShader *vs, const GfxShader *fs, uint32_t draw);
 
