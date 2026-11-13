@@ -2103,6 +2103,11 @@ static void rw_init(void) {
     RW.pipe = RW.n <= 0 || pipe <= 0 ? 0 : pipe > LIVE_GROUPS ? LIVE_GROUPS : pipe;
     if (RW.pipe) RW.help_dc = vk_exec_draw_ctx_new();
     RW.small = RW.pipe ? cfg_int("NX2NAVI_REPLAY_SMALL") : 0;
+    if (RW.small >= 2 * CHUNK_DRAWS) {   // a group that large is cut into chunks (group_start): no group would match
+        rt_log("vk: NX2NAVI_REPLAY_SMALL = %d: groups of %d draws or more are shared out anyway, so %d is used (0..%d)",
+               RW.small, 2 * CHUNK_DRAWS, 2 * CHUNK_DRAWS - 1, 2 * CHUNK_DRAWS - 1);
+        RW.small = 2 * CHUNK_DRAWS - 1;
+    }
     if (RW.small > 0)
         rt_log("vk: a group of %d draws or more goes whole to one replay worker (NX2NAVI_REPLAY_SMALL)", RW.small);
     else RW.small = 0;

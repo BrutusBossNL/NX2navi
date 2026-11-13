@@ -1505,7 +1505,7 @@ static void tab_game(float scale) {
     if (!workers) opt_disable_next(UI_MENU_NEEDS_WORKERS);
     opt_slider("NX2NAVI_REPLAY_PIPE", UI_MENU_REPLAY_PIPE, 0, 4, UI_MENU_REPLAY_PIPE_DESC, 1, "%.0f");
     if (!pipe) opt_disable_next(workers ? UI_MENU_NEEDS_PIPE : UI_MENU_NEEDS_WORKERS);
-    opt_slider("NX2NAVI_REPLAY_SMALL", UI_MENU_REPLAY_SMALL, 0, 64, UI_MENU_REPLAY_SMALL_DESC, 4, "%.0f");
+    opt_slider("NX2NAVI_REPLAY_SMALL", UI_MENU_REPLAY_SMALL, 0, 60, UI_MENU_REPLAY_SMALL_DESC, 4, "%.0f");
     opt_toggle("NX2NAVI_TAIL_EARLY", UI_MENU_TAIL_EARLY, UI_MENU_TAIL_EARLY_DESC);
     // The debug menu, a tool for testing with English text of its own: off unless switched on here
     if (dbg_supported()) {
