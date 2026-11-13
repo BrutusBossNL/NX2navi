@@ -206,30 +206,115 @@ folder. The folder holds code and data derived from your game: for your own mach
 
 ### Profile-guided build
 
-`build_game.py --pgo <file>.profdata` compiles the generated code at -O2 with an execution profile, and the runtime
-with it too: hot paths laid out straight, hot calls inlined, code that never ran compiled for size. On 1.4.3 the fight
-bench ran 12-15% faster per frame and a fight outside the training about 6%. The installer builds with
-`data/pgo-<ver>.profdata` of the release when the update has one, else at -O1.
+A build with an execution profile compiles the lifted code at -O2 with the counts of a play session, and the runtime
+with them too: hot paths laid out straight, hot calls inlined, functions that never ran compiled for size. On 1.4.3
+the fight bench ran 12-15% faster per frame and a fight outside the training about 6%. Game 1.1.1 has no profile yet
+and no measurement: "Training a profile for 1.1.1" below is the session that makes both.
 
-A profile only fits the generated C it was trained on: functions are matched by name and control-flow hash, so a
-function whose C changes loses its counts without a warning. Retrain after a lifter or generator change, from a clean
-`recomp/`. The instrumented build needs llvm-mingw, as MSYS2's clang has no profile runtime:
+Game 1.1.1 is built by `tools/make_game.py`, on the player's PC through the launcher. It compiles with
+`data\pgo-v111.profdata` of its kit (`app\<version>\data\` of a launcher release, which `make_launcher.py --pgo
+<file>` puts there and builds the prebuilt runtime with; `build\pgo\` in a source checkout) and says so in the
+compile step's log. The profile is left out, and the build is the one a kit without a profile makes (the lifted code
+at -O1), when:
 
-```powershell
-$llvm = "toolchain\llvm-mingw-<date>\llvm-mingw-<date>-ucrt-x86_64"
-.venv\Scripts\python tools\build_game.py --version v143 --out build\v143-pgogen --toolchain $llvm --pgo gen
-```
+- the kit has no profile, or `NX2NAVI_PGO=off` is in the environment (`make_game.py --pgo off`);
+- its record (`pgo-v111.json`) is missing or names another `recomp/` than the kit's (`make_game.py` `pgo_record`).
+  Functions are matched by name and control-flow hash, so a function whose C changed loses its counts without a
+  warning; the record holds `recomp/` by content (the lifter's `.py` files and `patches-v111.txt`), and any change
+  there means a new training;
+- the compiler cannot read the file: one trial compile at the start of the compile step, by each compiler that will
+  read it (`pgo_trial`). The log then names what the compiler said.
 
-Play `build\v143-pgogen\nx2navi.exe` through varied scenes (fights, towns, riding, building, underground, menus) for 20-30
-minutes; it is slower than a normal build. It writes `build\v143-pgogen\pgo\*.profraw` every minute and at exit.
-Scripted runs from saves (`tools/run_game.py`) add to the same file. Then:
+A profile is written by the `llvm-profdata` of one LLVM release and read by the clang of the build tools, which a
+release pins in `toolchain.lock.json` (clang 23.1.5 in 0.9.2). The same release or a newer clang reads it; an older
+one than the file's format refuses it with an error in every compile, which is what the trial compile is for. Train
+with the compiler the release pins: then the instrumented game, the merge and the players' build are one LLVM release.
 
-```powershell
-.venv\Scripts\python tools\pgo.py merge build\v143-pgogen --version v143
-```
+An instrumented build links the compiler's profile runtime, which MSYS2 packs apart from clang and neither
+`C:\msys64` (after the packages above) nor the launcher's build tools hold: the package
+`mingw-w64-ucrt-x86_64-compiler-rt` in the version of the clang it goes with, unpacked into the `msys64` folder of
+those build tools (`pacman -S` for `C:\msys64`; for the launcher's `toolchain\msys64`, the package file from the
+MSYS2 repository unpacked there). `make_game.py` links a test program first and names the package when it is not
+there (`pgo_gen_check`). The merge needs `llvm-profdata` of the same LLVM release: MSYS2's
+`mingw-w64-ucrt-x86_64-llvm-tools`, or the `bin\` of an LLVM installation of that release.
 
-writes `build\pgo\pgo-v143.profdata` and its record (`.json`: the `recomp/` tree it fits). `make_release.py` ships every
-profile of `build\pgo` in `data\` and warns when a record names another `recomp/` tree than the one released.
+#### Training a profile for 1.1.1
+
+`<game>` is a game folder `make_game.py` built (the launcher's `game\`, or one built from a checkout), `<ucrt64>` the
+UCRT64 folder of the build tools with the profile runtime, `python` a Python with numpy and lz4 (`.venv`). A
+checkout also needs the shader translator in `build\xlate` (step 4 of "Build"). Run every step from one commit with
+a clean `recomp/`.
+
+1. Measure the build without a profile (step 6) while the game folder still holds it.
+2. Build the instrumented game into the same folder. In a folder this checkout built only the compile step runs: the
+   lifted code at -O2, every runtime file (the prebuilt runtime counts nothing), and the link.
+
+   ```powershell
+   python tools\make_game.py --rebuild --out <game> --msys <ucrt64> --pgo gen
+   ```
+
+   From the launcher instead: start `NX2navi.exe` with `NX2NAVI_PGO=gen` in its environment and choose Rebuild the
+   Game; the launcher hands the variable on to its build.
+3. Delete `<game>\pgo\*.profraw` left from an earlier instrumented build, then play: start `<game>\ocarina.exe` (or
+   Play in the launcher) and play for 20 to 30 minutes with the settings players have by default. Cover the title
+   screen and the file select, Kokiri Forest, Hyrule Field on foot and on horseback, a town, a dungeon with fights and
+   a boss, the menus and the map, a cutscene, a save and several area changes. What is not played counts as never
+   run and is compiled for size. The game is slower than a normal build. Several sessions add up.
+4. The game adds its counts to `<game>\pgo\default_<id>.profraw` every minute and when it ends
+   (`runtime/platform/win32.c` `pgo_flush_thread`, `plat_exit`), so a crash loses at most a minute; look for the
+   file after the first minute of play. `<game>\pgo\training.json` names the `recomp/` and the compiler the game was
+   built from. The game's own runs inside a build (the shader preparation) count into
+   `<game>\build-cache\pgo-build\` and are not merged.
+5. Merge, with the `llvm-profdata` of the LLVM release that built the game:
+
+   ```powershell
+   python tools\pgo.py merge <game> --version v111 --toolchain <folder with bin\llvm-profdata.exe>
+   ```
+
+   This writes `build\pgo\pgo-v111.profdata` and its record `pgo-v111.json`, and stops when the checkout's
+   `recomp/` is not the one the game was built from. Then build with it; the log must say `built with the execution
+   profile pgo-v111.profdata`, or it says why not:
+
+   ```powershell
+   python tools\make_game.py --rebuild --out <game> --msys <ucrt64>
+   ```
+
+6. Compare the two builds with the runtime's own profiler (`runtime/prof.h`, `runtime/prof_win.c`), in the same
+   place from the same save, the camera left alone, with the same settings. In `<game>\nx2navi.ini` (or as
+   `NX2NAVI_TRACE`, `NX2NAVI_PROFILE` and `NX2NAVI_PROFILE_FRAMES` in the environment):
+
+   ```ini
+   trace = perf
+   profile = <game>\logs\before.prof
+   profile_frames = 7200-10800
+   ```
+
+   `profile` (`NX2NAVI_PROFILE`) samples every thread each millisecond; `profile_frames` limits that to the presented
+   frames 7200 to 10800, the third minute at 60 frames a second, and the profile is written when the window ends, so
+   be in place before it starts. Use `after.prof` for the second build. Then, for each, before the next build
+   replaces `ocarina.map` (the report names the functions from the map of the build that was sampled):
+
+   ```powershell
+   python tools\prof_report.py <game>\logs\before.prof <game>\build-cache\ocarina.map
+   python tools\perf_summary.py <game>\logs\nx2navi.log 7200 10800
+   ```
+
+   At the default 60 frames a second both builds draw the same frames, so the sample counts of `guest (f_*)` (the
+   lifted code) and `runtime host (exe)` in the report are processor time for the same work: the profile's gain is
+   how far they fall. For the frame time itself set `fps_limit = unlimited` and compare the `interval avg` of the
+   `perf:` lines in a place the processor bounds, such as a town at a low `render_scale`. Measure a place that was
+   in the training and one that was not.
+
+The profile and the raw counts are derived from the game's code: they stay under `build\` and in the game folder,
+`tools/check_content.py` refuses them in a commit, and a release carries the profile only as `make_launcher.py --pgo`
+puts it there. `python tests\pgo_build_test.py` checks which flags a build takes for a kit with and without a
+profile, for a record of another tree and for a profile the compiler refuses, with a stand-in for the compiler.
+
+The other game versions build with `tools/build_game.py`: `--pgo gen` with an llvm-mingw toolchain makes the
+instrumented `nx2navi.exe`, which writes `<out>\pgo\*.profraw`; `tools\pgo.py merge <out> --version <ver>` merges
+them, and `--pgo build\pgo\pgo-<ver>.profdata` compiles with the result. `make_release.py` ships every profile of
+`build\pgo` in `data\`, where the installer's build takes the one of its update, and warns when a record names
+another `recomp/` tree than the one released.
 
 ## Linux (in progress)
 

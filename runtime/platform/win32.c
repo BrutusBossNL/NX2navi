@@ -1174,8 +1174,9 @@ void plat_aligned_free(void *p) { _aligned_free(p); }
 // ---- process
 
 #ifdef NX2NAVI_PGO_GEN
-// compiler-rt's profile runtime (an instrumented build, tools/build_game.py --pgo gen). It writes its counters from an
-// atexit handler, which ExitProcess skips; __llvm_profile_dump writes them once and makes later writes no-ops.
+// compiler-rt's profile runtime (an instrumented build: --pgo gen of tools/make_game.py or tools/build_game.py). It
+// writes its counters from an atexit handler, which ExitProcess skips; __llvm_profile_dump writes them once and makes
+// later writes no-ops.
 int __llvm_profile_dump(void);
 int __llvm_profile_write_file(void);
 void __llvm_profile_reset_counters(void);
