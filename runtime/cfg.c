@@ -288,7 +288,8 @@ static const CfgMeta metas[] = {
     {"COOP_ACCEPT", "ask", NULL, LIVE},
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
-    {"REPLAY_WORKERS", "auto", "auto|0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16", RESTART},   // vk_exec.c rw_init, vk_exec_replay_workers_auto {"REPLAY_PIPE", "0", "0..4", RESTART},
+    {"REPLAY_PIPE", "0", "0..4", RESTART},
+    {"REPLAY_WORKERS", "auto", "auto|0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16", RESTART},   // vk_exec.c rw_init, vk_exec_replay_workers_auto
     {"TAIL_EARLY", "0", "0|1", RESTART},   // vk_exec.c "the early tail"
     {"REPLAY_SMALL", "0", "0..1024", RESTART},   // vk_exec.c group_start
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
