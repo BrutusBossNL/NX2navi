@@ -72,11 +72,14 @@ static uint32_t oneshot_wait_ms(void) {
     return (uint32_t)ms;
 }
 #define ONESHOT_WAIT_MS oneshot_wait_ms()
-// A mesh pipeline has no stage libraries and so no fast link: the wait is for its whole build, a few milliseconds
-// when the pipeline cache holds it and 200 ms or more when it does not. A longer wait only finds out which, and one
-// that has been building for longer than this is a compile: the draws that meet it in the frames after wait for
-// nothing (oneshot_ms). Before that rule a first visit waited 8 to 13 ms for each of 17 mesh draws over nine frames,
-// up to four in one frame, and every one of them was skipped at the end.
+// What a mesh draw waits for is a few milliseconds when the caches hold it and 200 ms or more when they do not: the
+// whole build of a mesh pipeline without stage libraries, which has no fast link, or with them
+// (vk_pipeline_mesh_libs) the library of its task and mesh stages, which is most of that build. A longer wait only
+// finds out which, and one that has been building for longer than this is a compile: the draws that meet it in the
+// frames after wait for nothing (oneshot_ms). Before that rule a first visit waited 8 to 13 ms for each of 17 mesh
+// draws over nine frames, up to four in one frame, and every one of them was skipped at the end.
+// The wait for a fast link (link_budget) needs the rule only without stage libraries (mesh_whole): with them a mesh
+// draw waits there as a vertex draw does, LINK_DRAW_MS from its pipeline's first miss and nothing after.
 #define MESH_WAIT_MS 8u
 static int oneshot_budget_on(void) {
     static int on = -1;
@@ -4177,6 +4180,10 @@ static void pool_charge(uint64_t *pool, uint64_t t0) {
     *pool = spent < *pool ? *pool - spent : 0;
 }
 
+// 1 for a draw whose pipeline is a mesh pipeline without stage libraries, which gets no fast link (MESH_WAIT_MS).
+// mesh: the draw binds a mesh pipeline.
+static int mesh_whole(int mesh) { return mesh && !vk_pipeline_mesh_libs(); }
+
 // What a one-shot draw with the state s may wait for its pipeline from pool.
 static uint32_t oneshot_ms(const uint64_t *pool, int mesh, const VkPipeState *s) {
     uint32_t ms = (uint32_t)(*pool / 1000000);
@@ -4568,9 +4575,10 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
                 uint32_t left = building >= LINK_DRAW_MS ? 0 : LINK_DRAW_MS - (uint32_t)building;
                 if (wait_ms > left) wait_ms = left;
             }
-            // A mesh pipeline that is known to be compiling gets no fast link, so the few milliseconds a draw waits
-            // for one are lost in every frame that meets it until the compile ends, 0.2 to 1.1 s later (MESH_WAIT_MS).
-            if (wait_ms && linking && mesh && !fb && building > MESH_WAIT_MS) wait_ms = 0;
+            // A mesh pipeline without stage libraries that is known to be compiling gets no fast link, so the few
+            // milliseconds a draw waits for one are lost in every frame that meets it until the compile ends, 0.2 to
+            // 1.1 s later (MESH_WAIT_MS).
+            if (wait_ms && linking && building > MESH_WAIT_MS && mesh_whole(mesh && !fb)) wait_ms = 0;
             if (wait_ms) p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
         }
         if (t0 && budget) {
@@ -4683,26 +4691,31 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
 // copy of the replay state. A draw looks its shaders up as prepare_draw_ex will (one not in memory is queued for its
 // disk read or translation by that lookup) and names its state to vk_pipeline_hint. The last draw looked up is kept:
 // one with the same program, texture binds and state repeats it, as most draws of a pass do.
+// A mesh draw is looked up with its mesh and task stages where its pipeline will be a mesh pipeline with stage
+// libraries (vk_pipeline_mesh_libs; never with the mesh fallback, which draws through vertex pipelines of its own).
 uint64_t vk_exec_ahead_draws, vk_exec_ahead_lookups;
 static struct { int valid; const prog_t *prog; uint64_t serial; uint32_t tex_serial; VkPipeState pipe; } AHL;
 
 void vk_exec_ahead_begin(void) { AHL.valid = 0; }
 
-static void ahead_draw(VkExec *sx) {
+static void ahead_draw(VkExec *sx, int mesh) {
     vk_exec_ahead_draws++;
-    if (!sx->prog) return;
+    if (!sx->prog || (mesh && (!vk_pipeline_mesh_libs() || vk_ctx()->mesh_fallback))) return;
     if (AHL.valid && AHL.prog == sx->prog && AHL.serial == sx->prog->serial && AHL.tex_serial == sx->tex_serial &&
         !memcmp(&AHL.pipe, &sx->pipe, sizeof AHL.pipe))
         return;
     AHL.valid = 1, AHL.prog = sx->prog, AHL.serial = sx->prog->serial, AHL.tex_serial = sx->tex_serial, AHL.pipe = sx->pipe;
     vk_exec_ahead_lookups++;
-    int has_vs, has_fs, vs_wait = 0, fs_wait = 0;
-    const GfxShader *vs = shader_for(sx, NVN_STAGE_VS, &has_vs, &vs_wait, 0);
-    if (!has_vs) return;   // a mesh program, or none: no libraries
+    int has_vs, has_fs, has_ts = 0, vs_wait = 0, fs_wait = 0, ts_wait = 0;
+    const GfxShader *vs = shader_for(sx, mesh ? NVN_STAGE_MESH : NVN_STAGE_VS, &has_vs, &vs_wait, 0), *ts = NULL;
+    if (!has_vs) return;   // a program without the stage this draw starts from: no libraries
+    if (mesh) ts = shader_for(sx, NVN_STAGE_TASK, &has_ts, &ts_wait, 0);
     const GfxShader *fs = shader_for(sx, NVN_STAGE_FS, &has_fs, &fs_wait, 0);
-    if (!vs || vs_wait || fs_wait || (has_fs && !fs) || shader_skipped(vs) || shader_skipped(fs)) return;
+    if (!vs || vs_wait || fs_wait || ts_wait || (has_fs && !fs) || (has_ts && !ts) || shader_skipped(vs) ||
+        shader_skipped(fs))
+        return;
     VkPipeState s = sx->pipe;
-    s.vs = vs, s.fs = fs, s.ts = NULL;
+    s.vs = vs, s.fs = fs, s.ts = ts;
     s.feedback = 0;
     s.prim = NVN_DRAW_PRIMITIVE_TRIANGLES;
     s.depth_minus_w = (uint8_t)(nvn_depth_minus_w() != 0);
@@ -4758,7 +4771,8 @@ void vk_exec_ahead_op(VkExec *sx, uint32_t op, const void *payload) {
         sx->tex_serial++;
         break;
     }
-    case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND: ahead_draw(sx); break;
+    case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND: ahead_draw(sx, 0); break;
+    case OP_DRAW_MESH: case OP_DRAW_MESH_IND: ahead_draw(sx, 1); break;
     default: break;
     }
 }

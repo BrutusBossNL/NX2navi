@@ -1543,9 +1543,10 @@ static void evo_resume(VkExec *ex) {
 // a shader not in memory is queued for its disk read or translation by the lookup itself. The draws then find their
 // libraries built, or building on several workers at once.
 // What the scan does not follow: the op stream past a wait for another queue's signal (what follows may be held), a
-// change of the texture pool, mesh draws (their pipelines have no libraries), and whatever would take it past
-// AHEAD_NS. Render targets are read from their descriptors (format, view format, sample count), which is what the
-// replay resolves them to unless a target is left out; a guess that misses costs two libraries at most.
+// change of the texture pool, mesh draws where their pipelines have no stage libraries (vk_pipeline_mesh_libs), and
+// whatever would take it past AHEAD_NS. Render targets are read from their descriptors (format, view format, sample
+// count), which is what the replay resolves them to unless a target is left out; a guess that misses costs two
+// libraries at most.
 #define AHEAD_NS 3000000ull
 #define AHEAD_OPS 400000u
 static struct {
@@ -1621,7 +1622,7 @@ void vk_exec_ahead(VkExec *ex) {
         case OP_DEPTH_CLAMP: sx.pipe.depth_clamp = ((const p_flag *)a)->value != 0; break;
         case OP_RASTER_DISCARD: sx.pipe.raster_discard = ((const p_flag *)a)->value != 0; break;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_TEX: case OP_BIND_IMG:
-        case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND:
+        case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND: case OP_DRAW_MESH: case OP_DRAW_MESH_IND:
             vk_exec_ahead_op(&sx, h->op, a);
             break;
         default: break;
