@@ -14,8 +14,8 @@ what you saw; nothing else is needed. Press it as often as you like: each press 
 the one before is still being written is skipped.
 
 The captures are in the game folder under `logs\captures`, one folder each, named by number and time
-(`003-20261113-141502`). *Menu > Open log folder* shows `logs`. A capture is between one and a few megabytes; delete
-old ones whenever you like. Nothing leaves your PC: a capture is files on your disk.
+(`003-20261113-141502`). *Menu > Open log folder* shows `logs`. A capture is a few megabytes, most of it the picture (about
+9 MB at 3440x1440 with HDR); delete old ones whenever you like. Nothing leaves your PC: a capture is files on your disk.
 
 ## What a capture holds
 
@@ -103,13 +103,15 @@ What the game does in such a run (`NX2NAVI_CAPTURE_REPLAY`, environment only):
 What a replay does not bring back: the time of day, enemies and other actors, Link's pose and what he holds, an event
 or cutscene that was running, the camera's field of view where the game had changed it (the comparison shows both),
 and progress made since the last save (the save is the one on disk at the press; the flags that differed are in
-`flags.tsv`).
+`flags.tsv`). A capture taken at the title screen or while loading has no area: its replay applies the settings and
+stops.
 
-Measured on the PC the feature was written on (RX 7900 XT, a 1720x720 test window, HDR on): a capture is written in
-0.6 to 0.8 s and holds about 3.5 MB; a replay of a capture taken three metres from where the save starts took 45 s
-from start to its own capture, with Link 0.4 m from the captured place and the camera's position and angles equal to
-the last digit; one that teleports to another area and ends a conversation on the way took about 100 s. A capture taken at the title screen or while loading has no area: its replay
-applies the settings and stops.
+Measured on the PC the feature was written on (RX 7900 XT, HDR on): in a 3232x1352 window a capture is written in
+1.2 s and holds about 9 MB, eight of them the picture; in a 1720x720 window 0.6 to 0.8 s and 3.5 MB. The frame after
+the press is some 10 ms longer, for the read-back of the picture. A replay of a capture taken three metres from where
+the save starts took 45 s from start to its own capture, with Link 0.4 to 0.5 m from the captured place and the
+camera's position and angles equal to the last digit; one that teleports to another area and ends a conversation on
+the way took about 100 s.
 
 Without the script: set `NX2NAVI_CAPTURE_REPLAY` to the folder and start the game with `--profile <a copy of a
 profile>`; `NX2NAVI_CAPTURE_DIR` says where the run's own capture goes (default `<capture>/replays`).
