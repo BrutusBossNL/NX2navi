@@ -143,7 +143,12 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
    per frame in the field, ~21 in a fight); the game's CPU reads them (guest f_70010c3298) to cull objects.
    A report reaches guest memory as a CPU write after its submission's fence, a ClearBuffer or ReportValue as a fill the
    GPU makes in stream order, so a report followed by a clear of the same record ended as the report, and a condition
-   replayed after the clear read memory from before the fill. A clear of at most 256 bytes is now also applied in the
+   replayed after the clear read memory from before the fill. A draw that finds the query ring full (every slot still
+   waiting for the completion thread, in a hitch at a high frame rate) is left uncounted and the report after it says
+   what the rest counted, at least 1, which the game reads as an object all but hidden for that frame;
+   `NX2NAVI_OQ_HOLD=1` makes such a report repeat the larger of that and its record's last complete count
+   (`vk_exec_xfer.c` `oq_report_count`, `vk_oq_hold.h`), and the log counts them ("missed draws the full occlusion
+   query ring left uncounted"). A clear of at most 256 bytes is now also applied in the
    replay to the counter records it covers (`vk_exec_xfer.c` `clear_small`, `NX2NAVI_CLEAR_SMALL_CPU`): earlier reports
    leave the cleared bytes alone, conditions read them from memory. Other small clears stay GPU fills alone, since the
    GPU reads guest memory too and a write ahead of it would reach passes that still want the old value. Whether the

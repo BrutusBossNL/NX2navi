@@ -140,6 +140,13 @@
 # order the game issued them, 0 or 1. Default: on. 0 leaves the clear to the video card alone, as before, and a
 # report issued before the clear can then be written after it.
 # clear_small_cpu = 1
+# Occlusion counts the replay could not take, 0 or 1. Default: off. When the GPU or the thread that reads the results
+# falls behind (a hitch at a high frame rate), some draws find no free occlusion query and go uncounted, and the
+# game's report after them says only what the rest counted, at least 1: the object it tested looks all but hidden for
+# that frame, and whatever the game scales by that count drops for one frame. 1 makes such a report repeat the last
+# full count of the same object (or what was counted, if that is more). The log says how often it happens either way
+# ("samples-passed reports so far missed draws", at the 1st, 10th, 100th...). Read at start.
+# oq_hold = 0
 # EXPERIMENT, 0 or 1. Default: off. The game asks the video card how much of an object would show behind what is
 # already drawn (an occlusion query) and leaves hidden objects out. With 1 it asks nothing and draws them all: more
 # draws in a frame, and no queries to issue or results to wait for and read back. Whether that gains or loses frames

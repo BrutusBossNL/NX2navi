@@ -42,6 +42,7 @@
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "vk_oq_hold.h"
 
 enum { W_FORMAT, W_REGION, W_BUFFER, W_OVERLAP, W_COPY, W_CLEAR, W_QUERY, W_COUNT };
 
@@ -556,6 +557,7 @@ void vk_exec_oq_draw(VkExec *ex) {
 void vk_exec_oq_pass_end(VkExec *ex) { oq_close(ex); }
 
 static void oq_batch_drop(void);   // the results kept by the completion thread (oq_take)
+static void oq_hold_drop(void);    // the counts remembered by the completion thread (oq_report_count)
 
 void vk_exec_xfer_shutdown(void) {
     if (oq_state > 0) vkDestroyQueryPool(vk_ctx()->device, oq_pool, NULL);
@@ -563,6 +565,7 @@ void vk_exec_xfer_shutdown(void) {
     oq_nseg = 0, oq_lost = 0, oq_count = 0;
     memset((void *)oq_busy, 0, sizeof oq_busy);
     oq_batch_drop();
+    oq_hold_drop();
 }
 
 // The completion thread reads the results in batches (NX2NAVI_OQ_BATCH, default 1; 0: every segment by itself, as
@@ -630,6 +633,35 @@ static uint64_t oq_take(VkDevice dev, uint32_t q, int *avail) {
     return OQB.v[2 * k];
 }
 
+// NX2NAVI_OQ_HOLD (default 0): a report whose segment left draws uncounted (a full ring, vk_exec_oq_draw) writes the
+// larger of what was counted and the last complete count of its record (vk_oq_hold.h); off, what was counted, at least
+// 1. Such reports are counted either way and logged at the 1st, 10th, 100th... so a log shows how often the ring ran
+// full. Completion thread only, as oq_count.
+static OqHold oq_held;
+static int oq_hold_on = -1;
+static uint64_t oq_lossy;
+
+static void oq_hold_drop(void) { memset(&oq_held, 0, sizeof oq_held), oq_lossy = 0, oq_hold_on = -1; }
+
+static uint64_t oq_report_count(const OqSegment *s, uint64_t counted) {
+    if (oq_hold_on < 0) {
+        oq_hold_on = cfg_bool("NX2NAVI_OQ_HOLD");
+        if (oq_hold_on) rt_log("vk: samples-passed reports that miss draws repeat their record's last complete count (NX2NAVI_OQ_HOLD)");
+    }
+    if (!s->lost) {
+        if (oq_hold_on) oqh_note(&oq_held, s->addr, counted);
+        return counted;
+    }
+    uint64_t v = oq_hold_on ? oqh_lost(&oq_held, s->addr, counted) : counted;
+    uint64_t n = ++oq_lossy, p = 1;
+    while (p < n) p *= 10;
+    if (p == n)
+        rt_log("vk: %llu samples-passed reports so far missed draws the full occlusion query ring left uncounted (this "
+               "one: %llu counted, %llu reported%s)", (unsigned long long)n, (unsigned long long)counted,
+               (unsigned long long)v, oq_hold_on ? ", NX2NAVI_OQ_HOLD" : "");
+    return v;
+}
+
 static void oq_cb(void *arg) {
     OqSegment *s = arg;
     VkDevice dev = vk_ctx()->device;
@@ -667,7 +699,7 @@ static void oq_cb(void *arg) {
         if (s->lost && !oq_count) oq_count = 1;
         if (s->addr) {
             if (vk_sync_effect_late()) __atomic_fetch_add(&late_counts, 1, __ATOMIC_RELAXED);
-            report_write(s->addr, s->seq, oq_count, 0);
+            report_write(s->addr, s->seq, oq_report_count(s, oq_count), 0);
         }
     }
     free(s->q), free(s);
