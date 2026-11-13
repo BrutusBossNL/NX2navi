@@ -8026,8 +8026,35 @@ static void lb_warm_worker(void *arg) {
     }
 }
 
-// Preparation: every variant of <dir>/shader-prepared.bin on every core at normal priority.
-static void lb_warm_prepared(const char *dir) {
+// --warm-shaders, before the whole list: LW_SAMPLE prepared fragment libraries spread over it, built into the driver's
+// own cache alone (no_cache, as the library warm in play builds) and timed, as the game's check at every start does
+// (lw_check). 1 when at least LW_WARM_SHARE of them came from the driver's cache. *fast and *got: the counts.
+static int prep_sample_warm(int *fast, int *got) {
+    double ms[LW_SAMPLE];
+    *fast = *got = 0;
+    size_t step = LB.n / LW_SAMPLE ? LB.n / LW_SAMPLE : 1;
+    int was = no_cache;
+    no_cache = 1;
+    for (size_t i = step / 2; i < LB.n && *got < LW_SAMPLE; i += step)
+        for (size_t j = i; j < i + step && j < LB.n; j++) {   // the next fragment variant from here
+            if (LB.e[j].stage != GFX_STAGE_FS) continue;
+            journal_mark(0, &LB.e[j]);   // a driver that dies on it names it, as the full pass would
+            double t = lw_build(&LB.e[j]);
+            journal_mark(0, NULL);
+            if (t >= 0) ms[(*got)++] = t;
+            break;
+        }
+    no_cache = was;
+    for (int i = 0; i < *got; i++) *fast += ms[i] <= LW_COLD_MS;
+    return *got >= LW_SAMPLE / 2 && lw_warm_sample(*fast, *got);
+}
+
+// Preparation: every variant of <dir>/shader-prepared.bin on every core at normal priority. sample: --warm-shaders
+// after an update, which first asks the driver's cache (prep_sample_warm) and builds nothing more when it has them.
+// It took 10 to 20 s on a player's PC at every update, all of it 42,000 libraries the driver gave back at once, and
+// it still takes the minutes of a full build when the driver no longer has them (a driver update, or a change of what
+// they are built with: 380 s on that PC once). NX2NAVI_LIB_WARM=force builds the whole list whatever the sample says.
+static void lb_warm_prepared(const char *dir, int sample) {
     char path[PLAT_PATH_MAX * 2 + 32];
     snprintf(path, sizeof path, "%s/shader-prepared.bin", dir);
     size_t n = 0;
@@ -8045,6 +8072,20 @@ static void lb_warm_prepared(const char *dir) {
     LB.n = n, LB.idle = 0, LB.t0 = now_ms();
     static const uint32_t no_pr[16], no_fs[4];
     lb_state(no_pr, no_fs);
+    int fast = 0, got = 0;
+    if (sample && P.gpl && strcmp(cfg_value("NX2NAVI_LIB_WARM"), "force") && prep_sample_warm(&fast, &got)) {
+        if (SK.journal) plat_file_close(SK.journal), SK.journal = NULL, plat_file_delete(jp);
+        printf("prepare-shaders: progress build %zu %zu\n", n, n);
+        printf("prepare-shaders: the graphics driver's cache still has the prepared shaders (%d of %d sampled came from "
+               "it in under %.0f ms each): the %zu variants are not built again (%.0f ms)\n", fast, got, LW_COLD_MS, n,
+               now_ms() - LB.t0);
+        fflush(stdout);
+        free(LB.e), LB.e = NULL, LB.n = 0, LB.next = 0, LB.done = 0, LB.skipped = 0;
+        return;
+    }
+    if (sample && got)
+        printf("prepare-shaders: the graphics driver's cache does not have the prepared shaders (%d of %d sampled came "
+               "from it): all %zu variants are built into it again\n", fast, got, n);
     int cpus = (int)plat_cpu_usable(), k = 0;
     PlatThread *t[JR_SLOTS];
     for (int i = 0; i < cpus && i < JR_SLOTS; i++)
@@ -8281,7 +8322,7 @@ int vk_pipeline_prepare_shaders(void) {
     // The listed pipelines before the stage libraries: the pipeline cache is saved with them in it and without the
     // tens of thousands of libraries the next step builds, which would take the file past its size limit.
     if (!rc) seed_pipelines(dir);
-    if (!rc) lb_warm_prepared(dir);
+    if (!rc) lb_warm_prepared(dir, 0);
     return rc;
 }
 
@@ -8304,7 +8345,7 @@ int vk_pipeline_warm_shaders(void) {
         return 1;
     }
     seed_pipelines(dir);   // before the libraries, as in vk_pipeline_prepare_shaders
-    lb_warm_prepared(dir);
+    lb_warm_prepared(dir, 1);
     return 0;
 }
 

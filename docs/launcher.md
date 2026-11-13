@@ -301,9 +301,11 @@ The stub swaps `python.next` in while no Python runs, then starts the new versio
    list was prepared from another shader seed than the one this kit writes: `shader-prepared.bin` carries the digests
    of the two seed files and the translator identity (`runtime/prp_file.h`), the step writes the seed first
    (`prepare_shaders.py --no-run`, seconds) and compares (`make_game.py` `seed_changed`); a list from before it
-   recorded its seed is prepared again once. Another translator alone does not prepare again. The step still builds
-   the prepared shaders into the graphics driver's cache again (`make_game.py` `warm_driver_cache`): seconds while
-   the driver has them, 20 minutes on a player's PC when the update changed what they are built with. Its bar
+   recorded its seed is prepared again once. Another translator alone does not prepare again. The step then asks
+   the graphics driver's cache whether it still has the prepared shaders (`make_game.py` `warm_driver_cache`,
+   `nx2navi.exe --warm-shaders`: a sample of twelve, as the game checks at every start) and builds them all into it
+   again only when it does not: nothing more while the driver has them, 6 to 20 minutes on a player's PC after a
+   driver update or an update that changed what they are built with. Its bar
    follows that count from 0 to 100 %, and the Updates row says an update takes from a few minutes to half an hour
    or more (`launcher/ui/app.py` `UPDATE_TAKES`).
 8. **Draw the Button Prompts**, with button art in the new version: only when the art, the prompt tools or the key
