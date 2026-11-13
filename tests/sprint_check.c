@@ -25,9 +25,13 @@ int rt_patch_enabled(int set) { return set == 3 && set_on; }
 void rt_patch_switch(int set, int on) { assert(set == 3); set_on = on != 0; }
 void rt_register_host(uint64_t addr, GuestFn fn) {
     if (addr == RT_PATCH_PAGE + 0xf40) link_fn = fn;
-    else if (addr == RT_PATCH_PAGE + 0xf50) stance_fn = fn;
+    else if (addr == RT_PATCH_PAGE + 0xf30) stance_fn = fn;
     else abort();
 }
+
+static float step = 1.0f;   // frame_step_frames: the 60 Hz frames of one update of Link
+float frame_step_frames(void) { return step; }
+int mem_readable(uint64_t a, uint64_t n) { (void)n; return a != 0; }
 
 // Link: vtable, +0x18 -> owner whose +0x270 -> a with +0x188 -> b with +0x1c0 -> the state, id at +0x28
 static uint64_t link[8], owner[0x50], a[0x40], b[0x40], state_obj[0x20], other[8];
@@ -72,7 +76,7 @@ int main(int argc, char **argv) {
     test_main_base = (uintptr_t)img;
     assert(link_fn && stance_fn);
     if (argc > 1 && !strcmp(argv[1], "kept-off")) {
-        // off at the start (NX2NAVI_SPRINT_PATCH=0, or a mod patching its sites): no rows, never switched on, and the
+        // off at the start (NX2NAVI_SPRINT_BUTTON_PATCH=0, or a mod patching its sites): no rows, never switched on, and the
         // button always reaches the game
         set_on = 0, button = "l3";
         assert(!sprint_available());
@@ -202,6 +206,45 @@ int main(int argc, char **argv) {
     assert(frame(0, WALK, link) == 0 && !dashing());
     frame(0, WAIT_ID, link);
     assert(frame(BB, WAIT_ID, link) == BB && !dashing());
+    // a press begun while standing stays the game's for its whole length, also once Link moves: no sprint, no strip
+    assert(frame(BB, WALK, link) == BB && !dashing());
+    assert(frame(BB, WALK, link) == BB && !dashing());
+    frame(0, WALK, link);
+    // a press begun while moving stays the sprint's when Link stops: the game gets no B from it
+    assert(frame(BB, WALK, link) == 0 && dashing());
+    assert(frame(BB, WAIT_ID, link) == 0);
+    frame(0, WAIT_ID, link);
+
+    // a press made in a menu (no update of Link for more than 8 polls) starts nothing when play goes on
+    reset("l3", "toggle");
+    frame(0, WALK, link);
+    {
+        uint64_t bt = 0;
+        for (int i = 0; i < 10; i++) bt = 0, sprint_pad(&bt);
+        bt = L3, sprint_pad(&bt);
+        assert(bt == L3);   // the menu's
+        bt = 0, sprint_pad(&bt);
+    }
+    frame(0, WALK, link);
+    assert(!dashing());
+
+    // the stand-still timings count 60 Hz frames: at 240 fps (a quarter frame an update) a stop of four updates goes on
+    reset("l3", "toggle");
+    step = 0.25f;
+    frame(L3, WALK, link), frame(0, WALK, link);
+    for (int i = 0; i < 4; i++) frame(0, WAIT_ID, link);
+    assert(dashing());
+    for (int i = 0; i < 16; i++) frame(0, WAIT_ID, link);
+    assert(!dashing());
+    step = 1.0f;
+
+    // switched off with the sprint on, and on again: it does not come back by itself
+    reset("l3", "toggle");
+    frame(L3, WALK, link), frame(0, WALK, link);
+    assert(dashing());
+    button = "off", frame(0, WALK, link);
+    button = "l3", frame(0, WALK, link);
+    assert(!dashing());
 
     puts("sprint_check: ok");
     free(img);

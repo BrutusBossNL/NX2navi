@@ -7,7 +7,13 @@
 // layout, or l3 the left stick's click, which has no other use); sprint_mode is toggle (a press starts the sprint, the
 // next press or Link's state ends it) or hold (sprint while the button is held). During gameplay the button is kept
 // from the game (sprint_pad, called by ov_input.c npad_states), so it does not also fire its own action. B is kept only
-// while Link moves (Walk, Jump, Land, Fall, Clamber), so it puts the weapon away as usual otherwise.
+// for a press that begins while Link moves (Walk, Jump, Land, Fall, Clamber), and then until it is released, so it
+// puts the weapon away as usual otherwise and the game never sees half a press. Presses made in a menu, a cutscene or
+// a load (no update of Link within GAMEPLAY_POLLS polls) start nothing: B closes the pause menu, and that press is the
+// menu's. Under the game's Swap Jump Controls B is the jump, which a B sprint button keeps from the game while Link
+// moves: L3 is the one to use then.
+// Patch page slots: the set's sites call +0xf40 and +0xf30; +0xf50 to +0xff0 belong to other sets (runtime/patches.c,
+// mouse_direct.c, ov_zstd.c). A slot registered twice ends the start (dispatch.c rt_register_host).
 //
 // Link's state: the id at [[[[Link +0x18] +0x270] +0x188] +0x1c0] +0x28 (+0x4c when that reads 0x11a, a state that
 // wraps another), the same field main+0x4aed50 compares with 1 (Walk) before the game starts a sprint.
@@ -32,8 +38,11 @@ static const uint64_t button_bits[] = {0, 1u << 1, 1u << 4};   // HidNpadButton 
 #define DASH_INPUT 0x10u
 #define LINK_VTABLE 0x4b4dfc0ull   // main offset: Link's actor class
 #define GAMEPLAY_POLLS 8           // the button is kept from the game while Link's update ran within this many polls
-#define WAIT_STOP_FRAMES 4         // standing still this many frames ends a toggled sprint that has moved
-#define WAIT_START_FRAMES 90       // ... or this many after a press while standing, which has not moved yet
+// Standing still this long ends a toggled sprint that has moved, or this long after a press while standing, which has
+// not moved yet. In 60 Hz frames: above 60 fps Link updates once a rendered frame, each step frame_step_frames() of
+// them, so counting updates would end the sprint on any short stop at 240 fps (four updates are 17 ms there).
+#define WAIT_STOP_FRAMES 4.0
+#define WAIT_START_FRAMES 90.0
 
 // What Link's state does to a sprint: MOVE keeps it (and is when the bottom button sprints), KEEP keeps it,
 // WAIT ends it after a few frames, STOP ends it at once. A state not listed stops it too.
@@ -56,7 +65,9 @@ static _Atomic int zl_held;        // ZL (targeting) held at the last poll
 static _Atomic int polls = GAMEPLAY_POLLS;   // polls since Link's last update (none yet: not gameplay)
 static _Atomic int moving;         // Link's state was a MOVE one at his last update
 static _Atomic int active;         // the sprint is on: the dash input goes in
-static int moved, wait_frames;     // sprint_link only: the sprint has moved since it started; frames stood still
+static _Atomic int latched;        // the press now held began in gameplay (and, for B, while Link moved): kept from the game
+static int moved;                  // sprint_link only: the sprint has moved since it started
+static double wait_frames;         // sprint_link only: 60 Hz frames stood still
 static int last_button = -1;       // sprint_link only: the button setting at the last update
 
 static int setting_button(void) {
@@ -71,7 +82,9 @@ static int setting_hold(void) {
     return v && !strcmp(v, "hold");
 }
 
-static uint64_t ld64(uint64_t a) { return a ? *(const uint64_t *)(uintptr_t)a : 0; }
+// Guest reads through Link's pointers: a stale pointer in the chain reads 0 instead of faulting.
+static uint64_t ld64(uint64_t a) { return a && mem_readable(a, 8) ? *(const uint64_t *)(uintptr_t)a : 0; }
+static int32_t ld32(uint64_t a) { return a && mem_readable(a, 4) ? *(const int32_t *)(uintptr_t)a : 0; }
 
 // 1 when x19 is the Link the player controls. Link's class has one more instance the player does not control: the
 // game's actor manager ([[main+0x4c7e0d0]], class main+0x4bdfe68) names the controlled one at +0x470 (class
@@ -91,15 +104,15 @@ static int state_kind(uint64_t link) {
     if (p) p = ld64(p + 0x188);
     if (p) p = ld64(p + 0x1c0);
     if (!p) return STOP;
-    int32_t id = *(const int32_t *)(uintptr_t)(p + 0x28);
-    if (id == 0x11a) id = *(const int32_t *)(uintptr_t)(p + 0x4c);
+    int32_t id = ld32(p + 0x28);
+    if (id == 0x11a) id = ld32(p + 0x4c);
     for (size_t i = 0; i < sizeof states / sizeof *states; i++)
         if (states[i].id == id) return states[i].kind;
     return STOP;
 }
 
 // The set runs only while a button is chosen, so with the sprint button off its sites cost nothing. Whether it may run
-// at all is read once, after the start: NX2NAVI_SPRINT_PATCH=0 or a mod whose code patches the same sites (mods.c
+// at all is read once, after the start: NX2NAVI_SPRINT_BUTTON_PATCH=0 or a mod whose code patches the same sites (mods.c
 // mods_exefs_switch) leaves it off then, and switching it on later must not undo that.
 static _Atomic int allowed = -1;
 static int sprint_set(void) { return rt_patch_set("sprint"); }
@@ -116,18 +129,27 @@ void sprint_pad(uint64_t *buttons) {
     if (!sprint_available()) return;
     int b = setting_button(), set = sprint_set();
     if (rt_patch_enabled(set) != (b != BTN_OFF)) rt_patch_switch(set, b != BTN_OFF);
-    if (b == BTN_OFF) return;
+    if (b == BTN_OFF) {   // the sites stop calling in: nothing may stay on for when a button is chosen again
+        atomic_store(&active, 0), atomic_store(&pressed, 0), atomic_store(&latched, 0);
+        return;
+    }
     static uint64_t last;
     uint64_t bit = button_bits[b], now = *buttons;
-    if (now & ~last & bit) atomic_fetch_or(&pressed, bit);
+    int n = atomic_load(&polls), gameplay = n < GAMEPLAY_POLLS;
+    if (n <= GAMEPLAY_POLLS) atomic_store(&polls, n + 1);
+    // A press is decided at its start, for its whole length: kept from the game, and the sprint's, when it begins in
+    // gameplay (B: while Link moves); else the game's alone, and no sprint's.
+    if (now & ~last & bit) {
+        int mine = gameplay && (b != BTN_B || atomic_load(&moving));
+        atomic_store(&latched, mine);
+        if (mine) atomic_fetch_or(&pressed, bit);
+    } else if (!(now & bit)) {
+        atomic_store(&latched, 0);
+    }
     last = now;
     atomic_store(&held, (now & bit) != 0);
     atomic_store(&zl_held, (now & BUTTON_ZL) != 0);
-    int n = atomic_load(&polls);
-    if (n <= GAMEPLAY_POLLS) atomic_store(&polls, n + 1);
-    if (n >= GAMEPLAY_POLLS) return;   // a menu, a cutscene or a load: the button keeps its role
-    if (b == BTN_B && !atomic_load(&moving)) return;
-    *buttons &= ~bit;
+    if (atomic_load(&latched) && gameplay) *buttons &= ~bit;
 }
 
 // The sprint for this update of Link, from his state and the button's presses: 1 when it is on.
@@ -137,7 +159,7 @@ int sprint_step(int kind, int button, int hold) {
     if (atomic_load(&zl_held)) kind = STOP;
     atomic_store(&moving, kind == MOVE);
     if (button == BTN_OFF) on = 0;
-    else if (hold) on = atomic_load(&held) && (button != BTN_B || kind == MOVE || on);
+    else if (hold) on = atomic_load(&held) && atomic_load(&latched) && kind != STOP;
     else {
         if (press) {
             if (on) on = 0;
@@ -145,7 +167,8 @@ int sprint_step(int kind, int button, int hold) {
         } else if (on) {
             if (kind == STOP) on = 0;
             else if (kind == WAIT) {
-                if (++wait_frames > (moved ? WAIT_STOP_FRAMES : WAIT_START_FRAMES)) on = 0;
+                wait_frames += frame_step_frames();
+                if (wait_frames > (moved ? WAIT_STOP_FRAMES : WAIT_START_FRAMES)) on = 0;
             } else {
                 wait_frames = 0;
                 moved |= kind == MOVE;
@@ -172,6 +195,6 @@ static void sprint_stance(Cpu *c) {
 __attribute__((constructor)) static void sprint_register(void) {
     if (!RT_V111) return;   // the set's sites are in 1.1.1's main only
     rt_register_host(RT_PATCH_PAGE + 0xf40, sprint_link);
-    rt_register_host(RT_PATCH_PAGE + 0xf50, sprint_stance);
+    rt_register_host(RT_PATCH_PAGE + 0xf30, sprint_stance);
 }
 #endif

@@ -822,7 +822,7 @@
 # rumble = 1
 # Sprint button (game 1.1.1): Link sprints without rolling first. off (the default), l3 (the left stick's click, which
 # has no other use) or b (the game's B button, the bottom one of the Nintendo layout: it sprints only while Link moves
-# and puts the weapon away as usual otherwise). sprint_mode: toggle (press to sprint and again to stop; the sprint
+# and puts the weapon away as usual otherwise; with the game's Swap Jump Controls B is the jump, so use l3). sprint_mode: toggle (press to sprint and again to stop; the sprint
 # also ends when Link stops, attacks, rolls, targets, uses an item, swims or climbs) or hold. The Controls tab's
 # Sprint rows set both; changes take effect at once.
 # sprint_button = off
