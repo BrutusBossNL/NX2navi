@@ -1135,7 +1135,7 @@ static int split_n = -1, split_idle, split_in_pass, split_draws, split_at, part_
 static uint64_t split_ns, part_t0;
 static uint64_t n_parts, n_subs, n_idle_parts, n_pass_splits, n_cuts;
 
-// ---- the early tail (NX2NAVI_TAIL_EARLY, default 0)
+// ---- the early tail (NX2NAVI_TAIL_EARLY, default 1 since 0.10.0; 0 turns it off)
 // Standing in Hyrule Field with FSR 4 (RX 7900 XT, 2026-11-13) a frame's main submission ends with one part of 4.7 ms
 // of GPU time, the temporal upscaler and the interface drawn after it, and one of 1.4 ms, the write-backs of what the
 // shaders wrote into VRAM mirrors. The game waits for all of it before it writes the next frame's data (the wait after
