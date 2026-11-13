@@ -709,13 +709,15 @@
 # Frame generation: off, fsr3 (AMD FSR 3.1 on any GPU where amd_fidelityfx_vk.dll loads, so not on Linux: one generated
 # frame between every two the game draws, the HUD kept out of it) or dlss (NVIDIA DLSS Frame Generation on GeForce RTX
 # 40 and 50 GPUs, paced with Reflex; it needs nx2navi_dlssg.dll and NVIDIA Streamline's files next to the executable,
-# which the setup puts there). Both need DLSS or FSR 3.1 upscaling (dlaa = 1). While frame generation runs, fps_limit
+# which the setup puts there). Both run with any upscaling: with DLSS or FSR 3.1 (dlaa = 1) they take its depth and
+# motion vectors, and without one (dlaa = 0) the same ones made for them alone, with no jitter (the log's "dlaa: frame
+# generation runs" line says which). While frame generation runs, fps_limit
 # counts the frames the game draws and the screen shows that times the multiplier (2 for fsr3); fps_limit = display
 # alone holds the screen to the monitor's rate and the game to that rate divided by the multiplier.
 # fsr3 takes effect at once, dlss (on or off) at the next start.
 # framegen = off
 # On Linux dlss runs through NVIDIA's NGX itself, without Streamline: it needs dlaa = 1 with DLSS when the game starts
-# and NVIDIA's libnvidia-ngx-dlssg.so.<version> (from NVIDIA's DLSS SDK repository) beside the game, then switches at
+# (it keeps running when dlaa is switched off later) and NVIDIA's libnvidia-ngx-dlssg.so.<version> (from NVIDIA's DLSS SDK repository) beside the game, then switches at
 # once, and its multiplier is fg_mult: 2 to 6 (above 2 needs an RTX 50 GPU) or dynamic, which generates only the frames
 # needed to reach the display's refresh rate at the rate the game draws. framegen_multiplier is not used there.
 # fg_mult = 2

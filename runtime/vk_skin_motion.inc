@@ -145,7 +145,7 @@ static int skin_joint_format(uint32_t fmt) {
 // filter). Reads the draw's own state only: the chunks of a parallel group ask at once.
 static int skin_pick(VkExec *ex, SkinPick *out) {
     out->stride = 0;
-    if (!skin_enabled() || !vk_dlaa_active()) return 0;
+    if (!skin_enabled() || !(vk_dlaa_active() || vk_dlaa_fg_only())) return 0;   // the upscaler or frame generation alone
     const DrawCtx *cx = ex->dc;
     int slot, storage;
     uint32_t joints;

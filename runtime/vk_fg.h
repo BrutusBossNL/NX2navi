@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-int vk_fg_wanted(void);                      // NX2NAVI_FRAMEGEN = fsr3 with DLSS or FSR 3.1 upscaling on (live), where FSR 3.1 loads
+int vk_fg_wanted(void);                      // NX2NAVI_FRAMEGEN = fsr3 (live), where FSR 3.1 loads, with any upscaler or none
 uint32_t vk_fg_queue_count(void);            // graphics-family queues the device creates
 // vk_device.c, after the device exists: the queues AMD's swapchain presents and acquires on, and their families (the
 // graphics family's own where it has three queues, else queues of another family: AMD's Windows driver gives one)
