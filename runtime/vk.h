@@ -774,6 +774,9 @@ int vk_sync_effect_late(void);
 uint64_t vk_sync_cb_value(void);            // the value whose side effect the calling thread is running; 0: not in one
 void vk_sync_cb_stats(char *out, size_t n);
 void vk_exec_late_stats(uint64_t *events, uint64_t *counters, uint64_t *counts);   // vk_exec_xfer.c: such callbacks since the last call
+// vk_exec_xfer.c clear_small: the small buffer clears since the last call and the counter records they covered, as a
+// clause for a periodic log line. Replay thread.
+void vk_exec_clear_stats(char *out, size_t n);
 VkCommandBuffer vk_sync_split_exec(void);   // vk_sync_split for the part before a submission's write-backs
 int vk_mem_mirror_wb_pending(void);         // vk_memory.c: vk_mem_mirror_end has write-backs to record
 uint64_t vk_sync_fence_done(void);         // highest done value

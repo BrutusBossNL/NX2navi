@@ -141,6 +141,14 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
    NVN log for counter types other than TIMESTAMP; any occlusion-driven visibility (flares, culling) is off. **Fixed 2026-10-22**:
    SAMPLES_PASSED counts come from Vulkan occlusion queries between RESET and REPORT (`vk_exec_xfer.c`, ~4 queries
    per frame in the field, ~21 in a fight); the game's CPU reads them (guest f_70010c3298) to cull objects.
+   A report reaches guest memory as a CPU write after its submission's fence, a ClearBuffer or ReportValue as a fill the
+   GPU makes in stream order, so a report followed by a clear of the same record ended as the report, and a condition
+   replayed after the clear read memory from before the fill. A clear of at most 256 bytes is now also applied in the
+   replay to the counter records it covers (`vk_exec_xfer.c` `clear_small`, `NX2NAVI_CLEAR_SMALL_CPU`): earlier reports
+   leave the cleared bytes alone, conditions read them from memory. Other small clears stay GPU fills alone, since the
+   GPU reads guest memory too and a write ahead of it would reach passes that still want the old value. Whether the
+   game clears counter records at all is not known: captures show one buffer fill a frame, of unknown address; the
+   periodic `vk_usnap:` log line counts the small clears and the records they covered.
 6. **Subgroup size.** The translator assumes 32; RDNA4 may run fragment shaders in wave64. `vk_caps.c` and
    `vk_pipeline.c` `pin_subgroup32` pin stages to 32 lanes with `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`
    where `subgroupSizeControl` allows it, and otherwise tell the translator the GPU's own size
