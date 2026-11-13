@@ -287,7 +287,9 @@ typedef enum {
     UI_MENU_COOP_N_FULL, UI_MENU_COOP_N_REFUSED, UI_MENU_COOP_N_NOT_OURS, UI_MENU_COOP_N_OTHER_VERSION,
     UI_MENU_COOP_N_REMOVED, UI_MENU_COOP_N_HOST_SILENT, UI_MENU_COOP_N_LOST, UI_MENU_COOP_N_LEFT,
     UI_MENU_COOP_LOCAL, UI_MENU_COOP_TOAST_INVITE,
-    UI_MENU_LAST_ID = UI_MENU_COOP_TOAST_INVITE,
+    // the note after F8 (bugcap.c, ui/menu.cpp capture_note): "%d" the capture's number, "%s" its folder's name
+    UI_MENU_CAPTURE_SAVED, UI_MENU_CAPTURE_FOLDER, UI_MENU_CAPTURE_FAILED,
+    UI_MENU_LAST_ID = UI_MENU_CAPTURE_FAILED,
     // the boot screen while the boot prewarm prepares shaders and pipelines (boot.c, ui/menu.cpp menu_boot_frame)
     UI_BOOT_TITLE, UI_BOOT_STARTING,
     UI_BOOT_SHADERS, UI_BOOT_PIPELINES,   // printf: "%lld" done, "%lld" total

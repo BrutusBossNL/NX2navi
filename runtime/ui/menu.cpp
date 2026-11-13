@@ -43,6 +43,7 @@ static int g_font_bad;
 
 extern "C" {
 #include "amiibo.h"
+#include "bugcap.h"
 #include "cheats.h"
 #include "debug_tools.h"
 #include "cfg.h"
@@ -2051,6 +2052,24 @@ static void perf_draw(const MenuTarget *t, float scale) {
     dl->AddText(ImVec2(p.x + padx, p.y + pady), SKIN_TEXT, g_perf_text);
 }
 
+// The note after F8 (bugcap.c): the capture's number and its folder's name for a few seconds, top centre, in the
+// menu's look. It shows once the capture is written, so the capture's own picture is without it.
+static void capture_note(const MenuTarget *t, float scale, bool below_coop) {
+    int number = 0, ok = 0;
+    char name[64], line1[160], line2[160] = "";
+    if (!bugcap_note(&number, &ok, name)) return;
+    snprintf(line1, sizeof line1, menu_text(ok ? UI_MENU_CAPTURE_SAVED : UI_MENU_CAPTURE_FAILED), number);
+    if (ok) snprintf(line2, sizeof line2, menu_text(UI_MENU_CAPTURE_FOLDER), name);
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    ImVec2 s1 = ImGui::CalcTextSize(line1), s2 = ImGui::CalcTextSize(line2);
+    float padx = 16 * scale, pady = 10 * scale, gap = line2[0] ? 4 * scale : 0;
+    float w = (s1.x > s2.x ? s1.x : s2.x) + padx * 2, h = s1.y + (line2[0] ? s2.y : 0) + gap + pady * 2;
+    ImVec2 p(((float)t->width - w) * 0.5f, (below_coop ? 96 : 12) * scale);   // co-op puts its lines at the top centre
+    skin_panel(dl, p, ImVec2(p.x + w, p.y + h), scale * 0.6f, 0.92f);
+    dl->AddText(ImVec2(p.x + (w - s1.x) * 0.5f, p.y + pady), SKIN_TEXT, line1);
+    if (line2[0]) dl->AddText(ImVec2(p.x + (w - s2.x) * 0.5f, p.y + pady + s1.y + gap), SKIN_TEXT_DIM, line2);
+}
+
 static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot) {
     *shot = NULL;
     if (t->phys && t->phys != g_gpu_vendor_of) {   // the GPU's vendor for the rows that depend on it (dlss_offered)
@@ -2067,6 +2086,9 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
     perf_tick(plat_now_ns(), t);
     amiibo_tick();
     const bool coop_draws = coop_overlay_tick();   // names of the other players, chat lines, an invite: over the game
+    int cap_number, cap_ok;
+    char cap_name[64];
+    const bool capture_shows = bugcap_note(&cap_number, &cap_ok, cap_name) != 0;   // the note after F8
     if (g_booting.load(std::memory_order_relaxed)) g_booting.store(0, std::memory_order_release);   // the game runs
     bool open = g_open.load(std::memory_order_relaxed);
     // the frame the menu is first laid out after opening: also when its g_reset went to an earlier frame of the overlay
@@ -2084,7 +2106,7 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
             if (g_debug.load()) debug_menu_tab(0);
             set_open(1);
             open = true;
-        } else if (!g_perf_mode && !coop_draws) {
+        } else if (!g_perf_mode && !coop_draws && !capture_shows) {
             return 0;
         }
     }
@@ -2151,6 +2173,7 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
     }
     perf_draw(t, scale);
     if (coop_draws) coop_overlay_draw((float)t->width, (float)t->height, scale, open);
+    capture_note(t, scale, coop_draws);
     ImGui::Render();
     if (open) g_save_pending = opt_save_tick(0);
     g_cost_ns += plat_now_ns() - t0;
