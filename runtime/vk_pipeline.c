@@ -774,9 +774,12 @@ static VkResult pipe_create(int kind, void *ci, VkPipeline *pipe) {
 // fold (323 -> 448 -> 461 -> 489 MB in four starts) and so crosses 512 MB in a few sessions (0.8.0: a 766 MB file
 // dropped at a start). With the limit at 2048 MB the same files were read and folded: boot hits 84 %, nothing left to
 // background builds, the boot 17 s instead of 24.
-// cache_cap: NX2NAVI_PIPELINE_CACHE_MAX_MB when set (0: no limit); unset, the machine's RAM / 32 between 512 and
-// 4096 MB (16 GB: 512 as before; 32 GB: 1024; 64 GB: 2048). The RAM and not the commit headroom at the boot, so the
-// same file is not read on one start and refused on the next.
+// cache_cap: NX2NAVI_PIPELINE_CACHE_MAX_MB when set (0: no limit); unset, the machine's RAM / 32 between 1024 and
+// 4096 MB (16 and 32 GB: 1024; 64 GB: 2048; 128 GB and more: 4096). Never below 1024: a full cache of the pipeline
+// list is about 550 MB on an NVIDIA card, and a limit under what the files reach compiles everything past it again at
+// every start, for good (RAM / 32 alone gave 509 MB on a 16 GB machine). The RAM and not the commit headroom at the
+// boot, so the same file is not read on one start and refused on the next. Read once, at the start; every caller
+// computes the same value, so the unlocked cache of it is harmless.
 static uint64_t cache_cap(void) {
     static uint64_t cap = UINT64_MAX;
     if (cap != UINT64_MAX) return cap;
@@ -787,7 +790,7 @@ static uint64_t cache_cap(void) {
     else {
         plat_mem_info(&used, &total, &proc);
         mb = total > 0 ? (uint64_t)total / 32 : 512;
-        mb = mb < 512 ? 512 : mb > 4096 ? 4096 : mb;
+        mb = mb < 1024 ? 1024 : mb > 4096 ? 4096 : mb;
     }
     if (set && *set)
         rt_log("vk_pipeline: pipeline cache files up to %llu MB%s (NX2NAVI_PIPELINE_CACHE_MAX_MB)",
@@ -889,14 +892,18 @@ static void cache_load(VkCtx *c) {
         // (cache_data_read). The merge into P.cache is the one the kept play cache gets below anyway, so it is done
         // here once and its size asked; a play file mostly holds what the other already has (461.2 + 524.9 MB folded
         // to 489.0 MB, 2026-11-12), so the size of the two files says little.
+        // The fold is written at the first autosave, after the boot's prewarm and background builds have added to
+        // P.cache: it is taken only with room for a play file's worth of growth (fold_at) under the limit, so that
+        // save is not refused (cache_save keeps the play file meanwhile).
         VkResult r = vkMergePipelineCaches(c->device, P.cache, 1, &play);
         size_t merged = 0;
         if (r == VK_SUCCESS && vkGetPipelineCacheData(c->device, P.cache, &merged, NULL) == VK_SUCCESS &&
-            merged > cache_cap()) {
+            merged + fold_at > cache_cap()) {
             rt_log("vk_pipeline: %s: %.1f MB read, the driver holds %.1f MB of it; folding it in would make %s %.1f MB, "
-                   "over the limit of %llu MB: both files stay as they are, and this run's pipelines go into the play "
-                   "file as long as it stays under the limit", P.play_path, psize / 1048576.0, pkept / 1048576.0,
-                   P.cache_path, merged / 1048576.0, (unsigned long long)(cache_cap() >> 20));
+                   "with less than %llu MB of room left under the limit of %llu MB: both files stay as they are, and "
+                   "this run's pipelines go into the play file as long as it stays under the limit", P.play_path,
+                   psize / 1048576.0, pkept / 1048576.0, P.cache_path, merged / 1048576.0,
+                   (unsigned long long)(fold_at >> 20), (unsigned long long)(cache_cap() >> 20));
             fold = 0, psize = 0;   // merged already: the branch for a kept play file below is skipped
         } else if (r != VK_SUCCESS) {
             rt_log("vk_pipeline: %s did not merge into the cache of %s (%d); it is left as it is and not used in this run",
@@ -8471,7 +8478,16 @@ static int cache_save(uint32_t wait_ms, int exiting) {
     }
     int ok = 1, r;
     if (!P.play || P.fold) ok = cache_save_one(0, wait_ms, exiting);
-    if (P.play && (r = cache_save_one(1, wait_ms, exiting)) < ok) ok = r;   // the worse of the two
+    // While a fold is not written yet (P.fold: refused at the limit, or no build-free moment) the play file still holds
+    // what was folded in memory only: written over with this run's play cache, that would be in neither file.
+    static int fold_kept_said;
+    if (P.play && P.fold) {
+        if (!fold_kept_said++)
+            rt_log("vk_pipeline: %s is kept as it is until %s holds what was folded from it; this run's new pipelines "
+                   "are saved once that write is done", P.play_path, P.cache_path);
+    } else if (P.play && (r = cache_save_one(1, wait_ms, exiting)) < ok) {
+        ok = r;   // the worse of the two
+    }
     plat_mutex_unlock(&save_lock);
     return ok;
 }
