@@ -37,7 +37,7 @@ import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog
 
-from .. import NAME, build, feed, gameini, gamefiles, jobs, locks, mods, saves, steam, versions, winsys
+from .. import NAME, build, feed, gameini, gamefiles, jobs, locks, mods, saves, steam, steamlib, versions, winsys
 from ..context import Context
 from ..paths import long_path_problem
 from . import art, picture, sound
@@ -1891,6 +1891,7 @@ class App:
             return
         if waiting:
             self.ctx.log(f'play: without the code of {", ".join(waiting)}, whose build did not finish')
+        steamlib.ensure(gd, self.ctx.layout.app / 'bin', log=self.ctx.log)   # co-op's Steam library file, beside the game
         try:
             self.game_proc = winsys.start_game(exe)
         except OSError as e:
@@ -2747,6 +2748,7 @@ def play_only(ctx):
     if waiting:   # the window builds the mods' code in, then starts the game (App.start with --play)
         ctx.log(f'play from Steam: the game is built again first for the code of {", ".join(waiting)}')
         return None
+    steamlib.ensure(gd, ctx.layout.app / 'bin', log=ctx.log)   # co-op's Steam library file, beside the game
     try:
         proc = winsys.start_game(exe)
     except OSError as e:
