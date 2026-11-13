@@ -18,6 +18,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "logq.h"
+#include "mem_budget.h"
 #include "mem_growth.h"
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
@@ -5528,6 +5529,9 @@ static void system_log(uint64_t frame, const ReportFig *f, const VkPipeMem *pm, 
            "%.0f, %s) + other %.0f (the driver's own memory, thread stacks, the program's data; %u other heaps)",
            pcache / M, pm->cache[0] / M, pm->cache[1] / M, pm->cache_asked ? "as last asked" : "as loaded at the boot",
            other / M, hi.other_heaps);
+    char room[160];
+    mem_budget_text(room, sizeof room);   // the levels the owners that give memory back go by (mem_budget.h)
+    mg_put(line, sizeof line, &k, "; room: %s", room);
     rt_log("%s", line);
     *out = (SysFig){priv, crt, shaders, pipes, texhost, pcache, other > 0 ? (uint64_t)other : 0};
 }

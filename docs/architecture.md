@@ -300,6 +300,13 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   misses and draws (the module's hash and its Binding decorations) is kept apart and needs no decode; a compute
   pipeline created at a dispatch and a mesh shader's first pipeline key decode on that thread, which the memory report
   counts. `shader_compress = 0` keeps it plain.
+- Room levels: a thread samples every two seconds how much room the card and the system have and turns each into a
+  level, roomy (over 40% free), normal (over 20%), tight (over 8%) or critical, with five points of hysteresis upward
+  (`runtime/mem_budget.h`, `mem_budget.c`): the card's from the driver's budget against this process's use, the
+  system's from the lower of the commit's headroom and the physical memory free. A change is logged, and the memory
+  report's `mem: system` line ends with both levels. The SPIR-V at rest is compressed after 5 s unused while the system
+  is tight and after 1 s while it is critical. `mem_budget_test_vram_mb` and `mem_budget_test_ram_mb` pretend a side is
+  that small, to test what gives memory back on a large machine; they leave the texture cache's own rules alone.
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
   `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
   (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.

@@ -11,6 +11,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "mem_budget.h"
 #include "vk.h"
 #include "platform/platform.h"
 #include "vk_dlaa.h"
@@ -763,7 +764,8 @@ int vk_init(void) {
     plat_mutex_lock(&g_lock);
     if (!g_ready) {
         memset(&g_vk, 0, sizeof g_vk);
-        if (create_instance() && pick_device() && create_device()) g_ready = 1, vk_headroom_start(), vk_dlaa_init();
+        if (create_instance() && pick_device() && create_device())
+            g_ready = 1, vk_headroom_start(), vk_dlaa_init(), mem_budget_vram(1);
         else destroy_all();
     }
     int ok = g_ready;
@@ -773,7 +775,7 @@ int vk_init(void) {
 
 void vk_shutdown(void) {
     plat_mutex_lock(&g_lock);
-    if (g_ready) { destroy_all(); g_ready = 0; }
+    if (g_ready) { mem_budget_vram(0); destroy_all(); g_ready = 0; }
     plat_mutex_unlock(&g_lock);
 }
 
