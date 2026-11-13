@@ -579,6 +579,14 @@
 # motion_guard_degrees (35, 45 or 60, the default): a part that turns more than this in one frame is checked against
 # last frame's depth before its vector is written.
 # selective_motion = 1
+# Motion vectors of their own for every other skinned character (game 1.1.1): people, animals and enemies are drawn a
+# second time with last frame's pose too, so DLSS, FSR 3.1 and frame generation follow them as they move instead of
+# smearing them along the camera's motion. A character's draw is matched with last frame's by its mesh and shaders;
+# where the match is in doubt (it just appeared, another one of the same model appeared or left) it keeps the camera's
+# motion for a few frames. 1, the default; 0: the camera's motion for all of them, as before. Nothing runs without
+# DLSS or FSR 3.1. The "selective motion" log line counts the skinned draws and why some kept the camera's motion.
+# Read at start.
+# skin_motion = 1
 # Characters' trails: where a character, animal or held item moves without motion vectors of its own (all of them with
 # dlaa_objmv = 0), DLSS can drag a faint copy of it. The G-buffer marks those objects; on them and where they were the
 # frame before, DLSS is told to favour the current frame by this percentage (0, 35, 65 or 100; 0 off). Higher removes

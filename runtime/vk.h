@@ -1021,5 +1021,9 @@ void vk_pipeline_foreign_counts(VkForeignPipes *o);
 
 #include "vk_rec.h"   // last: its macros route the vkCmd* calls of every file that includes vk.h
 
-// Select the main scene view for selective animated motion.
-int vk_fg_pose_prepare(uint64_t cam, VkImage depth);
+// Select the main scene view for selective animated motion, and decide which of the frame's other skinned draws
+// continue a draw of last frame (vk_skin_motion.inc skin_resolve). ex: the submission that records the motion vectors,
+// which are made for the camera block cam and tested against the depth image depth of w x h. 1: the frame has motion
+// draws to record.
+struct VkExec;
+int vk_fg_pose_prepare(struct VkExec *ex, uint64_t cam, VkImage depth, uint32_t w, uint32_t h);

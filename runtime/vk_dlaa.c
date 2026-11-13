@@ -1289,7 +1289,7 @@ static int mv_pass(VkExec *ex, struct Size *e, VkImageView zv, float jx, float j
     // Not on a frame that starts a new history, nor on the first frame of another render size (D.stepped, evaluate):
     // that frame was left out before the history could stay across a size, and it still is.
     if (D.cam_size == OCAM_BLOCK)
-        object_motion = vk_fg_pose_prepare(D.cam_addr, D.depth.image) && !D.reset && !D.stepped;
+        object_motion = vk_fg_pose_prepare(ex, D.cam_addr, D.depth.image, w, h) && !D.reset && !D.stepped;
     if (object_motion && vk_mvobj_execute(ex, D.cam_addr, e->mv_view, zv, D.depth.format, w, h)) full_barrier(cb);
     if (T.on > 0) T.cpu_mv += kern_now_ns() - c0;
     times_mark(cb, T_OBJ);

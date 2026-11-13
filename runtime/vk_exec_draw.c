@@ -629,8 +629,10 @@ static void mesh_ring_release(VkCtx *c);
 static void pool_marks_release(VkCtx *c);
 
 static void pose_shutdown(void);
+static void skin_shutdown(void);
 void vk_exec_draw_shutdown(void) {
     pose_shutdown();
+    skin_shutdown();
     vk_meshfb_shutdown();
     if (vk_ctx()) mesh_ring_release(vk_ctx()), pool_marks_release(vk_ctx());   // made without the stand-ins below too
     if (!Z.ready) return;
@@ -4917,6 +4919,8 @@ typedef struct {
     int32_t base_vertex;
     uint64_t cam;                // the draw's camera block, this frame's
     int pose_index, pose_view;
+    int skin;                    // vk_skin_motion.inc: 0 not a skinned character's draw; 1 one, 2 one checked against
+                                 // last frame's depth; -1 one skin_resolve left to the camera
 } MoDraw;
 typedef struct { VkBuffer b[17]; VkDeviceSize o[17], sz[17], str[17]; } MoVb;
 static struct {
@@ -4973,9 +4977,11 @@ static uint64_t mo_gen = 1;   // the list's snapshot (mo_prev_cached), bumped by
 static struct { uint32_t mask, chg, n; } MF[16];   // this list's draws per position banks and changed banks
 static char fm_last[400];                          // the last executed list's, formatted (vk_mvobj_frame_masks)
 
+static void skin_begin(uint64_t frame);
 // Starts this frame's list (the old one, never executed, is dropped).
 static void mo_begin(VkExec *ex, uint64_t frame) {
     mo_drop();
+    skin_begin(frame);
     mo_gen++;
     memset(MF, 0, sizeof MF);
     MQ.frame = frame, MQ.fence = ex->fence, MQ.depth_fmt = ex->depth.format;
@@ -5192,10 +5198,12 @@ static void mo_emit(VkCommandBuffer cb) {
 }
 
 #include "vk_fg_pose.inc"
+#include "vk_skin_motion.inc"
 
-static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out, uint32_t *banks_out, MotionOwner *owner_out, uint64_t t0);
+static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out, uint32_t *banks_out, MotionOwner *owner_out,
+                      SkinPick *skin_out, uint64_t t0);
 static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSize ib_off, uint64_t t0,
-                        const GfxShader *vs, uint32_t banks, const MotionOwner *owner);
+                        const GfxShader *vs, uint32_t banks, const MotionOwner *owner, const SkinPick *skin);
 // The chunks of a parallel group (vk_exec.c) add to the frame's list at once: whether a draw is listed at all is decided
 // by its own draw context (mvobj_pick, its memo per context), and only the frame's list, its memos and statistics go
 // under mo_lock there: under one lock for the whole check, the chunks' scene draws waited for each other. The order of
@@ -5206,7 +5214,7 @@ static PlatMutex mo_lock = PLAT_MUTEX_INIT;
 static void mvobj_draw(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSize ib_off) {
     if (MO.failed || !ex->dc->B.st_valid) return;
     if (RT_V111) {
-        if (!vk_dlaa_available() || !pose_enabled()) return;
+        if (!vk_dlaa_available() || (!pose_enabled() && !skin_enabled())) return;
     } else if (!vk_mvprev_on()) return;
     static int timed = -1;
     if (timed < 0) timed = rt_knob("MVOBJ_TIMES", "0");   // NX2NAVI_MVOBJ_TIMES=1: the summary's times (the clock reads cost)
@@ -5214,10 +5222,11 @@ static void mvobj_draw(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSiz
     const GfxShader *vs;
     uint32_t banks;
     MotionOwner owner = {0};
-    int listed = mvobj_pick(ex, d, &vs, &banks, &owner, t0);
+    SkinPick skin = {0};
+    int listed = mvobj_pick(ex, d, &vs, &banks, &owner, &skin, t0);
     int lk = listed && vk_exec_shared();
     if (lk) plat_mutex_lock(&mo_lock);
-    if (listed) mvobj_draw_(ex, d, ib, ib_off, t0, vs, banks, &owner);
+    if (listed) mvobj_draw_(ex, d, ib, ib_off, t0, vs, banks, &owner, skin.stride ? &skin : NULL);
     if (t0) __atomic_add_fetch(&MO.ns_check, kern_now_ns() - t0, __ATOMIC_RELAXED);
     if (lk) plat_mutex_unlock(&mo_lock);
 }
@@ -5384,7 +5393,8 @@ static int mo_legacy_previous(VkExec *ex, uint64_t frame, uint32_t banks, uint64
 
 // Whether the draw goes on to the frame's list (mvobj_draw_), with its motion variant and the banks its position reads;
 // this draw context alone decides (no lock in a chunk): the draw's state, and the variant memo per context.
-static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out, uint32_t *banks_out, MotionOwner *owner_out, uint64_t t0) {
+static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out, uint32_t *banks_out, MotionOwner *owner_out,
+                      SkinPick *skin_out, uint64_t t0) {
     DrawCtx *const cx = ex->dc;
     if (!vk_exec_in_chunk()) mvobj_banks(ex);   // a test's log of every scene draw (its tables are not shared)
     const VkExecTarget *z = &ex->depth;
@@ -5403,16 +5413,17 @@ static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out,
             ex->pass_layers != 1 || z->level || z->base_layer || z->layers != 1 ||
             v.x != 0.0f || v.y != (float)z->height ||
             v.width != (float)z->width || v.height != -(float)z->height) return 0;
+        // the player's own draw (ownership records), else any other skinned character's (vk_skin_motion.inc)
         if (!pose_owner(ex, owner_out)) {
             __atomic_add_fetch(&pose_unowned, 1, __ATOMIC_RELAXED);
-            return 0;
+            if (!skin_pick(ex, skin_out)) return 0;
         }
     }
     // a vertex shader that reads a user bank besides the camera's (c4) may move on its own
     const GfxShaderRes *ur;
     int nu = gfx_shader_resources(cx->B.st.vs, GFX_RES_UBO, &ur), reads = 0;
     for (int i = 0; i < nu; i++) reads |= ur[i].slot >= 3 && ur[i].slot <= 16 && ur[i].slot != 4;
-    if (!reads) return 0;
+    if (!reads) return skin_pick_left(skin_out, SKIN_BANKS_OTHER);
     __atomic_add_fetch(&MO.cand, 1, __ATOMIC_RELAXED);
     if (t0) {
         __atomic_add_fetch(&MO.ns_part[0], kern_now_ns() - t0, __ATOMIC_RELAXED);
@@ -5432,7 +5443,7 @@ static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out,
         cx->sf_mvprev = 0;
         if (!v || pending) {
             __atomic_add_fetch(&MO.building, 1, __ATOMIC_RELAXED);
-            return 0;
+            return skin_pick_left(skin_out, SKIN_NOT_READY);
         }
         GfxShaderIo io[32];
         uint32_t extra = gfx_shader_outputs(v, io) & ~gfx_shader_outputs(cx->B.st.vs, io);
@@ -5444,7 +5455,7 @@ static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out,
     uint32_t banks = vmemo[vi].banks;
     if (!banks || !(banks & ~(1u << 4))) {
         __atomic_add_fetch(&MO.no_out, 1, __ATOMIC_RELAXED);
-        return 0;
+        return skin_pick_left(skin_out, SKIN_BANKS_OTHER);
     }
     // a position without the scene camera (c4) has a view of its own (c8 c9 c10 [c13]: its c8 is at a new address every
     // frame, last frame's is never found): drawn again it would get this frame's view and no camera motion
@@ -5453,7 +5464,7 @@ static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out,
     if (noc4 < 0) noc4 = rt_knob("MVOBJ_NOC4", "0");   // NX2NAVI_MVOBJ_NOC4=1 (test): drawn again all the same
     if (!(banks >> 4 & 1) && !noc4) {
         __atomic_add_fetch(&MO.no_out, 1, __ATOMIC_RELAXED);
-        return 0;
+        return skin_pick_left(skin_out, SKIN_BANKS_OTHER);
     }
     // only positions that read an object's own blocks: bones (c5), place (c7) or c6. The rest (terrain and grass: c14
     // c15 c16, with or without c9) measured no better than the camera's motion (NX2NAVI_MV_CHECK, turning, those draws
@@ -5463,7 +5474,7 @@ static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out,
     if (all < 0) all = rt_knob("MVOBJ_ALL", "0");
     if (!all && !(banks & (1u << 5 | 1u << 6 | 1u << 7))) {
         __atomic_add_fetch(&MO.no_out, 1, __ATOMIC_RELAXED);
-        return 0;
+        return skin_pick_left(skin_out, SKIN_BANKS_OTHER);
     }
     // NX2NAVI_MVOBJ_ONLY=<hex bank mask> (test): only draws whose position reads no bank outside the mask (bit n: cn)
     static long only = -2;
@@ -5471,13 +5482,13 @@ static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out,
         const char *e = cfg_get("NX2NAVI_MVOBJ_ONLY");
         only = e && *e ? strtol(e, NULL, 16) : -1;
     }
-    if (only >= 0 && banks & ~(uint32_t)only & ~(1u << 4)) return 0;
+    if (only >= 0 && banks & ~(uint32_t)only & ~(1u << 4)) return skin_pick_left(skin_out, SKIN_BANKS_OTHER);
     static long exact = -2;   // NX2NAVI_MVOBJ_EXACT=<hex bank mask> (test): only draws with exactly these position banks
     if (exact == -2) {
         const char *e = cfg_get("NX2NAVI_MVOBJ_EXACT");
         exact = e && *e ? strtol(e, NULL, 16) : -1;
     }
-    if (exact >= 0 && banks != (uint32_t)exact) return 0;
+    if (exact >= 0 && banks != (uint32_t)exact) return skin_pick_left(skin_out, SKIN_BANKS_OTHER);
     *vs_out = vs, *banks_out = banks;
     return 1;
 }
@@ -5485,7 +5496,7 @@ static int mvobj_pick(VkExec *ex, const p_draw_idx *d, const GfxShader **vs_out,
 // A draw mvobj_pick took, onto the frame's list (in a chunk under mo_lock): the list begins at the first such draw of
 // the frame's submission (mo_emit drops a list of another frame, submission or depth format).
 static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSize ib_off, uint64_t t0,
-                        const GfxShader *vs, uint32_t banks, const MotionOwner *owner) {
+                        const GfxShader *vs, uint32_t banks, const MotionOwner *owner, const SkinPick *skin) {
     DrawCtx *const cx = ex->dc;
     const VkExecTarget *z = &ex->depth;
     uint64_t tp = t0 ? kern_now_ns() : 0;
@@ -5493,8 +5504,11 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     if (MQ.frame != frame || MQ.fence != ex->fence || MQ.depth_fmt != z->format) mo_begin(ex, frame);
     mo_mask_note(banks, cx->B.st.vs);
     // last frame's camera and blocks; held still when none of the position's blocks changed (most of the scenery)
-    PoseRange *pose = RT_V111 ? pose_match(ex, d, owner) : NULL;
-    if (RT_V111 && !pose) return;
+    PoseRange *pose = RT_V111 && !skin ? pose_match(ex, d, owner) : NULL;
+    if (RT_V111 && !pose && !skin) return;
+    SkinDraw skin_draw;
+    SkinEntry skin_entry;
+    uint64_t skin_listed = 0;
     VkDescriptorBufferInfo cam = {0}, prevb[17] = {0};
     uint32_t have = 0, changed = 0;
     const ActorPose *previous_pose = NULL;
@@ -5522,6 +5536,15 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
         VkViewport v = draw_viewport(ex);
         jit[0] = v.x;
         jit[1] = v.y - (float)z->height;
+    } else if (skin) {
+        // another skinned character's draw: its blocks, and whether a bone turned sharply (vk_skin_motion.inc); which
+        // draw of last frame it continues is decided when the vectors are made (skin_resolve)
+        if (!skin_try(ex, d, frame, vs, banks, skin, &skin_draw, &skin_entry, &skin_listed, &pose_visibility_guard)) return;
+        if (pose_visibility_guard && !vk_dlaa_pose_depth(frame, z->width, z->height, &pose_depth, history))
+            pose_visibility_guard = 0;   // as for the player: no depth of last frame to check against, the plain vector
+        VkViewport v = draw_viewport(ex);
+        jit[0] = v.x;
+        jit[1] = v.y - (float)z->height;
     } else {
         if (!vk_dlaa_prev_camera(&cam, jit)) {
             MO.nodata++, MO.why[0]++;
@@ -5541,6 +5564,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     const GfxShader *fs = pose_visibility_guard ? link_motion_fs(loc) : mo_fs(loc);
     if (!fs) {
         MO.no_fs++;
+        if (skin) skin_left(SKIN_NOT_READY);
         return;
     }
     VkPipeState ms = cx->B.st;
@@ -5556,7 +5580,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     static int eq = -1;
     if (eq < 0) eq = rt_knob("MVOBJ_EQUAL", "0");
     int df = cx->B.st.ds.df;
-    df = (eq || pose) ? NVN_DEPTH_FUNC_EQUAL : df == NVN_DEPTH_FUNC_LESS ? NVN_DEPTH_FUNC_LEQUAL
+    df = (eq || pose || skin) ? NVN_DEPTH_FUNC_EQUAL : df == NVN_DEPTH_FUNC_LESS ? NVN_DEPTH_FUNC_LEQUAL
        : df == NVN_DEPTH_FUNC_GREATER ? NVN_DEPTH_FUNC_GEQUAL : df == NVN_DEPTH_FUNC_LEQUAL || df == NVN_DEPTH_FUNC_GEQUAL ? df
        : NVN_DEPTH_FUNC_EQUAL;
     ms.ds.dt = 1, ms.ds.dw = 0, ms.ds.df = (uint64_t)df, ms.ds.st = 0;
@@ -5581,11 +5605,15 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     if (pmemo[pi].used && !memcmp(&pmemo[pi].st, &ms, sizeof ms)) {
         info = pmemo[pi].info;
         pipe = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);   // its optimised build once swapped in
-        if (!pipe) return;
+        if (!pipe) {
+            if (skin) skin_left(SKIN_NOT_READY);
+            return;
+        }
     } else {
         pipe = vk_pipeline_graphics_async(&ms, &info, &pending, 0);
         if (pending || !pipe || !info) {
             MO.building += pending != 0;
+            if (skin) skin_left(SKIN_NOT_READY);
             return;
         }
         pmemo[pi].st = ms, pmemo[pi].p = pipe, pmemo[pi].info = info, pmemo[pi].used = 1;
@@ -5615,6 +5643,10 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
             memcpy(scratch(ex, b->range, &b->buffer, &b->offset), data, b->range);
             data += b->range;
         }
+    } else if (skin) {
+        // where skin_resolve puts last frame's bytes of each block, once it knows whose they are
+        for (int i = 0; i < SKIN_BANKS; i++)
+            if (skin_draw.block[i] >= 0) cx->mo_ovr[NVN_STAGE_VS][18 + i] = SK.f[SK.cur].b[skin_draw.block[i]].was;
     } else {
         for (int bk = 3; bk <= 16; bk++)
             cx->mo_ovr[NVN_STAGE_VS][bk + 15] = bk == 4 ? cam : (have >> bk & 1) ? prevb[bk] : ubo_info(ex, NVN_STAGE_VS, bk);
@@ -5625,6 +5657,7 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     cx->mo_ovr_on = 0;
     if (!bound) {
         MO.storage++;
+        if (skin) skin_left(SKIN_STORAGE);
         return;
     }
     q->pipe = pipe, q->info = info;
@@ -5640,9 +5673,11 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     q->it = d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     q->count = (uint32_t)d->count, q->instances = d->instances > 0 ? (uint32_t)d->instances : 1;
     q->base_vertex = d->base_vertex, q->base_instance = (uint32_t)d->base_instance;
-    q->cam = ex->ubo[NVN_STAGE_VS][pose ? 0 : 1].addr;
+    q->cam = ex->ubo[NVN_STAGE_VS][pose || skin ? 0 : 1].addr;
     q->pose_index = pose ? (int)(pose - pose_ranges) + 1 : 0;
     q->pose_view = pose ? (int)(pose_view - pose->history[frame & 1].view) : 0;
+    q->skin = skin ? 1 + pose_visibility_guard : 0;
+    if (skin) skin_commit(&skin_draw, &skin_entry, skin_listed, MQ.n);
     MQ.n++;
     MO.draws++;
     for (int i = 0; i < 16; i++)   // the frame's draws per position banks and changed banks (vk_mvobj_frame_masks)
@@ -5653,9 +5688,12 @@ static void mvobj_draw_(VkExec *ex, const p_draw_idx *d, VkBuffer ib, VkDeviceSi
     if (t0) MO.ns_rec += kern_now_ns() - t1, MO.n_rec++;
 }
 
-int vk_fg_pose_prepare(uint64_t cam, VkImage depth) {
-    if (!RT_V111 || !pose_enabled()) return 0;
-    pose_select(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), cam, depth);
+int vk_fg_pose_prepare(VkExec *ex, uint64_t cam, VkImage depth, uint32_t w, uint32_t h) {
+    if (!RT_V111 || (!pose_enabled() && !skin_enabled())) return 0;
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    pose_select(frame, cam, depth);
+    skin_resolve(ex, frame, cam, depth, w, h);
+    pose_status(frame);
     return MQ.n != 0;
 }
 
@@ -5730,11 +5768,13 @@ int vk_mvobj_execute(VkExec *ex, uint64_t cam, VkImageView mv, VkImageView depth
     int kept = 0;
     for (int i = 0; i < MQ.n; i++)
         if (MQ.d[i].cam == cam && (!MQ.d[i].pose_index ||
-            pose_ranges[MQ.d[i].pose_index - 1].history[frame & 1].view[MQ.d[i].pose_view].selected)) {
+            pose_ranges[MQ.d[i].pose_index - 1].history[frame & 1].view[MQ.d[i].pose_view].selected) &&
+            (!MQ.d[i].skin || (MQ.d[i].skin > 0 && SK.resolved))) {   // a skinned draw: one skin_resolve paired
             if (MQ.d[i].pose_index) ++pose_written[pose_ranges[MQ.d[i].pose_index - 1].actor];
+            if (MQ.d[i].skin) skin_recorded(MQ.d[i].skin == 2);
             MQ.d[kept++] = MQ.d[i];
         }
-        else MO.other_cam++;
+        else if (!MQ.d[i].skin) MO.other_cam++;   // a skinned draw left out has its own count (skin_status)
     MQ.n = kept;
     if (!MQ.n) {
         mo_drop();
