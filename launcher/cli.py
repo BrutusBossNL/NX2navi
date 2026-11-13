@@ -31,12 +31,13 @@ def follow(job):
     seen = {}
     job.start()
     while job.result is None:
-        for s in job.steps:
-            key = (s.state, s.value if s.state != jobs.RUNNING else int(s.fraction * 20))
-            if seen.get(s.id) != key:
-                seen[s.id] = key
-                print(f'{s.label}: {s.value}' + (f' ({s.detail})' if s.detail and s.state == jobs.RUNNING else ''),
-                      flush=True)
+        with job.locked():   # each step as one change of the worker left it
+            steps = [(s.id, s.label, s.state, s.value, s.fraction, s.detail) for s in job.steps]
+        for sid, label, state, value, fraction, detail in steps:
+            key = (state, value if state != jobs.RUNNING else int(fraction * 20))
+            if seen.get(sid) != key:
+                seen[sid] = key
+                print(f'{label}: {value}' + (f' ({detail})' if detail and state == jobs.RUNNING else ''), flush=True)
         time.sleep(0.2)
     for s in job.steps:
         if seen.get(s.id, (None,))[0] != s.state:

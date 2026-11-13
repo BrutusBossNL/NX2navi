@@ -147,7 +147,10 @@ class Job:
         self.finished = None
         self.after = None           # what the window does next ('restart', ...)
         self.note = ''              # a sentence for the home screen after the job (note_scan)
-        self._lock = threading.Lock()
+        # Held for every change of a step and of rev, and by a reader that wants the steps as one change left them
+        # (locked). The worker, the thread that reads the build's output and the window's thread (cancel) all change
+        # the job. Reentrant: progress() begins a step, and every change ends in _touch().
+        self._lock = threading.RLock()
 
     # ---- state the window reads
     def step(self, sid):
@@ -200,47 +203,68 @@ class Job:
     def elapsed(self):
         return (self.finished or time.time()) - self.started
 
+    def locked(self):
+        """The lock to read the steps under (`with job.locked():`): they are then as one change left them, a step's
+        state with the value and fraction that belong to it. Held only to copy what is read, never across a
+        wait."""
+        return self._lock
+
     # ---- changes, from the worker
     def _touch(self):
-        self.rev += 1
+        # Under the lock: "rev += 1" from two threads at once can write an older count back, and a reader that had
+        # seen the newer one then takes the next change for one it has drawn already. The job's last change is its
+        # result, so the window stayed on the job screen of a job that had ended.
+        with self._lock:
+            self.rev += 1
 
     def log(self, line):
-        self.lines.append(line)
-        self.ctx.log(line)
+        with self._lock:
+            self.lines.append(line)
+        self.ctx.log(line)   # outside the lock: it waits for the disk
         self._touch()
 
+    def last_lines(self, n):
+        """The last n lines of the job's output, copied under the lock: the thread that reads the build's output
+        appends while the window draws them, and a deque changed while it is read raises."""
+        with self._lock:
+            return list(self.lines)[-n:]
+
     def begin(self, sid, detail=''):
-        s = self.step(sid)
-        if s and s.state != RUNNING:
-            s.state, s.fraction, s.detail, s.t0, s.value = RUNNING, 0.0, detail, time.time(), '0%'
-            s.pace.clear()
-            self._touch()
+        with self._lock:
+            s = self.step(sid)
+            if s and s.state != RUNNING:
+                s.state, s.fraction, s.detail, s.t0, s.value = RUNNING, 0.0, detail, time.time(), '0%'
+                s.pace.clear()
+                self._touch()
 
     def progress(self, sid, fraction, detail=''):
-        s = self.step(sid)
-        if s:
-            if s.state == PENDING:
-                self.begin(sid)
-            s.fraction = max(0.0, min(1.0, fraction))
-            s.pace.append((time.time(), s.fraction))
-            s.value = f'{int(s.fraction * 100)}%'
-            if detail:
-                s.detail = detail
-            self._touch()
+        with self._lock:
+            s = self.step(sid)
+            if s:
+                if s.state == PENDING:
+                    self.begin(sid)
+                s.fraction = max(0.0, min(1.0, fraction))
+                s.pace.append((time.time(), s.fraction))
+                s.value = f'{int(s.fraction * 100)}%'
+                if detail:
+                    s.detail = detail
+                self._touch()
 
     def finish(self, sid, value=None):
-        s = self.step(sid)
-        if s:
-            s.seconds = time.time() - s.t0 if s.t0 else 0.0
-            s.state, s.fraction = DONE, 1.0
-            s.value = value or f'Done · {mmss(s.seconds)}'
-            self._touch()
+        with self._lock:
+            s = self.step(sid)
+            if s:
+                s.seconds = time.time() - s.t0 if s.t0 else 0.0
+                s.state, s.fraction = DONE, 1.0
+                s.value = value or f'Done · {mmss(s.seconds)}'
+                self._touch()
 
     def skip(self, sid, value='Unchanged'):
-        s = self.step(sid)
-        if s:
-            s.state, s.value = SKIPPED, value
-            self._touch()
+        with self._lock:
+            s = self.step(sid)
+            if s:
+                s.state, s.value = SKIPPED, value
+                self._touch()
 
     def cancelled(self):
         return self.cancel_flag.is_set()
@@ -313,10 +337,11 @@ class Job:
                 self.result, self.error = 'failed', str(e) or type(e).__name__
                 self.ctx.log(failure_line(e) if isinstance(e, PLAIN_FAILURES) else traceback.format_exc())
         finally:
-            for s in self.steps:
-                if s.state == RUNNING:
-                    s.state = FAILED if self.result == 'failed' else PENDING
-                    s.value = 'Stopped' if self.result == 'failed' else 'Cancelled'
+            with self._lock:
+                for s in self.steps:
+                    if s.state == RUNNING:
+                        s.state = FAILED if self.result == 'failed' else PENDING
+                        s.value = 'Stopped' if self.result == 'failed' else 'Cancelled'
             if marked:
                 try:
                     (self.ctx.layout.data / MARKER).unlink(missing_ok=True)

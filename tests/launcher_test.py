@@ -3833,6 +3833,71 @@ class JobTest(Tmp):
         (game / 'romfs' / 'romfs.bin').unlink()   # the image is gone: only the dump brings it back
         self.assertEqual(jobs.InstallJob(ctx, self.tmp / 'g.nup', game).args()[0], '--nup')
 
+    def test_a_reader_sees_each_step_as_one_change_left_it(self):
+        """The worker, the build's reader thread and the window change a job while the window reads it. Under
+        job.locked() a step's state comes with the value and fraction that belong to it, every change counts in
+        rev (the window draws again when rev changed, and learns from it that the job ended), and the output's
+        last lines can be copied while lines arrive."""
+        ctx = self.make_ctx('ok')
+        self.addCleanup(ctx._file.close)
+        j = jobs.Job(ctx, ['lift', 'compile'])
+        stop = threading.Event()
+        wrong, errors = [], []
+
+        def work():
+            while not stop.is_set():
+                for sid in ('lift', 'compile'):
+                    j.begin(sid, 'starting')
+                    j.progress(sid, 0.5, 'half')
+                    j.finish(sid)
+                    j.log(f'working on {sid}')
+                    with j.locked():
+                        j.step(sid).state, j.step(sid).value, j.step(sid).fraction = jobs.PENDING, 'Waiting', 0.0
+
+        def read():
+            try:
+                while not stop.is_set():
+                    with j.locked():
+                        seen = [(s.state, s.value, s.fraction) for s in j.steps]
+                    for state, value, fraction in seen:
+                        ok = {jobs.PENDING: value == 'Waiting' and fraction == 0.0,
+                              jobs.RUNNING: value.endswith('%') and value == f'{int(fraction * 100)}%',
+                              jobs.DONE: value.startswith('Done') and fraction == 1.0}[state]
+                        if not ok:
+                            wrong.append((state, value, fraction))
+                    j.last_lines(6)
+            except Exception as e:   # noqa: BLE001 - whatever a reader meets is the failure
+                errors.append(e)
+
+        threads = [threading.Thread(target=work), threading.Thread(target=read), threading.Thread(target=read)]
+        for t in threads:
+            t.start()
+        time.sleep(0.5)
+        stop.set()
+        for t in threads:
+            t.join(30)
+        self.assertEqual((wrong[:3], errors), ([], []))
+
+        counted = jobs.Job(ctx, [])
+        touchers = [threading.Thread(target=lambda: [counted._touch() for _ in range(20000)]) for _ in range(4)]
+        for t in touchers:
+            t.start()
+        for t in touchers:
+            t.join(60)
+        self.assertEqual(counted.rev, 80000)                             # no change was lost
+        try:
+            from launcher.ui.app import App
+        except ImportError:
+            return
+        a = mock.MagicMock()                                             # the job screen's rows, from a real job
+        a.job = jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game')
+        a.job.begin('tools')
+        a.job.progress('tools', 0.25)
+        rows = App.rows_job(a)
+        self.assertEqual((rows[0].kind, rows[0].value, rows[0].fraction), ('progress', '25%', 0.25))
+        self.assertEqual([r.kind for r in rows].count('divider'), 1)     # after the game data, as before
+        self.assertEqual(rows[-1].kind, 'action')                        # Cancel
+
 
 # ---------------------------------------------------------------- one launcher, one job
 

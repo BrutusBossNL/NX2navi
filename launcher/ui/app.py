@@ -2074,15 +2074,17 @@ class App:
     def rows_job(self):
         j = self.job
         rows = []
-        for st in j.steps:
-            if st.state == jobs.RUNNING:
-                rows.append(Row('progress', st.label, fraction=st.fraction, value=f'{int(st.fraction * 100)}%',
+        with j.locked():   # each step as one change of the worker left it, not a state with the value before it
+            steps = [(st.id, st.label, st.state, st.value, st.fraction) for st in j.steps]
+        for sid, label, state, value, fraction in steps:
+            if state == jobs.RUNNING:
+                rows.append(Row('progress', label, fraction=fraction, value=f'{int(fraction * 100)}%',
                                 focus_value=True, desc=None))
             else:
-                style = {jobs.DONE: 'normal', jobs.SKIPPED: 'dim', jobs.PENDING: 'dim', jobs.FAILED: 'salmon'}[st.state]
-                rows.append(Row('value', st.label, st.value, style, check=st.state == jobs.DONE, desc=None,
-                                focus_value=st.state == jobs.FAILED))
-            if st.id in ('romfs', 'verify') and st is not j.steps[-1]:
+                style = {jobs.DONE: 'normal', jobs.SKIPPED: 'dim', jobs.PENDING: 'dim', jobs.FAILED: 'salmon'}[state]
+                rows.append(Row('value', label, value, style, check=state == jobs.DONE, desc=None,
+                                focus_value=state == jobs.FAILED))
+            if sid in ('romfs', 'verify') and sid != steps[-1][0]:
                 rows.append(Row('divider'))
         if j.result is None:
             label = {'install': 'Cancel Installation', 'update': 'Cancel Update'}.get(j.kind, 'Cancel')
@@ -2105,7 +2107,7 @@ class App:
     def job_desc(self):
         j = self.job
         cur = j.current()
-        lines = [ln for ln in j.lines if ln.strip() and not ln.startswith('@@')][-6:]
+        lines = [ln for ln in j.last_lines(200) if ln.strip() and not ln.startswith('@@')][-6:]
         if j.result == 'failed':
             return {'title': 'The Build Stopped' if j.kind != 'update' or cur.id not in ('download', 'verify')
                     else 'The Update Stopped',
@@ -2165,7 +2167,7 @@ class App:
         j = self.job
         report = [f'NX2navi {self.layout.version} ({"checkout" if self.layout.dev else "release"}), {sys.platform}',
                   f'Job: {j.kind}, step: {j.current().label}', f'Error: {j.error}', '', 'Last lines:']
-        report += [ln for ln in list(j.lines)[-60:]]
+        report += j.last_lines(60)
         self.root.clipboard_clear()
         self.root.clipboard_append('\n'.join(report))
         self.message = 'Report copied.'
