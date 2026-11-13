@@ -196,6 +196,9 @@ int mem_start_note(int probe);                             // a game's start: a 
                                                            // below the game's need (mem_need.h); 1 when it is
 void mem_guest_census(uint64_t frame);   // NX2NAVI_TRACE=perf: committed bytes per guest region
 void mem_lazy_heap_report(uint64_t frame);   // NX2NAVI_TRACE=perf: the lazy heap's faults since the last line
+// The game's own memory for the memory report (vk_memory.c owner_log): its heap's size, the part of it committed (the
+// size itself unless the heap is lazy), and the physical memory it mapped. No lock: a log may read a figure late.
+void mem_guest_usage(uint64_t *heap, uint64_t *heap_committed, uint64_t *phys_maps);
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr);                      // 0x01
 uint32_t mem_set_permission(uint64_t a, uint64_t n, uint32_t perm);             // 0x02
 uint32_t mem_set_attribute(uint64_t a, uint64_t n, uint32_t mask, uint32_t at); // 0x03
@@ -364,6 +367,10 @@ void wide_init(void);
 void wide_present(void);                                    // each present: DLSS's render scale (res_fixed)                                      // after rt_patches_init: widescreen.c, NX2NAVI_GAME_ASPECT
 int wide_available(void);                                  // the generated C has the widescreen sets
 void wide_picture(unsigned *w, unsigned *h);               // the picture the game draws (its scene is never larger)
+int wide_scene_settable(void);                             // the generated C has res_fixed: the scene's share can be set
+double wide_scene_share(void);                             // the scene's share of the picture now (0: the game's own)
+double wide_scene_wanted(void);                            // ... what the settings ask for, before the heap's limit
+int wide_scene_restart(void);                              // a restart gives the larger scene the settings ask for
 uint64_t wide_heap_extra_kib(void);                        // the texture heap's growth for the widescreen picture
 // The most res_heap_extra_kib may be (memory.c): with more the application pool passes the heap region and the
 // game's own SetHeapSize is refused. A whole number of 2 MiB.

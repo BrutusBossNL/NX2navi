@@ -662,6 +662,11 @@ bytes goes first, what moves fits the free bytes outside the chosen blocks, a pl
 and 400 random tables keep those rules. The part of `runtime/vk_texture.c` that builds the table and moves the images
 (`NX2NAVI_TEX_COMPACT`) is not built by it. No GPU, no game files.
 
+A change to which entry of the upscaler stand-in's scratch images serves a new size (`runtime/vk_scratch_lru.h`,
+`runtime/vk_exec_draw.c` `fallback_scratch`) passes `python tests\scratch_lru_check.py`, which builds the header alone
+and checks that a match is a hit, a ninth size takes a free entry or the one used longest ago instead of being
+refused, and two images of one frame never evict each other. No GPU, no game files.
+
 A change to which frames FSR 3.1 frame generation is told are camera cuts (`runtime/vk_fg_reset.h`, `runtime/vk_fg.cpp`
 `generate` and `vk_fg_frame`) passes `python tests\fg_reset_check.py`, which builds the header alone and checks that each
 frame id gets its own frame's cut, that an id never noted or no longer held counts as a cut, and that a slot rewritten

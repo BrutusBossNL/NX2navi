@@ -50,6 +50,7 @@ typedef enum {
     UI_MENU_TEX_DETAIL, UI_MENU_TEX_DETAIL_DESC,
     UI_MENU_TEX_DETAIL_AUTO,   // "Automatic: %s", %s the level it picks on this card
     UI_MENU_TEX_DETAIL_FULL, UI_MENU_TEX_DETAIL_REDUCED, UI_MENU_TEX_DETAIL_LOW,
+    UI_MENU_VRAM_USE, UI_MENU_VRAM_USE_DESC, UI_MENU_VRAM_USE_LOW, UI_MENU_VRAM_USE_HIGH,
     UI_MENU_SHARPNESS, UI_MENU_SHARPNESS_DESC, UI_MENU_SHARPNESS_NEEDS_FSR,
     UI_MENU_COLOR,            // group heading over the colour rows
     UI_MENU_COLOR_PRESET, UI_MENU_COLOR_PRESET_DESC, UI_MENU_COLOR_DEFAULT, UI_MENU_COLOR_VIVID, UI_MENU_COLOR_CLARITY,
@@ -174,7 +175,10 @@ typedef enum {
     // Menu tab
     UI_MENU_MENU_LANG, UI_MENU_MENU_LANG_DESC, UI_MENU_MENU_LANG_AUTO,
     UI_MENU_DISCORD_RPC, UI_MENU_DISCORD_RPC_DESC, UI_MENU_LOW_END_GPU, UI_MENU_LOW_END_GPU_DESC,
-    UI_MENU_REPLAY_WORKERS, UI_MENU_REPLAY_WORKERS_DESC,   // the Game tab, English only
+    // the Game tab's Testing rows (ui/menu.cpp tab_game), English only
+    UI_MENU_REPLAY_WORKERS, UI_MENU_REPLAY_WORKERS_DESC, UI_MENU_REPLAY_PIPE, UI_MENU_REPLAY_PIPE_DESC,
+    UI_MENU_REPLAY_SMALL, UI_MENU_REPLAY_SMALL_DESC, UI_MENU_TAIL_EARLY, UI_MENU_TAIL_EARLY_DESC,
+    UI_MENU_NEEDS_WORKERS, UI_MENU_NEEDS_PIPE,   // why a row is greyed out
 
     // Language names, each in its own language and the same in every row (game language and menu language lists)
     UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_JA, UI_MENU_LANGNAME_FR, UI_MENU_LANGNAME_DE, UI_MENU_LANGNAME_IT,
@@ -334,6 +338,7 @@ typedef enum {
     // and on a build where FSR 3.1 does not load (vk_ffx_available): the menu leaves it out there, and these texts say so
     UI_MENU_UPSCALING_DESC_NO_FSR,
     UI_MENU_FSR3_OFF,   // FSR 3.1 is still set but not loadable: "in use: off" and why
+    UI_MENU_UPSCALING_NATIVE,   // the scene at the picture's own size, no upscaler (ui/menu.cpp share_native)
     UI_MENU_FRAMEGEN_DESC_DLSS, UI_MENU_FRAMEGEN_NOTE_DLSS, UI_MENU_FRAMEGEN_NEEDS_DLSS,   // DLSS only
     UI_MENU_FRAMEGEN_DESC_NONE, UI_MENU_FRAMEGEN_NEEDS_NONE,                               // neither runs
     // DLSS frame generation (ui/menu.cpp row_framegen, row_framegen_mult): the multiplier row, its notes when this GPU

@@ -71,11 +71,30 @@
 # of latency, and can show a dark or flickering frame now and then: the other thread reads vertex and buffer memory
 # the game has sometimes rewritten by then.
 # replay_async = 0
-# Record the large groups of draws of a submission on this many replay worker threads beside the submitting one, 0 to
-# 16. Default: 3 (Hyrule Field standing on an RX 7900 XT: 51.7 instead of 43.6 fps). 0: the replay records everything
-# on one thread, as before; try it if a picture looks wrong. With 1 a worker records each long run of draws while the
-# submitting thread waits for it: no faster, it checks that the pictures stay the same.
-# replay_workers = 3
+# EXPERIMENTAL. Record the large groups of draws of a submission on this many replay worker threads beside the
+# submitting one: auto or 0 to 16. Default: auto, half the CPU's physical cores less one (2 on 6 cores, 3 on 8, 5 on
+# 12, at most 6), none on four cores or fewer and none on AMD's driver for RX 6000 and older Radeon cards, where a
+# player's game lost its graphics device with workers on; the log's "replay workers automatic" line says how many.
+# 0: the replay records everything on one thread. 3 gave 51.7 instead of 43.6 fps standing in Hyrule Field on an RX
+# 7900 XT, and more than 3 gave nothing more there. Also in the menu: Game, Testing, CPU helper threads.
+# With 1 a worker records each long run of draws while the submitting thread waits for it: no faster, it checks that
+# the pictures stay the same.
+# replay_workers = auto
+# EXPERIMENTAL. 1 lets the game start on its next frame while the graphics card still runs the end of the last one: the
+# upscaler (FSR 4, FSR 3.1 or DLSS) and the interface drawn after it. The graphics card runs the same work, with the
+# copies of what it wrote for the game moved before that end, and the game's waits end once those copies and the
+# results it reads are there. A frame whose end hands the game anything else runs as before. Default: 0. Standing in
+# Hyrule Field on an RX 7900 XT with FSR 4: 50.7 instead of 42.5 fps, and 63.5 instead of 49.4 with replay_workers = 3.
+# Does nothing without one of those upscalers, nor with the lazy write-back (the default on NVIDIA and Intel cards).
+# Also in the menu: Game, Testing, Start next frame early.
+# tail_early = 0
+# EXPERIMENTAL, with replay_workers. replay_pipe = N (1 to 4, default 0): the submitting thread goes on past up to N
+# groups its workers still record. replay_small = N (default 0, needs replay_pipe): a group of N draws or more that is
+# too small to share out goes whole to one worker. Kokiri Forest standing on an RX 7900 XT with FSR 4, tail_early = 1,
+# replay_workers = 5, replay_pipe = 4 and replay_small = 16: 63 instead of 45 fps with all of them off. Also in the
+# menu: Game, Testing, Helpers work ahead (replay_pipe) and Helpers take small jobs (replay_small).
+# replay_pipe = 0
+# replay_small = 0
 # EXPERIMENTAL, THE GAME CRASHES WITH 1. 1 lifts the virtual core gate: guest threads run without the console's limit
 # of one thread per core, and the game keeps per-core data without locks. With 1 the game crashes or hangs,
 # usually at start. Keep 0 to play.
@@ -333,8 +352,21 @@
 # Percent of the video memory in use above which textures give way: first those the game released, then those no
 # shader sampled for a while (tex_disuse); each is made again when used. The default lies under the 87 percent past
 # which game memory gets no copy in video memory (memory = mirror), which costs far more frame time than a texture
-# uploaded again. 0: textures never give way for video memory.
+# uploaded again. 0: textures never give way for video memory. 70 frees more on a card short of memory, and more
+# textures are made again (the low of the 0.10 previews set it).
 # tex_vram_pressure = 80
+# Seconds a texture the game released is kept once nothing uses it (0 to 900); then it goes, however much room is
+# left. In play the game took released textures back within a minute or not at all; one taken back after its drop is
+# made again and shows its stand-in for a frame. A texture whose content only the GPU made waits twice as long, and one
+# the GPU drew into since its last copy back to game memory stays. 0: released textures stay up to tex_released_mb for
+# the whole session (as before 0.10). Default: 180; vram_use = high sets 0. Read at start.
+# tex_released_hold = 180
+# Megabytes the released textures may hold (0: no bound). Past it the oldest go even when young; while tex_released_hold
+# is on, young ones may stay past it, up to twice it, as long as video memory and the system's commit have room.
+# Default: a quarter of the video memory budget where the PC has an eighth of its memory to match, at least a
+# thirty-second of the PC's memory (512 to 2048), at most 8192. 1024 (the low of the 0.10 previews) holds less, but
+# textures the game takes back after their drop are made again and show their stand-in for a frame. Read at start.
+# tex_released_mb = 4096
 # Texture compaction (experimental). Video memory is taken in blocks (vma_block_mb), and a block goes back to the
 # driver only once everything in it is freed: after a long session the blocks hold textures scattered between holes,
 # and the game holds a gigabyte or two of video memory it does not use. 1: textures no shader sampled for ten seconds
@@ -521,6 +553,14 @@
 # is softer and costs a little less GPU time. DLSS and FSR 3.1 (dlaa = 1) scale the scene themselves, so this changes
 # nothing there, and it does not touch the movies. Changes while the game runs take effect at once.
 # standin_filter = easu
+# The 3D scene's share of the game resolution without DLSS or FSR 3.1 (dlaa = 0), Ocarina of Time: 0.75, the default,
+# is the game's own most (1920x1080 in its 2560x1440 picture), which the scaling above enlarges; 1 draws the scene at
+# the picture's full size and nothing enlarges it (the menu's Upscaling row calls it Native (100%)); 0 leaves the size
+# to the game's dynamic resolution, down to a third of the picture under load. A larger scene needs more of the
+# memory the game keeps for its render targets, which is set aside at the start: 1 takes 238 MiB more than 0.75 at
+# 2560x1440, 533 MiB more at 3840x2160 and 712 MiB more at 5120x2160, as dlss = dlaa does. Changes while the game runs
+# take effect at once up to the share the game started with, a larger one at the next start.
+# scene_share = 0.75
 # Picture shape when the window's shape differs from the game resolution's (a 16:9 picture in a 21:9 fullscreen
 # window): fit, the default, keeps the shape, with black bars at the sides or above and below, so a 16:9 game in a wider
 # window is no longer stretched as it used to be; stretch fills the window. Changes while the game runs take effect at
@@ -540,6 +580,15 @@
 # cpu or astc_bc = 0) and the budget is under 20480 MiB, auto goes one step lower, as they take four times the memory.
 # The log says what was picked ("texture detail:"). Read at start.
 # texture_detail = auto
+# Video memory use (the Screen tab's row): low or high. low, the default, lets go of released textures once nothing has
+# used them for tex_released_hold (180 s), and frees what DLSS, frame generation's HUD-less picture, FSR 1 and SMAA
+# held once they have been switched off for a while (about 0.9 GiB with DLSS off at 5120x2142). high keeps both for the
+# whole session (tex_released_hold = 0: released textures up to tex_released_mb), so switching those features on again
+# makes nothing. balanced, the default before 0.10, means low. The low of the 0.10 previews traded memory for work
+# done again; its values are keys of their own: tex_released_mb = 1024, tex_vram_pressure = 70 and pipe_seed_boot = 0
+# (0.3-0.6 GiB of video memory and 2-4 GB of commit less, but a first visit to an area misses objects for a frame
+# while their pipelines are made). Read at start.
+# vram_use = low
 # Sun shadow map size: game (the game's own, which changes with the view and drops to about 400 near the ground, so
 # leaf shadows look blocky and jump) or a fixed 256, 512, 768, 1024, 1536 or 2048. Above 960 the texture heap grows with
 # it. 256 is coarser than the game's own and is for integrated GPUs short of memory bandwidth. Read at start.
@@ -605,7 +654,9 @@
 # characters, a little more flicker). Any other model by its letter, a to m: on slower RTX cards the older model e is
 # cheaper. Changes while the game runs take effect at once (DLSS starts a new history).
 # dlss_preset = default
-# DLSS keeps one network per picture size (gameplay, the pause screen). 1: one unused for 3,600 frames is freed.
+# DLSS keeps one network per picture size (gameplay, the pause screen). 1: one unused for 3,600 frames is freed, and
+# ten seconds after the upscaler or frame generation is switched off in the menu, the networks and pictures they held
+# are freed too (switched on again later, they are made again, which the first frame waits for).
 # 0: none is ever freed (about 0.5 GB more video memory after the first pause). 2: as 1, and the networks that stay
 # are not made again when another is made (shows striped pause screens; for tests).
 # dlss_idle_free = 1
@@ -616,6 +667,12 @@
 # takes, and counts the changes of size that kept the picture against those that made a network. 0 is the default:
 # the shared network has been compiled and not yet run on a graphics card. Read at start.
 # dlss_range = 0
+# Where DLSS or FSR 3.1 works in the frame (a test, off by default). 0: on the finished picture, after the game has
+# added its bloom, applied its exposure and tonemapped it. 1: on the scene's own light, before the bloom chain and the
+# tonemap, as these upscalers are made for; the bloom, the lens flares and the tonemap then work on the upscaler's
+# picture, drawn at the picture's size when the scene is smaller. Frames without the bloom (menus) stay as with 0.
+# The log says where it ran (lines starting with "dlaa: prebloom"). Changes apply at the next frame.
+# dlss_prebloom = 0
 # Per-object motion vectors for DLSS: characters, animals and moving objects get their own motion instead of the
 # camera's, so DLSS keeps their history instead of smearing or rejecting it. Costs some CPU time each frame (about 1-2 ms
 # on a laptop CPU); 0 leaves camera-only motion. Read at start.

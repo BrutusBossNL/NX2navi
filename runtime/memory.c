@@ -1806,6 +1806,12 @@ void mem_guest_census(uint64_t frame) {
                __atomic_load_n(&heap_size, __ATOMIC_ACQUIRE) / 1048576.0, (unsigned long long)heap_lazy_faults);
 }
 
+void mem_guest_usage(uint64_t *heap, uint64_t *heap_committed, uint64_t *phys_maps) {
+    *heap = __atomic_load_n(&heap_size, __ATOMIC_RELAXED);
+    *heap_committed = heap_lazy ? __atomic_load_n(&heap_lazy_bytes, __ATOMIC_RELAXED) : *heap;
+    *phys_maps = __atomic_load_n(&alias_bytes, __ATOMIC_RELAXED);
+}
+
 // NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the guest heap and physical maps, the kernel region's bump and commit, the
 // moved stacks, and the lazily written ranges with their array's room.
 void mem_sizes(PerfSizes *s) {

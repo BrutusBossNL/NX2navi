@@ -209,7 +209,9 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
 - The game's tensor-core upscaler is replaced by a decode-and-scale pass (`vk_tonemap.c`), which enlarges the scene
   with FSR 1's edge-adaptive filter (`NX2NAVI_STANDIN_FILTER`, `bilinear` for the plain one) unless DLSS or FSR 3.1
   scales it; `NX2NAVI_NATIVE_TENSOR=1` runs the game's own network programs instead (`vk_exec_draw.c` `native_tensor`,
-  off by default). `vk_fsr.c` runs AMD FSR 1 (EASU, RCAS) on the present when the window is larger than the picture.
+  off by default). Without DLSS or FSR the scene is `scene_share` of the picture (`widescreen.c` `plain_share`, the
+  game's own 3/4 by default); at 1, the Upscaling row's Native, it is the picture's size and the pass only decodes it,
+  texel for texel. `vk_fsr.c` runs AMD FSR 1 (EASU, RCAS) on the present when the window is larger than the picture.
 - Anti-aliasing (`vk_aa.c`, `NX2NAVI_AA`): the game anti-aliases with its own SMAA, three compute passes after the bloom
   composite (edges, blending weights, composition into the scene target as square-rooted RGB9E5 words). `off`, `fxaa`
   and `smaa` leave out the first two and replace the composition with `shaders/aa_post.comp` or SMAA at its Ultra preset
@@ -217,6 +219,10 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   `taa` is DLSS or FSR at the scene's size with the game's SMAA. While DLSS or FSR runs (`dlaa`, any mode), the other
   values still choose the pass: in the native modes it smooths the upscaler's picture after the bloom, in the scaling
   modes it runs on the scene before the upscaler scales it.
+  DLSS and FSR 3.1 read the bloom composite's output, which the game has already exposed and tonemapped;
+  `NX2NAVI_DLSS_PREBLOOM=1` (a test, off by default) runs them at the bloom chain's first pass on the scene's linear
+  light instead, and draws the lens flares and the bloom composite after them at the picture's size (`vk_dlaa.c`,
+  "before the bloom").
 - HDR (`vk_hdr.c`): the game tonemaps its scene into a float target, upscales it, draws the HUD into a second float
   target and copies that into the 8-bit sRGB window texture it presents. With `NX2NAVI_HDR=1` the tonemap shader gets
   the function of `shaders/hdr_tonemap.frag` spliced in where its SDR curve clamps each channel, so the float picture
@@ -260,6 +266,21 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   the holes of fuller ones, a few per frame and only in frames with time to spare; which blocks is decided from a
   table of what lies in them (`vk_tex_compact.h`), and the old image of a moved texture stays until no descriptor
   set and no submission can still name it (`vk_texture.c`, "the pass").
+- Memory report: beside each `mem: holes` line, `mem: by owner` splits the device-local memory the driver counts into
+  VMA's allocations by the file that made them (`vk_vma_budget.c`, "owners"; the textures further by the texture
+  cache's census), the free space inside VMA's blocks and what VMA never allocated (pipelines, descriptor memory, the
+  swapchain, DLSS and frame generation features); `mem: host` gives the host-visible allocations, the process's
+  commit and working set and the game's heap; `vk: released textures` how often released textures came back and how
+  old they were, and how many were made again after a drop (`vk_memory.c` `owner_log`). A figure that only climbs over
+  a session is a leak.
+- Released textures by age: the game releases a texture when what uses it leaves the view and takes it back when that
+  returns; the cache keeps the released image so that the take-back finds it. In play the take-backs came within a
+  minute of the release or never, so a released texture goes once it has gone unused for a hold of three minutes, six
+  for content only the GPU made (`vk_texture.c` `drop_aged`, `vk_tex_release.h`, `tex_released_hold`). The size bound
+  (a quarter of the video memory budget) stays as the safety net for a burst of area changes, and young textures may
+  pass it, up to twice it, while the card and the system's commit have room. Times are wall seconds from a clock of
+  the presents, not present counts. `vram_use = high` (`cfg.c` `vram_use_value`) turns the hold off and keeps what a
+  switched-off upscaler or SMAA holds; the default, low, frees both.
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
   `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
   (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.

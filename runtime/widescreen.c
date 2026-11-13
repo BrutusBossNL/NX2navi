@@ -79,7 +79,9 @@ static unsigned picture_height(void) {
 // While DLSS is on, the scene is the DLSS mode's share of the picture (NVIDIA's ratios: DLAA all of it, Quality 2/3,
 // Balanced 0.58, Performance 1/2, Ultra Performance 1/3) instead of what the game's dynamic-resolution controller
 // picks. The share is written to +240 at every change of the setting (the menu switches the mode live); the set goes on
-// RES_FIXED_AFTER presents after the first, once the controller has filled the fields the fixed path keeps.
+// RES_FIXED_AFTER presents after the first, once the controller has filled the fields the fixed path keeps. Without
+// DLSS or FSR the share is NX2NAVI_SCENE_SHARE's (plain_share): the game's own most unless set, all of the picture
+// for the menu's Native.
 #define RES_FIXED_AFTER 120
 // The share follows the upscaler that runs, not the setting: DLSS starts only after a restart and only where NGX came up
 // (vk_dlaa_available), and FSR 3.1 only where its library loads (vk_dlaa_fsr3), so a mode picked in the menu, or one
@@ -114,8 +116,13 @@ static double mode_share(void) {
          : !strcmp(m, "ultra_performance") ? 1.0 / 3 : 1.0;
 }
 
+// DLSS or FSR 3.1 scales the scene in this run: the setting is on and the upscaler came up.
+static int upscaler_runs(void) {
+    return vk_dlaa_wanted() && cfg_bool("NX2NAVI_DLAA") && (vk_dlaa_fsr3() || vk_dlaa_available());
+}
+
 static double dlss_share(void) {
-    if (!vk_dlaa_wanted() || !cfg_bool("NX2NAVI_DLAA") || (!vk_dlaa_fsr3() && !vk_dlaa_available())) return 0;
+    if (!upscaler_runs()) return 0;
     double s = mode_share();
     // Never more than the texture heap the game has was made for (fit_share). A mode chosen in the menu that renders
     // more than the start's did gets its size after a restart; a heap at its limit never holds the whole picture.
@@ -132,14 +139,24 @@ static double dlss_share(void) {
     return s;
 }
 
+// The share without DLSS or FSR 3.1 (NX2NAVI_SCENE_SHARE, 1 at most): PLAIN_SHARE unset, 1 for the menu's Native
+// (ui/menu.cpp row_upscaling: the scene at the picture's size, which the stand-in then only decodes, vk_tonemap.c),
+// 0 for the game's dynamic resolution, as with no share at all. Read at every call, so the menu's choice applies at
+// once within the heap the start made (fit_share).
+static double plain_share(void) {
+    const char *e = cfg_get("NX2NAVI_SCENE_SHARE");
+    double s = e && *e ? atof(e) : PLAIN_SHARE;
+    return s > 1 ? 1 : s;
+}
+
 static double scene_share(void) {
-    static double plain = -1;
-    if (plain < 0) {
-        const char *e = cfg_get("NX2NAVI_SCENE_SHARE");   // 0: the game's dynamic resolution, as with no share at all
-        plain = e && *e ? atof(e) : PLAIN_SHARE;
-    }
-    double s = dlss_share();
+    double s = dlss_share(), plain = plain_share();
     return s > 0 ? s : plain > fit_share() ? fit_share() : plain;   // NX2NAVI_SCENE_SHARE above the heap the game has
+}
+
+// The share the settings ask for, before the heap's limit: the upscaler's mode while one runs, else plain_share.
+static double wanted_share(void) {
+    return upscaler_runs() ? mode_share() : plain_share();
 }
 
 static int picture_size(unsigned *ow, unsigned *oh, int quiet);
@@ -149,6 +166,14 @@ static double picture_ratio(void) {
     unsigned ow, oh;
     if (!wide_available() || !picture_size(&ow, &oh, 1)) ow = GAME_W, oh = GAME_H;
     return (double)ow * oh / ((double)GAME_W * GAME_H);
+}
+
+// The most share of the picture the application pool has room for at the picture the settings ask for (the heap
+// grows with the share's square, see heap_share). Computed anew at each call, so the menu can tell whether a restart
+// would give a larger scene (wide_scene_restart).
+static double share_most(void) {
+    double room = (double)mem_heap_extra_max_kib() / GAME_DTA_KIB + 1;   // the heap's most over the shipped one
+    return sqrt(room / picture_ratio()) * PLAIN_SHARE;
 }
 
 // The largest share of the picture the scene can have in this run, which the texture heap is made for
@@ -164,13 +189,10 @@ static double picture_ratio(void) {
 static double heap_share(void) {
     static double share = -1;
     if (share < 0) {
-        const char *e = cfg_get("NX2NAVI_SCENE_SHARE");
-        double s = e && *e ? atof(e) : PLAIN_SHARE;
+        double s = plain_share();
         if (s < PLAIN_SHARE) s = PLAIN_SHARE;
         if (rt_patch_set("res_fixed") >= 0 && cfg_bool("NX2NAVI_DLAA") && mode_share() > s) s = mode_share();
-        if (s > 1) s = 1;
-        double room = (double)mem_heap_extra_max_kib() / GAME_DTA_KIB + 1;   // the heap's most over the shipped one
-        double most = sqrt(room / picture_ratio()) * PLAIN_SHARE;
+        double most = share_most();
         if (s > most) {
             if (most < PLAIN_SHARE) most = PLAIN_SHARE;   // wide_heap_extra_kib says what a picture this large lacks
             rt_log("widescreen: the scene can be %.0f%% of the picture at most, not %.0f%%: the game's render-target "
@@ -189,6 +211,36 @@ static double heap_share(void) {
 // 810-line scene, three quarters of the picture), so there the share goes in as it is: wide_init sets the factor.
 static double scale_k = 1.0;
 
+// One line for the scene in effect: its size, the picture's and how the scene reaches the picture's size. Written when
+// the fixed share first takes over from the game's dynamic resolution and again when the share or the way it is scaled
+// changes (a setting changed in the menu), not at every settings change. The scene's size is the share of the
+// picture's as the game sizes it (a 50% scene of 5120x2160 is 2560x1080).
+static void scene_log(double s, int first) {
+    static double last_s = -1;
+    static int last_how = -1;
+    // 1 DLSS, 2 FSR, 3 not scaled (the stand-in decodes 1:1), 4 the stand-in's edge-adaptive filter, 5 its linear one
+    int how = dlss_share() > 0 ? (vk_dlaa_fsr3() ? 2 : 1) : s >= 1 ? 3
+            : !strcmp(cfg_value("NX2NAVI_STANDIN_FILTER"), "easu") ? 4 : 5;
+    if (!first && how == last_how && fabs(s - last_s) < 0.001) return;
+    last_s = s, last_how = how;
+    static const char *const hows[] = {
+        "", "DLSS scales it to the picture", "AMD FSR scales it to the picture",
+        "native: no upscaling, the upscaler's stand-in only decodes it 1:1",
+        "the upscaler's stand-in enlarges it with the edge-adaptive filter (no DLSS or FSR)",
+        "the upscaler's stand-in enlarges it with the linear filter (no DLSS or FSR)"};
+    unsigned pw, ph;
+    wide_picture(&pw, &ph);
+    rt_log("widescreen: scene %ux%u, picture %ux%u (%.0f%% of it): %s%s", (unsigned)lround(pw * s),
+           (unsigned)lround(ph * s), pw, ph, s * 100, hows[how], first ? " (the game's dynamic resolution off)" : "");
+    // The menu's Native, or another share, larger than the heap the start made: say why the scene is smaller
+    double want = wanted_share();
+    if (how >= 3 && want > s + 0.001)
+        rt_log("widescreen: scene_share asks for %.0f%% of the picture; the game's render-target heap %s", want * 100,
+               heap_unserved ? "is the shipped one (the start's log says why the grown one was not served)"
+               : wide_scene_restart() ? "was sized at the start for less: the next start gives it"
+                                      : "is at its limit for this picture (the start's log says so)");
+}
+
 void wide_present(void) {
     static int set = -2;
     static uint64_t presents;
@@ -196,17 +248,37 @@ void wide_present(void) {
     if (set == -2) set = rt_patch_set("res_fixed");
     if (set < 0) return;
     unsigned v = cfg_version();
-    if (v != seen) {
-        seen = v;
-        float s = (float)scene_share(), page_s = (float)(s * scale_k);
-        if (s > 0) memcpy((uint8_t *)rt_patch_page() + 240, &page_s, 4);
-        if (s <= 0 && rt_patch_enabled(set)) rt_patch_switch(set, 0);
-        else if (rt_patch_enabled(set)) rt_log("widescreen: render scale %.0f%% of the picture", s * 100);
+    int at = ++presents == RES_FIXED_AFTER, due = presents >= RES_FIXED_AFTER;
+    if (v == seen && !at) return;
+    seen = v;
+    double s = scene_share();
+    float page_s = (float)(s * scale_k);
+    if (s > 0) memcpy((uint8_t *)rt_patch_page() + 240, &page_s, 4);
+    int on = rt_patch_enabled(set);
+    if (s <= 0) {
+        if (on) rt_patch_switch(set, 0);
+        return;
     }
-    if (++presents == RES_FIXED_AFTER && scene_share() > 0) {
-        rt_patch_switch(set, 1);
-        rt_log("widescreen: render scale %.0f%% of the picture (the game's dynamic resolution off)", scene_share() * 100);
-    }
+    // On at RES_FIXED_AFTER, once the controller has filled its fields; later too, after a share of 0 (the game's
+    // dynamic resolution) gave way to a fixed one
+    if (!due) return;
+    if (!on) rt_patch_switch(set, 1);
+    scene_log(s, !on);
+}
+
+int wide_scene_settable(void) { return rt_patch_set("res_fixed") >= 0; }
+
+double wide_scene_share(void) { return scene_share(); }
+
+double wide_scene_wanted(void) { return wanted_share(); }
+
+// The settings ask for a larger scene than the heap the start made holds, and the next start's heap holds more: the
+// share it asks for within what the application pool has room for at the picture the settings ask for (share_most).
+// A heap the game was not served (heap_unserved) stays the shipped one at the next start too, as far as is known here.
+int wide_scene_restart(void) {
+    double want = wanted_share(), now = fit_share(), next = share_most();
+    if (want > 1) want = 1;
+    return !heap_unserved && want > now + 0.001 && next > now + 0.001;
 }
 
 // The picture the settings ask for, *ow x *oh; 0 when it is the game's own 2560x1440 (every set stays off). Read at the

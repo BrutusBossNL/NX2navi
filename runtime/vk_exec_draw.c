@@ -32,6 +32,7 @@
 #include "vk_gpa.h"
 #include "mesh_fb.h"
 #include "vk_mesh_fb.h"
+#include "vk_scratch_lru.h"
 #include "platform/platform.h"
 #include "vk_dlaa.h"
 #include "mesh_emu_spirv.h"
@@ -920,8 +921,8 @@ VkImageView vk_exec_target_view(const VkTexImage *img, VkFormat format, VkImageV
 }
 
 int vk_exec_image_gone(VkImage image) {
-    vk_tonemap_image_gone(image);   // its views in the tonemap pass, keyed by the handle a new image may get
     vk_exec_bc_gone(image);
+    vk_tonemap_forget(image);   // the stand-in's views of a game image it read as it is
     vk_hdr_image_gone(image);
     if (!views_by_image.klen) return 0;
     int purged = 0;
@@ -6828,37 +6829,23 @@ static int fmt_rgba8(VkFormat f) {
            f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_A8B8G8R8_UNORM_PACK32 || f == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
 }
 
-// Scratch images for those blits, one per (size, format). Up to FB_SCRATCH are kept; a new size past them takes the
-// place of the one used longest ago, which goes once the GPU is past the submission being recorded (vk_defer_image),
-// with the tonemap pass's view of it. Before, the first eight sizes were kept for the process and a ninth got no
-// scratch, so its blit was left out: the sizes come from the scene's resolution, which DLSS modes, the dynamic
-// resolution and a window or picture size change move, at up to 32 MiB each at 2160 lines. One used in the
-// submission being recorded is never the one replaced: the blit may have recorded it already.
-#define FB_SCRATCH 8
+// Scratch images for those blits, one per (size, format), at most SCRATCH_N; a new size takes the place of the one used
+// longest ago (vk_scratch_lru.h), whose image goes through the deferred destruction.
+#define SCRATCH_N 8
 static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) {
-    static struct { uint32_t w, h; VkFormat f; VkImage img; VmaAllocation a; uint64_t used; } cache[FB_SCRATCH];
-    static int n;
-    static PlatMutex lock = PLAT_MUTEX_INIT;   // replay workers record blits side by side
-    plat_mutex_lock(&lock);
-    for (int i = 0; i < n; i++)
-        if (cache[i].w == w && cache[i].h == h && cache[i].f == f) {
-            cache[i].used = ex->fence;
-            VkImage img = cache[i].img;
-            plat_mutex_unlock(&lock);
-            return img;
-        }
-    int slot = n;
-    if (n == FB_SCRATCH) {   // the one used longest ago, unless the submission being recorded uses it
-        slot = -1;
-        for (int i = 0; i < n; i++)
-            if (cache[i].used < ex->fence && (slot < 0 || cache[i].used < cache[slot].used)) slot = i;
-        if (slot < 0) {
-            plat_mutex_unlock(&lock);
-            return VK_NULL_HANDLE;
-        }
-        vk_tonemap_image_gone(cache[slot].img);
-        vk_defer_image(cache[slot].img, cache[slot].a);
-        cache[slot].img = VK_NULL_HANDLE;
+    static ScrEntry ent[SCRATCH_N];
+    static struct { VkImage img; VmaAllocation a; } cache[SCRATCH_N];
+    static int evictions;
+    int hit, evict, i = scr_pick(ent, SCRATCH_N, w, h, (uint32_t)f,
+                                 __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), &hit, &evict);
+    if (hit) return cache[i].img;
+    if (evict) {
+        if (evictions++ < 8)
+            rt_log("vk: a stand-in scratch image of %ux%u (format %d) makes room for one of %ux%u (format %d)",
+                   ent[i].w, ent[i].h, (int)ent[i].f, w, h, (int)f);
+        vk_tonemap_forget(cache[i].img);   // the stand-in's views of it, before a new image can take its handle
+        vk_defer_image(cache[i].img, cache[i].a);
+        ent[i].live = 0, cache[i].img = VK_NULL_HANDLE, cache[i].a = NULL;
     }
     VkCtx *c = vk_ctx();
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
@@ -6869,11 +6856,7 @@ static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) 
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VmaAllocationCreateInfo ia = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VkImage img; VmaAllocation a;
-    if (vmaCreateImage(c->vma, &ii, &ia, &img, &a, NULL) != VK_SUCCESS) {
-        if (slot < n) cache[slot] = cache[--n];   // the replaced entry's place stays empty
-        plat_mutex_unlock(&lock);
-        return VK_NULL_HANDLE;
-    }
+    if (vmaCreateImage(c->vma, &ii, &ia, &img, &a, NULL) != VK_SUCCESS) return VK_NULL_HANDLE;
     VkImageMemoryBarrier2 bar = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
                                  .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                  .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -6882,10 +6865,8 @@ static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) 
                                  .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &bar};
     vkCmdPipelineBarrier2(ex->cb, &di);
-    cache[slot].w = w, cache[slot].h = h, cache[slot].f = f, cache[slot].img = img, cache[slot].a = a;
-    cache[slot].used = ex->fence;
-    if (slot == n) n++;
-    plat_mutex_unlock(&lock);
+    ent[i] = (ScrEntry){w, h, (uint32_t)f, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), 1};
+    cache[i].img = img, cache[i].a = a;
     return img;
 }
 
@@ -7391,7 +7372,14 @@ static void op_update_ub(VkExec *ex, const p_update_ub *u) {
     VK_MEM_PICK(sp);
     VkBufferCopy cp = {o, sp.offset, u->size};
     vkCmdCopyBuffer(ex->cb, b, sp.buffer, 1, &cp);
-    vk_mem_gpu_wrote(&sp, u->size);
+    // In a submission's tail (vk_exec.c "the early tail") an update of a mirrored block reaches guest memory with the
+    // results the game reads, from the bytes here, and takes no write-back: one after the tail would land when the
+    // game is already writing the next frame's data. Not with the lazy write-back, where the block's pages may be
+    // armed and a store into them would wait for the GPU (memory.c lazy_fault): the update is noted as ever there,
+    // and the tail goes after the write-backs as before.
+    if (vk_exec_tail() && !vk_mem_wb_lazy() && vk_mem_mirrored(u->dst, u->size))
+        vk_exec_tail_ub(ex->fence, u->dst, u->data, u->size);
+    else vk_mem_gpu_wrote(&sp, u->size);
     vk_usnap_drop(u->dst, u->size);
     ex->recorded++;
     vk_mem_count(sp.cls, VK_MUSE_GPU_WRITE, u->size);

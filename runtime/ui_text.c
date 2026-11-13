@@ -82,6 +82,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                               "sharper than bilinear. Smaller window (Ocarina draws 2560 x 1440): the picture is shrunk "
                               "and FSR sharpens it by the strength below.",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Bilinear",
+    [UI_MENU_UPSCALING_NATIVE] = "Native (100%)",
     [UI_MENU_GAME_ASPECT] = "Widescreen",
     [UI_MENU_GAME_ASPECT_DESC] = "Widens the view. HUD and menus stay 16:9.",
     [UI_MENU_GAME_ASPECT_16_9] = "16:9 (the game's)", [UI_MENU_GAME_ASPECT_WINDOW] = "Window shape",
@@ -98,6 +99,13 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_DESC] = "Sharpness of large surface textures. Reduced and Low leave out their largest versions, so that an area fits the video memory of 6 and 8 GB cards; only surfaces seen up close look softer. Automatic picks by the card's video memory.",
     [UI_MENU_TEX_DETAIL_AUTO] = "Automatic: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Full", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduced", [UI_MENU_TEX_DETAIL_LOW] = "Low",
+    [UI_MENU_VRAM_USE] = "Video memory use",
+    [UI_MENU_VRAM_USE_DESC] = "How much video memory the game keeps for later. Low, the default, lets go of the textures "
+                              "of places you left once they have gone unused for three minutes, and of what an upscaler "
+                              "or anti-aliasing switched off had made; in play the game asked for such textures again "
+                              "within a minute or not at all. High keeps both for the whole session. Takes effect after "
+                              "a restart.",
+    [UI_MENU_VRAM_USE_LOW] = "Low", [UI_MENU_VRAM_USE_HIGH] = "High",
     [UI_MENU_LOWEND_INTRO] = "The settings of the low-end GPU mode. Each can be changed here; most take effect after a restart.",
     [UI_MENU_LOWEND_RESTART] = "The mode turns on after a restart. Its settings are listed here then.",
     [UI_MENU_LOWEND_NOT_FOR_CARD] = "Not for this graphics card: it has mesh shaders and 8 GB of video memory or more. "
@@ -499,11 +507,26 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                  "where the card has none, keeps video memory within what the driver reports free, waits less for the GPU and "
                                  "prepares frames on a thread of their own. Measured on a Radeon RX 580 only: it can show a dark or flickering "
                                  "frame now and then, so leave it off on a newer card.",
-    [UI_MENU_REPLAY_WORKERS] = "Replay workers (experimental)",
-    [UI_MENU_REPLAY_WORKERS_DESC] = "CPU threads that help translate each frame's draws for the GPU, beside the game's own "
-                                    "thread. 3 gave about 20% more frames a second in Hyrule Field on an 8-core CPU; more "
-                                    "than 3 gave nothing more. Some players' games crashed with them on: 0 (off) is the "
-                                    "safe choice. Takes effect after a restart.",
+    [UI_MENU_REPLAY_WORKERS] = "CPU helper threads (experimental)",
+    [UI_MENU_REPLAY_WORKERS_DESC] = "Uses more of your CPU's cores to prepare each frame for the graphics card. Automatic "
+                                    "picks the number for your CPU: half its cores less one, none on four cores or fewer "
+                                    "and none on RX 6000 and older Radeon cards. 0 turns it off. 3 gave about 20% more "
+                                    "frames a second on an 8-core CPU. If your game crashes with this on, set it to 0.",
+    [UI_MENU_REPLAY_PIPE] = "Helpers work ahead (experimental)",
+    [UI_MENU_REPLAY_PIPE_DESC] = "The game carries on with the rest of the frame while the helper threads are still "
+                                 "busy, instead of waiting for them. The number is how many batches of work the "
+                                 "helpers may have at once; 0 turns it off. A small gain: 4 gave 1 to 2% more frames a "
+                                 "second.",
+    [UI_MENU_REPLAY_SMALL] = "Helpers take small jobs (experimental)",
+    [UI_MENU_REPLAY_SMALL_DESC] = "Gives the helper threads the smaller batches of drawing work too, not only the large "
+                                  "ones. The number is the smallest batch a helper takes, counted in draw calls; 0 "
+                                  "turns it off. A small gain: 16 gave about 2% more frames a second.",
+    [UI_MENU_TAIL_EARLY] = "Start next frame early (experimental)",
+    [UI_MENU_TAIL_EARLY_DESC] = "The game starts on its next frame while the graphics card is still finishing the "
+                                "current one. The biggest gain of these settings: 19 to 29% more frames a second with "
+                                "FSR 4 on a Radeon RX 7900 XT, the only card it was measured on. It needs TAA, DLSS, "
+                                "FSR 3.1 or FSR 4, and for now an AMD graphics card. Without them it changes nothing.",
+    [UI_MENU_NEEDS_WORKERS] = "needs CPU helper threads", [UI_MENU_NEEDS_PIPE] = "needs Helpers work ahead",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
     [UI_MENU_DISCORD_RPC_DESC] = "Shows \"Playing NX2navi\" with the play time in your Discord status while the "
                                  "game runs. discord_app_id and discord_image in nx2navi.ini choose the application.",
@@ -802,8 +825,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_BOOT_STARTING] = "Starting", [UI_BOOT_SHADERS] = "Shaders: %lld of %lld", [UI_BOOT_PIPELINES] = "Pipelines: %lld of %lld",
     [UI_BOOT_COMPUTE] = "Compute pipelines: %lld of %lld", [UI_BOOT_DRIVER_CACHE] = "Driver cache: %lld of %lld",
     [UI_MENU_UPSCALING] = "Upscaling",
-    [UI_MENU_UPSCALING_DESC] = "How the picture is smoothed and scaled to your window.",
-    [UI_MENU_UPSCALING_DESC_FSR] = "How the picture is smoothed and scaled to your window.",
+    [UI_MENU_UPSCALING_DESC] = "How the picture is smoothed and scaled to your window. Native draws the 3D scene at "
+                               "the picture's full size with no upscaler: the sharpest, and the most GPU work.",
+    [UI_MENU_UPSCALING_DESC_FSR] = "How the picture is smoothed and scaled to your window. Native draws the 3D scene "
+                                   "at the picture's full size with no upscaler: the sharpest, and the most GPU work.",
     [UI_MENU_FRAMEGEN] = "Frame generation",
     [UI_MENU_FRAMEGEN_DESC] = "Adds generated frames for smoother motion. Needs DLSS or FSR 3.1.",
     [UI_MENU_FRAMEGEN_OFF] = "Off",
@@ -813,8 +838,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FRAMEGEN_NEEDS_FSR] = "choose an FSR 3.1 mode under Upscaling first",
     [UI_MENU_FRAMEGEN_NOTE_FSR] = "needs FSR 3.1",
     [UI_MENU_FRAMEGEN_DESC_FSR] = "Adds generated frames for smoother motion. Needs FSR 3.1.",
-    [UI_MENU_UPSCALING_DESC_NO_FSR] = "How the picture is smoothed and scaled to your window. AMD FSR 3.1 is not offered "
-                                      "here: it needs amd_fidelityfx_vk.dll, which cannot be loaded.",
+    [UI_MENU_UPSCALING_DESC_NO_FSR] = "How the picture is smoothed and scaled to your window. Native draws the 3D scene "
+                                      "at the picture's full size with no upscaler: the sharpest, and the most GPU "
+                                      "work. AMD FSR 3.1 is not offered here: it needs amd_fidelityfx_vk.dll, which "
+                                      "cannot be loaded.",
     [UI_MENU_FSR3_OFF] = "in use: off, FSR 3.1 is not available",
     [UI_MENU_FRAMEGEN_DESC_DLSS] = "Adds generated frames for smoother motion. Needs DLSS.",
     [UI_MENU_FRAMEGEN_NOTE_DLSS] = "needs DLSS",
@@ -900,6 +927,17 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                               "билинейного. Окно меньше (Ocarina рисует 2560 × 1440): картинка уменьшается, и FSR "
                               "повышает её резкость на величину ниже.",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Билинейное",
+    [UI_MENU_UPSCALING_NATIVE] = "Родное (100%)",
+    [UI_MENU_UPSCALING_DESC] = "Как картинка сглаживается и масштабируется под окно. «Родное» рисует 3D-сцену в "
+                               "полном размере картинки без апскейлера: самая чёткая картинка и самая большая "
+                               "нагрузка на видеокарту.",
+    [UI_MENU_UPSCALING_DESC_FSR] = "Как картинка сглаживается и масштабируется под окно. «Родное» рисует 3D-сцену в "
+                                   "полном размере картинки без апскейлера: самая чёткая картинка и самая большая "
+                                   "нагрузка на видеокарту.",
+    [UI_MENU_UPSCALING_DESC_NO_FSR] = "Как картинка сглаживается и масштабируется под окно. «Родное» рисует 3D-сцену "
+                                      "в полном размере картинки без апскейлера: самая чёткая картинка и самая "
+                                      "большая нагрузка на видеокарту. AMD FSR 3.1 здесь не предлагается: ему нужен "
+                                      "amd_fidelityfx_vk.dll, который не удаётся загрузить.",
     [UI_MENU_GAME_ASPECT] = "Широкий экран",
     [UI_MENU_GAME_ASPECT_DESC] = "Расширяет обзор. Интерфейс и меню остаются 16:9.",
     [UI_MENU_GAME_ASPECT_16_9] = "16:9 (как в игре)", [UI_MENU_GAME_ASPECT_WINDOW] = "По окну",
@@ -916,6 +954,13 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_DESC] = "Чёткость больших текстур поверхностей. «Сниженная» и «Низкая» не загружают их самые крупные версии, чтобы область помещалась в видеопамять карт на 6 и 8 ГБ; мягче выглядят только поверхности вблизи. «Авто» выбирает по объёму видеопамяти.",
     [UI_MENU_TEX_DETAIL_AUTO] = "Авто: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Полная", [UI_MENU_TEX_DETAIL_REDUCED] = "Сниженная", [UI_MENU_TEX_DETAIL_LOW] = "Низкая",
+    [UI_MENU_VRAM_USE] = "Расход видеопамяти",
+    [UI_MENU_VRAM_USE_DESC] = "Сколько видеопамяти игра держит про запас. «Низкий», по умолчанию, освобождает текстуры "
+                              "покинутых мест, не использованные три минуты, и то, что создали отключённые "
+                              "масштабирование или сглаживание; в игре такие текстуры запрашивались снова в течение "
+                              "минуты или не запрашивались вовсе. «Высокий» хранит и то и другое всю сессию. Действует "
+                              "после перезапуска.",
+    [UI_MENU_VRAM_USE_LOW] = "Низкий", [UI_MENU_VRAM_USE_HIGH] = "Высокий",
     [UI_MENU_SHARPNESS] = "Резкость FSR",
     [UI_MENU_SHARPNESS_DESC] = "Насколько FSR повышает резкость. 0 отключает.",
     [UI_MENU_SHARPNESS_NEEDS_FSR] = "только с AMD FSR 1",
@@ -1606,6 +1651,15 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
                               "mais nítidos que o bilinear. Janela menor (Ocarina desenha 2560 x 1440): a imagem é "
                               "reduzida e o FSR aumenta a nitidez com a intensidade abaixo.",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Bilinear",
+    [UI_MENU_UPSCALING_NATIVE] = "Nativo (100%)",
+    [UI_MENU_UPSCALING_DESC] = "Como a imagem é suavizada e ajustada à janela. Nativo desenha a cena 3D no tamanho "
+                               "total da imagem, sem upscaler: a mais nítida, e a que mais exige da GPU.",
+    [UI_MENU_UPSCALING_DESC_FSR] = "Como a imagem é suavizada e ajustada à janela. Nativo desenha a cena 3D no "
+                                   "tamanho total da imagem, sem upscaler: a mais nítida, e a que mais exige da GPU.",
+    [UI_MENU_UPSCALING_DESC_NO_FSR] = "Como a imagem é suavizada e ajustada à janela. Nativo desenha a cena 3D no "
+                                      "tamanho total da imagem, sem upscaler: a mais nítida, e a que mais exige da "
+                                      "GPU. O AMD FSR 3.1 não é oferecido aqui: ele precisa do amd_fidelityfx_vk.dll, "
+                                      "que não pode ser carregado.",
     [UI_MENU_GAME_ASPECT] = "Tela larga",
     [UI_MENU_GAME_ASPECT_DESC] = "Amplia a visão. A interface e os menus continuam em 16:9.",
     [UI_MENU_GAME_ASPECT_16_9] = "16:9 (o do jogo)", [UI_MENU_GAME_ASPECT_WINDOW] = "Formato da janela",
@@ -1887,6 +1941,13 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
                                 "da placa.",
     [UI_MENU_TEX_DETAIL_AUTO] = "Automático: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Completo", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduzido", [UI_MENU_TEX_DETAIL_LOW] = "Baixo",
+    [UI_MENU_VRAM_USE] = "Uso da memória de vídeo",
+    [UI_MENU_VRAM_USE_DESC] = "Quanta memória de vídeo o jogo guarda para depois. Baixo, o padrão, libera as texturas "
+                              "dos lugares que você deixou após três minutos sem uso, e o que um escalonador ou "
+                              "antisserrilhamento desligado criou; em jogo, essas texturas foram pedidas de novo em "
+                              "menos de um minuto ou nunca. Alto guarda tudo isso durante a sessão inteira. Vale depois "
+                              "de reiniciar.",
+    [UI_MENU_VRAM_USE_LOW] = "Baixo", [UI_MENU_VRAM_USE_HIGH] = "Alto",
     [UI_MENU_COLOR] = "Cor",
     [UI_MENU_COLOR_PRESET] = "Perfil de cor",
     [UI_MENU_COLOR_PRESET_DESC] = "Define os quatro valores abaixo. Vívido: mais contraste e saturação, sombras um "
@@ -2317,6 +2378,14 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
                               "窗口更小时（Ocarina 绘制 2560 × 1440）：画面被缩小，FSR 按下方强度锐化。",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1",
     [UI_MENU_UPSCALER_BILINEAR] = "双线性",
+    [UI_MENU_UPSCALING_NATIVE] = "原生（100%）",
+    [UI_MENU_UPSCALING_DESC] = "画面如何平滑并缩放到窗口。原生：以画面的完整尺寸绘制 3D 场景，不使用超分辨率："
+                               "最清晰，GPU 负担也最大。",
+    [UI_MENU_UPSCALING_DESC_FSR] = "画面如何平滑并缩放到窗口。原生：以画面的完整尺寸绘制 3D 场景，不使用超分辨率："
+                                   "最清晰，GPU 负担也最大。",
+    [UI_MENU_UPSCALING_DESC_NO_FSR] = "画面如何平滑并缩放到窗口。原生：以画面的完整尺寸绘制 3D 场景，不使用超分辨率："
+                                      "最清晰，GPU 负担也最大。此处不提供 AMD FSR 3.1：它需要 "
+                                      "amd_fidelityfx_vk.dll，但无法加载。",
     [UI_MENU_GAME_ASPECT] = "宽屏",
     [UI_MENU_GAME_ASPECT_DESC] = "扩大视野。界面和菜单保持 16:9。",
     [UI_MENU_GAME_ASPECT_16_9] = "16:9（游戏原生）", [UI_MENU_GAME_ASPECT_WINDOW] = "窗口比例",
@@ -2719,6 +2788,10 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_DESC] = "大型表面纹理的清晰度。“降低”和“低”不加载它们最大的版本，使一个区域能放进 6 GB 和 8 GB 显卡的显存；只有近处的表面看起来略微柔和。“自动”根据显卡的显存选择。",
     [UI_MENU_TEX_DETAIL_AUTO] = "自动：%s",
     [UI_MENU_TEX_DETAIL_FULL] = "完整", [UI_MENU_TEX_DETAIL_REDUCED] = "降低", [UI_MENU_TEX_DETAIL_LOW] = "低",
+    [UI_MENU_VRAM_USE] = "显存占用",
+    [UI_MENU_VRAM_USE_DESC] = "游戏为之后保留多少显存。“低”（默认）会释放已离开地点中三分钟未使用的纹理，以及已关闭的放大或抗锯齿"
+                              "创建的内容；实际游玩中，这类纹理要么在一分钟内再次被使用，要么不再使用。“高”在整个游戏过程中保留两者。重启后生效。",
+    [UI_MENU_VRAM_USE_LOW] = "低", [UI_MENU_VRAM_USE_HIGH] = "高",
     [UI_MENU_HDR_GROUP] = "HDR",
     [UI_MENU_HDR] = "HDR 输出",
     [UI_MENU_HDR_DESC] = "在 HDR 显示器上呈现更亮的高光。请先在 Windows 中开启 HDR。",

@@ -8,17 +8,30 @@
 #pragma clang diagnostic pop
 // Every VMA allocation goes by the device-local heaps' live budgets (vk_vma_budget.c): a heap within the reserve of its
 // budget takes nothing new while another heap can.
+// Each allocation is also counted under its owner, by the source file that made it, until it is freed through the
+// wrappers below (vk_vma_owner_bytes, for the memory report: vk_memory.c owner_log).
 VkResult vk_vma_create_image(VmaAllocator vma, const VkImageCreateInfo *ici, const VmaAllocationCreateInfo *ai, VkImage *img,
-                             VmaAllocation *a, VmaAllocationInfo *info);
+                             VmaAllocation *a, VmaAllocationInfo *info, const char *file);
 VkResult vk_vma_create_buffer(VmaAllocator vma, const VkBufferCreateInfo *bci, const VmaAllocationCreateInfo *ai,
-                              VkBuffer *buf, VmaAllocation *a, VmaAllocationInfo *info);
+                              VkBuffer *buf, VmaAllocation *a, VmaAllocationInfo *info, const char *file);
 VkResult vk_vma_allocate_memory(VmaAllocator vma, const VkMemoryRequirements *req, const VmaAllocationCreateInfo *ai,
-                                VmaAllocation *a, VmaAllocationInfo *info);
+                                VmaAllocation *a, VmaAllocationInfo *info, const char *file);
+void vk_vma_destroy_image(VmaAllocator vma, VkImage img, VmaAllocation a);
+void vk_vma_destroy_buffer(VmaAllocator vma, VkBuffer buf, VmaAllocation a);
+void vk_vma_free_memory(VmaAllocator vma, VmaAllocation a);
 uint64_t vk_vma_moved(void);   // allocations placed outside a full heap so far
+// The owners of VMA allocations (vk_vma_budget.c owner_of says which files make each one's).
+enum { VK_OWN_TEXTURES, VK_OWN_POOLS, VK_OWN_UPSCALER, VK_OWN_REPLAY, VK_OWN_USNAP, VK_OWN_GPA, VK_OWN_ASTC,
+       VK_OWN_PRESENT, VK_OWN_HEADROOM, VK_OWN_OTHER, VK_OWN_N };
+// The bytes of an owner's live allocations on the device-local heaps (local 1) or on the others (local 0). No lock.
+uint64_t vk_vma_owner_bytes(int owner, int local);
 #ifndef VK_VMA_BUDGET_IMPL
-#define vmaCreateImage vk_vma_create_image
-#define vmaCreateBuffer vk_vma_create_buffer
-#define vmaAllocateMemory vk_vma_allocate_memory
+#define vmaCreateImage(v, ici, ai, img, a, info) vk_vma_create_image(v, ici, ai, img, a, info, __FILE__)
+#define vmaCreateBuffer(v, bci, ai, buf, a, info) vk_vma_create_buffer(v, bci, ai, buf, a, info, __FILE__)
+#define vmaAllocateMemory(v, req, ai, a, info) vk_vma_allocate_memory(v, req, ai, a, info, __FILE__)
+#define vmaDestroyImage vk_vma_destroy_image
+#define vmaDestroyBuffer vk_vma_destroy_buffer
+#define vmaFreeMemory vk_vma_free_memory
 #endif
 #include "nvn_obj.h"   // pool_t, tex_t, view_t, samp_par, NVNcopyRegion (memory and textures block)
 #include "gfx.h"       // GfxShader, GfxShaderRes, GfxShaderAnswers (pipelines block)
@@ -393,6 +406,23 @@ int vk_mem_take_live(void);
 // for the newest such submission up to the one it waits for.
 enum { VK_RES_EVENT = 1, VK_RES_COUNTER = 2, VK_RES_OQ = 4, VK_RES_WRITE = 8, VK_RES_WRITEBACK = 16, VK_RES_KINDS = 5 };
 void vk_exec_note_results(int kind);   // VK_RES_*
+// The early tail (vk_exec.c "the early tail", NX2NAVI_TAIL_EARLY). vk_exec_tail: the replay is recording a submission's
+// tail. vk_sync.c: the tail's command buffer set aside for the write-backs' one (hold), then the part with the
+// write-backs handed over with the executed timeline's signal and the tail put behind it (release); whether a part can
+// take that order now (ok); the game's wait for a fence (game_wait); for a value whose tail the GPU still runs, about
+// how long that takes (tail_pending_ns, else 0).
+struct VkExec;
+void vk_exec_tail_begin(struct VkExec *ex);
+int vk_exec_tail(void);
+void vk_exec_tail_ub(uint64_t fence, uint64_t addr, const void *data, uint32_t size);   // vk_exec_xfer.c
+int vk_sync_tail_ok(void);
+VkCommandBuffer vk_sync_tail_hold(void);
+VkCommandBuffer vk_sync_tail_release(void);
+int vk_sync_game_wait(uint64_t value, uint64_t timeout_ns);
+uint64_t vk_sync_tail_pending_ns(uint64_t value);
+int vk_mem_live_swap(int v);              // vk_memory.c: the note of a late read of guest memory, exchanged
+uint64_t vk_mem_gpu_wrote_count(void);    // vk_memory.c: GPU writes of pool memory noted so far
+int vk_mem_wb_lazy(void);                 // vk_memory.c: the lazy write-back runs
 int vk_exec_take_results(void);        // the kinds noted since the last take
 void vk_mem_lazy_part_end(void);   // lazy write-back: a part ends (before its prologue), and it is handed over
 void vk_mem_lazy_handed(void);
@@ -688,10 +718,12 @@ VkDescriptorSetLayout vk_empty_set_layout(void);    // set 1 of layouts without 
 // image, which it returns for the caller to blit into the target; VK_NULL_HANDLE when it cannot. edge: 1 lets it scale
 // with the edge-adaptive filter (NX2NAVI_STANDIN_FILTER), 0 keeps the linear one (another upscaler's picture replaces
 // this one). The caller binds its own compute pipeline again afterwards.
-// The tonemap pass's views of img go (vk_defer_view): img is destroyed or replaced. Any thread.
-void vk_tonemap_image_gone(VkImage img);
 VkImage vk_tonemap_record(VkCommandBuffer cb, VkImage src, VkFormat sf, uint32_t sw, uint32_t sh, uint32_t dw,
                           uint32_t dh, int edge);
+// A source image of the stand-in goes (vk_exec_draw.c fallback_scratch, or a game image's destroy through
+// vk_exec_image_gone): its views go through the deferred destruction, before another image can take its handle. Any
+// thread.
+void vk_tonemap_forget(VkImage src);
 // What vk_texture_by_id(id) returns can change only when this does: the slot is registered again, or a texture entry at
 // its storage address is created, dropped, released or taken back into use. Unlocked; read it before the lookup it
 // guards (a lookup may create an entry). 0 when the slot was never registered: nothing is kept under 0.
@@ -765,10 +797,16 @@ void vk_texture_write_back(uint64_t addr, uint64_t size);   // writes those imag
 void vk_texture_range_gone(uint64_t lo, uint64_t size, VmaAllocation alloc);   // vk_pool_fini: drop the images there
 void vk_texture_stats(uint64_t *images, uint64_t *uploads, uint64_t *reuploads);
 // Entries now, live and released (TextureFinalize, kept until sweep_released), with the bytes of their own memory
-// (images not bound into pool memory).
-typedef struct { uint64_t live, released, own_live, own_released, bytes_live, bytes_released; } VkTexCensus;
+// (images not bound into pool memory). Of the live bytes: those whose content only the GPU made (render targets and
+// what the GPU drew or copied into), and the idle ones no lookup reached lately (vk_texture.c idle, what the VRAM
+// pressure may evict); of the released bytes: those released too lately for any bound to drop them (stale_after).
+typedef struct {
+    uint64_t live, released, own_live, own_released, bytes_live, bytes_released;
+    uint64_t bytes_live_gpu, bytes_live_idle, bytes_released_young;
+} VkTexCensus;
 void vk_texture_census(VkTexCensus *s);
 void vk_texture_census_log(uint64_t frame);         // vk_memory.c vram_log: the live entries' memory by kind and format
+void vk_texture_reuse_log(uint64_t frame);          // vk_memory.c owner_log: released textures taken back, made again
 // The holes in VMA's blocks that hold textures (vk_texture.c "compaction", vk_tex_compact.h), for vk_memory.c holes_log.
 // A VkBlockRow is an allocation of another kind that the caller knows to lie in one of VMA's blocks (a VRAM mirror):
 // the block's device memory handle and size, the allocation's size and memory type.

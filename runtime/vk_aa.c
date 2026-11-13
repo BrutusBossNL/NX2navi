@@ -75,13 +75,13 @@ static struct {
     int none_told;
 } A = {.frame_read = ~0ull, .composed = 1};
 
-static void smaa_idle(int mode);
+static void work_idle(uint64_t frame);
 
 int vk_aa_mode(void) {
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (f == A.frame_read) return A.mode;
     A.frame_read = f;
-    smaa_idle(A.mode);   // the frame before's mode
+    work_idle(f);
     const char *v = cfg_value("NX2NAVI_AA");
     int want = VK_AA_GAME;
     for (int i = 1; i < 4; i++)
@@ -137,7 +137,23 @@ static struct {
     Img area, search;
     Img luma, edges, weights;   // at the scene's size (w, h)
     uint32_t w, h;
+    uint64_t smaa_frame;        // the last frame that recorded SMAA's passes
 } P;
+
+static void img_free(Img *m);
+
+// SMAA's work images stayed for the rest of the run once aa left smaa: three pictures of the scene's size, 109 MiB at
+// 5120x2142. They go WORK_IDLE presents after the last frame that used them, through the deferred destruction (no
+// submission still names them then); smaa again makes them as a change of the scene's size does (work_images), in the
+// command buffer of its first frame. A minute, not less: the passes run only where the game runs its own SMAA, so a
+// long pause or loading screen with smaa set also counts as unused, and the images are made again after it.
+#define WORK_IDLE 3600
+static void work_idle(uint64_t frame) {
+    if (!P.luma.img || frame - P.smaa_frame < WORK_IDLE || cfg_vram_keep()) return;   // vram_use = high keeps them
+    rt_log("aa: SMAA's work images unused for %d frames: freed (%ux%u)", WORK_IDLE, P.w, P.h);
+    img_free(&P.luma), img_free(&P.edges), img_free(&P.weights);
+    P.w = P.h = 0;
+}
 
 static int pipes_init(void) {
     if (P.tried) return P.ok;
@@ -265,22 +281,6 @@ static int tables_make(void) {
     return 1;
 }
 
-// SMAA's work images (35 MiB at a 2560x1440 scene, 79 MiB at 2160 lines) were kept for the process once SMAA had run.
-// After SMAA_IDLE_FRAMES frames of another mode they go, once the GPU is past the submission being recorded
-// (img_free defers); SMAA chosen again makes them anew. The lookup textures, a few hundred KiB, stay.
-#define SMAA_IDLE_FRAMES 600
-static void smaa_idle(int mode) {
-    static unsigned idle;
-    if (mode == VK_AA_SMAA || !P.luma.img) {
-        idle = 0;
-        return;
-    }
-    if (++idle < SMAA_IDLE_FRAMES) return;
-    img_free(&P.luma), img_free(&P.edges), img_free(&P.weights);
-    P.w = P.h = 0, idle = 0;
-    rt_log("aa: SMAA has not run for %d frames: its work images are freed", SMAA_IDLE_FRAMES);
-}
-
 // SMAA's work images at the scene's size, made again when it changes
 static int work_images(VkCommandBuffer cb, uint32_t w, uint32_t h) {
     if (P.luma.img && P.w == w && P.h == h) return 1;
@@ -338,6 +338,7 @@ int vk_aa_record(VkCommandBuffer cb, int mode, VkImageView src, VkImageView dst,
         pass(cb, P_POST, v, s, &pc, sizeof pc, w, h);
         return 1;
     }
+    P.smaa_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     const float metrics[4] = {1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h};
     const VkSampler lin[4] = {P.linear, P.linear, P.linear, P.linear};
     pass(cb, P_LUMA, (const VkImageView[]){src, P.luma.view}, lin, metrics, sizeof metrics, w, h);

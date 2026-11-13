@@ -966,6 +966,7 @@ static int dead_pending(void);
 static void vram_log(uint64_t frame);
 #define HOLES_PERIOD 3600   // frames between two "mem: holes" lines (holes_log)
 static void holes_log(uint64_t frame);
+static void owner_log(uint64_t frame);   // the memory report, after the staging pool (vk_mem_give_back)
 static void compact_look(void);
 static void outside_watch(uint64_t frame);
 static void up_ts_log(uint64_t frame);
@@ -983,7 +984,7 @@ void vk_mem_census(uint64_t frame) {
     if (dmabuf_on && frame % 60 == 0) span_gc(frame, 0);
     static uint64_t window_start;
     if ((rt_trace & RT_TRACE_PERF) && frame % 600 == 0) vram_log(frame), mirror_pool_log(frame);
-    if (frame && frame % ((rt_trace & RT_TRACE_PERF) ? 600 : HOLES_PERIOD) == 0) holes_log(frame);
+    if (frame && frame % ((rt_trace & RT_TRACE_PERF) ? 600 : HOLES_PERIOD) == 0) holes_log(frame), owner_log(frame);
     if (vk_texture_compact_due()) compact_look();   // NX2NAVI_TEX_COMPACT: 0 at once with the setting off
     if ((rt_trace & RT_TRACE_PERF) && frame % 60 == 0) outside_watch(frame), up_ts_log(frame), vk_gtl_log(frame, 60);
     if ((rt_trace & RT_TRACE_PERF) && !vk_mirror_on) dirty_frame(frame);
@@ -3725,7 +3726,11 @@ static uint64_t wb_skip(void) {
 }
 static int64_t m_wb_skipped;    // bytes wb_skip kept in mirrors since the last summary
 
+static volatile uint64_t n_gpu_wrote;   // vk_mem_gpu_wrote_count
+uint64_t vk_mem_gpu_wrote_count(void) { return __atomic_load_n(&n_gpu_wrote, __ATOMIC_RELAXED); }
+
 static void gpu_wrote(const VkMemSpan *sp, uint64_t size, int shader) {
+    __atomic_fetch_add(&n_gpu_wrote, 1, __ATOMIC_RELAXED);
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size || !wb_lazy()) {
         uint64_t skip = r && r->mstate == MS_ON && sp->buffer == r->mbuf ? wb_skip() : 0;
@@ -4100,6 +4105,9 @@ static uint64_t capture_cap(void) {
 }
 
 void vk_mem_note_live(void) { __atomic_store_n(&mirror_live, 1, __ATOMIC_RELAXED); }
+int vk_mem_live_swap(int v) { return __atomic_exchange_n(&mirror_live, v, __ATOMIC_RELAXED); }
+static int wb_lazy(void);
+int vk_mem_wb_lazy(void) { return wb_lazy(); }   // the lazy write-back runs (vk_exec_draw.c op_update_ub)
 
 int vk_mem_take_live(void) {
     int live = __atomic_exchange_n(&mirror_live, 0, __ATOMIC_RELAXED);
@@ -5358,6 +5366,88 @@ uint64_t vk_mem_give_back(void) {
     nsnap_pool = 0, snap_pool_bytes = 0;
     plat_mutex_unlock(&snap_pool_lock);
     return freed + vk_headroom_release();
+}
+
+// ---- The memory report: every HOLES_PERIOD presents (600 with NX2NAVI_TRACE=perf), after the holes line, in every run.
+// The device-local memory the driver counts for the game split by what holds it: VMA's allocations by owner
+// (vk_vma_budget.c, "owners"), with the textures split further by the texture cache's census (vk_texture_census) and
+// the pools into VRAM mirrors and physical pools; the free space inside VMA's blocks; and what VMA never allocated
+// (compiled pipelines, descriptor memory, the swapchain, the DLSS and frame generation features, the driver's own),
+// with DLSS's share as its statistics report it. Then the host-visible allocations (staging above all) and the
+// process's system memory with the game's own heap. Then the released textures' reuse (vk_texture_reuse_log).
+// A category that only climbs from line to line over a long session is a leak. The figures are sums the owners keep
+// already, one driver query, VMA's budget query and one walk of the texture entries (vk_texture_census): well under a
+// millisecond once a minute, at the present that logs.
+static void owner_log(uint64_t frame) {
+    VkCtx *c = vk_ctx();
+    if (!c || !c->vma) return;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT bp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    if (c->has_memory_budget) {
+        VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, .pNext = &bp};
+        vkGetPhysicalDeviceMemoryProperties2(c->phys, &p2);
+    }
+    VmaBudget vb[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(c->vma, vb);
+    uint64_t usage = 0, blocks = 0, allocs = 0, hblocks = 0, hallocs = 0;
+    for (uint32_t h = 0; h < c->mem_props.memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++) {
+        if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            usage += c->has_memory_budget ? bp.heapUsage[h] : vb[h].statistics.blockBytes,
+                blocks += vb[h].statistics.blockBytes, allocs += vb[h].statistics.allocationBytes;
+        else hblocks += vb[h].statistics.blockBytes, hallocs += vb[h].statistics.allocationBytes;
+    }
+    uint64_t phys = 0;
+    plat_mutex_lock_shared(&pool_lock);
+    for (int i = 0; i < nphys; i++)
+        if (phys_list[i]->alloc) phys += phys_list[i]->size;
+    plat_mutex_unlock_shared(&pool_lock);
+    VkTexCensus t;
+    vk_texture_census(&t);
+    uint64_t own[VK_OWN_N], hown[VK_OWN_N];
+    for (int o = 0; o < VK_OWN_N; o++) own[o] = vk_vma_owner_bytes(o, 1), hown[o] = vk_vma_owner_bytes(o, 0);
+    uint64_t stg_blocks = 0, kept;
+    if (stg_pool) {
+        VmaStatistics st;
+        vmaGetPoolStatistics(c->vma, stg_pool, &st);
+        stg_blocks = st.blockBytes;
+    }
+    // Read without their locks: an upload holds cmd_lock while it waits for a batch (stg_create), tens of milliseconds
+    // the present would wait too; a figure a log reads a moment late does no harm.
+    kept = __atomic_load_n(&stg_cache_bytes, __ATOMIC_RELAXED) +
+           (uint64_t)__atomic_load_n(&narena_free, __ATOMIC_RELAXED) * ARENA_CHUNK;
+    uint64_t snaps = __atomic_load_n(&snap_pool_bytes, __ATOMIC_RELAXED);
+    int64_t dlss = vk_dlaa_vram();
+    char ds[48] = "nothing";
+    if (dlss >= 0) snprintf(ds, sizeof ds, "%.0f MiB", dlss / 1048576.0);
+    const double M = 1048576.0;
+    uint64_t mir = (uint64_t)__atomic_load_n(&m_live_bytes, __ATOMIC_RELAXED);
+    rt_log("mem: by owner frame %llu: device-local in use %.0f MiB (the driver's figure) = VMA's allocations %.0f + free "
+           "inside VMA's blocks %.0f + outside VMA %.0f (compiled pipelines, descriptor memory, the swapchain, DLSS and "
+           "frame generation features, the driver; DLSS reports %s). VMA's allocations: textures %.0f (live %.0f, of them "
+           "render targets and other GPU-drawn %.0f and idle %.0f; released %.0f, of them too lately to drop %.0f), pools "
+           "%.0f (VRAM mirrors %.0f, physical pools %.0f), upscalers %.0f, replay buffers %.0f, uniform snapshots %.0f, "
+           "device address table %.0f, ASTC decoder %.0f, present and post-processing %.0f, headroom spares %.0f, other "
+           "%.0f", (unsigned long long)frame, usage / M, allocs / M, blocks > allocs ? (blocks - allocs) / M : 0.0,
+           usage > blocks ? (usage - blocks) / M : 0.0, ds, own[VK_OWN_TEXTURES] / M, t.bytes_live / M,
+           t.bytes_live_gpu / M, t.bytes_live_idle / M, t.bytes_released / M, t.bytes_released_young / M,
+           own[VK_OWN_POOLS] / M, mir / M, phys / M, own[VK_OWN_UPSCALER] / M, own[VK_OWN_REPLAY] / M,
+           own[VK_OWN_USNAP] / M, own[VK_OWN_GPA] / M, own[VK_OWN_ASTC] / M, own[VK_OWN_PRESENT] / M,
+           own[VK_OWN_HEADROOM] / M, own[VK_OWN_OTHER] / M);
+    double proc, sys_used, sys_limit;
+    float ram_used, ram_total, ws;
+    plat_commit_info(&proc, &sys_used, &sys_limit);
+    plat_mem_info(&ram_used, &ram_total, &ws);
+    uint64_t heap, heap_c, maps;
+    mem_guest_usage(&heap, &heap_c, &maps);
+    rt_log("mem: host frame %llu: VMA's host-visible blocks %.0f MiB hold %.0f MiB: staging pool blocks %.0f (kept staging "
+           "buffers and arena chunks %.0f), write-back snapshots %.0f; by owner: pools and staging %.0f, textures %.0f, "
+           "upscalers %.0f, replay buffers %.0f, uniform snapshots %.0f, present and post-processing (the flight "
+           "recorder's thumbnails among them) %.0f, other %.0f. Process commit %.0f MB, working set %.0f MB; system commit "
+           "%.0f of %.0f MB; the game's heap %.0f MiB (%.0f committed), its physical maps %.0f MiB",
+           (unsigned long long)frame, hblocks / M, hallocs / M, stg_blocks / M, kept / M, snaps / M, hown[VK_OWN_POOLS] / M,
+           hown[VK_OWN_TEXTURES] / M, hown[VK_OWN_UPSCALER] / M, hown[VK_OWN_REPLAY] / M, hown[VK_OWN_USNAP] / M,
+           hown[VK_OWN_PRESENT] / M, (hown[VK_OWN_OTHER] + hown[VK_OWN_GPA] + hown[VK_OWN_ASTC] + hown[VK_OWN_HEADROOM]) / M,
+           proc, (double)ws, sys_used, sys_limit, heap / M, heap_c / M, maps / M);
+    vk_texture_reuse_log(frame);
 }
 
 // NX2NAVI_STAGING_FAIL_AT=n (test): the n-th staging buffer the driver makes is taken as refused for memory once, so

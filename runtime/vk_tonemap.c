@@ -25,8 +25,10 @@
 // (vk_fsr.c), built here with its SQUARE constant set: it filters the same stored values, which are the perceptual
 // encoding that filter is made for, and squares the result as the linear pass does, so only how the scaled sample is
 // taken differs. bilinear keeps the linear pass. The linear pass also stays where nothing is enlarged (the filter only
-// enlarges, and at the same size the linear pass copies each texel exactly) and where the caller says another
-// upscaler's picture replaces this one (vk_exec_draw.c untranslated_dispatch_fallback: DLSS or FSR 3.1, vk_dlaa.c).
+// enlarges) and where the caller says another upscaler's picture replaces this one (vk_exec_draw.c
+// untranslated_dispatch_fallback: DLSS or FSR 3.1, vk_dlaa.c). A scene as large as the picture (scene_share = 1, the
+// menu's Native: widescreen.c plain_share) is not scaled at all: the linear pass samples it with a nearest-texel
+// sampler, so each output texel is its source texel squared, whatever the filtering hardware's sub-texel precision.
 // The movie's frames do not come through here: the caller blits those (RGBA8) itself.
 static struct {
     int tried, ok;
@@ -37,8 +39,9 @@ static struct {
     VkPipeline easu;               // scale with the edge-adaptive filter, then square (shaders/fsr_easu.comp)
     int easu_tried;
     int filter_logs;               // lines tm_filter_log has written
-    int filter_last;               // what its last line named: 1 the linear filter, 2 the edge-adaptive one
+    int filter_last;               // what its last line named: 1 the linear filter, 2 the edge-adaptive one, 3 a copy 1:1
     VkSampler sampler;
+    VkSampler nearest;             // the same with nearest-texel filtering: a source of the output's size (copy 1:1)
     struct { VkImage img; VkFormat f; VkImageView view; } views[16];
     int nviews;
     VkImage out;                   // the pass's own output (RGBA16F, the target's size); the caller blits it in
@@ -102,8 +105,11 @@ static int tm_init(void) {
     int ok = TM.push && vkCreateDescriptorSetLayout(c->device, &dci, NULL, &TM.dsl) == VK_SUCCESS;
     VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                      .pSetLayouts = &TM.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    VkSamplerCreateInfo ni = si;
+    ni.magFilter = ni.minFilter = VK_FILTER_NEAREST;
     ok = ok && vkCreatePipelineLayout(c->device, &li, NULL, &TM.layout) == VK_SUCCESS &&
          vkCreateSampler(c->device, &si, NULL, &TM.sampler) == VK_SUCCESS &&
+         vkCreateSampler(c->device, &ni, NULL, &TM.nearest) == VK_SUCCESS &&
          vkCreateShaderModule(c->device, &mi, NULL, &m) == VK_SUCCESS;
     if (ok) {
         VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -148,53 +154,48 @@ static VkPipeline tm_easu(void) {
 // One log line when the filter the pass scales with changes (the setting, DLSS or FSR switched on or off, a scene as
 // large as the picture), 8 at most: a scene whose size changes from frame to frame can cross the picture's size often.
 static void tm_filter_log(int easu, int edge, uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh) {
-    int now = easu ? 2 : 1;
+    int same = sw == dw && sh == dh, now = easu ? 2 : same && edge ? 3 : 1;
     if (TM.filter_last == now || TM.filter_logs >= 8) return;
     TM.filter_last = now, TM.filter_logs++;
     if (easu)
         rt_log("vk_exec: upscaler stand-in scales %ux%u to %ux%u with the edge-adaptive filter "
                "(NX2NAVI_STANDIN_FILTER=bilinear: the linear one)", sw, sh, dw, dh);
+    else if (now == 3)
+        rt_log("vk_exec: upscaler stand-in copies %ux%u 1:1, decoded and not scaled: the scene is the picture's size", sw,
+               sh);
     else
         rt_log("vk_exec: upscaler stand-in scales %ux%u to %ux%u with the linear filter: %s", sw, sh, dw, dh,
                !edge ? "DLSS or FSR scales the scene and its picture goes over this one"
-               : dw < sw || dh < sh || (dw == sw && dh == sh) ? "nothing to enlarge"
+               : dw < sw || dh < sh ? "nothing to enlarge"
                : strcmp(cfg_value("NX2NAVI_STANDIN_FILTER"), "easu") ? "NX2NAVI_STANDIN_FILTER asks for it"
                                                                      : "the edge-adaptive pass is not there");
 }
 
-// Views of the images the pass samples: the fallback blit's scratch images, and a game image the pass reads as it is.
-// A view goes with its image (vk_tonemap_image_gone: the scratch image's replacement, vk_exec_image_gone for a game
-// image), so a new image that gets the old handle never finds the old image's view. Kept before for the process, with
-// a game image's view left naming a destroyed image, and no view at all past sixteen.
-static PlatMutex tm_view_lock = PLAT_MUTEX_INIT;   // the replay records, a texture's destroy (any thread) takes views away
+// Views of the images the pass samples, kept as long as the image: vk_tonemap_forget drops those of an image
+// fallback_scratch frees, and those of a game image the pass read as it is when the game's texture goes
+// (vk_exec_image_gone), which also gives their places back. Without the second, a game image's view stayed naming a
+// destroyed image whose handle a new image could get. The texture's destroy runs on any thread, hence the lock.
+static PlatMutex tm_view_lock = PLAT_MUTEX_INIT;
+
+void vk_tonemap_forget(VkImage src) {
+    plat_mutex_lock(&tm_view_lock);
+    for (int i = 0; i < TM.nviews;)
+        if (TM.views[i].img == src) vk_defer_view(TM.views[i].view), TM.views[i] = TM.views[--TM.nviews];
+        else i++;
+    plat_mutex_unlock(&tm_view_lock);
+}
 
 static VkImageView tm_view(VkImage img, VkFormat f) {
     plat_mutex_lock(&tm_view_lock);
-    for (int i = 0; i < TM.nviews; i++)
-        if (TM.views[i].img == img && TM.views[i].f == f) {
-            VkImageView v = TM.views[i].view;
-            plat_mutex_unlock(&tm_view_lock);
-            return v;
-        }
     VkImageView v = VK_NULL_HANDLE;
+    for (int i = 0; i < TM.nviews && !v; i++)
+        if (TM.views[i].img == img && TM.views[i].f == f) v = TM.views[i].view;
     VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
                                 .format = f, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    if (TM.nviews < 16 && vkCreateImageView(vk_ctx()->device, &vi, NULL, &v) == VK_SUCCESS)
+    if (!v && TM.nviews < 16 && vkCreateImageView(vk_ctx()->device, &vi, NULL, &v) == VK_SUCCESS)
         TM.views[TM.nviews].img = img, TM.views[TM.nviews].f = f, TM.views[TM.nviews].view = v, TM.nviews++;
     plat_mutex_unlock(&tm_view_lock);
     return v;
-}
-
-void vk_tonemap_image_gone(VkImage img) {
-    plat_mutex_lock(&tm_view_lock);
-    for (int i = 0; i < TM.nviews;)
-        if (TM.views[i].img == img) {
-            vk_defer_view(TM.views[i].view);   // a submission being recorded may sample it
-            TM.views[i] = TM.views[--TM.nviews];
-        } else {
-            i++;
-        }
-    plat_mutex_unlock(&tm_view_lock);
 }
 
 // Records the pass from src (sampled, sw x sh) into the pass's own RGBA16F image of dw x dh and returns it (the caller
@@ -218,7 +219,9 @@ VkImage vk_tonemap_record(VkCommandBuffer cb, VkImage src, VkFormat sf, uint32_t
     VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &dep);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, easu ? easu : TM.pipe);
-    VkDescriptorImageInfo ii[2] = {{TM.sampler, sv, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, dv, VK_IMAGE_LAYOUT_GENERAL}};
+    // the same size both ways: each output texel takes its own source texel (see the top of the file)
+    VkSampler smp = !easu && dw == sw && dh == sh ? TM.nearest : TM.sampler;
+    VkDescriptorImageInfo ii[2] = {{smp, sv, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, dv, VK_IMAGE_LAYOUT_GENERAL}};
     VkWriteDescriptorSet w[2] = {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0]},

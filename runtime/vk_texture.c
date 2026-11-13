@@ -28,6 +28,7 @@
 #include "vk_dlaa.h"
 #include "vk_exec.h"
 #include "vk_tex_compact.h"
+#include "vk_tex_release.h"
 #include "prof.h"
 #include "platform/platform.h"
 
@@ -182,12 +183,36 @@ static uint32_t submit_epoch = 1;   // bumped per queue submit: draw bindings ch
 static uint32_t tex_rate = 256;
 #define PRESENTS(n) ((uint64_t)(n) * tex_rate >> 8)
 
+// The wall clock of the presents (vk_tex_release.h TrlClock): rate_tick notes the present count about once a second,
+// so that the released textures' hold (drop_aged) and the take-back ages (vk_texture_reuse_log) count seconds, not
+// presents at whatever rate the game runs. tex_lock.
+// The seconds are seconds of play, not of the wall: a gap between two submissions counts at most PLAY_GAP_MAX_NS. A
+// window minimized for ten minutes (freeze_idle), a game stopped at a breakpoint or a long load then does not age the
+// released textures past their hold while nothing could take them back, and the first frames after it find the
+// textures the frames just before it released.
+#define PLAY_GAP_MAX_NS 1000000000ull
+static TrlClock pclock;
+static uint64_t pclock_t0;   // kern_now_ns at the first tick
+static uint64_t play_ns;     // seconds of play so far, in ns (rate_tick)
+static uint64_t play_last;   // kern_now_ns at the last submission rate_tick saw
+
+static uint32_t now_sec(void) {
+    if (!pclock_t0) return 0;
+    uint64_t gap = kern_now_ns() - play_last;
+    return (uint32_t)((play_ns + (gap < PLAY_GAP_MAX_NS ? gap : PLAY_GAP_MAX_NS)) / 1000000000ull);
+}
+
+static uint32_t secs_since(uint64_t frame) { return trl_clock_age(&pclock, frame, now_sec()); }
+
 static void rate_tick(void) {   // each submission, tex_lock held
     static uint64_t t0, f0;
     static uint32_t ring[RATE_N], at;
     uint64_t t = kern_now_ns(), f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-    if (!t0) t0 = t, f0 = f;
+    if (play_last) play_ns += t - play_last < PLAY_GAP_MAX_NS ? t - play_last : PLAY_GAP_MAX_NS;
+    play_last = t;
+    if (!t0) t0 = t, f0 = f, pclock_t0 = t, trl_clock_tick(&pclock, f, 0);
     if (t - t0 < 1000000000ull) return;
+    trl_clock_tick(&pclock, f, (uint32_t)(play_ns / 1000000000ull));
     uint64_t r = (f - f0) * 256ull * 1000000000ull / ((t - t0) * 60);
     ring[at++ % RATE_N] = r < 256 ? 256 : r > 2048 ? 2048 : (uint32_t)r;
     t0 = t, f0 = f;
@@ -723,8 +748,12 @@ static int slot_names(const Tex *e) {
 
 // Why an entry was destroyed (drop_tex), in the order of drop_names.
 enum { DROP_NONE, DROP_MAX, DROP_CAP, DROP_COMMIT, DROP_VRAM, DROP_IDLE_VRAM, DROP_IDLE_COMMIT, DROP_DISUSE,
-       DROP_OVERWRITTEN, DROP_REPLACED, DROP_REUSED, DROP_RANGE, DROP_EXACT, DROP_SHUTDOWN, DROP_COMPACT, DROP_N };
+       DROP_OVERWRITTEN, DROP_REPLACED, DROP_REUSED, DROP_RANGE, DROP_EXACT, DROP_SHUTDOWN, DROP_COMPACT,
+       DROP_AGE, DROP_N };
 static void drop_tex(Tex *e, int why);
+static void reuse_dropped(const Tex *e, int why);   // "reuse of released textures", after vk_texture_census
+static void reuse_made(const Tex *e);
+static void reuse_taken_back(const Tex *e);
 static int compact_on(void);          // NX2NAVI_TEX_COMPACT ("compaction", near the end of the file)
 static void compact_step(void);
 static void compact_forget(Tex *e);
@@ -1569,8 +1598,10 @@ static void rel_append(Tex *e) {
 }
 
 static Tex *sweep_at;   // where sweep_released goes on
+static Tex *aged_at;    // where drop_aged goes on
 static void rel_unlink(Tex *e) {
     if (sweep_at == e) sweep_at = e->rel_next;
+    if (aged_at == e) aged_at = e->rel_next;
     ru_unlink(e);
     rel_bytes -= e->bytes;
     if (e->rel_prev) e->rel_prev->rel_next = e->rel_next;
@@ -1885,7 +1916,8 @@ static const char *const drop_names[DROP_N] = {
     "", "past RELEASED_MAX released entries", "past the released entries' size cap", "under commit pressure",
     "under VRAM pressure", "idle, under VRAM pressure", "idle, under commit pressure", "unsampled (disuse)",
     "overwritten at another address", "replaced by another descriptor at its address", "its image went to another texture",
-    "its storage went", "made whole again (texture detail)", "shutdown", "released, in a block a compaction empties"};
+    "its storage went", "made whole again (texture detail)", "shutdown", "released, in a block a compaction empties",
+    "released and unused for longer than the hold"};
 static const char *const start_names[START_N] = {
     "started on its own", "filled from storage over a live entry", "content copied from a live entry",
     "content copied from a released entry", "started empty over a live entry", "started empty over a released entry",
@@ -2015,6 +2047,7 @@ static void drop_tex(Tex *e, int why) {
         else if (wb_wanted(e)) write_back_n(&e, 1), n_drop_wb++;
     }
     n_drop_by[why]++;
+    reuse_dropped(e, why);
     if (rt_trace & RT_TRACE_PERF)
         drops[ndrops++ % DROPS_N] = (DropRec){key_hash(&e->key), e->key.addr, frames_now(), (uint32_t)e->t.d.format,
                                               (uint32_t)e->t.d.flags, e->t.d.width, e->t.d.height, (uint8_t)why,
@@ -2361,12 +2394,15 @@ void vk_texture_pool_ctx(int on) { pool_ctx = on; }
 static int idle(const Tex *e, uint64_t now);
 
 // NX2NAVI_TEX_RELEASED_MB (default a thirty-second of the installed memory, 512 MiB to 2 GiB, or more by the card's
-// budget, released_cap_bytes; 0 = no limit) bounds the
-// own memory of the released entries: RELEASED_MAX alone kept 5-7 GiB of released render targets and decoded textures
-// after an hour of play at a 2160p game resolution, device memory the driver also charges to the system's commit (the
-// process's private bytes reached 31 GiB). A sixteenth (1 to 4 GiB) still let them hold 1.3 GiB on a 32 GB PC whose
-// commit then ran out at an area load (device lost); only entries released STALE_FRAMES presents ago go, so the
-// transient ones the game takes back within frames stay. NX2NAVI_TEX_COMMIT_FREE_MB (default the larger of 4 GiB and a tenth of the commit
+// budget, released_cap_bytes; 0 = no limit) bounds the own memory of the released entries. With the hold on (drop_aged,
+// the default) what they hold is what the last minutes released, and the bound is the safety net for a burst of area
+// changes within the hold; sweep_pressure lets young entries past it while the card and the system have room
+// (vk_tex_release.h trl_keep). Before the hold the bound was all that limited them: RELEASED_MAX alone kept 5-7 GiB of
+// released render targets and decoded textures after an hour of play at a 2160p game resolution, device memory the
+// driver also charges to the system's commit (the process's private bytes reached 31 GiB). A sixteenth (1 to 4 GiB)
+// still let them hold 1.3 GiB on a 32 GB PC whose commit then ran out at an area load (device lost); only entries
+// released STALE_FRAMES presents ago go, so the transient ones the game takes back within frames stay.
+// NX2NAVI_TEX_COMMIT_FREE_MB (default the larger of 4 GiB and a tenth of the commit
 // limit; 0 = off) lowers that bound to COMMIT_LOW_KEEP while less of the system's commit is free: an allocation that
 // fails there ends the game. On Linux nothing fails at the limit: the OOM killer ends the game when its cgroup or the
 // machine runs out of memory, and plat_commit_info reports the tighter of the two. Both drop only stale entries
@@ -2400,6 +2436,9 @@ static long long proc_commit_mb;        // this process's bound in MB; 0 = none
 static int commit_low, commit_logs;     // commit_low: either of the two below at the last check
 static int sys_low, proc_high;          // the system's commit is low; this process's is above its bound
 static uint64_t n_cap_drops, n_commit_drops, n_commit_past;
+// The system's commit at the last check, for the room young released entries past the bound may take (trl_room): MB
+// free and the free space under which it counts as low; -1 free: not tracked.
+static double commit_free_now = -1, commit_low_mark;
 
 static uint64_t released_cap_bytes(void) {
     if (!released_cap) {
@@ -2456,6 +2495,7 @@ static int commit_is_low(void) {
                    "textures give way only when the system's commit is low",
                    plat_commit_counts_vram() ? ", less the video memory in use on a discrete card," : "", proc_commit_mb);
     }
+    commit_free_now = -1;
     if (!commit_free_mb && !proc_commit_mb) return 0;
     double proc, used, limit;
     plat_commit_info(&proc, &used, &limit);
@@ -2464,6 +2504,7 @@ static int commit_is_low(void) {
     if (commit_free_mb && used >= 0 && limit > 0) {
         double want = commit_free_mb > 0 ? (double)commit_free_mb : limit / 10 > 4096 ? limit / 10 : 4096;
         low = limit - used < want;
+        commit_free_now = limit - used, commit_low_mark = want;
         commit_critical = limit - used < want / 2;   // the pause for drops that come back ends here
     }
     double dev = 0;   // device-local memory in use, MB: in the commit (plat_commit_counts_vram), not in RAM (see above)
@@ -2614,6 +2655,62 @@ static void drop_overwritten(void) {
         drop_tex(e, DROP_OVERWRITTEN);
         dropped++, n_over_drops++;
     }
+}
+
+// ---- released textures by age (vk_tex_release.h has the take-back figures behind the hold)
+// NX2NAVI_TEX_RELEASED_HOLD (seconds, default TRL_HOLD_S, at most TRL_HOLD_MAX_S; 0 = no hold; vram_use = high sets 0):
+// a released entry that owns memory goes once it has gone unused that long, twice that for content only the GPU made,
+// whatever the size bound says. Unused counts from the release or the last sample of the released image, whichever is
+// later, in seconds of the wall clock (secs_since). The rules drop_stale keeps hold here too: not before stale_after
+// (an entry the game once took back after a long gap waits GAP_TIMES that gap) and not while it is not idle (a lookup
+// other than the pool's reached it, or a shader sampled it, lately). Nor an entry the GPU drew into since its last
+// write-back: its drop would first copy it back to the game's memory and wait for the GPU (drop_tex, write_back_n),
+// a stall the sweep is not to make in play; such an entry stays to the size bound, as before the hold. Each check
+// looks at up to AGED_LOOK entries from where the last one stopped (aged_at), in release order, and starts from the
+// oldest again at the first one released less than the hold ago: the rest are younger.
+#define AGED_LOOK 256
+static int rel_hold = -1;                   // seconds; -1: not read yet
+static uint64_t n_age_drops, n_age_bytes;   // since the last vk_texture_reuse_log line
+
+static uint32_t released_hold(void) {
+    if (rel_hold < 0) {
+        const char *s = cfg_get("NX2NAVI_TEX_RELEASED_HOLD");
+        long long v = s && *s ? atoll(s) : TRL_HOLD_S;
+        rel_hold = v < 0 ? 0 : v > TRL_HOLD_MAX_S ? TRL_HOLD_MAX_S : (int)v;
+        if (rel_hold)
+            rt_log("vk: released textures go once unused for %d s, %d s for content only the GPU made "
+                   "(NX2NAVI_TEX_RELEASED_HOLD); young ones past the size bound stay while the card and the system "
+                   "have room, up to %d times the bound", rel_hold, (int)trl_hold((uint32_t)rel_hold, TRL_GPU),
+                   TRL_ROOM_TIMES);
+        else
+            rt_log("vk: released textures stay until the size bound or a pressure takes them "
+                   "(NX2NAVI_TEX_RELEASED_HOLD=0)");
+    }
+    return (uint32_t)rel_hold;
+}
+
+static void drop_aged(void) {   // tex_lock held
+    uint32_t hold = released_hold();
+    if (!hold) return;
+    uint64_t now = frames_now();
+    Tex *e = aged_at ? aged_at : rel_head;
+    int dropped = 0;
+    for (int n = 0; n < AGED_LOOK && dropped < PRESSURE_STEP; n++) {
+        if (!e || secs_since(e->rel_frame) < hold) {   // the rest is younger: from the oldest next time
+            e = NULL;
+            break;
+        }
+        Tex *next = e->rel_next;
+        int cls = comes_back_intact(e) || e->overwritten ? TRL_STORAGE : TRL_GPU;
+        uint64_t last = e->samp_frame > e->rel_frame ? e->samp_frame : e->rel_frame;
+        if (e->bytes && !e->gpu_dirty && trl_aged(hold, cls, secs_since(last)) &&
+            now - e->rel_frame >= stale_after(e) && idle(e, now)) {
+            n_age_drops++, n_age_bytes += e->bytes, dropped++;
+            drop_tex(e, DROP_AGE);
+        }
+        e = next;
+    }
+    aged_at = e;
 }
 
 // NX2NAVI_TEX_EVICT (default on; 0 = only released entries go under VRAM pressure, as before): above the VRAM pressure
@@ -3175,9 +3272,17 @@ static void sweep_pressure(void) {   // tex_lock held
     int held = low && commit_drops_held();   // the commit drops came back (commit_back_note)
     if (rel_head) {
         drop_overwritten();
-        uint64_t cap = released_cap_bytes();
-        if (rel_bytes > cap) drop_stale(cap, &n_cap_drops, DROP_CAP);
-        if (cap != UINT64_MAX && rel_bytes > cap + cap / 4) rel_census(cap);   // well over it still: what holds the rest
+        drop_aged();
+        // the bound, or more of it while the hold empties the released entries within minutes and the card and the
+        // system have room (vk_tex_release.h trl_keep): a young entry dropped there is one the game may still take back
+        uint64_t cap = released_cap_bytes(), keep = cap, vused, vbudget;
+        int vexact;
+        if (rel_bytes > cap && released_hold() && vk_mem_vram(&vused, &vbudget, &vexact))
+            keep = trl_keep(released_hold(), cap,
+                            trl_room(vused, vbudget, vram_pressure ? vram_pressure : VRAM_PRESSURE_DEFAULT,
+                                     commit_free_now, commit_low_mark));
+        if (rel_bytes > keep) drop_stale(keep, &n_cap_drops, DROP_CAP);
+        if (keep != UINT64_MAX && rel_bytes > keep + keep / 4) rel_census(keep);   // well over it: what holds the rest
         if (rel_bytes > COMMIT_LOW_KEEP && low && !held)
             more = drop_stale(COMMIT_LOW_KEEP, &n_commit_drops, DROP_COMMIT) == PRESSURE_STEP;
     }
@@ -4246,6 +4351,7 @@ static Tex *entry_of(const tex_t *t) {
         }
         if (!(e = create_tex(t, &k, tex_alias))) return create_failed(&k), NULL;
         origin_made(e);
+        reuse_made(e);
         perf_count(PERF_CNT_TEX_NEW);
         start_at(e, &k, 0);
         flight_ev(e, FLIGHT_TEX_NEW, e->og_start, 0);
@@ -4263,6 +4369,7 @@ static Tex *entry_of(const tex_t *t) {
         e->samp_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);   // in use again, as a new one
         uint64_t gap = e->samp_frame - e->rel_frame;
         if (gap > e->back_gap) e->back_gap = gap > UINT32_MAX ? UINT32_MAX : (uint32_t)gap;
+        reuse_taken_back(e);
         e->released = 0, nreleased--, rel_unlink(e), n_site[2]++, tex_gen_flip(e, e->superseded || e->overwritten);
         if (e->pidx) pent[e->pidx - 1].rel = 0;   // the pool's check looks at it again
         e->overwritten = 0;
@@ -6324,23 +6431,100 @@ void vk_texture_stats(uint64_t *images, uint64_t *uploads, uint64_t *reuploads) 
     unlock();
 }
 
+// A walk over the entries under the texture lock, with the sizes the entries keep (Tex.bytes): about 0.1 ms with ten
+// thousand of them, at most once a HOLES_PERIOD (vk_memory.c owner_log) without the perf trace.
 void vk_texture_census(VkTexCensus *s) {
-    VkCtx *c = vk_ctx();
     memset(s, 0, sizeof *s);
     lock();
+    uint64_t now = frames_now();
     for (uint32_t i = 0; i < by_key.cap; i++) {
         const Tex *e = by_key.vals[i];
         if (!e) continue;
-        uint64_t bytes = 0;
-        if (e->alloc && c) {
-            VmaAllocationInfo ai;
-            vmaGetAllocationInfo(c->vma, e->alloc, &ai);
-            bytes = ai.size;
+        uint64_t bytes = e->alloc ? e->bytes : 0;
+        if (e->released) {
+            s->released++, s->own_released += e->alloc != NULL, s->bytes_released += bytes;
+            if (now - e->rel_frame < stale_after(e)) s->bytes_released_young += bytes;
+        } else {
+            s->live++, s->own_live += e->alloc != NULL, s->bytes_live += bytes;
+            if (!comes_back_intact(e)) s->bytes_live_gpu += bytes;
+            if (idle(e, now)) s->bytes_live_idle += bytes;
         }
-        if (e->released) s->released++, s->own_released += e->alloc != NULL, s->bytes_released += bytes;
-        else s->live++, s->own_live += e->alloc != NULL, s->bytes_live += bytes;
     }
     unlock();
+}
+
+// ---- reuse of released textures (vk_texture_reuse_log)
+// How often a released entry is taken back and how long it had been released then, and how often an entry is made
+// again after a drop that a bound or a pressure made (the image made and its content uploaded or decoded once more).
+// The two tell what the bounds on the released entries cost: an entry taken back after minutes is one a smaller bound
+// may have dropped, and one made again soon after its drop is one the bound did drop. Counted since the last line; the
+// dropped keys are remembered in a table of DROPPED_N slots indexed by the key's hash, a newer drop taking the slot.
+// Ages are wall seconds (secs_since); 1-3 min and 3-5 min lie either side of the default hold (TRL_HOLD_S).
+enum { AGE_YOUNG, AGE_10S, AGE_1M, AGE_3M, AGE_5M, AGE_OLD, AGE_N };
+static const char *const age_names[AGE_N] = {"under 2 s", "2-10 s", "10-60 s", "1-3 min", "3-5 min", "longer"};
+static uint64_t rb_n[AGE_N], rb_bytes[AGE_N];       // take-backs by the time released (tex_lock)
+static uint64_t ra_n[AGE_N], ra_bytes, ra_why[DROP_N];   // made again by the time since the drop, and by its reason
+#define DROPPED_N 8192
+static struct { uint64_t kh, frame; uint8_t why; } dropped[DROPPED_N];   // tex_lock
+
+static int age_of(uint32_t s) {   // seconds
+    return s < 2 ? AGE_YOUNG : s < 10 ? AGE_10S : s < 60 ? AGE_1M : s < 180 ? AGE_3M : s < 300 ? AGE_5M : AGE_OLD;
+}
+
+static void reuse_taken_back(const Tex *e) {   // tex_lock held; e is being taken back, rel_frame still its release
+    int a = age_of(secs_since(e->rel_frame));
+    rb_n[a]++, rb_bytes[a] += e->alloc ? e->bytes : 0;
+}
+
+// Drops of an entry the game may still ask for: past a bound, or under a pressure, or unsampled.
+static int drop_costs(int why) {
+    return why == DROP_MAX || why == DROP_CAP || why == DROP_COMMIT || why == DROP_VRAM || why == DROP_IDLE_VRAM ||
+           why == DROP_IDLE_COMMIT || why == DROP_DISUSE || why == DROP_AGE;
+}
+
+static void reuse_dropped(const Tex *e, int why) {   // tex_lock held
+    if (!drop_costs(why)) return;
+    uint64_t kh = key_hash(&e->key);
+    dropped[kh % DROPPED_N].kh = kh, dropped[kh % DROPPED_N].frame = frames_now(), dropped[kh % DROPPED_N].why = (uint8_t)why;
+}
+
+static void reuse_made(const Tex *e) {   // tex_lock held; e was just made
+    uint64_t kh = key_hash(&e->key);
+    if (dropped[kh % DROPPED_N].kh != kh || !dropped[kh % DROPPED_N].why) return;
+    int a = age_of(secs_since(dropped[kh % DROPPED_N].frame));
+    ra_n[a]++, ra_bytes += e->alloc ? e->bytes : 0, ra_why[dropped[kh % DROPPED_N].why]++;
+    dropped[kh % DROPPED_N].why = 0;
+}
+
+void vk_texture_reuse_log(uint64_t frame) {
+    char line[1536];
+    const double M = 1048576.0;
+    lock();
+    int o = snprintf(line, sizeof line, "vk: released textures frame %llu, since the last line: taken back by the time "
+                     "released:", (unsigned long long)frame);
+    for (int a = 0; a < AGE_N; a++)
+        o += snprintf(line + o, sizeof line - (size_t)o, " %s %llu (%.0f MiB);", age_names[a], (unsigned long long)rb_n[a],
+                      rb_bytes[a] / M);
+    uint64_t again = 0;
+    for (int a = 0; a < AGE_N; a++) again += ra_n[a];
+    o += snprintf(line + o, sizeof line - (size_t)o, " made again after a drop %llu (%.0f MiB; by the time since the drop:",
+                  (unsigned long long)again, ra_bytes / M);
+    for (int a = 0; a < AGE_N; a++)
+        o += snprintf(line + o, sizeof line - (size_t)o, "%s %s %llu", a ? "," : "", age_names[a], (unsigned long long)ra_n[a]);
+    snprintf(line + o, sizeof line - (size_t)o, "; by the drop: released past the hold %llu, past the size bound "
+             "%llu, past the count %llu, VRAM pressure %llu released and %llu idle, commit %llu released and %llu "
+             "idle, unsampled %llu); dropped past the hold %llu (%.0f MiB); now %d released, %.0f MiB of a bound of "
+             "%.0f MiB, hold %u s",
+             (unsigned long long)ra_why[DROP_AGE], (unsigned long long)ra_why[DROP_CAP],
+             (unsigned long long)ra_why[DROP_MAX], (unsigned long long)ra_why[DROP_VRAM],
+             (unsigned long long)ra_why[DROP_IDLE_VRAM], (unsigned long long)ra_why[DROP_COMMIT],
+             (unsigned long long)ra_why[DROP_IDLE_COMMIT], (unsigned long long)ra_why[DROP_DISUSE],
+             (unsigned long long)n_age_drops, n_age_bytes / M, nreleased, rel_bytes / M,
+             released_cap_bytes() == UINT64_MAX ? 0.0 : released_cap_bytes() / M, released_hold());
+    memset(rb_n, 0, sizeof rb_n), memset(rb_bytes, 0, sizeof rb_bytes), memset(ra_n, 0, sizeof ra_n);
+    memset(ra_why, 0, sizeof ra_why), ra_bytes = 0, n_age_drops = n_age_bytes = 0;
+    unlock();
+    rt_log("%s", line);
 }
 
 // With NX2NAVI_TRACE=perf every 600 frames, after vk_memory.c's vram line: what the live entries' own memory holds. By
