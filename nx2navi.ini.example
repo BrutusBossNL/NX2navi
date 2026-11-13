@@ -635,6 +635,15 @@
 # Each step adds a little latency, and a display shows no more than its refresh rate. Changes while the game runs
 # take effect at once.
 # framegen_multiplier = 2
+# Low latency without frame generation: 0 off, 1 on, 2 on with boost (NVIDIA's: the GPU keeps a high clock; on AMD 2
+# is 1). The graphics driver holds each frame's start, so the game reads the controller as late as the picture allows
+# and no finished picture waits for its turn: NVIDIA's low-latency mode (VK_NV_low_latency2) or AMD's Anti-Lag
+# (VK_AMD_anti_lag), whichever the driver has. On a driver with neither the setting does nothing. While it is on the
+# driver holds the game to fps_limit, in place of the game's own limiter and of RivaTuner Statistics Server (rtss).
+# With framegen = dlss on Windows, DLSS Frame Generation's own low latency is used and this setting is not; with
+# framegen = fsr3 it runs on AMD GPUs and is off on NVIDIA ones while frames are generated. Changes while the game runs
+# take effect at once.
+# low_latency = 0
 
 # HDR output, two kinds (both need HDR on in Windows, "Use HDR", or a Wayland compositor with colour management;
 # without it the picture stays SDR, the game's own): hdr = 1 sends the game's scene tone mapped to your display, one

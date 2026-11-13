@@ -17,6 +17,7 @@
 #include "vk_gpa.h"
 #include "vk_fg.h"
 #include "vk_dlssg.h"
+#include "vk_lowlat.h"
 
 // The loader's vkGetDeviceProcAddr until Streamline is on the device (see vk.h).
 PFN_vkGetDeviceProcAddr vk_dpa = vkGetDeviceProcAddr;
@@ -397,6 +398,8 @@ typedef struct {
     VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR mrc;
     VkPhysicalDeviceMaintenance5FeaturesKHR m5;
     VkPhysicalDevicePipelineBinaryFeaturesKHR pbin;
+    VkPhysicalDevicePresentIdFeaturesKHR pid;
+    VkPhysicalDeviceAntiLagFeaturesAMD antilag;
 } FeatureChain;
 
 // One line for a fatal error's report (dispatch.h rt_fatal_note_add): the card, its driver, and the settings in effect
@@ -507,6 +510,22 @@ static int create_device(void) {
         ext[n_ext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
         ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
     }
+    // Low latency without frame generation (vk_lowlat.c): NVIDIA's extension, which needs VK_KHR_present_id enabled
+    // with it, or AMD's, whose calls need its feature. Each only where the driver lists it; a driver lists one of them
+    // at most. Not on a device the DLSS Frame Generation proxies make (vk_dlssg_create_device): that path's own
+    // low-latency plugin asks for what it needs there, and the direct path stays off for the run.
+    if (!vk_dlssg_dpa() && n_ext + 2 <= sizeof ext / sizeof *ext) {
+        if (has_ext(ep, ne, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
+            g_vk.has_low_latency2 = 1;
+            ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
+            ext[n_ext++] = VK_NV_LOW_LATENCY_2_EXTENSION_NAME;
+            CHAIN(pid, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
+        } else if (has_ext(ep, ne, VK_AMD_ANTI_LAG_EXTENSION_NAME)) {
+            g_vk.has_anti_lag = 1;
+            ext[n_ext++] = VK_AMD_ANTI_LAG_EXTENSION_NAME;
+            CHAIN(antilag, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD);
+        }
+    }
     // Graphics pipeline library: chained last so it can be dropped again when vk_caps_gpl declines it.
     void **gpl_link = NULL;
     if (has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) && has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)) {
@@ -574,6 +593,10 @@ static int create_device(void) {
     }
     if (g_vk.has_maximal_reconvergence && !c->mrc.shaderMaximalReconvergence) g_vk.has_maximal_reconvergence = 0;
     if (g_vk.has_pipeline_binary && !(c->pbin.pipelineBinaries && c->m5.maintenance5)) g_vk.has_pipeline_binary = 0;
+    // The chain enables what the driver reported: a present carries a frame's number only with presentId, and
+    // vkAntiLagUpdateAMD may be called only with antiLag (the extension alone stays enabled and unused without it).
+    g_vk.has_present_id = g_vk.has_low_latency2 && c->pid.presentId;
+    if (g_vk.has_anti_lag && !c->antilag.antiLag) g_vk.has_anti_lag = 0;
     g_vk.has_buffer_device_address = c->f12.bufferDeviceAddress;
     g_vk.has_astc_ldr = h->textureCompressionASTC_LDR;
     {
@@ -682,6 +705,7 @@ static int create_device(void) {
         return 0;
     }
     vk_crumbs_init(&g_vk);
+    vk_lowlat_init(&g_vk);
     return 1;
 }
 
@@ -693,6 +717,7 @@ static void destroy_all(void) {
     if (g_vk.device) vk_dlaa_release();   // the DLSS features and NGX: the allocator and the device still live
     if (g_vk.device) vk_astc_release();
     if (g_vk.device) vk_crumbs_release();
+    if (g_vk.device) vk_lowlat_release();   // the sleep's semaphore: the device still lives
     if (g_vk.timeline) vkDestroySemaphore(g_vk.device, g_vk.timeline, NULL);
     if (lost_fence) vkDestroyFence(g_vk.device, lost_fence, NULL);   // vk_device_lost_poll
     lost_fence = VK_NULL_HANDLE;

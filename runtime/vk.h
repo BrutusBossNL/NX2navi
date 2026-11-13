@@ -54,6 +54,9 @@ typedef struct VkCtx {
         has_mesh_shader, has_vrs,           // VK_EXT_mesh_shader with taskShader and meshShader (NVN2 task/mesh stages)
         has_maximal_reconvergence,          // VK_KHR_shader_maximal_reconvergence (vk_pipeline.c spirv_reconverge)
         has_pipeline_binary,                // VK_KHR_pipeline_binary with VK_KHR_maintenance5 (vk_pipeline.c pipe_create)
+        has_low_latency2,                   // VK_NV_low_latency2 with VK_KHR_present_id, which it needs (vk_lowlat.c)
+        has_present_id,                     // ... and the presentId feature: presents may carry a frame's number
+        has_anti_lag,                       // VK_AMD_anti_lag with its antiLag feature (vk_lowlat.c)
         has_mesh_queries;                   // meshShaderQueries, kept while NX2NAVI_GPU_PASSES or NX2NAVI_DUMP is set
     int mesh_fallback;                      // task and mesh programs run as compute passes and are drawn from buffers
                                             // (mesh_fallback: auto without has_mesh_shader; vk_exec_draw.c "mesh fallback")
