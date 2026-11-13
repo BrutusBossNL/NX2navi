@@ -4,8 +4,9 @@
 // playing that app.
 //
 // The Steamworks library is not part of NX2navi and is never in its repository. steam.c declares the functions it
-// calls itself and loads steam_api64.dll from beside the game at run time; without the file, or without a running
-// Steam client that is signed in, steam_start fails and says why.
+// calls itself and loads steam_api64.dll from beside the game at run time (the launcher copies one there from a
+// Steam game the player has, launcher/steamlib.py); without the file, or without a running Steam client that is
+// signed in, steam_start fails and says why.
 //
 // Every function here is called from one thread (the co-op thread, coop.c): the library is used single-threaded.
 #pragma once

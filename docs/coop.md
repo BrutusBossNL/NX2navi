@@ -16,9 +16,12 @@ and the time of day are each game's own.
   the test app Valve gives every account. While co-op is on, Steam shows you as playing Spacewar. Nobody forwards a
   port on a router and nobody runs a server: the room is a Steam lobby and the games talk through Steam's own network,
   which finds a direct path between them or relays for them.
-- **Steam's library file, `steam_api64.dll`, beside `ocarina.exe`.** NX2navi may not ship that file. Every Steam game
-  has one in its folder: copy one from a recent game (2021 or later) into the folder of `ocarina.exe`. The Co-op tab
-  says when the file is missing or too old. The game loads it from that one place only.
+- **At least one Steam game from 2021 or later installed** (Windows). Co-op uses Steam's library file,
+  `steam_api64.dll`, which NX2navi may not ship; every Steam game has one in its folder. The launcher fetches it for
+  you: each time it starts the game and the file is not beside `ocarina.exe`, it looks through your Steam libraries
+  for the newest one that Valve signed and that has the calls co-op uses, and copies it there (a second or two, once;
+  `launcher/steamlib.py`). You can also copy one there yourself. The Co-op tab says when the file is missing or too
+  old; the game loads it from that one place only.
 - **The same NX2navi version and game version (1.1.1)** as the others. A game of another version is told so and does
   not get into the room.
 
