@@ -479,7 +479,39 @@ static uint64_t move_param(uint64_t components) {
     return 0;
 }
 
+// Called only on the native charged-spin branches of Weapon::getAttackShapeScale.
+// The game still owns sword-specific geometry, attack windows, magic checks and shape restoration.
+// s0 is (length scale - 1), s1 the thickness scale; the caller adds 1 to s0 afterwards.
+void cheats_spin_range_host(Cpu *c) {
+    if (!g_movement_build) return;
+    const char *mode = cfg_value("NX2NAVI_SPIN_RANGE");
+    float factor = !strcmp(mode, "1.5") ? 1.5f : !strcmp(mode, "2") ? 2.0f : !strcmp(mode, "2.5") ? 2.5f : 1.0f;
+    if (factor == 1) return;
+    uint64_t weapon = c->x[20], sword = move_ptr(weapon + 0x18);
+    uint64_t actor = move_ptr(move_ptr(g_main + 0x4e371d0) + 0x480);
+    uint64_t components = move_ptr(actor + 0x270), equipment = move_ptr(components + 0x200);
+    uint64_t entry = move_ptr(equipment + 0x28), generation, actual;
+    if (!actor || move_ptr(actor) != g_main + 0x4b25e18 || !equipment || !entry ||
+        !rd(equipment + 0x30, 4, &generation) || generation == 0xffffffffu ||
+        !rd(entry + 0x48, 4, &actual) || generation != actual || move_ptr(entry + 0x40) != sword ||
+        move_ptr(move_ptr(sword + 0x270) + 0x458) != weapon) return;
+    uint64_t name = move_ptr(sword + 0x20);
+    if (!name || !guest_ok(name, 13, 1) || memcmp((void *)(uintptr_t)name, "Weapon_Sword_", 13)) return;
+    float length, radius;
+    memcpy(&length, &c->v[0], 4);
+    memcpy(&radius, &c->v[1], 4);
+    if (!isfinite(length) || !isfinite(radius) || length <= -1 || length > 20 || radius < 1 || radius > 20) return;
+    length = (length + 1) * factor - 1;
+    radius *= factor;
+    memcpy(&c->v[0], &length, 4);
+    memcpy(&c->v[1], &radius, 4);
+}
+
 static void movement_frame(uint64_t keys, int32_t lx, int32_t ly) {
+    static int charge_set = -2;
+    if (charge_set == -2) charge_set = rt_patch_set("spin_instant");
+    int instant = g_movement_build && !strcmp(cfg_value("NX2NAVI_SPIN_CHARGE"), "instant");
+    if (charge_set >= 0 && rt_patch_enabled(charge_set) != instant) rt_patch_switch(charge_set, instant);
     int jump_down = (keys & (1ull << 2)) != 0;   // native jump action after input mapping
     int jump_press = jump_down && !g_jump_held;
     g_jump_held = jump_down;

@@ -871,6 +871,12 @@ static void probe_menu_text(void) {
     static const char *const langs[] = {"en", "ja", "fr", "de", "it", "es", "nl", "pt", "ru", "zh-Hans", "zh-Hant", "ko",
                                         "pt-BR"};
     for (int id = UI_MENU_FIRST; id <= UI_MENU_LAST_ID; id++) {
+        // The experimental helper-thread rows currently have English text only and use catalog fallback.
+        if (id >= UI_MENU_REPLAY_WORKERS && id <= UI_MENU_NEEDS_PIPE) {
+            CHECK(ui_text_defined("en", (UiTextId)id) && *ui_text_in("en", (UiTextId)id),
+                  "helper setting text id %d lacks English", id);
+            continue;
+        }
         CHECK(ui_text_defined("en", (UiTextId)id) && ui_text_defined("ru", (UiTextId)id) &&
               ui_text_defined("pt-BR", (UiTextId)id), "menu text id %d lacks en, ru or pt-BR", id);
         CHECK(*ui_text_in("en", (UiTextId)id) && *ui_text_in("ru", (UiTextId)id) && *ui_text_in("pt-BR", (UiTextId)id),

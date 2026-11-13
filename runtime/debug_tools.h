@@ -16,6 +16,7 @@ extern "C" {
 int dbg_supported(void);               // this game build's structures are known (Ocarina of Time 1.1.1)
 
 int dbg_player_pos(float xyz[3]);      // Link's position in metres; 0 while there is no player
+int dbg_area(char out[64]);            // the area the game is in, by its name in the game's files; 0 unknown
 float dbg_speed_factor(void);          // the game's speed: 1 normal, 0.05 to 8 (frame_rate.c multiplies the game's step)
 void dbg_speed_set(float factor);
 
@@ -34,7 +35,7 @@ int dbg_names(int *found);             // 0 not started, 1 being read from the g
 // time: nothing is taken while dbg_busy. dbg_status is the last thing that happened, in words.
 int dbg_places(void);
 const char *dbg_place_area(int i);
-const char *dbg_place_pos(int i);      // "": the area's default start
+const char *dbg_place_pos(int i);      // never "": a teleport without a listed position takes the area's first
 void dbg_warp(const char *area, const char *pos);
 int dbg_events(void);
 const char *dbg_event_name(int i);
@@ -48,6 +49,12 @@ int dbg_freecam_available(void);       // the build has the camera's patch set
 void dbg_freecam_set(int on, int sticks, float speed);
 void dbg_freecam_reset(void);          // back to the game's view, free again from there
 int dbg_freecam(int *sticks, float *speed, double pos[3]);   // on or off
+int dbg_freecam_flying(void);          // on, with the sticks and ground avoidance: vk_dlaa.c reads the ground's distances back
+void dbg_freecam_avoid_set(int on);    // ground avoidance (off by default): the camera stays a metre above ground-like surfaces
+int dbg_freecam_avoid(void);
+// The replay's thread: nine view distances of the lower view (three rows of three, the top row first; 0 sky), with the
+// tangent of half the view's vertical angle and its width over its height
+void dbg_freecam_ground(const float *dist, int n, float tan_half_y, float aspect);
 
 // Memory: values of 1, 2 or 4 bytes in the game's heap.
 int dbg_search_new(uint32_t value, int size);       // returns the number of places

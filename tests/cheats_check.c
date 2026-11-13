@@ -20,6 +20,35 @@ static uint32_t get32(uint64_t a) { uint32_t v; memcpy(&v, (void *)(uintptr_t)a,
 static void f32(uint64_t a, float v) { memcpy((void *)(uintptr_t)a, &v, 4); }
 static float getfloat(uint64_t a) { float v; memcpy(&v, (void *)(uintptr_t)a, 4); return v; }
 
+extern const char *test_spin_range;
+static void spin_checks(void) {
+    uint64_t mgr=alloc_bytes(0x500), actor=alloc_bytes(0x500), components=alloc_bytes(0x500);
+    uint64_t equipment=alloc_bytes(0x100), ref=alloc_bytes(0x80), sword=alloc_bytes(0x300);
+    uint64_t sword_components=alloc_bytes(0x500), weapon=alloc_bytes(0x200), name=alloc_bytes(32);
+    u64(g_main+0x4e371d0,mgr); u64(mgr+0x480,actor); u64(actor,g_main+0x4b25e18);
+    u64(actor+0x270,components);u64(components+0x200,equipment);u64(equipment+0x28,ref);
+    u32(equipment+0x30,123);u32(ref+0x48,123);u64(ref+0x40,sword);
+    u64(sword+0x270,sword_components);u64(sword_components+0x458,weapon);u64(weapon+0x18,sword);
+    u64(sword+0x20,name);memcpy((void *)(uintptr_t)name,"Weapon_Sword_Kokiri",20);
+    const char *modes[]={"normal","1.5","2","2.5"};float factors[]={1,1.5f,2,2.5f};
+    for(int i=0;i<4;i++) {
+        Cpu cpu={0};cpu.x[20]=weapon;cpu.nzcv=0xa0000000;cpu.x[19]=0x12345;
+        float length=.53f,radius=10;
+        memcpy(&cpu.v[0],&length,4);memcpy(&cpu.v[1],&radius,4);
+        Cpu before=cpu;test_spin_range=modes[i];cheats_spin_range_host(&cpu);
+        memcpy(&length,&cpu.v[0],4);memcpy(&radius,&cpu.v[1],4);
+        assert(fabsf((length+1)-1.53f*factors[i])<.00001f && radius==10*factors[i]);
+        cpu.v[0]=before.v[0];cpu.v[1]=before.v[1];assert(!memcmp(&cpu,&before,sizeof cpu));
+    }
+    Cpu cpu={0};cpu.x[20]=weapon;Cpu before=cpu;
+    u32(ref+0x48,124);cheats_spin_range_host(&cpu);assert(!memcmp(&cpu,&before,sizeof cpu));
+    u32(ref+0x48,123);memcpy((void *)(uintptr_t)name,"Weapon_Hammer",14);
+    cheats_spin_range_host(&cpu);assert(!memcmp(&cpu,&before,sizeof cpu));
+    u64(weapon+0x18,0);cheats_spin_range_host(&cpu);assert(!memcmp(&cpu,&before,sizeof cpu));
+    g_movement_build=0;cheats_spin_range_host(&cpu);assert(!memcmp(&cpu,&before,sizeof cpu));
+    g_movement_build=1;test_spin_range="normal";
+}
+
 uint32_t mem_query(uint64_t a, RtMemoryInfo *out) {
     uint64_t base = (uint64_t)(uintptr_t)arena;
     if (a < base || a - base >= arena_size) return 1;
@@ -150,6 +179,7 @@ int main(void) {
     *(uint8_t *)(uintptr_t)down = 0; f32(timer, 1801); basic_run(15); assert(getfloat(timer) == 1801);
     *(uint8_t *)(uintptr_t)down = 1; f32(timer, 0); basic_run(15); assert(getfloat(timer) == 0);
     f32(timer, NAN); basic_run(15); assert(isnan(getfloat(timer)));
-    puts("cheats_check: passed (build gate, resource guards, independent policies, five bottles, countdown modes)");
+    spin_checks();
+    puts("cheats_check: passed (resources, bottles, countdown, spin multipliers and stale/non-sword guards)");
     return 0;
 }

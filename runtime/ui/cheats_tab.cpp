@@ -59,6 +59,12 @@ extern "C" bool tab_cheats(float scale) {
         static const char *const speeds[] = {"normal", "2", "3.5", "5"};
         const char *speed_names[] = {menu_text(UI_MENU_SPRINT_NORMAL), "2x", "3.5x", "5x"};
         opt_choice_list("NX2NAVI_SPRINT_SPEED", UI_MENU_SPRINT_SPEED, speeds, speed_names, 4, UI_MENU_SPRINT_SPEED_DESC);
+        static const char *const ranges[] = {"normal", "1.5", "2", "2.5"};
+        const char *range_names[] = {menu_text(UI_MENU_SPRINT_NORMAL), "1.5x", "2x", "2.5x"};
+        opt_choice_list("NX2NAVI_SPIN_RANGE", UI_MENU_SPIN_RANGE, ranges, range_names, 4, UI_MENU_SPIN_RANGE_DESC);
+        static const char *const charges[] = {"normal", "instant"};
+        const char *charge_names[] = {menu_text(UI_MENU_SPRINT_NORMAL), menu_text(UI_MENU_SPIN_INSTANT)};
+        opt_choice_list("NX2NAVI_SPIN_CHARGE", UI_MENU_SPIN_CHARGE, charges, charge_names, 2, UI_MENU_SPIN_CHARGE_DESC);
         builtin_row(2);
         opt_group(UI_MENU_CHEATS_INVENTORY);
         builtin_row(13);

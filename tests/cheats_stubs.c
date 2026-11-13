@@ -1,5 +1,6 @@
 // Services outside the policies under test must never be called by cheats_check.
 #include <stdlib.h>
+#include <string.h>
 #include "host.h"
 #include "cfg.h"
 #include "mods.h"
@@ -26,7 +27,11 @@ int mods_count(void) { abort(); }
 ModInfo *mods_at(int i) { (void)i; abort(); }
 int mods_exefs_pending(uint32_t *key) { (void)key; abort(); }
 const char *cfg_get(const char *name) { (void)name; abort(); }
-const char *cfg_value(const char *name) { (void)name; abort(); }
+const char *test_spin_range = "normal";
+const char *cfg_value(const char *name) {
+    if (!strcmp(name, "NX2NAVI_SPIN_RANGE")) return test_spin_range;
+    abort();
+}
 int cfg_bool(const char *name) { (void)name; abort(); }
 void cfg_set(const char *name, const char *value) { (void)name; (void)value; abort(); }
 int cfg_save(void) { abort(); }
