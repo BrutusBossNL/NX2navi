@@ -473,8 +473,24 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_REPLAY_WORKERS] = "Replay workers (experimental)",
     [UI_MENU_REPLAY_WORKERS_DESC] = "CPU threads that help translate each frame's draws for the GPU, beside the game's own "
                                     "thread. 3 gave about 20% more frames a second in Hyrule Field on an 8-core CPU; more "
-                                    "than 3 gave nothing more. Some players' games crashed with them on: 0 (off) is the "
-                                    "safe choice. Takes effect after a restart.",
+                                    "than 3 gave little more. Some players' games crashed with them on: 0 (off) is the "
+                                    "safe choice.",
+    [UI_MENU_REPLAY_PIPE] = "Worker groups in flight (experimental)",
+    [UI_MENU_REPLAY_PIPE_DESC] = "How many groups of draws the replay workers may have in hand at once while the game's "
+                                 "render thread goes on to the draws after them. At 0 the thread waits for each group "
+                                 "and helps with it. 2 to 4 gave 1 to 2% more frames a second with 5 workers and the "
+                                 "early frame end on, and nothing without it.",
+    [UI_MENU_REPLAY_SMALL] = "Small groups to one worker (experimental)",
+    [UI_MENU_REPLAY_SMALL_DESC] = "A group of at least this many draws that is too small to split between workers goes "
+                                  "whole to one worker, and the game's render thread goes on. 0 is off: the thread "
+                                  "records such groups itself. 16 gave about 2% more frames a second in Kokiri Forest.",
+    [UI_MENU_TAIL_EARLY] = "Early frame end (experimental)",
+    [UI_MENU_TAIL_EARLY_DESC] = "Lets the game start its next frame while the GPU still runs the upscaler and the rest "
+                                "of the frame's end. With FSR 4 on a Radeon RX 7900 XT it gave 19 to 29% more frames a "
+                                "second in Hyrule Field, measured on that card only and not in long sessions. It needs "
+                                "TAA, or DLSS, FSR 3.1 or FSR 4 under Upscaling, and for now an AMD card: without "
+                                "them the game runs as before.",
+    [UI_MENU_NEEDS_WORKERS] = "needs replay workers", [UI_MENU_NEEDS_PIPE] = "needs worker groups in flight",
     [UI_MENU_DISCORD_RPC] = "Discord Rich Presence",
     [UI_MENU_DISCORD_RPC_DESC] = "Shows \"Playing NX2navi\" with the play time in your Discord status while the "
                                  "game runs. discord_app_id and discord_image in nx2navi.ini choose the application.",

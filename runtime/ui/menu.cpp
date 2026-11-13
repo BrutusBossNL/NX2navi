@@ -1412,8 +1412,15 @@ static void tab_game(float scale) {
     rows_saves();
     // Testing: experimental rows, then the debug menu where the game version has it
     opt_group_text("Testing");
-    // vk_exec.c rw_init reads it at start: the row notes the restart and the bar's Restart does it
+    // vk_exec.c rw_init and tail_enabled read these at start: each row notes the restart and the bar's Restart does
+    // it. A row whose setting does nothing without another one (rw_init) is greyed out until that one is set.
     opt_slider("NX2NAVI_REPLAY_WORKERS", UI_MENU_REPLAY_WORKERS, 0, 8, UI_MENU_REPLAY_WORKERS_DESC, 1, "%.0f");
+    const bool workers = cfg_int("NX2NAVI_REPLAY_WORKERS") > 0, pipe = workers && cfg_int("NX2NAVI_REPLAY_PIPE") > 0;
+    if (!workers) opt_disable_next(UI_MENU_NEEDS_WORKERS);
+    opt_slider("NX2NAVI_REPLAY_PIPE", UI_MENU_REPLAY_PIPE, 0, 4, UI_MENU_REPLAY_PIPE_DESC, 1, "%.0f");
+    if (!pipe) opt_disable_next(workers ? UI_MENU_NEEDS_PIPE : UI_MENU_NEEDS_WORKERS);
+    opt_slider("NX2NAVI_REPLAY_SMALL", UI_MENU_REPLAY_SMALL, 0, 64, UI_MENU_REPLAY_SMALL_DESC, 4, "%.0f");
+    opt_toggle("NX2NAVI_TAIL_EARLY", UI_MENU_TAIL_EARLY, UI_MENU_TAIL_EARLY_DESC);
     // The debug menu, a tool for testing with English text of its own: off unless switched on here
     if (dbg_supported()) {
         const bool on = cfg_bool("NX2NAVI_DEBUG_MENU");
