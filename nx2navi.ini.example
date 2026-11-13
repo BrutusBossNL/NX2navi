@@ -518,7 +518,9 @@
 # What DLSS works from: dlaa (the 3D scene at full size), quality, balanced, performance or ultra_performance (the
 # scene at 67, 58, 50 or 33 % of the output, scaled up by DLSS; these replace render_scale and sharpen texture filtering
 # to match). They apply only with dlaa = 1 and the DLSS model next to the executable; otherwise the scene follows
-# render_scale. Changes while the game runs take effect at once.
+# render_scale. Changes while the game runs take effect at once, with one limit: the game's memory for render targets
+# is sized at the start for the mode set then, so dlaa chosen in the menu of a run that started with a smaller mode
+# (or with dlaa = 0) renders at 75 % until the next start.
 # dlss = dlaa
 # AMD FSR in DLSS's place, on any GPU (Windows): with taa = fsr3 and dlaa = 1 the scene is scaled by AMD FSR 3.1 in the
 # mode dlss names (dlaa is FSR's Native AA). The menu's Upscaling row sets all of these. Changes while the game runs
