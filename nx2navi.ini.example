@@ -69,7 +69,7 @@
 # EXPERIMENTAL. Record the large groups of draws of a submission on this many replay worker threads beside the
 # submitting one, 0 to 16. Default: 0, the replay records everything on one thread. 3 gave 51.7 instead of 43.6 fps
 # standing in Hyrule Field on an RX 7900 XT, and more than 3 gave nothing more; some players' games ended with a lost
-# graphics device with it on, so it is off unless you turn it on (also in the menu: Game, Testing, Replay workers).
+# graphics device with it on, so it is off unless you turn it on (also in the menu: Game, Testing, CPU helper threads).
 # With 1 a worker records each long run of draws while the submitting thread waits for it: no faster, it checks that
 # the pictures stay the same.
 # replay_workers = 0
@@ -79,13 +79,14 @@
 # results it reads are there. A frame whose end hands the game anything else runs as before. Default: 0. Standing in
 # Hyrule Field on an RX 7900 XT with FSR 4: 50.7 instead of 42.5 fps, and 63.5 instead of 49.4 with replay_workers = 3.
 # Does nothing without one of those upscalers, nor with the lazy write-back (the default on NVIDIA and Intel cards).
-# Also in the menu: Game, Testing, Early frame end.
+# Also in the menu: Game, Testing, Start next frame early.
 # tail_early = 0
 # EXPERIMENTAL, with replay_workers. replay_pipe = N (1 to 4, default 0): the submitting thread goes on past up to N
 # groups its workers still record. replay_small = N (default 0, needs replay_pipe): a group of N draws or more that is
 # too small to share out goes whole to one worker. Kokiri Forest standing on an RX 7900 XT with FSR 4, tail_early = 1,
 # replay_workers = 5, replay_pipe = 4 and replay_small = 16: 63 instead of 45 fps with all of them off. Also in the
-# menu: Game, Testing, Worker groups in flight and Small groups to one worker.
+# menu: Game, Testing, as switches: Helpers work ahead (on is replay_pipe = 4) and Helpers take small jobs (on is
+# replay_small = 16).
 # replay_pipe = 0
 # replay_small = 0
 # EXPERIMENTAL, THE GAME CRASHES WITH 1. 1 lifts the virtual core gate: guest threads run without the console's limit

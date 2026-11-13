@@ -1836,7 +1836,7 @@ static void op_one(VkExec *ex, const op_hdr *h) {
 }
 
 // ---- replay workers (NX2NAVI_REPLAY_WORKERS, default 0: the replay records every op on the submitting thread; the
-// Game tab's Replay workers row sets it)
+// Game tab's CPU helper threads row sets it)
 // 3 workers: on an RX 7900 XT with a Ryzen 7 5800X3D, Hyrule Field standing went from 41.2 to 50.4 fps (2026-11-12, one
 // batch), with the same pictures there and in Kokiri Forest, Kakariko, Goron City, a graveyard house and Gerudo
 // Valley; 5 or 7 workers measured the same as 3. Default 0 again after players' games crashed with 3 on by default
