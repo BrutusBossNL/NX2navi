@@ -751,6 +751,79 @@ static void world_clock(double dt, double step) {
     atomic_store_explicit(&world_us, w + (int64_t)(step * 1e6 + 0.5), memory_order_relaxed);
 }
 
+// ---- NX2NAVI_FLOOR_PROBE (floor_probe in nx2navi.ini, 0 by default): Link on a moving floor, one line per update
+// (diagnosis, 1.1.1). Above 60 fps Link stands still on the Deku Tree's floating platform while it moves under him, and
+// the code that carries him has not been found; these lines give what a run needs to find it. The moving floors are
+// the engine's ground groups: their manager is [[[main+0x4c7df00]] +0xc0] +0x130 (the ground control moves write it,
+// main+0x3000a90, and its transform setter main+0x386a740 takes it so), the group count at +0x28 and the array of
+// 32-byte entries at +0x30, each starting with the group; a group's transform is three rows of four floats at +0x88,
+// +0x98 and +0xa8 (main+0x386a7e8..0x386a800), its translation in their fourth lanes. Each update the probe reads every
+// group's translation and Link's position (Player +0x31c, player_pos), and logs the step, Link's position and how far
+// he moved since the last update, and the moving group nearest to him (within FLOOR_PROBE_RADIUS horizontally) with
+// how far it moved: at 60 fps the two moves match while he stands on it. The value is the number of lines to write
+// (1 means 4000); off it costs one test per present. The guest memory is read where the host can read it directly.
+#define FLOOR_PROBE_RADIUS 8.0f
+#define FLOOR_PROBE_GROUPS 16384
+static int floor_probe_left = -1;   // lines still to write; -1 before the setting was read
+static float *floor_last;            // the groups' translations at the last update (x, y, z each)
+static uint32_t floor_last_n;
+static float floor_link[3];
+static int floor_link_ok;
+
+static int direct_read(uint64_t a, void *out, size_t n) {
+    if (!a || !mem_host_readable(a, n)) return 0;
+    memcpy(out, (const void *)(uintptr_t)a, n);
+    return 1;
+}
+static uint64_t direct_ptr(uint64_t a) {
+    uint64_t v = 0;
+    return direct_read(a, &v, 8) ? v : 0;
+}
+
+static void floor_probe(void) {
+    if (floor_probe_left < 0) {
+        const char *e = cfg_get("NX2NAVI_FLOOR_PROBE");
+        int n = e && *e ? atoi(e) : 0;
+        floor_probe_left = !RT_V111 || n <= 0 ? 0 : n == 1 ? 4000 : n;
+        if (floor_probe_left) rt_log("floor probe: on for %d lines", floor_probe_left);
+    }
+    if (!floor_probe_left) return;
+    uint64_t g = direct_ptr(MOD_MAIN_BASE + 0x4c7df00), p = direct_ptr(g), q = p ? direct_ptr(p + 0xc0) : 0,
+             mgr = q ? direct_ptr(q + 0x130) : 0;
+    uint32_t count = 0;
+    uint64_t array = 0;
+    if (!mgr || !direct_read(mgr + 0x28, &count, 4) || !(array = direct_ptr(mgr + 0x30))) return;
+    if (count > FLOOR_PROBE_GROUPS) count = FLOOR_PROBE_GROUPS;
+    if (!floor_last) floor_last = calloc(FLOOR_PROBE_GROUPS * 3, sizeof(float));
+    float link[3];
+    int link_ok = player_pos(link);
+    int best = -1;
+    float best_d2 = FLOOR_PROBE_RADIUS * FLOOR_PROBE_RADIUS, best_t[3] = {0}, best_m[3] = {0};
+    for (uint32_t i = 0; i < count && floor_last; i++) {
+        uint64_t grp = direct_ptr(array + 32ull * i);
+        float t[3], *last = floor_last + 3 * i;
+        if (!grp || !direct_read(grp + 0x88 + 12, &t[0], 4) || !direct_read(grp + 0x98 + 12, &t[1], 4) ||
+            !direct_read(grp + 0xa8 + 12, &t[2], 4) || !isfinite(t[0]) || !isfinite(t[1]) || !isfinite(t[2]))
+            continue;
+        float m[3] = {t[0] - last[0], t[1] - last[1], t[2] - last[2]};
+        int moved = i < floor_last_n && (m[0] != 0 || m[1] != 0 || m[2] != 0);
+        memcpy(last, t, sizeof t);
+        if (!moved || !link_ok) continue;
+        float d2 = (t[0] - link[0]) * (t[0] - link[0]) + (t[2] - link[2]) * (t[2] - link[2]);
+        if (d2 < best_d2) best = (int)i, best_d2 = d2, memcpy(best_t, t, sizeof t), memcpy(best_m, m, sizeof m);
+    }
+    floor_last_n = count;
+    if (link_ok && floor_link_ok && best >= 0) {
+        rt_log("floor probe: step %.4f frames; link %.4f %.4f %.4f moved %.5f %.5f %.5f; "
+               "group %d of %u at %.4f %.4f %.4f moved %.5f %.5f %.5f", (double)frame_step_frames(), link[0], link[1],
+               link[2], link[0] - floor_link[0], link[1] - floor_link[1], link[2] - floor_link[2], best, count,
+               best_t[0], best_t[1], best_t[2], best_m[0], best_m[1], best_m[2]);
+        floor_probe_left--;
+    }
+    if (link_ok) memcpy(floor_link, link, sizeof link);
+    floor_link_ok = link_ok;
+}
+
 void frame_step_present(uint64_t display_ns, int interval) {
     atomic_fetch_add_explicit(&guest_presents, 1, memory_order_relaxed);
     game_interval = interval > 0 ? interval : 1;
@@ -782,6 +855,7 @@ void frame_step_present(uint64_t display_ns, int interval) {
     atomic_store_explicit(&game_us, atomic_load_explicit(&game_us, memory_order_relaxed) + (uint64_t)(game * 1e6 + 0.5),
                           memory_order_relaxed);
     world_clock(dt, step);
+    floor_probe();
     if (rt_trace & RT_TRACE_PERF) {
         time_dump();
         if (frame_free_running()) {   // the game's own step, as its time manager holds it

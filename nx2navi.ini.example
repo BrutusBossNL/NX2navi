@@ -1011,6 +1011,9 @@
 # it waits for and what that one is doing (at most 24 lines a run): a game that stops then leaves the chain in its log.
 # Off by default: its thread takes the game's thread lock every 2 seconds. 10 is a good value for a hang report.
 # wait_watch_s = 0
+# Diagnosis: one log line per frame while Link stands near a moving floor (the floating platforms): the frame's step,
+# how far he moved and how far the floor moved. 1 writes 4000 lines, a larger number that many; 0 is off.
+# floor_probe = 0
 # 1: with trace = perf, walks of the process's address space count its private and write-combined memory every 600
 # frames (the "mem: process" line) and where its committed memory lies every 3600 frames (the "commit census" lines).
 # Each walk holds the address-space lock for 100-240 ms and delays the next frame by as much, so they are off unless
