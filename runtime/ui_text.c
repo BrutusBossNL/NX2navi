@@ -507,10 +507,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                  "prepares frames on a thread of their own. Measured on a Radeon RX 580 only: it can show a dark or flickering "
                                  "frame now and then, so leave it off on a newer card.",
     [UI_MENU_REPLAY_WORKERS] = "CPU helper threads (experimental)",
-    [UI_MENU_REPLAY_WORKERS_DESC] = "Uses more of your CPU's cores to prepare each frame for the graphics card. 0 turns it "
-                                    "off. 3 gave about 20% more frames a second on an 8-core CPU, and 5 a little more "
-                                    "with the settings below. Some players' games crashed with this on: set it back to "
-                                    "0 if yours does.",
+    [UI_MENU_REPLAY_WORKERS_DESC] = "Uses more of your CPU's cores to prepare each frame for the graphics card. Automatic "
+                                    "picks the number for your CPU: half its cores less one, none on four cores or fewer "
+                                    "and none on RX 6000 and older Radeon cards. 0 turns it off. 3 gave about 20% more "
+                                    "frames a second on an 8-core CPU. If your game crashes with this on, set it to 0.",
     [UI_MENU_REPLAY_PIPE] = "Helpers work ahead (experimental)",
     [UI_MENU_REPLAY_PIPE_DESC] = "The game carries on with the rest of the frame while the helper threads are still "
                                  "busy, instead of waiting for them. A small gain: 1 to 2% more frames a second.",

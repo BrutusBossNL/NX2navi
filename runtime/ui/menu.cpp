@@ -87,6 +87,7 @@ const char *vk_fg4_name(void);          // ... the version the library runs here
 int vk_texture_detail_auto(void);       // vk_texture.c: the texture detail auto picks on this card, 0 full to 2 low
 int vk_mesh_shader_native(void);        // vk_device.c: the GPU has mesh shaders (the mesh emulation does nothing)
 int vk_low_end_card(void);              // vk_device.c: no mesh shaders, or under 8 GiB of video memory
+int vk_exec_replay_workers_auto(const char **why);   // vk_exec.c: replay_workers = auto's count on this PC
 double frame_step_limit_hz(void);
 int frame_limit_adjustable(void);
 int rtss_limit_state(void);
@@ -1451,8 +1452,17 @@ static void tab_game(float scale) {
     // it. A row whose setting does nothing without another one (rw_init) is greyed out until that one is set. The two
     // rows under the workers are switches: on writes the value measured best (4 groups at once, groups from 16 draws),
     // and any other value set in nx2navi.ini shows as on and stays.
-    opt_slider("NX2NAVI_REPLAY_WORKERS", UI_MENU_REPLAY_WORKERS, 0, 8, UI_MENU_REPLAY_WORKERS_DESC, 1, "%.0f");
-    const bool workers = cfg_int("NX2NAVI_REPLAY_WORKERS") > 0, pipe = workers && cfg_int("NX2NAVI_REPLAY_PIPE") > 0;
+    // Automatic first, the default (vk_exec.c vk_exec_replay_workers_auto), named with the count it gives on this PC
+    {
+        static const char *const vals[] = {"auto", "0", "1", "2", "3", "4", "5", "6", "7", "8"};
+        static char auto_name[64];
+        snprintf(auto_name, sizeof auto_name, "%s (%d)", menu_text(UI_MENU_AUTO), vk_exec_replay_workers_auto(nullptr));
+        const char *names[] = {auto_name, "0", "1", "2", "3", "4", "5", "6", "7", "8"};
+        opt_choice_list("NX2NAVI_REPLAY_WORKERS", UI_MENU_REPLAY_WORKERS, vals, names, 10, UI_MENU_REPLAY_WORKERS_DESC);
+    }
+    const char *wset = cfg_value("NX2NAVI_REPLAY_WORKERS");
+    const bool workers = (!strcmp(wset, "auto") ? vk_exec_replay_workers_auto(nullptr) : atoi(wset)) > 0,
+               pipe = workers && cfg_int("NX2NAVI_REPLAY_PIPE") > 0;
     if (!workers) opt_disable_next(UI_MENU_NEEDS_WORKERS);
     opt_toggle_value("NX2NAVI_REPLAY_PIPE", UI_MENU_REPLAY_PIPE, UI_MENU_REPLAY_PIPE_DESC, "4", "0");
     if (!pipe) opt_disable_next(workers ? UI_MENU_NEEDS_PIPE : UI_MENU_NEEDS_WORKERS);

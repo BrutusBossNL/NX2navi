@@ -1836,8 +1836,9 @@ static void op_one(VkExec *ex, const op_hdr *h) {
     }
 }
 
-// ---- replay workers (NX2NAVI_REPLAY_WORKERS, default 0: the replay records every op on the submitting thread; the
-// Game tab's CPU helper threads row sets it)
+// ---- replay workers (NX2NAVI_REPLAY_WORKERS, default auto: as many as the CPU's cores make worth it,
+// vk_exec_replay_workers_auto; 0: the replay records every op on the submitting thread; the Game tab's CPU helper
+// threads row sets it)
 // 3 workers: on an RX 7900 XT with a Ryzen 7 5800X3D, Hyrule Field standing went from 41.2 to 50.4 fps (2026-11-12, one
 // batch), with the same pictures there and in Kokiri Forest, Kakariko, Goron City, a graveyard house and Gerudo
 // Valley; 5 or 7 workers measured the same as 3. Default 0 again after players' games crashed with 3 on by default
@@ -2047,9 +2048,36 @@ static void rw_main(void *arg) {
     }
 }
 
+// NX2NAVI_REPLAY_WORKERS = auto: the workers this PC gets. The game's own threads, the submitting thread, the present
+// thread and the pipeline builders already keep about half of the cores busy, and on the 8-core CPU above 3 workers
+// gave all there was (5 and 7 measured the same), so the count is half the physical cores less one: 2 on 6 cores, 3 on
+// 8, 5 on 12, at most 6. Four cores or fewer get none: a worker would take a core from the game's threads. AMD's
+// Windows driver for RX 6000 and older (vk_caps.amd_sc) gets none either, as that is where a player's device was lost
+// with workers on and the cause is not known; a number set in nx2navi.ini or the menu still applies there. Physical
+// cores of the process's affinity (plat_cpu_cores), or half the usable logical processors where that is unknown.
+#define RW_AUTO_MAX 6
+int vk_exec_replay_workers_auto(const char **why) {
+    uint64_t all, first;
+    int cores = plat_cpu_cores(&all, &first);
+    if (cores <= 0) cores = (int)plat_cpu_usable() / 2;
+    int n = cores <= 4 ? 0 : cores / 2 - 1;
+    if (n > RW_AUTO_MAX) n = RW_AUTO_MAX;
+    const char *w = cores <= 4 ? "four cores or fewer" : "half the cores less one";
+    if (vk_caps.amd_sc) n = 0, w = "AMD's driver for RX 6000 and older, where a game with workers lost its device";
+    if (why) *why = w;
+    return n;
+}
+
 static void rw_init(void) {
-    int n = cfg_int("NX2NAVI_REPLAY_WORKERS");
+    const char *set = cfg_value("NX2NAVI_REPLAY_WORKERS"), *why = NULL;
+    int autoset = !strcmp(set, "auto");
+    int n = autoset ? vk_exec_replay_workers_auto(&why) : atoi(set);
     RW.n = n < 0 ? 0 : n > RW_MAX ? RW_MAX : n;
+    if (autoset) {
+        uint64_t all, first;
+        rt_log("vk: replay workers automatic: %d for %d physical cores (%s; NX2NAVI_REPLAY_WORKERS = a number sets "
+               "them)", RW.n, plat_cpu_cores(&all, &first), why);
+    }
     for (int k = 0; k < RW.n; k++) {
         RwWorker *w = calloc(1, sizeof *w);
         if (!w) rt_fatal("vk: out of memory (replay worker)");
