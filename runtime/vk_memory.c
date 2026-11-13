@@ -5485,6 +5485,17 @@ static void system_log(uint64_t frame, const ReportFig *f, const VkPipeMem *pm, 
     flight_mem(&frec, &fthumb);
     uint64_t lq = logq_bytes();
     uint64_t shaders = sr.cache + sr.use + sr.pack + sr.records;
+    // The shaders' SPIR-V as held (gfx_shader.c "SPIR-V at rest"): against what it would be uncompressed, how many
+    // shaders hold it compressed alone, and the decodes readers' pins made, those on the drawing threads apart.
+    char spv[400];
+    if (sr.compress > 0)
+        snprintf(spv, sizeof spv, " (their SPIR-V %.0f, uncompressed %.0f; %llu shaders compressed; %llu decompressions "
+                 "in %.0f ms, %llu of them on the drawing threads in %.1f ms, the longest %.2f ms)", sr.spv_held / M,
+                 sr.spv_full / M, (unsigned long long)sr.spv_packed, (unsigned long long)sr.decodes, sr.decode_ns / 1e6,
+                 (unsigned long long)sr.draw_decodes, sr.draw_decode_ns / 1e6, sr.draw_decode_max_ns / 1e6);
+    else
+        snprintf(spv, sizeof spv, " (their SPIR-V %.0f, uncompressed%s)", sr.spv_held / M,
+                 sr.compress < 0 ? ": shader_compress = 0" : "");
     uint64_t pipes = pm->ram_pipes + pm->ram_keys + pm->ram_seed + pm->ram_binaries;
     uint64_t texhost = th.bytes + th.tmp, known = shaders + pipes + texhost + lq + frec;
     uint64_t pcache = pm->cache[0] + pm->cache[1];
@@ -5503,15 +5514,15 @@ static void system_log(uint64_t frame, const ReportFig *f, const VkPipeMem *pm, 
            f->hblocks / M, fthumb / M);
     if (hi.committed)
         mg_put(line, sizeof line, &k, " + the C runtime heap %.0f (%.0f of it handed out; of it known: shader caches %.0f in "
-               "%llu shaders, pipeline tables %.0f, the texture cache %.0f with decode temporaries %.0f now and %.0f at most "
+               "%llu shaders%s, pipeline tables %.0f, the texture cache %.0f with decode temporaries %.0f now and %.0f at most "
                "since the last report, the log queue %.0f, the flight recorder's records %.0f; the rest %.0f)",
-               hi.committed / M, hi.used / M, shaders / M, (unsigned long long)sr.shaders, pipes / M, texhost / M,
+               hi.committed / M, hi.used / M, shaders / M, (unsigned long long)sr.shaders, spv, pipes / M, texhost / M,
                th.tmp / M, th.tmp_peak / M, lq / M, frec / M, ((double)hi.committed - (double)known) / M);
     else
         mg_put(line, sizeof line, &k, " + what the runtime knows it allocated %.0f (the C runtime heap's size is not "
-               "known: shader caches %.0f in %llu shaders, pipeline tables %.0f, the texture cache %.0f with decode "
+               "known: shader caches %.0f in %llu shaders%s, pipeline tables %.0f, the texture cache %.0f with decode "
                "temporaries %.0f now and %.0f at most since the last report, the log queue %.0f, the flight recorder's "
-               "records %.0f)", known / M, shaders / M, (unsigned long long)sr.shaders, pipes / M, texhost / M,
+               "records %.0f)", known / M, shaders / M, (unsigned long long)sr.shaders, spv, pipes / M, texhost / M,
                th.tmp / M, th.tmp_peak / M, lq / M, frec / M);
     mg_put(line, sizeof line, &k, " + the driver's pipeline cache data %.0f (pipeline-cache.bin's %.0f, the play cache's "
            "%.0f, %s) + other %.0f (the driver's own memory, thread stacks, the program's data; %u other heaps)",

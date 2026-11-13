@@ -3290,9 +3290,7 @@ static uint64_t spirv_hash(const GfxShader *s) {
     for (uint32_t i = 0, j = (uint32_t)(k >> 51); i < 8192; i++, j = (j + 1) & 8191) {
         if (tab[j].s == s) return tab[j].h;
         if (!tab[j].s) {
-            uint64_t words = 0, h = 0xcbf29ce484222325ull;
-            const uint8_t *b = (const uint8_t *)gfx_shader_spirv(s, &words);
-            for (uint64_t n = 0; b && n < words * 4; n++) h = (h ^ b[n]) * 0x100000001b3ull;
+            uint64_t h = gfx_shader_spirv_fnv(s);   // kept by the shader: a compressed one is not decoded on this thread
             tab[j].s = s, tab[j].h = h;
             return h;
         }

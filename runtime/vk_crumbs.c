@@ -227,9 +227,7 @@ static uint64_t gp_shader_hash(const GfxShader *s) {
     if (!s) return 0;
     uint32_t i = (uint32_t)(((uintptr_t)s * 0x9E3779B97F4A7C15ull) >> 54);
     if (memo[i].s == s) return memo[i].h;
-    uint64_t words = 0, h = 0xcbf29ce484222325ull;
-    const uint8_t *b = (const uint8_t *)gfx_shader_spirv(s, &words);
-    for (uint64_t k = 0; b && k < words * 4; k++) h = (h ^ b[k]) * 0x100000001b3ull;
+    uint64_t h = gfx_shader_spirv_fnv(s);   // kept by the shader: nothing is decoded here
     memo[i].s = s, memo[i].h = h;
     return h;
 }

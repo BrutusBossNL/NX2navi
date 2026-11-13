@@ -63,8 +63,15 @@ void gfx_shader_disk_counts(uint64_t *sync, uint64_t *sync_ns, uint64_t *bg);   
                                                      // thread (count, ns) and by the loaders (gfx_shader.c load_budget)
 // The shader caches' host memory for the memory report (vk_memory.c system_log), at report time, in bytes: the memory
 // cache of translated shaders (shaders entries), the use masks, the cache pack's index, the play records' sets and
-// pending appends.
-typedef struct { uint64_t shaders, cache, use, pack, records; } GfxShaderRam;
+// pending appends. The memory cache's SPIR-V (gfx_shader.c "SPIR-V at rest"): spv_held bytes held, plain copies and
+// compressed frames together, against spv_full uncompressed; spv_packed shaders held compressed alone; compress 1 on,
+// -1 off, 0 no shader yet. The decodes readers' pins made, and those on the drawing threads (count, time, longest).
+typedef struct {
+    uint64_t shaders, cache, use, pack, records;
+    uint64_t spv_held, spv_full, spv_packed;
+    uint64_t decodes, decode_ns, draw_decodes, draw_decode_ns, draw_decode_max_ns;
+    int compress;
+} GfxShaderRam;
 void gfx_shader_ram(GfxShaderRam *r);
 // Translator answers for this device (vk_caps.c): shaderFloat64, storage offset rounding, subgroup size per vs/fs/cs.
 void gfx_shader_set_host(int float64, uint32_t sbuf_align, const uint32_t subgroup[3], uint32_t gather_bits, int zero_locals,
@@ -108,7 +115,17 @@ size_t gfx_shader_warm_list(GfxWarmEnt **out);              // malloc'd; recorde
 // Disk-cache load the caller owns (*owned 1: release it), or the memory cache's entry (*owned 0). NULL if not cached.
 const GfxShader *gfx_shader_load_private(const uint8_t iid[32], int *owned);
 void gfx_shader_release_private(const GfxShader *s);
-const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words);
+// A shader's SPIR-V may be held compressed while nobody reads it (gfx_shader.c "SPIR-V at rest"). A reader pins it:
+// gfx_shader_spirv_pin returns the plain SPIR-V (decoded first if need be), valid until the matching
+// gfx_shader_spirv_unpin; every pin needs its unpin, and the pointer is not used after it. Any thread.
+const uint32_t *gfx_shader_spirv_pin(const GfxShader *s, uint64_t *words);
+void gfx_shader_spirv_unpin(const GfxShader *s);
+uint64_t gfx_shader_words(const GfxShader *s);              // the SPIR-V's length in words, without reading it
+// FNV-1a (64-bit, over the bytes) of the SPIR-V: worked out once per shader and kept, so it decodes nothing on a
+// compressed shader (NX2NAVI_SKIP_SHADERS, vk_dump.c and vk_dlaa.c name shaders by it).
+uint64_t gfx_shader_spirv_fnv(const GfxShader *s);
+// The values of the module's OpDecorate Binding instructions, in module order, in *b (kept with the shader).
+uint32_t gfx_shader_bindings(const GfxShader *s, const uint32_t **b);
 const char *gfx_shader_res_json(const GfxShader *s);        // the translator's .res.json text
 int gfx_shader_write_code(const GfxShader *s, const char *path);   // the guest program, from the stored inputs
 // A shader of the runtime's own (SPIR-V and a .res.json text as the translator writes them), outside the cache and

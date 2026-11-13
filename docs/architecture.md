@@ -278,8 +278,9 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   those none did, stage libraries by kind, compute pipelines, layouts, descriptor pools) beside the swapchain's pixels
   and DLSS's and FSR's figures; `mem: system` splits the process's commit into the game's heap and physical maps, the
   device-local memory (Windows charges it to the process), VMA's host-visible blocks, the C runtime heap with the shares
-  the runtime can name (shader caches, pipeline tables, the texture cache and its decode temporaries, the log queue, the
-  flight recorder), the data of the driver's pipeline caches (asked once a minute on the autosave thread) and the rest;
+  the runtime can name (shader caches, with their SPIR-V as held against uncompressed and the decompressions, pipeline
+  tables, the texture cache and its decode temporaries, the log queue, the flight recorder), the data of the driver's
+  pipeline caches (asked once a minute on the autosave thread) and the rest;
   `mem: growth` names what grew by more than 64 MiB since the report before and since the first report in play. Every
   ten minutes of play and at exit, `mem: growth ranking` ranks the categories by their growth since play began and
   marks those that only climbed (`mem_growth.h`).
@@ -291,6 +292,14 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   pass it, up to twice it, while the card and the system's commit have room. Times are wall seconds from a clock of
   the presents, not present counts. What a switched-off upscaler or SMAA held is freed after it has gone unused for a
   while (`vk_dlaa.c` `idle_release`, `vk_fsr.c` `idle_note`, `vk_aa.c` `work_idle`).
+- Translated shaders at rest: the shader memory cache keeps every shader for the whole session, but a shader's SPIR-V
+  is read only while modules are made of it. A background thread compresses (zstd, checked by decoding it) the SPIR-V
+  of each shader no reader used for `shader_compress_idle_s` seconds (30) and frees the plain copy; a reader pins it
+  and gets it decoded back, about 60 us for a mean module (`runtime/gfx_shader.c` "SPIR-V at rest",
+  `runtime/spv_store.h`). The SPIR-V keeps about a quarter of its size. What the drawing thread compares at pipeline
+  misses and draws (the module's hash and its Binding decorations) is kept apart and needs no decode; a compute
+  pipeline created at a dispatch and a mesh shader's first pipeline key decode on that thread, which the memory report
+  counts. `shader_compress = 0` keeps it plain.
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
   `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
   (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.

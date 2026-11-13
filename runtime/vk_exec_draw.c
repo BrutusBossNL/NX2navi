@@ -2475,9 +2475,7 @@ static int shader_skipped(const GfxShader *sh) {
     if (!n || !sh) return 0;
     uint32_t i = (uint32_t)(((uintptr_t)sh * 0x9E3779B97F4A7C15ull) >> 56);
     if (memo[i].s == sh) return memo[i].skip;
-    uint64_t words = 0, h = 0xcbf29ce484222325ull;   // as vk_dump.c shader_hash
-    const uint8_t *b = (const uint8_t *)gfx_shader_spirv(sh, &words);
-    for (uint64_t k = 0; b && k < words * 4; k++) h = (h ^ b[k]) * 0x100000001b3ull;
+    uint64_t h = gfx_shader_spirv_fnv(sh);   // as vk_dump.c shader_hash
     uint8_t skip = 0;
     for (int k = 0; k < n; k++) skip |= list[k] == h;
     memo[i].s = sh, memo[i].skip = skip;
@@ -5839,15 +5837,10 @@ static struct {
 } MFB = {.lock = PLAT_MUTEX_INIT};
 
 static uint32_t mfb_binding_base(const GfxShader *s) {   // one past the highest binding the module declares
-    uint64_t n;
-    const uint32_t *w = gfx_shader_spirv(s, &n);
-    uint32_t top = 0;
-    for (uint64_t i = 5; i < n;) {
-        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
-        if (!len) break;
-        if (op == 71 && len == 4 && w[i + 2] == 33 && w[i + 3] > top) top = w[i + 3];   // OpDecorate Binding
-        i += len;
-    }
+    const uint32_t *b;
+    uint32_t n = gfx_shader_bindings(s, &b), top = 0;
+    for (uint32_t i = 0; i < n; i++)
+        if (b[i] > top) top = b[i];
     return top + 1;
 }
 
@@ -5856,10 +5849,11 @@ static uint32_t mfb_binding_base(const GfxShader *s) {   // one past the highest
 static const GfxShader *mfb_module(const MfbCs *e, int stage, char *err, size_t cap) {
     const GfxShader *src = stage == 6 ? e->ts : e->ms;
     uint64_t n, on = 0;
-    const uint32_t *w = gfx_shader_spirv(src, &n);
+    const uint32_t *w = gfx_shader_spirv_pin(src, &n);
     uint32_t base = mfb_binding_base(src);
     uint32_t *out = stage == 6 ? meshfb_task_cs(w, n, &e->ti, base, &on, err, cap)
                                : meshfb_mesh_cs(w, n, &e->mi, base, e->ti.payload_bytes / 4, &on, err, cap);
+    gfx_shader_spirv_unpin(src);
     if (!out) return NULL;
     static const int task_slots[1] = {MESHFB_CB_TASK}, mesh_slots[3] = {MESHFB_CB_TASK, MESHFB_CB_MESH, MESHFB_CB_LIST};
     char *res = stage == 6 ? meshfb_res_json(gfx_shader_res_json(src), base, task_slots, 1)
@@ -6086,8 +6080,9 @@ static int mesh_emu_draw_prim(VkExec *ex) {
     unsigned h = (unsigned)((uintptr_t)ms >> 4) & 255;
     if (memo[h].s != ms) {
         uint64_t n = 0;
-        const uint32_t *w = gfx_shader_spirv(ms, &n);
+        const uint32_t *w = gfx_shader_spirv_pin(ms, &n);   // once per mesh shader the memo meets
         memo[h].s = ms, memo[h].prim = w && mesh_emu_prim(w, (size_t)n) == 1 ? NVN_DRAW_PRIMITIVE_POINTS : NVN_DRAW_PRIMITIVE_TRIANGLES;
+        gfx_shader_spirv_unpin(ms);
     }
     return memo[h].prim;
 }

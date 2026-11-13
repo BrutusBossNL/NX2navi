@@ -2879,24 +2879,22 @@ static int add_stage(Bindings *B, const GfxShader *s, uint32_t off) {
 }
 
 // The first binding a module's resource variables use that the binding list b[0..n) lacks (module bindings >= 1 moved
-// by off), or -1. A reflection that misses a resource would otherwise hand the driver an invalid layout.
+// by off), or -1. A reflection that misses a resource would otherwise hand the driver an invalid layout. The module's
+// Binding decorations come from the list the shader keeps (gfx_shader_bindings), not from its SPIR-V: this runs on the
+// drawing thread at every pipeline miss (pipe_miss), where a compressed module would be decoded.
 static int module_binding_missing(const GfxShader *s, const VkDescriptorSetLayoutBinding *b, uint32_t n, uint32_t off) {
-    uint64_t words = 0;
-    const uint32_t *w = gfx_shader_spirv(s, &words);
+    const uint32_t *bind;
+    uint32_t nb = gfx_shader_bindings(s, &bind);
     const GfxShaderRes *tr;
     int nt = gfx_shader_resources(s, GFX_RES_TEX, &tr);
-    for (uint64_t i = 5; w && i < words;) {
-        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
-        if (!len || i + len > words) break;
+    for (uint32_t i = 0; i < nb; i++) {
         int pooled = 0;   // a pool array: set 2, not in this layout (spirv_pool_rebind)
-        for (int t = 0; t < nt && op == SPV_OP_DECORATE && len >= 4; t++)
-            if (tr[t].pool && tr[t].binding == (w[i + 3] & 0xffff)) pooled = 1;   // GfxShaderRes.binding is 16 bits
-        if (op == SPV_OP_DECORATE && len >= 4 && w[i + 2] == SPV_DEC_BINDING && !pooled) {
-            uint32_t want = w[i + 3] + (w[i + 3] >= 1 ? off : 0), j = 0;
-            while (j < n && b[j].binding != want) j++;
-            if (j == n) return (int)w[i + 3];
-        }
-        i += len;
+        for (int t = 0; t < nt; t++)
+            if (tr[t].pool && tr[t].binding == (bind[i] & 0xffff)) pooled = 1;   // GfxShaderRes.binding is 16 bits
+        if (pooled) continue;
+        uint32_t want = bind[i] + (bind[i] >= 1 ? off : 0), j = 0;
+        while (j < n && b[j].binding != want) j++;
+        if (j == n) return (int)bind[i];
     }
     return -1;
 }
@@ -3109,15 +3107,17 @@ static const MeshEmuEnt *emu_get(const GfxShader *ms, const GfxShader *ts, VkPip
     const char *why = NULL;
     uint64_t n = 0;
     size_t cn = 0;
-    const uint32_t *w = gfx_shader_spirv(ms, &n);
+    const uint32_t *w = gfx_shader_spirv_pin(ms, &n);
     uint32_t *c = w ? mesh_emu_compute(w, (size_t)n, &e->mi, &cn, &why) : NULL;
+    gfx_shader_spirv_unpin(ms);
     if (c && (e->mesh = emu_compute(c, cn, layout))) e->ok = 1;
     else if (!why) why = "the mesh stage's compute pipeline was not created";
     free(c);
     if (e->ok && e->mi.payload_words && !ts) e->ok = 0, why = "a mesh stage that reads a task payload without a task stage";
     if (e->ok && ts) {
-        w = gfx_shader_spirv(ts, &n);
+        w = gfx_shader_spirv_pin(ts, &n);
         c = w ? mesh_emu_compute(w, (size_t)n, &e->ti, &cn, &why) : NULL;
+        gfx_shader_spirv_unpin(ts);
         uint32_t *r = c && toff ? spirv_rebind(c, cn, toff) : NULL;   // the task stage's bindings follow the fragment stage's
         if (c && (e->task = emu_compute(r ? r : c, cn, layout))) {
             if (e->ti.payload_words != e->mi.payload_words) e->ok = 0, why = "task and mesh payload sizes differ";
@@ -3277,9 +3277,10 @@ static uint32_t mesh_outs(const GfxShader *ms, int *points) {
     }
     plat_mutex_unlock(&MSO.lock);
     uint64_t n = 0;
-    const uint32_t *w = gfx_shader_spirv(ms, &n);
+    const uint32_t *w = gfx_shader_spirv_pin(ms, &n);   // once per mesh shader: decoded here if it is compressed
     *points = 0;
     mask = w ? spirv_mesh_outputs(w, n, points) : ~0u;   // as create_graphics takes a module it cannot read
+    gfx_shader_spirv_unpin(ms);
     plat_mutex_lock(&MSO.lock);
     for (j = (uint32_t)(((uintptr_t)ms >> 4) * 0x9e3779b1u) & (MESH_OUTS_CAP - 1); MSO.ms[j] && MSO.ms[j] != ms;)
         j = (j + 1) & (MESH_OUTS_CAP - 1);
@@ -3583,23 +3584,24 @@ enum { WATER_VERTEX, WATER_FRAGMENT, WATER_ABSORPTION };
 static struct { uint64_t key; uint32_t *code; uint64_t words; int state; } water_mods[8];
 static PlatMutex water_lock = PLAT_MUTEX_INIT;
 
-// The edited module that stands for the module of hash `key`, or NULL. w: the translation it is made from at the
-// first call (NULL: only look); a fragment translation is first put into its set 1 form, which must be the module
-// `key` names, as it is the form the pipeline builds.
-static const uint32_t *water_module(uint64_t key, int kind, const WaterProfile *p, const uint32_t *w, uint64_t n,
-                                    uint64_t *words) {
+// The edited module that stands for the module of hash `key`, or NULL. src: the translation it is made from at the
+// first call (NULL: only look), whose SPIR-V is pinned for the edit only; a fragment translation is first put into its
+// set 1 form, which must be the module `key` names, as it is the form the pipeline builds.
+static const uint32_t *water_module(uint64_t key, int kind, const WaterProfile *p, const GfxShader *src, uint64_t *words) {
     const uint32_t *code = NULL;
     plat_mutex_lock(&water_lock);
     int i = 0;
     while (i < 8 && water_mods[i].state && water_mods[i].key != key) i++;
-    if (i < 8 && !water_mods[i].state && w) {
-        uint64_t wn = 0;
+    if (i < 8 && !water_mods[i].state && src) {
+        uint64_t wn = 0, n = 0;
+        const uint32_t *w = gfx_shader_spirv_pin(src, &n);
         uint32_t *c = NULL, *set1 = kind == WATER_VERTEX ? NULL : spirv_set(w, n, 1);
         if (kind == WATER_VERTEX) c = spirv_water_vertex(w, n, &wn);
         else if (set1 && fnv(FNV0, set1, (size_t)n * 4) == key)
             c = kind == WATER_FRAGMENT ? spirv_water_fragment(set1, n, &wn)
                                        : spirv_water_absorption(set1, n, p->mat_pointer, p->mat_distance, &wn);
         free(set1);
+        gfx_shader_spirv_unpin(src);
         water_mods[i].key = key, water_mods[i].code = c, water_mods[i].words = wn, water_mods[i].state = c ? 1 : -1;
         static const char *const names[] = {"vertex stage of the coordinate pair", "fragment stage of the coordinate pair",
                                             "absorption material"};
@@ -3614,23 +3616,21 @@ static const uint32_t *water_module(uint64_t key, int kind, const WaterProfile *
 }
 
 // The water mode of a pipeline's shaders: 1 a coordinate pair whose two edited modules exist, 2 the absorption
-// material whose edited module exists, else 0.
+// material whose edited module exists, else 0. The drawing thread asks it for every pipeline it links (lib_keys): the
+// modules' hashes are the ones the shaders keep (gfx_shader_spirv_fnv), and the SPIR-V is read only to make an edited
+// module, once per profile.
 static int water_projective_pair(const VkPipeState *s) {
     static int on = -1;
     if (on < 0) on = cfg_bool("NX2NAVI_WATER_PROJECTIVE");
     if (!on || !P.indep || !s->fs) return 0;
-    uint64_t vn = 0, fn = 0, wn;
-    const uint32_t *f = gfx_shader_spirv(s->fs, &fn);
-    if (!f) return 0;
-    uint64_t fh = fnv(FNV0, f, (size_t)fn * 4);
+    uint64_t wn, fh = gfx_shader_spirv_fnv(s->fs);
     for (size_t i = 0; i < sizeof water_profiles / sizeof *water_profiles; i++) {
         const WaterProfile *p = &water_profiles[i];
         // The absorption correction is independent of the coordinate pair.
-        if (fh == p->mat) return water_module(p->mat_set1, WATER_ABSORPTION, p, f, fn, &wn) ? 2 : 0;
+        if (fh == p->mat) return water_module(p->mat_set1, WATER_ABSORPTION, p, s->fs, &wn) ? 2 : 0;
         if (fh != p->fs) continue;
-        const uint32_t *v = s->vs ? gfx_shader_spirv(s->vs, &vn) : NULL;
-        if (!v || fnv(FNV0, v, (size_t)vn * 4) != p->vs) return 0;
-        return water_module(p->vs, WATER_VERTEX, p, v, vn, &wn) && water_module(p->fs_set1, WATER_FRAGMENT, p, f, fn, &wn);
+        if (!s->vs || gfx_shader_spirv_fnv(s->vs) != p->vs) return 0;
+        return water_module(p->vs, WATER_VERTEX, p, s->vs, &wn) && water_module(p->fs_set1, WATER_FRAGMENT, p, s->fs, &wn);
     }
     return 0;
 }
@@ -3639,7 +3639,7 @@ static int water_projective_pair(const VkPipeState *s) {
 // (in its set 1 form), else the module itself.
 static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early, int mode) {
     uint64_t words = 0;
-    const uint32_t *code = mode ? water_module(fnv(FNV0, w, (size_t)n * 4), 0, NULL, NULL, 0, &words) : NULL;
+    const uint32_t *code = mode ? water_module(fnv(FNV0, w, (size_t)n * 4), 0, NULL, NULL, &words) : NULL;
     if (mode == 1 && !code) LOG_ONCE("vk_pipeline: water: a coordinate pair's fragment module is not in its known form; built as it is");
     return code ? make_module(code, words, early) : make_module(w, n, early);
 }
@@ -3648,7 +3648,7 @@ static VkShaderModule water_pair_module(const uint32_t *w, uint64_t n, int early
 // outputs the vertex shader's union adds (spirv_add_outputs), which differ from one install to the next and are added
 // to the edited module as to any other. NULL in every other case. The module stays the table's.
 static const uint32_t *water_pair_vertex(const uint32_t *v, uint64_t n, int mode, uint64_t *words) {
-    return mode == 1 && v ? water_module(fnv(FNV0, v, (size_t)n * 4), 0, NULL, NULL, 0, words) : NULL;
+    return mode == 1 && v ? water_module(fnv(FNV0, v, (size_t)n * 4), 0, NULL, NULL, words) : NULL;
 }
 
 // water_projective_pair for a pipeline of key k. A coordinate pair blended with dual-source factors keeps its original
@@ -3703,7 +3703,12 @@ static uint32_t mesh_dyn(VkDynamicState *out) {
 static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Layout *l, uint32_t fs_off) {
     VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE;
     uint64_t vw, fw, vm_hash = 0, fm_hash = 0;   // the hashes: of the final modules, for the PIPE_FEEDBACK 2 line
-    const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
+    // The stages' translations, pinned until the pipeline is made (gfx.h gfx_shader_spirv_pin): vcode and fcode become
+    // patched copies on the way, vplain and fplain stay the translations.
+    uint64_t vw0 = 0, fw0 = 0;
+    const uint32_t *vplain = gfx_shader_spirv_pin(s->vs, &vw0), *fplain = s->fs ? gfx_shader_spirv_pin(s->fs, &fw0) : NULL;
+    const uint32_t *vcode = vplain;
+    vw = vw0;
     uint32_t *vpatched = NULL, *fpatched = NULL;
     int mesh = is_mesh(s), emu = mesh && l->emu;
     // the water pair's vertex edit is for a translated vertex stage: an emulated mesh draw's generated one has none
@@ -3714,7 +3719,11 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     if (emu) {   // NX2NAVI_MESH_EMULATION: the task and mesh stages as compute pipelines, a generated vertex shader here
         uint32_t toff = fs_off + (s->fs ? binding_span(s->fs) - 1 : 0);
         const MeshEmuEnt *me = emu_get(s->vs, s->ts, l->layout, toff, 1);
-        if (!me || !me->ok) return VK_NULL_HANDLE;
+        if (!me || !me->ok) {
+            gfx_shader_spirv_unpin(s->vs);
+            if (s->fs) gfx_shader_spirv_unpin(s->fs);
+            return VK_NULL_HANDLE;
+        }
         GfxShaderIo fin[32];
         uint8_t ty[32], cp[32];
         uint32_t need = s->fs ? gfx_shader_inputs(s->fs, fin) : 0;
@@ -3723,21 +3732,24 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
             cp[i] = need >> i & 1 && !fin[i].packed && fin[i].comps ? (uint8_t)fin[i].comps : 4;
         }
         size_t vn = 0;
-        uint64_t fsw = 0;
-        const uint32_t *fcode0 = s->fs ? gfx_shader_spirv(s->fs, &fsw) : NULL;
-        vpatched = mesh_emu_vs(&me->mi, need, ty, cp, fcode0, (size_t)fsw, &vn);
-        if (!vpatched) return VK_NULL_HANDLE;
+        vpatched = mesh_emu_vs(&me->mi, need, ty, cp, fplain, (size_t)fw0, &vn);
+        if (!vpatched) {
+            gfx_shader_spirv_unpin(s->vs);
+            if (s->fs) gfx_shader_spirv_unpin(s->fs);
+            return VK_NULL_HANDLE;
+        }
         vcode = vpatched, vw = vn;
         mesh = 0;   // a vertex pipeline from here on
     }
     VkShaderModule tm = VK_NULL_HANDLE;
     if (mesh && s->ts) {   // the task stage's bindings follow another stage's in its set (task_off)
         uint64_t tw;
-        const uint32_t *tcode = gfx_shader_spirv(s->ts, &tw);
+        const uint32_t *tcode = gfx_shader_spirv_pin(s->ts, &tw);
         uint32_t toff = task_off(s, l, fs_off);
         uint32_t *t = tcode && toff ? spirv_rebind(tcode, tw, toff) : NULL;
         tm = make_module(t ? t : tcode, tw, 0);
         free(t);
+        gfx_shader_spirv_unpin(s->ts);
     }
     if (l->set1 && !mesh) {   // independent layouts: outputs from the vertex shader's union, not from this fragment shader
         GfxShaderIo fin[32];
@@ -3768,7 +3780,8 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
             if (!vpatched) LOG_ONCE("vk_pipeline: cannot add missing vertex outputs (mask %#x)", missing);
             else vcode = vpatched, vw = n2;
         }
-        const uint32_t *fcode = gfx_shader_spirv(s->fs, &fw);
+        const uint32_t *fcode = fplain;
+        fw = fw0;
         if (missing && mesh && fcode) {   // inputs no mesh output feeds read as Maxwell gives them (spirv_fs_fill_inputs)
             uint64_t n2 = 0;
             uint32_t *f = spirv_fs_fill_inputs(fcode, fw, missing, points, &n2);
@@ -3806,10 +3819,8 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         n_stages++;
     }
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rqv, rqf;
-    uint64_t sw;
-    const uint32_t *scode = gfx_shader_spirv(s->vs, &sw);   // vcode may be a patched copy that is freed by now
-    if (!emu) pin_subgroup32(&stages[0], &rqv, scode, sw);
-    if (s->fs) pin_subgroup32(&stages[1], &rqf, gfx_shader_spirv(s->fs, &sw), sw);
+    if (!emu) pin_subgroup32(&stages[0], &rqv, vplain, vw0);   // vcode may be a patched copy that is freed by now
+    if (s->fs) pin_subgroup32(&stages[1], &rqf, fplain, fw0);
     VkVertexInputAttributeDescription va[32];
     VkVertexInputBindingDescription vb[17];
     uint32_t na = 0, nb = 0;
@@ -3918,6 +3929,8 @@ out:
     if (vm) vkDestroyShaderModule(P.device, vm, NULL);
     if (fm) vkDestroyShaderModule(P.device, fm, NULL);
     if (tm) vkDestroyShaderModule(P.device, tm, NULL);
+    gfx_shader_spirv_unpin(s->vs);
+    if (s->fs) gfx_shader_spirv_unpin(s->fs);
     return pipe;
 }
 
@@ -4025,6 +4038,7 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     uint32_t *patched = NULL;
     VkPipeline pipe = VK_NULL_HANDLE;
+    const GfxShader *pinned[2] = {NULL, NULL};   // the shaders whose SPIR-V is pinned until out (gfx_shader_spirv_pin)
     if (kind == LIB_VI) {
         if (!P.dyn_vi) {
             VtxInput v;
@@ -4043,13 +4057,13 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         // takes the subgroup pin there, so here too. No vertex outputs are added: what a fragment shader reads and
         // the mesh stage does not write is filled in the fragment module (FsKey.fill).
         uint64_t vw, tw = 0;
-        const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
+        const uint32_t *vcode = gfx_shader_spirv_pin(pinned[0] = s->vs, &vw);
         if (!vcode || !(m = make_module(vcode, vw, 0))) goto out;
         mst[0] = st, mst[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT, mst[0].module = m;
         pin_subgroup32(&mst[0], &rq, vcode, vw);
         pi.stageCount = 1;
         if (s->ts) {
-            const uint32_t *tcode = gfx_shader_spirv(s->ts, &tw);
+            const uint32_t *tcode = gfx_shader_spirv_pin(pinned[1] = s->ts, &tw);
             uint32_t toff = binding_span(s->vs) - 1;
             patched = tcode && toff ? spirv_rebind(tcode, tw, toff) : NULL;
             if (!tcode || !(tm = make_module(patched ? patched : tcode, tw, 0))) goto out;
@@ -4061,7 +4075,7 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
     } else if (kind == LIB_PR) {
         const PrKey *pk = key;
         uint64_t vw, sw, n2 = 0;
-        const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw), *scode = vcode;
+        const uint32_t *vcode = gfx_shader_spirv_pin(pinned[0] = s->vs, &vw), *scode = vcode;
         sw = vw;
         uint64_t wn = 0;
         const uint32_t *vwater = water_pair_vertex(vcode, vw, pk->water_projective, &wn);
@@ -4077,7 +4091,7 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         if (s->fs) {
             const FsKey *fk = key;
             uint64_t fw, sw, n2 = 0;
-            const uint32_t *fcode = gfx_shader_spirv(s->fs, &fw), *scode = fcode;
+            const uint32_t *fcode = gfx_shader_spirv_pin(pinned[0] = s->fs, &fw), *scode = fcode;
             sw = fw;
             uint32_t *d = NULL, *filled = NULL;
             if (fk->fill && fcode) {   // a mesh pipeline's: before the other rewrites, as create_graphics
@@ -4132,6 +4146,8 @@ out:
     if (m) vkDestroyShaderModule(P.device, m, NULL);
     if (tm) vkDestroyShaderModule(P.device, tm, NULL);
     free(patched);
+    for (int i = 0; i < 2; i++)
+        if (pinned[i]) gfx_shader_spirv_unpin(pinned[i]);
     return pipe;
 }
 
@@ -6379,7 +6395,10 @@ static void compute_warm_clear(void) {
 static VkPipeline compute_create(const GfxShader *cs, const Layout *l, int cached_only, int *already_warm) {
     if (already_warm) *already_warm = 0;
     uint64_t words;
-    const uint32_t *code = gfx_shader_spirv(cs, &words);
+    // pinned until the pipeline is made: a dispatch on the drawing thread that creates its pipeline here decodes a
+    // compressed shader first, about 60 us for a mean module against the creation's milliseconds (gfx_shader.c
+    // "SPIR-V at rest", counted in the memory report)
+    const uint32_t *code = gfx_shader_spirv_pin(cs, &words);
     uint64_t ow = 0;
     uint32_t *over = spv_override(code, words, &ow);
     if (over) code = over, words = ow;
@@ -6409,11 +6428,12 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l, int cache
             *already_warm = 1;
             __atomic_fetch_add(&compute_warm_reused, 1, __ATOMIC_RELAXED);
             free(over);
+            gfx_shader_spirv_unpin(cs);
             return VK_NULL_HANDLE;
         }
     }
     VkShaderModule m = make_module(code, words, 0);
-    if (!m) return free(over), VK_NULL_HANDLE;
+    if (!m) return free(over), gfx_shader_spirv_unpin(cs), VK_NULL_HANDLE;
     ci.stage.module = m;
     VkPipeline pipe = VK_NULL_HANDLE;
     VkPipelineCreationFeedbackCreateInfo fci;
@@ -6434,6 +6454,7 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l, int cache
                (double)fb.duration / 1e6);
     vkDestroyShaderModule(P.device, m, NULL);
     free(over);
+    gfx_shader_spirv_unpin(cs);
     return pipe;
 }
 
@@ -7349,8 +7370,7 @@ static void lb_compute(const GfxShader *cs, const uint8_t iid[32], int keep, int
     uint64_t h = key_hash(&k, sizeof k);
     Bindings B = {0};
     const char *why = NULL;
-    uint64_t words = 0;
-    gfx_shader_spirv(cs, &words);
+    uint64_t words = gfx_shader_words(cs);
     int big = LB.big_words && words > LB.big_words;   // only from the caches (LB_BIG_WORDS)
     if (big && !keep) {   // no run dispatched it: a pipeline of it would hold about 100 MiB of device memory unused
         plat_mutex_lock(&LB.stat);
@@ -8420,9 +8440,8 @@ int vk_pipeline_probe_prewarm(void) {
         double l0 = now_ms();
         const GfxShader *sh = gfx_shader_load_input(LB.e[i].iid, 0);   // from the disk: the boot released its copy
         double load = now_ms() - l0;
-        uint64_t words = 0;
         if (!sh || gfx_shader_stage(sh) != GFX_STAGE_CS) continue;
-        gfx_shader_spirv(sh, &words);
+        uint64_t words = gfx_shader_words(sh);
         if (LB.big_words && words > LB.big_words) continue;   // a first dispatch of one compiles it: not what is timed here
         const VkPipeInfo *info = NULL;
         double t0 = now_ms();

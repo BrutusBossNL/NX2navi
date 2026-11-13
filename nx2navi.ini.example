@@ -298,6 +298,12 @@
 # the new translator cannot translate keeps its old translation. 0: shaders the new translator has not translated yet
 # are translated before they are used (at start or when the game first draws them), as earlier versions did.
 # shader_carry = 1
+# 1 keeps a shader's translation (its SPIR-V) compressed in memory once no pipeline was made of it for
+# shader_compress_idle_s seconds (1 to 3600), and decompresses it when one is made again (about 0.06 ms for most
+# shaders): about 570 MiB less memory with 7,000 shaders in memory, the picture unchanged. 0 keeps every translation
+# as it is.
+# shader_compress = 1
+# shader_compress_idle_s = 30
 # Vulkan graphics pipeline library, 0 or 1. Default: on, except with AMD's Windows driver for RX 6000 and older cards
 # (RX 400 to RX 6000), where the game ended at every enemy killed with it on. There it is off: a pipeline needed for
 # the first time is built whole while its draw is left out for some frames, and the start waits until every pipeline

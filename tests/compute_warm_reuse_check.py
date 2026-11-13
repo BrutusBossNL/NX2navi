@@ -35,7 +35,9 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 static void plat_mutex_lock(PlatMutex *m) { AcquireSRWLockExclusive(m); }
 static void plat_mutex_unlock(PlatMutex *m) { ReleaseSRWLockExclusive(m); }
 static void rt_sha256(const void *p, size_t n, uint8_t out[32]) { sha256(p,n,out); }
-static const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *n) { *n=8;return s->code; }
+static int pins;   // gfx_shader_spirv_pin minus gfx_shader_spirv_unpin: every exit of compute_create unpins
+static const uint32_t *gfx_shader_spirv_pin(const GfxShader *s, uint64_t *n) { pins++;*n=8;return s->code; }
+static void gfx_shader_spirv_unpin(const GfxShader *s) { pins--; }
 static uint32_t *spv_override(const uint32_t *code, uint64_t n, uint64_t *out) {
     if (!override_word) return NULL;
     uint32_t *p=malloc(n*4);memcpy(p,code,n*4);p[7]=override_word;*out=n;return p;
@@ -97,7 +99,7 @@ int main(void) {
     compute_warm_clear();
     assert(compute_create(&a,&l,0,&reused) && !reused && calls==12);
     compute_warm_clear();
-    assert(modules==0);
+    assert(modules==0 && pins==0);
     puts("compute warm reuse: equivalent requests, live handles, layout/flags/code separation, failures and cleanup passed");
     return 0;
 }
