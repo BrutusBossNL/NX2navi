@@ -93,6 +93,7 @@ void gfx_window_closed(void) {
     // The window closed while the boot still built its pipelines: not the driver crash the marker is there to catch.
     // Left in place, the next start took it for one and every later start skipped the prebuild (vk_pipeline.c pm_skipped).
     vk_pipeline_prewarm_marker_clear();
+    vk_mem_exit_log();   // the memory report's ranking of the session
     vk_pipeline_save_exit();
     prof_write();   // plat_exit runs no atexit handlers
     rtss_limit_restore();   // RivaTuner Statistics Server's profile as it was
@@ -707,6 +708,18 @@ static void thumb_cells(uint64_t frame) {
     vmaInvalidateAllocation(vk_ctx()->vma, g_th_alloc, TH_BYTES * ring, TH_BYTES);
     flash_cells(g_th_ptr + TH_BYTES * ring, FLIGHT_THUMB_W, FLIGHT_THUMB_H, cells);
     flight_cells(frame, cells);
+}
+
+// The memory report's swapchain (vk_memory.c outside_log): its images and their size; the bytes are the pixels alone,
+// 8 a pixel for a half-float format and 4 for the others (the driver's padding and compression data are not known).
+// Read without g_pl: the figures of a swapchain made again meanwhile are a report late. The images of a frame
+// generation's swapchain are the ones counted (create_swapchain takes them from it).
+void vk_present_swapchain_mem(uint32_t *n, uint32_t *w, uint32_t *h, uint64_t *bytes) {
+    *n = __atomic_load_n(&g_sc_n, __ATOMIC_RELAXED);
+    *w = __atomic_load_n(&g_sc_ext.width, __ATOMIC_RELAXED), *h = __atomic_load_n(&g_sc_ext.height, __ATOMIC_RELAXED);
+    VkFormat f = __atomic_load_n(&g_sc_fmt, __ATOMIC_RELAXED);
+    uint32_t px = f == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4;
+    *bytes = __atomic_load_n(&g_sc, __ATOMIC_RELAXED) ? (uint64_t)*n * *w * *h * px : 0;
 }
 
 void vk_present_capture(int on) {

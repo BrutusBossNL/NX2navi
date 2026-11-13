@@ -14,8 +14,11 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "flight.h"
 #include "gfx.h"
 #include "host.h"
+#include "logq.h"
+#include "mem_growth.h"
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
 #include "vk.h"
@@ -5368,6 +5371,217 @@ uint64_t vk_mem_give_back(void) {
     return freed + vk_headroom_release();
 }
 
+// ---- The memory report past VMA's figures: every report (owner_log) adds three lines. "mem: outside VMA" follows the
+// driver's usage and budget per heap against VMA's blocks in it, so that what VMA never allocated (the driver's usage
+// less VMA's blocks) can be followed over a session, and counts what the runtime itself made outside VMA where no size
+// can be known: the driver gives none for a pipeline, a stage library or a descriptor pool (the boot stage lines,
+// vk_mem_stage_log, place their memory by difference: 1.5 GiB for the recorded pipelines on an RTX 5090); the
+// swapchain's pixels and DLSS's and FSR's figures are sizes. "mem: system" splits the process's commit by owner: the
+// game's heap and physical maps, the device-local memory on Windows (the driver charges it to the process: in a session
+// of 2026-11-13 the commit rose 4.6 GB at the first area while VMA's device-local allocations rose 3.4 GiB, and fell
+// with them later), VMA's host-visible blocks, the C runtime heap with the shares of it the runtime can name, the data
+// of the driver's pipeline caches, and the rest. "mem: growth" names what grew by more than GROWTH_STEP since the report
+// before and since the first report in play; every RANK_EVERY_NS of play and at exit (vk_mem_exit_log) "mem: growth
+// ranking" ranks every category by its growth since play began and marks those that only climbed (mem_growth.h).
+// Every figure is read at the report: sums the owners keep, walks of the pipeline, shader and texture tables under
+// their locks (a fraction of a millisecond, once a report), the C runtime heap's summary. Nothing is counted per frame.
+#define IDLE_MIN 10                              // pipelines no lookup reached for this many minutes count as unused
+#define GROWTH_STEP (64ull << 20)                // growth_take names a category that grew by more than this
+#define RANK_EVERY_NS (600ull * 1000000000ull)   // the ranking's period in play
+#define HEAP_SLOW_NS 2000000ull                  // a heap summary that took longer is not asked for again
+
+typedef struct {
+    uint64_t usage, blocks, allocs;   // the device-local heaps: the driver's usage, VMA's blocks and allocations
+    uint64_t hblocks;                 // VMA's blocks on the other heaps
+    uint64_t tex, pools, vma_other;   // VMA's device-local allocations: textures, pools (mirrors and physical), the rest
+    uint64_t heap_c, maps;            // the game's heap as committed, its physical maps
+} ReportFig;
+
+// The game's memory imported for the GPU (VK_EXT_external_memory_host): the driver counts it in a host heap's usage.
+static uint64_t import_bytes(void) {
+    uint64_t b = 0;
+    plat_mutex_lock_shared(&pool_lock);
+    for (int i = 0; i < pool_index.n; i++) {
+        const PoolRec *r = pool_index.e[i].buf;
+        if (r->kind == POOL_IMPORT && r->buf) b += r->import_hi - r->import_lo;
+    }
+    plat_mutex_unlock_shared(&pool_lock);
+    return b;
+}
+
+static void outside_log(VkCtx *c, uint64_t frame, const VkPhysicalDeviceMemoryBudgetPropertiesEXT *bp,
+                        const VmaBudget *vb, const VkPipeMem *pm) {
+    const double M = 1048576.0;
+    char line[2000];
+    size_t k = 0;
+    mg_put(line, sizeof line, &k, "mem: outside VMA frame %llu: by heap, the driver's usage of its budget, VMA's blocks "
+           "in it and the rest:", (unsigned long long)frame);
+    for (uint32_t h = 0; h < c->mem_props.memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++) {
+        uint64_t use = c->has_memory_budget ? bp->heapUsage[h] : vb[h].usage;
+        uint64_t budget = c->has_memory_budget ? bp->heapBudget[h] : vb[h].budget, vma = vb[h].statistics.blockBytes;
+        mg_put(line, sizeof line, &k, "%s heap %u (%s) %.0f of %.0f MiB, VMA's blocks %.0f, outside VMA %.0f", h ? ";" : "",
+               h, c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "device-local" : "host",
+               use / M, budget / M, vma / M, use > vma ? (use - vma) / M : 0.0);
+    }
+    uint64_t imp = import_bytes();
+    if (imp) mg_put(line, sizeof line, &k, " (the game's memory imported for the GPU, %.0f MiB, is in the host heaps' rest)",
+                    imp / M);
+    if (!c->has_memory_budget)
+        mg_put(line, sizeof line, &k, " (VMA's own estimates: without VK_EXT_memory_budget nothing outside VMA shows)");
+    mg_put(line, sizeof line, &k, ". Made outside VMA, counted where the driver gives no size: graphics pipelines %llu "
+           "(whole %llu, fast-linked %llu, optimised after a fast link %llu; no draw for %u minutes %llu, none in this run "
+           "%llu; building or failed %llu), stage libraries %llu (vertex input %llu, pre-rasterization %llu, fragment "
+           "shader %llu, fragment output %llu), compute pipelines %llu (no dispatch for %u minutes %llu, none in this run "
+           "%llu), pipeline layouts %llu", (unsigned long long)pm->gfx, (unsigned long long)pm->gfx_whole,
+           (unsigned long long)pm->gfx_fast, (unsigned long long)pm->gfx_opt, pm->idle_min,
+           (unsigned long long)pm->gfx_idle, (unsigned long long)pm->gfx_never, (unsigned long long)pm->gfx_none,
+           (unsigned long long)(pm->lib[0] + pm->lib[1] + pm->lib[2] + pm->lib[3]), (unsigned long long)pm->lib[0],
+           (unsigned long long)pm->lib[1], (unsigned long long)pm->lib[2], (unsigned long long)pm->lib[3],
+           (unsigned long long)pm->comp, pm->idle_min, (unsigned long long)pm->comp_idle,
+           (unsigned long long)pm->comp_never, (unsigned long long)pm->layouts);
+    VkDescMem dm;
+    vk_exec_desc_mem(&dm);
+    mg_put(line, sizeof line, &k, "; descriptor pools %llu of %llu sets each (%llu of them spare), the texture pool's %llu "
+           "sets", (unsigned long long)dm.pools, (unsigned long long)dm.sets_each, (unsigned long long)dm.spare,
+           (unsigned long long)dm.tex_sets);
+    uint32_t sn, sw, sh;
+    uint64_t sb;
+    vk_present_swapchain_mem(&sn, &sw, &sh, &sb);
+    mg_put(line, sizeof line, &k, "; the swapchain %u images of %ux%u, %.0f MiB of pixels", sn, sw, sh, sb / M);
+    int64_t dlss = vk_dlaa_vram();
+    int nfsr = 0;
+    uint64_t fg = 0, fsr = vk_ffx_vram(&nfsr, &fg);
+    if (dlss >= 0) mg_put(line, sizeof line, &k, "; DLSS %.0f MiB", dlss / M);
+    else mg_put(line, sizeof line, &k, "; DLSS reports nothing");
+    mg_put(line, sizeof line, &k, "; FSR upscaling %.0f MiB in %d contexts, FSR frame generation %.0f MiB (DLSS frame "
+           "generation gives no size)", fsr / M, nfsr, fg / M);
+    rt_log("%s", line);
+}
+
+// The figures of system_log that the growth bookkeeping follows.
+typedef struct { uint64_t commit, crt, shaders, pipes, texhost, pcache, other; } SysFig;
+
+static void system_log(uint64_t frame, const ReportFig *f, const VkPipeMem *pm, SysFig *out) {
+    const double M = 1048576.0;
+    uint64_t res, priv;
+    plat_process_memory(&res, &priv);
+    // The C runtime heap's summary holds the heap's lock while it adds up: asked at the report only, and no more once
+    // one was slow, so that a heap grown past what the summary handles quickly does not hold every malloc up again.
+    static int heap_off;
+    PlatHeapInfo hi = {0};
+    if (!heap_off) {
+        uint64_t t0 = plat_now_ns();
+        plat_heap_info(&hi);
+        uint64_t took = plat_now_ns() - t0;
+        if (took > HEAP_SLOW_NS)
+            heap_off = 1, rt_log("mem: the C runtime heap's summary took %.1f ms; it is not asked for again in this run",
+                                 took / 1e6);
+    }
+    GfxShaderRam sr;
+    gfx_shader_ram(&sr);
+    VkTexHost th;
+    vk_texture_host(&th);
+    uint64_t frec, fthumb;
+    flight_mem(&frec, &fthumb);
+    uint64_t lq = logq_bytes();
+    uint64_t shaders = sr.cache + sr.use + sr.pack + sr.records;
+    uint64_t pipes = pm->ram_pipes + pm->ram_keys + pm->ram_seed + pm->ram_binaries;
+    uint64_t texhost = th.bytes + th.tmp, known = shaders + pipes + texhost + lq + frec;
+    uint64_t pcache = pm->cache[0] + pm->cache[1];
+    // Windows charges the device-local memory the driver allocates to the process's commit (platform.h
+    // plat_commit_counts_vram): the driver's figure, VMA's blocks and what VMA never allocated alike.
+    int charged = plat_commit_counts_vram();
+    uint64_t dev = charged ? f->usage : 0, crt = hi.committed ? hi.committed : known;
+    int64_t other = (int64_t)priv - (int64_t)(f->heap_c + f->maps + dev + f->hblocks + crt + pcache);
+    char line[2000];
+    size_t k = 0;
+    mg_put(line, sizeof line, &k, "mem: system frame %llu: process commit %.0f MiB%s = the game's heap %.0f + its physical "
+           "maps %.0f", (unsigned long long)frame, priv / M, charged ? "" : " (the resident anonymous pages)",
+           f->heap_c / M, f->maps / M);
+    if (charged) mg_put(line, sizeof line, &k, " + device-local memory, which Windows charges to the process, %.0f", dev / M);
+    mg_put(line, sizeof line, &k, " + VMA's host-visible blocks %.0f (the flight recorder's thumbnails %.0f of them)",
+           f->hblocks / M, fthumb / M);
+    if (hi.committed)
+        mg_put(line, sizeof line, &k, " + the C runtime heap %.0f (%.0f of it handed out; of it known: shader caches %.0f in "
+               "%llu shaders, pipeline tables %.0f, the texture cache %.0f with decode temporaries %.0f now and %.0f at most "
+               "since the last report, the log queue %.0f, the flight recorder's records %.0f; the rest %.0f)",
+               hi.committed / M, hi.used / M, shaders / M, (unsigned long long)sr.shaders, pipes / M, texhost / M,
+               th.tmp / M, th.tmp_peak / M, lq / M, frec / M, ((double)hi.committed - (double)known) / M);
+    else
+        mg_put(line, sizeof line, &k, " + what the runtime knows it allocated %.0f (the C runtime heap's size is not "
+               "known: shader caches %.0f in %llu shaders, pipeline tables %.0f, the texture cache %.0f with decode "
+               "temporaries %.0f now and %.0f at most since the last report, the log queue %.0f, the flight recorder's "
+               "records %.0f)", known / M, shaders / M, (unsigned long long)sr.shaders, pipes / M, texhost / M,
+               th.tmp / M, th.tmp_peak / M, lq / M, frec / M);
+    mg_put(line, sizeof line, &k, " + the driver's pipeline cache data %.0f (pipeline-cache.bin's %.0f, the play cache's "
+           "%.0f, %s) + other %.0f (the driver's own memory, thread stacks, the program's data; %u other heaps)",
+           pcache / M, pm->cache[0] / M, pm->cache[1] / M, pm->cache_asked ? "as last asked" : "as loaded at the boot",
+           other / M, hi.other_heaps);
+    rt_log("%s", line);
+    *out = (SysFig){priv, crt, shaders, pipes, texhost, pcache, other > 0 ? (uint64_t)other : 0};
+}
+
+// ---- growth bookkeeping (mem_growth.h): the categories, in the order the lines name them
+enum { G_DEV, G_TEX, G_POOLS, G_VMA_OTHER, G_VMA_FREE, G_OUTSIDE, G_COMMIT, G_HEAP, G_MAPS, G_HOSTVMA, G_CRT, G_SHADERS,
+       G_PIPES, G_TEXHOST, G_PCACHE, G_OTHER, G_N };
+static const char *const grow_names[G_N] = {
+    "device-local in use", "textures", "pools and VRAM mirrors", "VMA's other allocations", "free inside VMA's blocks",
+    "outside VMA", "process commit", "the game's heap", "its physical maps", "VMA's host-visible blocks",
+    "the C runtime heap", "shader caches", "pipeline tables", "the texture cache's host memory",
+    "the driver's pipeline cache data", "other system memory"};
+static PlatMutex grow_lock = PLAT_MUTEX_INIT;   // the book, between the report's thread and the exit's
+static MgBook gbook;
+static uint64_t grow_t0, grow_ranked;           // plat_now_ns at the first report in play, at the last ranking
+
+static void rank_log_locked(const char *when, uint64_t now) {
+    char line[1900];
+    mg_rank(&gbook, line, sizeof line);
+    rt_log("mem: growth ranking %s %.1f min of play (%u reports; only climbs: rose in a report and fell in none): %s", when,
+           (now - grow_t0) / 60e9, gbook.play_lines, line);
+}
+
+static void growth_take(uint64_t frame, const uint64_t v[G_N]) {
+    plat_mutex_lock(&grow_lock);
+    if (!gbook.n)
+        for (int i = 0; i < G_N; i++) mg_cat(&gbook, grow_names[i]);
+    int was = gbook.play;
+    mg_take(&gbook, v, frame_step_world_us() >= 0);
+    uint64_t now = plat_now_ns();
+    if (gbook.play && !was) grow_t0 = grow_ranked = now;
+    char line[1800], when[48];
+    if (gbook.play) snprintf(when, sizeof when, "%.1f min of play", (now - grow_t0) / 60e9);
+    else snprintf(when, sizeof when, "before play");
+    if (mg_grew(&gbook, GROWTH_STEP, line, sizeof line))
+        rt_log("mem: growth frame %llu (%s), by more than %llu MiB: %s", (unsigned long long)frame, when,
+               (unsigned long long)(GROWTH_STEP >> 20), line);
+    if (gbook.play && now - grow_ranked >= RANK_EVERY_NS) grow_ranked = now, rank_log_locked("after", now);
+    plat_mutex_unlock(&grow_lock);
+}
+
+// At the process's end (the window's close, the game's exit, a timed run's end): the session's ranking, once it reached
+// play, from the figures of the last report; nothing is asked of the device here.
+void vk_mem_exit_log(void) {
+    plat_mutex_lock(&grow_lock);
+    if (gbook.play) rank_log_locked("at exit, after", plat_now_ns());
+    plat_mutex_unlock(&grow_lock);
+}
+
+static void beyond_log(VkCtx *c, uint64_t frame, const VkPhysicalDeviceMemoryBudgetPropertiesEXT *bp, const VmaBudget *vb,
+                       const ReportFig *f) {
+    VkPipeMem pm;
+    vk_pipeline_mem(&pm, IDLE_MIN);
+    outside_log(c, frame, bp, vb, &pm);
+    SysFig s;
+    system_log(frame, f, &pm, &s);
+    uint64_t v[G_N] = {
+        [G_DEV] = f->usage, [G_TEX] = f->tex, [G_POOLS] = f->pools, [G_VMA_OTHER] = f->vma_other,
+        [G_VMA_FREE] = f->blocks > f->allocs ? f->blocks - f->allocs : 0,
+        [G_OUTSIDE] = f->usage > f->blocks ? f->usage - f->blocks : 0, [G_COMMIT] = s.commit, [G_HEAP] = f->heap_c,
+        [G_MAPS] = f->maps, [G_HOSTVMA] = f->hblocks, [G_CRT] = s.crt, [G_SHADERS] = s.shaders, [G_PIPES] = s.pipes,
+        [G_TEXHOST] = s.texhost, [G_PCACHE] = s.pcache, [G_OTHER] = s.other};
+    growth_take(frame, v);
+}
+
 // ---- The memory report: every HOLES_PERIOD presents (600 with NX2NAVI_TRACE=perf), after the holes line, in every run.
 // The device-local memory the driver counts for the game split by what holds it: VMA's allocations by owner
 // (vk_vma_budget.c, "owners"), with the textures split further by the texture cache's census (vk_texture_census) and
@@ -5447,6 +5661,9 @@ static void owner_log(uint64_t frame) {
            hown[VK_OWN_TEXTURES] / M, hown[VK_OWN_UPSCALER] / M, hown[VK_OWN_REPLAY] / M, hown[VK_OWN_USNAP] / M,
            hown[VK_OWN_PRESENT] / M, (hown[VK_OWN_OTHER] + hown[VK_OWN_GPA] + hown[VK_OWN_ASTC] + hown[VK_OWN_HEADROOM]) / M,
            proc, (double)ws, sys_used, sys_limit, heap / M, heap_c / M, maps / M);
+    uint64_t tex = own[VK_OWN_TEXTURES], pools = own[VK_OWN_POOLS];
+    ReportFig f = {usage, blocks, allocs, hblocks, tex, pools, allocs > tex + pools ? allocs - tex - pools : 0, heap_c, maps};
+    beyond_log(c, frame, &bp, vb, &f);
     vk_texture_reuse_log(frame);
 }
 

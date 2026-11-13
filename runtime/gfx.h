@@ -61,6 +61,11 @@ uint64_t gfx_shader_async_done(void);                      // translations finis
 void gfx_shader_counts(uint64_t *keys, uint64_t *translated);   // distinct keys in memory, translations done (NX2NAVI_TRACE=perf)
 void gfx_shader_disk_counts(uint64_t *sync, uint64_t *sync_ns, uint64_t *bg);   // disk cache reads on the render
                                                      // thread (count, ns) and by the loaders (gfx_shader.c load_budget)
+// The shader caches' host memory for the memory report (vk_memory.c system_log), at report time, in bytes: the memory
+// cache of translated shaders (shaders entries), the use masks, the cache pack's index, the play records' sets and
+// pending appends.
+typedef struct { uint64_t shaders, cache, use, pack, records; } GfxShaderRam;
+void gfx_shader_ram(GfxShaderRam *r);
 // Translator answers for this device (vk_caps.c): shaderFloat64, storage offset rounding, subgroup size per vs/fs/cs.
 void gfx_shader_set_host(int float64, uint32_t sbuf_align, const uint32_t subgroup[3], uint32_t gather_bits, int zero_locals,
                          int bda);

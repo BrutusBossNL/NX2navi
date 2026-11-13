@@ -54,6 +54,7 @@ int vk_ffx4_holds(void);   // an FSR 4 upscale context is made
 int vk_ffx4_failed(void);         // it failed three times in a row: FSR 3.1 serves until vk_ffx4_retry
 void vk_ffx4_retry(void);         // the menu chose FSR 4 again: try it anew after such failures
 void vk_ffx4_trim(uint64_t now_ns);   // at each upscale: FSR 4's contexts unused for a while go
+uint64_t vk_ffx4_vram(int *contexts);   // FSR 4's upscale contexts and their video memory (vk_ffx_vram)
 int vk_ffx_fsr4(void);            // the setting asks for FSR 4 and it runs here: what vk_ffx_upscale uses, for the menu
 
 #if defined(__cplusplus) && !defined(VK_FFX_NO_API)

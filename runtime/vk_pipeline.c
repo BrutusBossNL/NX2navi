@@ -101,6 +101,8 @@ static struct {
     VkPipelineCache play;              // what this run compiles (pipeline-cache-play.bin); VK_NULL_HANDLE: all goes into cache
     uint64_t play_loaded;              // bytes of pipeline-cache-play.bin the driver took at boot
     uint64_t saved[2];                 // the data size of cache [0] and play [1] that their files hold; 0: not known
+    volatile uint64_t held[2];         // the data size of cache [0] and play [1] when last asked (cache_save_one,
+                                       // cache_sizes_ask); 0: not asked yet (the memory report takes the loaded size)
     int fold;                          // the play file's content was merged into cache: saving cache removes the play file
     volatile uint64_t play_made;       // pipelines this run compiled into play
     int pv_last;                       // provokingVertexLast enabled: NVN's default is the last vertex
@@ -159,10 +161,23 @@ typedef struct Pipe {
     uint8_t link_queued;               // a waiting draw queued its fast link to the workers (LibJob p), not yet run
     uint8_t used;                      // compute: a dispatch of this run asked for it (vk_pipeline_compute)
     uint8_t pre;                       // compute: built and kept by the boot prebuild (lb_compute) or bg_main
+    uint8_t optimised;                 // graphics: its pipeline is the whole build that replaced a fast link (fast_retire)
+    uint32_t used_min;                 // pipe_minute when a draw or dispatch last looked it up; 0 none in this run
     uint64_t t_miss;                   // graphics: when a draw first missed it (ns), 0 once it is usable (ready_note)
     size_t key_size;
     uint8_t key[];
 } Pipe;
+
+// The memory report's clock for pipelines not used lately (vk_pipeline_mem): wall minutes, plus one so that 0 stays
+// "never". The autosave thread moves it every half second; a lookup stores it into its Pipe under P.lock, which the
+// lookup holds anyway, so the per-draw cost is one compare. A pipeline that only the replay's memo of the previous draw
+// served (vk_exec_draw.c, PM) keeps an older minute: at most the one pipeline each replay context remembers.
+static volatile uint32_t pipe_minute;
+static uint32_t minute_now(void) { return (uint32_t)(plat_now_ns() / 60000000000ull) + 1; }
+static inline void pipe_used(Pipe *p) {
+    uint32_t m = __atomic_load_n(&pipe_minute, __ATOMIC_RELAXED);
+    if (p->used_min != m) p->used_min = m;
+}
 
 static Layout *layouts[LAYOUT_BUCKETS];
 static Pipe *pipes[PIPE_BUCKETS];
@@ -1045,6 +1060,7 @@ static int ensure_init(void) {
     }
     VkCtx *c = vk_ctx();
     P.device = c->device;
+    __atomic_store_n(&pipe_minute, minute_now(), __ATOMIC_RELAXED);
     VkPhysicalDevicePushDescriptorPropertiesKHR pd = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pd};
     vkGetPhysicalDeviceProperties2(c->phys, &p2);
@@ -4996,7 +5012,7 @@ static void job_build(Job *j, int lowrun) {
     plat_mutex_lock(&P.lock);
     if (pipe || !j->p->fast) __atomic_store_n(&j->p->info.pipeline, pipe, __ATOMIC_SEQ_CST);   // a failed optimised build keeps the fast-linked one
     ready_note(j->p, 0);
-    if (pipe && j->p->fast) P.g.swaps++, fast_retire(j->p);
+    if (pipe && j->p->fast) P.g.swaps++, j->p->optimised = 1, fast_retire(j->p);
     j->p->building = 0;
     j->p->job = NULL;
     if (pipe) {
@@ -5463,6 +5479,7 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
     } else {
         p = pipe_miss(s, &k, h, async, &queued);
     }
+    if (p) pipe_used(p);
     // A draw that would wait (wait_ms) gets its missing shader libraries built at once, the vertex and fragment ones in
     // parallel on idle workers (lib_wait; about 0.12 ms per library from the driver's disk cache, 5-180 ms cold), and
     // links them here: its own job may queue behind optimised builds of earlier pipelines. The job then only does the
@@ -5591,7 +5608,7 @@ static void warm_builder(void *arg) {
         plat_mutex_lock(&P.lock);
         if (pipe || !j->p->fast) __atomic_store_n(&j->p->info.pipeline, pipe, __ATOMIC_SEQ_CST);   // a failed optimised build keeps the fast-linked one
         ready_note(j->p, 0);
-        if (pipe && j->p->fast) P.g.swaps++, fast_retire(j->p);
+        if (pipe && j->p->fast) P.g.swaps++, j->p->optimised = 1, fast_retire(j->p);
         j->p->building = 0;
         j->p->job = NULL;
         if (pipe) {
@@ -7056,6 +7073,7 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
         CF.pre_used += p->pre;
         if (p->info.pipeline) cu_note(cs);
     }
+    if (p) pipe_used(p);
     plat_mutex_unlock(&P.lock);
     if (!p) return VK_NULL_HANDLE;
     if (info) *info = &p->info;
@@ -8605,6 +8623,7 @@ static int cache_save_one(int which, uint32_t wait_ms, int exiting) {
     size_t size = 0;
     void *data = NULL;
     int sized = vkGetPipelineCacheData(P.device, cache, &size, NULL) == VK_SUCCESS && size;
+    if (sized) __atomic_store_n(&P.held[which], (uint64_t)size, __ATOMIC_RELAXED);
     // A cache past the limit is not written: the next start would drop the file whole (cache_data_read), so the file
     // keeps its last save under the limit and only the pipelines made since then are compiled again. A preparation
     // writes anyway: what it builds is the base every start reads, and a file it cannot write would leave none.
@@ -8781,14 +8800,37 @@ void vk_pipeline_save_exit(void) {
     save_with(SAVE_WAIT_MS, 1);
 }
 
+// The memory report's figure for the pipeline caches the driver keeps in process memory (vk_pipeline_mem): the size of
+// each cache's data, asked once a minute here on the autosave thread, and by every save (cache_save_one). The size is
+// asked as the save asks it, at a moment no build runs into either cache (cache_rw, tried once and never waited for),
+// and under save_lock, which the shutdown takes before it destroys the caches. The play file holds what this run
+// compiled, but pipeline-cache.bin is not written in play: its cache grows in memory with the compute pipelines the boot
+// builds for it alone, and only this query says by how much.
+#define SIZES_EVERY_MS 60000
+static void cache_sizes_ask(void) {
+    if (!plat_mutex_trylock(&save_lock)) return;
+    if (plat_mutex_trylock(&cache_rw)) {
+        for (int w = 0; w < 2; w++) {
+            VkPipelineCache cache = w ? P.play : P.cache;
+            size_t size = 0;
+            if (cache && vkGetPipelineCacheData(P.device, cache, &size, NULL) == VK_SUCCESS && size)
+                __atomic_store_n(&P.held[w], (uint64_t)size, __ATOMIC_RELAXED);
+        }
+        plat_mutex_unlock(&cache_rw);
+    }
+    plat_mutex_unlock(&save_lock);
+}
+
 // The game never shuts the device down (boot.c and the window end the process), so the cache is saved while it
 // runs: at most every 20 s, and only after new pipelines were built or while a save that did not happen is still owed
 // (vk_save_retry.h). New pipeline keys are appended every 2 s.
 static void autosave_once(void) {
-    static uint64_t last_keys;
+    static uint64_t last_keys, last_sizes;
     static SaveRetry sr;
     if (!P.ready) return;
     uint64_t now = plat_now_ms();
+    __atomic_store_n(&pipe_minute, minute_now(), __ATOMIC_RELAXED);
+    if (now - last_sizes >= SIZES_EVERY_MS && (P.cache || P.play)) last_sizes = now, cache_sizes_ask();
     if (now - last_keys >= 2000) {
         last_keys = now;
         if (*(volatile uint32_t *)&K.pend_n) keys_flush();
@@ -9120,4 +9162,61 @@ void vk_pipeline_sizes(PerfSizes *s) {
     perf_size(s, "library jobs queued", lq, 0, PERF_SIZE_NONE);
     perf_size(s, "pipeline jobs queued or running", jobs, 0, PERF_SIZE_NONE);
     perf_size(s, "pipeline keys seen", seen, 0, seen_b);
+}
+
+// The memory report's pipeline figures (vk_memory.c outside_log and system_log), once a report: what holds device
+// memory outside VMA, counted because the driver gives no size for a pipeline, and the host memory of the tables. A walk
+// of the hash chains under P.lock held shared, as vk_pipeline_sizes walks them (well under a millisecond: the draws'
+// lookups wait for it). A graphics entry's pipeline is whole (built in one piece, no fast link before it), fast-linked
+// (from its stage libraries, the optimised build not done or failed) or optimised (the whole build that replaced a fast
+// link). Not used lately: no lookup since idle_min wall minutes (pipe_used), never: none in this run (the boot's
+// prebuild made it from the key file or the shared list).
+void vk_pipeline_mem(VkPipeMem *m, uint32_t idle_min) {
+    memset(m, 0, sizeof *m);
+    m->idle_min = idle_min;
+    m->cache[0] = __atomic_load_n(&P.held[0], __ATOMIC_RELAXED);
+    m->cache[1] = __atomic_load_n(&P.held[1], __ATOMIC_RELAXED);
+    m->cache_asked = m->cache[0] || m->cache[1];
+    if (!m->cache[0]) m->cache[0] = P.cache ? P.cache_loaded : 0;
+    if (!m->cache[1]) m->cache[1] = P.play ? P.play_loaded : 0;
+    if (!P.ready) return;
+    uint32_t now = __atomic_load_n(&pipe_minute, __ATOMIC_RELAXED);
+    plat_mutex_lock_shared(&P.lock);
+    for (int i = 0; i < PIPE_BUCKETS; i++)
+        for (const Pipe *p = pipes[i]; p; p = p->next) {
+            m->ram_pipes += sizeof *p + p->key_size + (p->bindings ? p->info.n_bindings * sizeof *p->bindings : 0);
+            int comp = p->info.bind_point == VK_PIPELINE_BIND_POINT_COMPUTE;
+            VkPipeline pipe = p->info.pipeline;
+            if (!pipe) {
+                if (comp) m->comp_none++;
+                else m->gfx_none++;
+                continue;
+            }
+            int never = !p->used_min, idle = !never && now - p->used_min >= idle_min;
+            if (comp) {
+                m->comp++, m->comp_never += never, m->comp_idle += idle;
+                continue;
+            }
+            m->gfx++, m->gfx_never += never, m->gfx_idle += idle;
+            if (p->fast && pipe == p->fast) m->gfx_fast++;
+            else if (p->optimised) m->gfx_opt++;
+            else m->gfx_whole++;
+        }
+    for (int i = 0; i < LIB_BUCKETS; i++)
+        for (const Lib *b = libs[i]; b; b = b->next) {
+            m->ram_pipes += sizeof *b + b->size;
+            uint32_t kind;
+            memcpy(&kind, b->key, sizeof kind);   // every library key starts with its LIB_* kind
+            if (!b->pipe) m->lib_none++;
+            else if (kind < 4) m->lib[kind]++;
+        }
+    for (int i = 0; i < LAYOUT_BUCKETS; i++)
+        for (const Layout *l = layouts[i]; l; l = l->next) m->layouts++, m->ram_pipes += sizeof *l + l->n * sizeof *l->b;
+    m->ram_keys = (uint64_t)K.seen_cap * sizeof *K.seen + (uint64_t)K.pend_cap * sizeof(KeyRec) +
+                  (K.file ? K.own_n * sizeof(KeyRec) : 0);
+    m->ram_seed = K.file && K.file_n > K.own_n ? (K.file_n - K.own_n) * sizeof(KeyRec) : 0;
+    plat_mutex_unlock_shared(&P.lock);
+    plat_mutex_lock(&PB.lock);
+    m->ram_binaries = (uint64_t)PB.cap * sizeof *PB.slot + PB.pend_cap;
+    plat_mutex_unlock(&PB.lock);
 }

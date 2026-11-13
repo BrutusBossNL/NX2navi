@@ -265,6 +265,11 @@ void vk_hdr_support(float out[4]);
 int vk_contact_strength(void);   // percent, 0 = off
 void vk_contact_release(void);   // before the device goes away
 void vk_present_flip(void);
+// The swapchain's images, their size and their pixels' bytes, for the memory report (vk_memory.c outside_log).
+void vk_present_swapchain_mem(uint32_t *n, uint32_t *w, uint32_t *h, uint64_t *bytes);
+// FSR's video memory for the memory report (vk_ffx.cpp): the upscaling contexts', FSR 3.1's and FSR 4's, with their
+// count, and frame generation's in *fg; as the library reported each at its creation, 0 where it did not say.
+uint64_t vk_ffx_vram(int *contexts, uint64_t *fg);
 // Every submission to ctx->gfx_queue (and xfer_queue when shared) takes this lock; vk_present_image and the swapchain
 // rebuild do. Recursive. Taking it first hands the replay's held submissions to the queue (vk_sync_flush_held); the
 // raw forms leave them held, for vk_sync.c itself.
@@ -467,6 +472,8 @@ void vk_mem_lost_report(void);                    // a line with the video memor
 float vk_mem_device_used_mb(void);                // device-local memory this process holds (the driver's budget
                                                   // figure), MB; -1 without VK_EXT_memory_budget. Any thread.
 void vk_mem_stage_log(const char *stage);         // one line after a boot stage: device memory, process commit
+void vk_mem_exit_log(void);                       // at the process's end: the memory report's growth ranking of the
+                                                  // session (vk_memory.c growth_take), once it reached play
 // VRAM in use and its budget, summed over the DEVICE_LOCAL heaps. exact 1: VK_EXT_memory_budget (the whole process),
 // 0: this allocator's own allocations against the heap sizes. 0 when unknown.
 int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact);
@@ -805,6 +812,10 @@ typedef struct {
     uint64_t bytes_live_gpu, bytes_live_idle, bytes_released_young;
 } VkTexCensus;
 void vk_texture_census(VkTexCensus *s);
+// The texture cache's host memory for the memory report (vk_memory.c system_log), in bytes: its entries and tables, and
+// the CPU's decode and write-back temporaries in use now and at most at once since the last call (which resets that).
+typedef struct { uint64_t entries, bytes, tmp, tmp_peak; } VkTexHost;
+void vk_texture_host(VkTexHost *h);
 void vk_texture_census_log(uint64_t frame);         // vk_memory.c vram_log: the live entries' memory by kind and format
 void vk_texture_reuse_log(uint64_t frame);          // vk_memory.c owner_log: released textures taken back, made again
 // The holes in VMA's blocks that hold textures (vk_texture.c "compaction", vk_tex_compact.h), for vk_memory.c holes_log.
@@ -1103,7 +1114,25 @@ PFN_vkUpdateDescriptorSetWithTemplate vk_pipeline_update_tpl_fn(void);
 int vk_pipeline_set_indep(int on);
 typedef struct { uint64_t graphics, compute, failures, hits, layouts, push_layouts, async_built, pending_skips; } VkPipeStats;
 void vk_pipeline_stats(VkPipeStats *s);
-void vk_pipeline_save(void);               // writes the VkPipelineCache to pipeline-cache.bin next to nx2navi.exe
+// The memory report's pipeline figures (vk_memory.c outside_log, system_log), at report time. Counts of what holds
+// device memory outside VMA: graphics pipelines by kind (gfx_none: entries building or failed), of those with a pipeline
+// the ones no draw looked up for idle_min minutes and the ones none did in this run; built stage libraries by kind
+// (vertex input, pre-rasterization, fragment shader, fragment output); compute pipelines likewise; pipeline layouts.
+// Host bytes: the pipeline, library and layout tables, the key file's set and records, the shared list's records (only
+// until the boot's prebuild is done with them), the pipeline binaries' index. cache: the data the driver holds for
+// pipeline-cache.bin [0] and the play cache [1], as last asked (cache_asked) or else as loaded at the boot.
+typedef struct {
+    uint64_t gfx, gfx_whole, gfx_fast, gfx_opt, gfx_none, gfx_idle, gfx_never;
+    uint64_t lib[4], lib_none;
+    uint64_t comp, comp_none, comp_idle, comp_never;
+    uint64_t layouts;
+    uint64_t ram_pipes, ram_keys, ram_seed, ram_binaries;
+    uint64_t cache[2];
+    int cache_asked;
+    uint32_t idle_min;
+} VkPipeMem;
+void vk_pipeline_mem(VkPipeMem *m, uint32_t idle_min);
+void vk_pipeline_save(void);              // writes the VkPipelineCache to pipeline-cache.bin next to nx2navi.exe
 void vk_pipeline_save_exit(void);          // vk_pipeline_save as the process ends: new builds wait while it waits for
                                            // the running ones
 void vk_pipeline_autosave(void);           // vk_pipeline_save at most every 20 s, when pipelines were built since

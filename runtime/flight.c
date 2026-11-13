@@ -155,6 +155,15 @@ void flight_init(void) {
         rt_log("flight: no dump on a one-frame flash (%s)", thumbs_on ? "NX2NAVI_FLIGHT_FLASH=0" : "it needs the thumbnails");
 }
 
+// The recorder's memory for the memory report (vk_memory.c system_log): the frame records and the texture events in
+// process memory, and the thumbnail ring, which gfx_present.c keeps in host-visible memory of VMA's (counted there too).
+void flight_mem(uint64_t *records, uint64_t *thumbs) {
+    *records = *thumbs = 0;
+    if (!flight_on) return;
+    *records = (uint64_t)ring_n * sizeof *ring + (tex_ring ? (uint64_t)TEX_RING * sizeof *tex_ring : 0);
+    if (thumbs_on) *thumbs = (uint64_t)ring_n * FLIGHT_THUMB_W * FLIGHT_THUMB_H * 4;
+}
+
 void flight_cells(uint64_t frame, const uint8_t *cells) {
     int n = flash_note(&flash_track, frame, cells, flash_diff, flash_min_cells);
     // the frame judged is the one before; a flash not yet taken gives way to the newer one

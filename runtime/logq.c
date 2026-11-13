@@ -48,6 +48,9 @@ static struct {
 
 void logq_init(LogqSink sink) { Q.sink = sink; }
 
+// The queue's two buffers, made once when the log thread starts (logq_async) and kept: the memory report's figure.
+size_t logq_bytes(void) { return __atomic_load_n(&Q.buf, __ATOMIC_RELAXED) ? 2 * (size_t)LOGQ_CAP : 0; }
+
 // The write itself, timed.
 static void put_out(const char *p, size_t n) {
     uint64_t t0 = plat_now_ns();

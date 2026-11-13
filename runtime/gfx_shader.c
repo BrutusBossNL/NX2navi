@@ -1564,6 +1564,7 @@ static void use_path(const uint8_t h[32], char *p) {
 typedef struct UseFile { struct UseFile *next; uint8_t name[32]; UseMask m; } UseFile;
 static UseFile *use_files[USE_FILE_BUCKETS];
 static volatile int32_t use_files_ready;
+static volatile int64_t use_files_n;   // entries use_preload made (gfx_shader_ram)
 
 static UseFile **use_file_slot(const uint8_t name[32]) {
     UseFile **e = &use_files[(name[0] | name[1] << 8) % USE_FILE_BUCKETS];
@@ -1634,6 +1635,7 @@ static void use_preload(void *arg) {
     UsePreload st = {0};
     plat_file_list(cache_dir, ".use", use_preload_file, &st);
     n += st.n, bad += st.bad;
+    __atomic_store_n(&use_files_n, (int64_t)n, __ATOMIC_RELAXED);
     plat_xchg32(&use_files_ready, 1);
     rt_log("gfx_shader: %d use masks read in %.0f ms on a background thread (%d unreadable)", n,
            (plat_now_ns() - t0) / 1e6, bad);
@@ -3797,6 +3799,30 @@ void gfx_shader_carry_start(void) {
         return;
     }
     if (!plat_thread_spawn(carry_main, NULL, "shader carry", 0)) rt_log("gfx_shader: carry: cannot start the background pass");
+}
+
+// The memory report's figure for the shader caches in process memory (vk_memory.c system_log), at report time: the
+// memory cache's translated shaders (entries with their SPIR-V, reflection text and resource lists, kept for the life of
+// the process), the use masks (those read at the start, use_preload, and those found since), the cache pack's index,
+// and the records of programs and answers met in play (their sets and what waits to be appended). The walk holds
+// cache_lock shared, as gfx_shader_sizes does: a translator's insert waits for it.
+void gfx_shader_ram(GfxShaderRam *r) {
+    memset(r, 0, sizeof *r);
+    plat_mutex_lock_shared(&cache_lock);
+    for (int i = 0; i < BUCKETS; i++) {
+        for (const GfxShader *g = buckets[i]; g; g = g->next) {
+            r->shaders++;
+            r->cache += sizeof *g + g->words * 4 + g->reflection_size + 1;
+            for (int k = 0; k < GFX_RES_KINDS; k++) r->cache += (uint64_t)g->nres[k] * sizeof *g->res[k];
+        }
+        for (const UseEnt *u = use_buckets[i]; u; u = u->next) r->use += sizeof *u;
+    }
+    plat_mutex_unlock_shared(&cache_lock);
+    r->use += (uint64_t)__atomic_load_n(&use_files_n, __ATOMIC_RELAXED) * sizeof(UseFile) + sizeof use_files;
+    r->pack = (uint64_t)pack_n * sizeof(PackEnt);
+    plat_mutex_lock(&RC.lock);
+    r->records = ((uint64_t)RC.pairs.cap + RC.progs.cap) * sizeof(uint64_t) + RC.ans.cap + RC.prg.cap;
+    plat_mutex_unlock(&RC.lock);
 }
 
 // NX2NAVI_TRACE=perf "mem: sizes" (perf.c): the shader memory cache's entries with their SPIR-V and reflection bytes

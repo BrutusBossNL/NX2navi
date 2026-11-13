@@ -141,6 +141,8 @@ static PlatMutex spare_lock = PLAT_MUTEX_INIT;
 static VkDescriptorPool spare_pool[SPARE_POOLS];
 static Chunk spare_chunk[SPARE_CHUNKS];
 static int nspare_pool, nspare_chunk;
+static volatile int64_t npools_live;   // the replay's descriptor pools in existence, spare ones included (vk_exec_desc_mem)
+#define REPLAY_POOL_SETS 256           // sets in each of them (alloc_set)
 
 // State of the command buffer being recorded that the Vulkan command buffer itself holds (DrawCtx.B).
 typedef struct {
@@ -341,7 +343,7 @@ static void cb_done(void *arg) {   // completion thread
         int kept = nspare_pool < SPARE_POOLS;
         if (kept) spare_pool[nspare_pool++] = r->pools[i];
         plat_mutex_unlock(&spare_lock);
-        if (!kept) vkDestroyDescriptorPool(c->device, r->pools[i], NULL);
+        if (!kept) vkDestroyDescriptorPool(c->device, r->pools[i], NULL), __atomic_sub_fetch(&npools_live, 1, __ATOMIC_RELAXED);
     }
     for (int i = 0; i < r->nchunks; i++) {
         plat_mutex_lock(&spare_lock);
@@ -614,6 +616,7 @@ void vk_exec_draw_shutdown(void) {
     nvn_hm_clear(&rs_lists, free);
     dc_main.rs_last = NULL, dc_main.rs_last_l = NULL;   // the replay's context: no other records now
     for (int i = 0; i < nspare_pool; i++) vkDestroyDescriptorPool(c->device, spare_pool[i], NULL);
+    __atomic_sub_fetch(&npools_live, nspare_pool, __ATOMIC_RELAXED);
     for (int i = 0; i < nspare_chunk; i++) vmaDestroyBuffer(c->vma, spare_chunk[i].buf, spare_chunk[i].alloc);
     nspare_pool = nspare_chunk = 0;
     vk_usnap_shutdown();
@@ -3238,7 +3241,7 @@ static VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 256},
             {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 256}};
-        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 256,
+        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = REPLAY_POOL_SETS,
                                          .poolSizeCount = sizeof sizes / sizeof sizes[0], .pPoolSizes = sizes};
         if (r->npools == r->cpools) r->pools = grow(r->pools, &r->cpools, sizeof *r->pools);
         VkDescriptorPool pool = VK_NULL_HANDLE;
@@ -3254,6 +3257,7 @@ static VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
                        res == VK_SUCCESS ? "made at the second try" : "refused again");
             }
             if (res != VK_SUCCESS) rt_fatal("vk: descriptor pool failed (%d)", (int)res);
+            __atomic_add_fetch(&npools_live, 1, __ATOMIC_RELAXED);
         }
         r->pools[r->npools++] = pool;
     }
@@ -7549,4 +7553,16 @@ void vk_exec_sizes(PerfSizes *s) {
     perf_size(s, "spare descriptor pools", sp, SPARE_POOLS, PERF_SIZE_NONE);
     perf_size(s, "spare transient chunks", sc, SPARE_CHUNKS, sc * CHUNK_BYTES);
     perf_size(s, "held continuations", (uint64_t)vk_exec_held(), 36, PERF_SIZE_NONE);
+}
+
+// The memory report's descriptor pools (vk_memory.c outside_log): the replay's (alloc_set, REPLAY_POOL_SETS sets each),
+// the spare ones among them, and the texture pool's sets. Their memory is the driver's, outside VMA, and has no size.
+void vk_exec_desc_mem(VkDescMem *d) {
+    plat_mutex_lock(&spare_lock);
+    d->spare = (uint64_t)nspare_pool;
+    plat_mutex_unlock(&spare_lock);
+    int64_t live = __atomic_load_n(&npools_live, __ATOMIC_RELAXED);
+    d->pools = live > 0 ? (uint64_t)live : 0;
+    d->sets_each = REPLAY_POOL_SETS;
+    d->tex_sets = PL.dpool ? (uint64_t)PL.nsets : 0;
 }

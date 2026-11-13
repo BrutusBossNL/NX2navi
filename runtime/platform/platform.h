@@ -526,6 +526,13 @@ int plat_page_file_managed(void);
 // This process's memory in bytes: resident (the working set) and private (Windows: committed private bytes; Linux: the
 // resident anonymous pages). 0 when unknown.
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);
+// The C runtime's malloc heap in bytes, for the memory report (vk_memory.c system_log): what it took from the system
+// (committed) and what of that it handed out (used), and how many other heaps the process has (Windows: those DLLs made
+// with HeapCreate, the graphics driver's among them; their sizes are not asked, as a heap made without serialization
+// cannot be read while its owner uses it). 0 when unknown. Holds the heap's lock while it adds up, so it is called at
+// report time only. Windows: HeapSummary of the heap malloc uses; Linux: glibc's mallinfo2 over every arena.
+typedef struct { uint64_t committed, used; uint32_t other_heaps; } PlatHeapInfo;
+void plat_heap_info(PlatHeapInfo *h);
 
 // ---- child processes: a program with stdin and stdout piped to us (stderr discarded), no console window.
 typedef struct PlatChild PlatChild;

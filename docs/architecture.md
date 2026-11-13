@@ -272,7 +272,17 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   swapchain, DLSS and frame generation features); `mem: host` gives the host-visible allocations, the process's
   commit and working set and the game's heap; `vk: released textures` how often released textures came back and how
   old they were, and how many were made again after a drop (`vk_memory.c` `owner_log`). A figure that only climbs over
-  a session is a leak.
+  a session is a leak. Three lines follow at the same period (`vk_memory.c` `beyond_log`): `mem: outside VMA` gives the
+  driver's usage and budget per heap against VMA's blocks in it, and counts what the runtime made outside VMA where the
+  driver gives no size (graphics pipelines whole, fast-linked and optimised, those no draw used for ten minutes and
+  those none did, stage libraries by kind, compute pipelines, layouts, descriptor pools) beside the swapchain's pixels
+  and DLSS's and FSR's figures; `mem: system` splits the process's commit into the game's heap and physical maps, the
+  device-local memory (Windows charges it to the process), VMA's host-visible blocks, the C runtime heap with the shares
+  the runtime can name (shader caches, pipeline tables, the texture cache and its decode temporaries, the log queue, the
+  flight recorder), the data of the driver's pipeline caches (asked once a minute on the autosave thread) and the rest;
+  `mem: growth` names what grew by more than 64 MiB since the report before and since the first report in play. Every
+  ten minutes of play and at exit, `mem: growth ranking` ranks the categories by their growth since play began and
+  marks those that only climbed (`mem_growth.h`).
 - Released textures by age: the game releases a texture when what uses it leaves the view and takes it back when that
   returns; the cache keeps the released image so that the take-back finds it. In play the take-backs came within a
   minute of the release or never, so a released texture goes once it has gone unused for a hold of three minutes, six

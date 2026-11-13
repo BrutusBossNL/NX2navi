@@ -11,6 +11,9 @@ extern int flight_on;
 extern int vk_dump_white;   // vk_dump.c, NX2NAVI_DUMP_WHITE   // NX2NAVI_FLIGHT=1, set once by flight_init before the first present
 
 void flight_init(void);   // prof_start calls it
+// Its memory in bytes, for the memory report (vk_memory.c system_log): the records and texture events in process memory,
+// and the thumbnail ring in host-visible memory. 0 while it is off.
+void flight_mem(uint64_t *records, uint64_t *thumbs);
 // perf_present, once per present on the render thread: the interval since the previous present, the render thread's
 // blocked time per PERF_* kind in this frame, and the running PERF_CNT_* totals.
 void flight_frame(uint64_t frame, uint64_t now_ns, uint64_t interval_ns, const uint64_t blocked_ns[],

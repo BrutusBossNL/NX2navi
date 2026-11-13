@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <malloc.h>
 #include <linux/fs.h>
 #include <linux/futex.h>
 #include <linux/userfaultfd.h>
@@ -2239,6 +2240,17 @@ void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
         else if (sscanf(line, "RssAnon: %llu kB", &k) == 1) *private_bytes = (uint64_t)k << 10;
     }
     fclose(f);
+}
+
+// glibc's mallinfo2 (2.33 and later) sums every arena: arena is what the arenas took with brk and mmap, hblkhd the
+// blocks mmapped one by one, uordblks what the arenas handed out. Other C libraries leave the figures unknown.
+void plat_heap_info(PlatHeapInfo *h) {
+    memset(h, 0, sizeof *h);
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+    struct mallinfo2 m = mallinfo2();
+    h->committed = (uint64_t)m.arena + m.hblkhd;
+    h->used = (uint64_t)m.uordblks + m.hblkhd;
+#endif
 }
 
 // ---- memory limits

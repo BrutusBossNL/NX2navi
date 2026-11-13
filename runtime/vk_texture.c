@@ -3613,6 +3613,25 @@ static int chash_wanted(const Tex *e) {
     return RT_KNOB_ON(mode) && e->t.L.size <= CHASH_BIG_MAX && e->chash_miss < CHASH_MISSES && !vk_exec_pool_loading();
 }
 
+// The host temporaries of the CPU's texture work, counted for the memory report (vk_texture_host): the copies an upload
+// decodes ASTC or expands RGB from (upload), the tight ASTC blocks a texel write decodes (image_texels) and the texels
+// a write-back reads (write_back_n). Each lives for one upload or write-back; the report gives the bytes in
+// use when it asks and the most at once since it last asked. Two atomics per temporary, not per frame.
+static volatile int64_t tmp_now, tmp_peak;
+static void *tmp_alloc(size_t n) {
+    void *p = malloc(n);
+    if (!p) return NULL;
+    int64_t now = __atomic_add_fetch(&tmp_now, (int64_t)n, __ATOMIC_RELAXED);
+    int64_t pk = __atomic_load_n(&tmp_peak, __ATOMIC_RELAXED);
+    while (now > pk && !__atomic_compare_exchange_n(&tmp_peak, &pk, now, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    return p;
+}
+static void tmp_free(void *p, size_t n) {
+    if (!p) return;
+    free(p);
+    __atomic_sub_fetch(&tmp_now, (int64_t)n, __ATOMIC_RELAXED);
+}
+
 static void upload(Tex *e) {
     static volatile int32_t n_bad, n_undecoded, n_split;
     int no_mem = 0;   // a part's ASTC decode had no memory: the texture is uploaded again later
@@ -3753,7 +3772,7 @@ static void upload(Tex *e) {
             uint32_t rb = (w + bw - 1) / bw * (uint32_t)bpb, rows = (h + bh - 1) / bh;
             size_t raw = (size_t)rb * rows * sl;
             rg[k].bufferOffset -= base;
-            uint8_t *dst = stg + rg[k].bufferOffset, *tmp = (astc && !agpu) || rgb ? malloc(raw) : NULL;
+            uint8_t *dst = stg + rg[k].bufferOffset, *tmp = (astc && !agpu) || rgb ? tmp_alloc(raw) : NULL;
             tmps[k - k0] = tmp;
             if (!held) {
                 memset(tmp ? tmp : dst, 0, raw);
@@ -3787,7 +3806,7 @@ static void upload(Tex *e) {
             } else {
                 rg[k].bufferRowLength = rb / (uint32_t)bpb * (uint32_t)bw, rg[k].bufferImageHeight = rows * (uint32_t)bh;
             }
-            free(tmp);
+            tmp_free(tmp, (size_t)rb * rows * sl);   // the size the first loop asked for (raw)
         }
         free(tmps);
         vk_texstat_time(VK_TS_COPY, c0);
@@ -5252,12 +5271,12 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
         if (agpu) {
             for (size_t y = 0; y < g->hb; y++) memcpy(s + y * g->wb, m + y * g->row, g->wb);
         } else if (astc) {
-            uint8_t *tight = malloc(g->wb * g->hb);
+            uint8_t *tight = tmp_alloc(g->wb * g->hb);
             for (size_t y = 0; y < g->hb; y++) memcpy(tight + y * g->wb, m + y * g->row, g->wb);
             uint64_t a0 = perf_begin();
             astc_decode_ldr_mt(tight, w, h, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb, s);
             perf_end(PERF_ASTC, a0);
-            free(tight);
+            tmp_free(tight, g->wb * g->hb);
         } else if (rgb) {
             for (size_t y = 0; y < g->hb; y++) expand_rgb(e->t.d.format, m + y * g->row, s + y * w * ib, w);
         } else {
@@ -5406,11 +5425,11 @@ static void write_back_n(Tex **v, int n) {
     if (np) vk_upload_flush(1);
     for (int i = 0; i < np; i++) {
         WbPart *q = &p[i];
-        uint8_t *buf = malloc(q->g.img * (size_t)q->g.nz);
+        uint8_t *buf = tmp_alloc(q->g.img * (size_t)q->g.nz);
         if (!buf) rt_fatal("vk: out of memory for a texture write-back");
         texels_read_take(q->e, &q->g, &q->t, buf);
         storage_texels(&q->e->t, &q->g, &q->r, buf, 1);
-        free(buf);
+        tmp_free(buf, q->g.img * (size_t)q->g.nz);
     }
     free(p);
     for (int i = 0; i < n; i++) v[i]->gpu_dirty = 0;
@@ -6454,6 +6473,27 @@ void vk_texture_census(VkTexCensus *s) {
         }
     }
     unlock();
+}
+
+// The texture cache's host memory for the memory report (vk_memory.c system_log): the entries with their write-back
+// snapshots (SNAP_MAX each), the slot tables (fixed once the first slot is registered, vk_texture_register) and the CPU's
+// temporaries (tmp_alloc): those in use now and the most at once since the last call, which starts the next span.
+// The same walk as vk_texture_census, at the same time.
+void vk_texture_host(VkTexHost *h) {
+    memset(h, 0, sizeof *h);
+    lock();
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        const Tex *e = by_key.vals[i];
+        if (!e) continue;
+        h->entries++;
+        h->bytes += sizeof *e + (e->snap ? SNAP_MAX : 0);
+    }
+    h->bytes += (uint64_t)by_key.cap * (sizeof *by_key.vals + by_key.klen) + (uint64_t)ntslots * sizeof *tslots +
+                (uint64_t)nsslots * sizeof *sslots;
+    if (sinfo) h->bytes += (sizeof *sinfo + sizeof *slot_next + sizeof *slot_prev + sizeof *slot_grp + sizeof *slot_bucket) << 20;
+    unlock();
+    h->tmp = (uint64_t)__atomic_load_n(&tmp_now, __ATOMIC_RELAXED);
+    h->tmp_peak = (uint64_t)__atomic_exchange_n(&tmp_peak, (int64_t)h->tmp, __ATOMIC_RELAXED);
 }
 
 // ---- reuse of released textures (vk_texture_reuse_log)

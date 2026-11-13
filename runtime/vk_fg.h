@@ -29,6 +29,7 @@ void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt, VkExtent2D
 uint64_t vk_fg_presents(VkSwapchainKHR sc);   // frames the swapchain presented, generated ones included (0: off)
 PFN_vkSetHdrMetadataEXT vk_fg_hdr_metadata_fn(void);   // AMD's replacement for vkSetHdrMetadataEXT while active, else NULL
 void vk_fg_release(void);
+uint64_t vk_fg_vram(void);   // the frame generation context's video memory, FSR 3.1's or FSR 4's; 0 none or not told
 
 // The same through AMD's FSR SDK 2.4 (vk_fg4.cpp), for vk_fg.cpp alone: it takes this path while FSR 4 is the upscaler,
 // and every call above goes to these while this path holds the swapchain.
@@ -47,3 +48,4 @@ void vk_fg4_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt, VkExtent2
 uint64_t vk_fg4_presents(VkSwapchainKHR sc);
 PFN_vkSetHdrMetadataEXT vk_fg4_hdr_metadata_fn(void);
 void vk_fg4_release(void);
+uint64_t vk_fg4_vram(void);

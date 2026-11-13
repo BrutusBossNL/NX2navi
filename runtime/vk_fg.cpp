@@ -50,6 +50,7 @@ struct {
     FgrRing cuts;   // each frame id's camera cut, for the generation callback (vk_fg_reset.h)
     uint64_t cut_frames = 0;   // frames handed to the callback as cuts
     int prepared = 0;          // the last frame was prepared (generation on with its inputs)
+    uint64_t vram = 0;         // the frame generation context's video memory as the library reported it, 0 not told
 } F;
 
 VkResult submit_game(uint32_t n, const VkSubmitInfo *si, VkFence fence) {
@@ -265,6 +266,11 @@ extern "C" void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt,
         ffxReturnCode_t r = vk_ffx_create(&F.fg, &d.header);
         if (r != FFX_API_RETURN_OK) return F.fg = nullptr, fail("the frame generation context", r);
         F.fg_ext = ext, F.fg_fmt = fmt, F.fg_max = max_render;
+        FfxApiEffectMemoryUsage mem = {};   // for the memory report (vk_fg_vram); 0 when the provider does not say
+        ffxQueryDescFrameGenerationGetGPUMemoryUsage mq = {};
+        mq.header.type = FFX_API_QUERY_DESC_TYPE_FRAMEGENERATION_GPU_MEMORY_USAGE;
+        mq.gpuMemoryUsageFrameGeneration = &mem;
+        F.vram = vk_ffx_query(&F.fg, &mq.header) == FFX_API_RETURN_OK ? mem.totalUsageInBytes : 0;
         rt_log("fg: frame generation context for %ux%u%s, render size up to %ux%u", ext.width, ext.height,
                hdr_format(fmt) ? " (HDR)" : "", max_render.width, max_render.height);
     }
@@ -351,4 +357,10 @@ extern "C" void vk_fg_release(void) {
     if (F.sc) vk_ffx_destroy(&F.sc), F.sc = nullptr;
     __atomic_store_n(&F.on, 0, __ATOMIC_RELAXED);
     F.prepared = 0;
+}
+
+// The frame generation contexts' video memory, FSR 3.1's and FSR 4's (vk_fg4_vram), for the memory report
+// (vk_ffx.cpp vk_ffx_vram). The swapchain's own images are counted with the swapchain (gfx_present.c).
+extern "C" uint64_t vk_fg_vram(void) {
+    return (__atomic_load_n(&F.fg, __ATOMIC_RELAXED) ? __atomic_load_n(&F.vram, __ATOMIC_RELAXED) : 0) + vk_fg4_vram();
 }

@@ -2,6 +2,7 @@
 // SRW locks and condition variables.
 #include <io.h>
 #include <limits.h>
+#include <malloc.h>     // _get_heap_handle (plat_heap_info)
 #include <stdio.h>
 #include <winsock2.h>   // before windows.h, which would otherwise pull in the old winsock.h
 #include <ws2tcpip.h>
@@ -2065,6 +2066,18 @@ void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
     *resident = *private_bytes = 0;
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pm, sizeof pm))
         *resident = pm.WorkingSetSize, *private_bytes = pm.PrivateUsage;
+}
+
+// The UCRT's malloc takes its memory from the heap _get_heap_handle names (the process heap); HeapSummary sums it. The
+// other heaps are only counted: one made with HEAP_NO_SERIALIZE has no lock to take.
+void plat_heap_info(PlatHeapInfo *h) {
+    memset(h, 0, sizeof *h);
+    HANDLE crt = (HANDLE)_get_heap_handle();
+    HEAP_SUMMARY s = {.cb = sizeof s};
+    if (crt && HeapSummary(crt, 0, &s)) h->committed = s.cbCommitted, h->used = s.cbAllocated;
+    HANDLE hs[256];
+    DWORD n = GetProcessHeaps(256, hs);
+    for (DWORD i = 0; i < n && i < 256; i++) h->other_heaps += hs[i] != crt;
 }
 
 // ---- child processes
