@@ -971,6 +971,10 @@
 # then on. The snapshot holds the game for about a second once. 1 writes 20000 lines, a larger number that many; 0 is
 # off.
 # floor_scan = 0
+# Diagnosis (Windows): 1 also runs floor_scan and, once it has found the floor, logs which code of the game reads and
+# writes it: hardware watchpoints on its addresses for a few seconds at 60 fps, and again at the next stretch at 120
+# fps or more with Link on the floor. Each pass slows the game for its few seconds. 0 is off.
+# floor_watch = 0
 # 1: with trace = perf, walks of the process's address space count its private and write-combined memory every 600
 # frames (the "mem: process" line) and where its committed memory lies every 3600 frames (the "commit census" lines).
 # Each walk holds the address-space lock for 100-240 ms and delays the next frame by as much, so they are off unless

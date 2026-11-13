@@ -15,6 +15,7 @@
 #include <restartmanager.h>
 #include <shellapi.h>
 #include <timeapi.h>
+#include <tlhelp32.h>   // CreateToolhelp32Snapshot (plat_watch_set)
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -198,6 +199,120 @@ int plat_intr_resume(PlatIntr *t, uint64_t to) {
     }
     ResumeThread(t->h);
     return ok;
+}
+
+// ---- hardware data watchpoints (platform.h plat_watch_set): the debug registers DR0-DR3 hold the addresses and DR7
+// enables them, each for reads and writes (R/W 11) of its length. A thread's debug registers are part of its context:
+// a helper thread lists the process's threads, then stops each, sets them with SetThreadContext and lets it go on; it
+// opens every handle before it stops anything and takes no lock while a thread is stopped, so a thread stopped while
+// holding the heap or loader lock cannot block it. The caller waits for the helper, which also sets the caller's own
+// registers. An access traps after the instruction that made it, as EXCEPTION_SINGLE_STEP with the slot's bit in DR6;
+// watch_veh hands it on and writes the current set into the context it continues with. So a thread that traps after
+// its registers were cleared, or whose continue would restore registers from before a change, ends up with the
+// current set too.
+static PlatWatchHit watch_fn;
+static volatile LONG watch_on;
+static DWORD64 watch_addr[4], watch_dr7;
+static int watch_added;
+
+// frames[0] the instruction after the access, then the return addresses the unwind tables give
+static int watch_unwind(const CONTEXT *at, uint64_t *frames) {
+    CONTEXT c = *at;
+    int d = 0;
+    frames[d++] = c.Rip;
+    while (d < PLAT_WATCH_DEPTH) {
+        DWORD64 base;
+        PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(c.Rip, &base, NULL);
+        if (f) {
+            void *hd;
+            DWORD64 est;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, &c, &hd, &est, NULL);
+        } else {   // a leaf function: the return address is on top
+            c.Rip = *(DWORD64 *)c.Rsp;
+            c.Rsp += 8;
+        }
+        if (!c.Rip) break;
+        frames[d++] = c.Rip;
+    }
+    return d;
+}
+
+static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT *c = ep->ContextRecord;
+    unsigned bits = (unsigned)(c->Dr6 & 0xf);
+    if (!bits) return EXCEPTION_CONTINUE_SEARCH;   // a trap-flag step, not a watchpoint
+    int on = watch_on != 0, stop = !on;
+    if (on && watch_fn) {
+        uint64_t frames[PLAT_WATCH_DEPTH];
+        int d = watch_unwind(c, frames);
+        for (int s = 0; s < 4; s++)
+            if (bits >> s & 1 && watch_dr7 >> (2 * s) & 1) stop |= watch_fn(s, frames, d);
+    }
+    c->Dr0 = watch_addr[0], c->Dr1 = watch_addr[1], c->Dr2 = watch_addr[2], c->Dr3 = watch_addr[3];
+    c->Dr7 = stop ? 0 : watch_dr7;
+    c->Dr6 = 0;
+    c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+#define WATCH_THREADS 4096
+static DWORD WINAPI watch_apply(void *arg) {
+    (void)arg;
+    static DWORD tids[WATCH_THREADS];
+    static HANDLE hs[WATCH_THREADS];
+    DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return (DWORD)-1;
+    int nt = 0;
+    THREADENTRY32 te = {.dwSize = sizeof te};
+    for (BOOL ok = Thread32First(snap, &te); ok && nt < WATCH_THREADS; ok = Thread32Next(snap, &te))
+        if (te.th32OwnerProcessID == pid && te.th32ThreadID != self) tids[nt++] = te.th32ThreadID;
+    CloseHandle(snap);
+    int nh = 0;
+    for (int i = 0; i < nt; i++) {
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT, FALSE, tids[i]);
+        if (h) hs[nh++] = h;
+    }
+    static CONTEXT ctx __attribute__((aligned(16)));
+    memset(&ctx, 0, sizeof ctx);
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    ctx.Dr0 = watch_addr[0], ctx.Dr1 = watch_addr[1], ctx.Dr2 = watch_addr[2], ctx.Dr3 = watch_addr[3];
+    ctx.Dr7 = watch_on ? watch_dr7 : 0;
+    DWORD done = 0;
+    for (int i = 0; i < nh; i++) {   // nothing between the stop and the go-on but the context call
+        if (SuspendThread(hs[i]) != (DWORD)-1) {
+            if (SetThreadContext(hs[i], &ctx)) done++;
+            ResumeThread(hs[i]);
+        }
+    }
+    for (int i = 0; i < nh; i++) CloseHandle(hs[i]);
+    return done;
+}
+
+int plat_watch_set(const uint64_t *addr, const int *len, int n, PlatWatchHit hit) {
+    if (n < 0) n = 0;
+    if (n > 4) n = 4;
+    if (!watch_added) {
+        if (!n) return 0;
+        if (!AddVectoredExceptionHandler(1, watch_veh)) return -1;
+        watch_added = 1;
+    }
+    DWORD64 dr7 = 0;
+    for (int i = 0; i < 4; i++) watch_addr[i] = i < n ? addr[i] : 0;
+    for (int i = 0; i < n; i++) {
+        DWORD64 size = len[i] == 8 ? 2 : len[i] == 4 ? 3 : len[i] == 2 ? 1 : 0;   // DR7's LEN encoding
+        dr7 |= 1ull << (2 * i) | 3ull << (16 + 4 * i) | size << (18 + 4 * i);
+    }
+    // the hook and the registers are in place before watch_on says so, and a clear takes watch_on away first
+    if (n) watch_fn = hit, watch_dr7 = dr7;
+    InterlockedExchange(&watch_on, n > 0);
+    HANDLE t = CreateThread(NULL, 64 << 10, watch_apply, NULL, 0, NULL);
+    DWORD code = (DWORD)-1;
+    if (!t || WaitForSingleObject(t, 10000) != WAIT_OBJECT_0 || !GetExitCodeThread(t, &code)) code = (DWORD)-1;
+    if (t) CloseHandle(t);
+    if (code == (DWORD)-1 && n) InterlockedExchange(&watch_on, 0);
+    return code == (DWORD)-1 ? -1 : (int)code;
 }
 
 // ---- fibers: Windows fibers with FIBER_FLAG_FLOAT_SWITCH (the MXCSR and x87 control word switch with them).

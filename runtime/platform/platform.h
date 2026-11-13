@@ -75,6 +75,16 @@ int plat_intr_stop(PlatIntr *t, uint64_t *rip, uint64_t *rsp);
 // on where it stopped).
 int plat_intr_resume(PlatIntr *t, uint64_t to);
 
+// Hardware data watchpoints (diagnosis: floor_watch.c). Up to four addresses, each watched for any read or write of its
+// len bytes (1, 2, 4 or 8, the address aligned to it), on every thread the process has when they are set; threads
+// started later have none. After each access hit(slot, frames, depth) runs on the thread that made it, inside its
+// exception handling: frames[0] is the instruction after the access, then up to PLAT_WATCH_DEPTH - 1 return addresses.
+// hit must not lock, allocate or log, and its nonzero return clears that thread's watchpoints. n = 0 clears them on
+// every thread. Returns the threads changed; -1 where the platform has none (Linux) or the change failed.
+#define PLAT_WATCH_DEPTH 4
+typedef int (*PlatWatchHit)(int slot, const uint64_t *frames, int depth);
+int plat_watch_set(const uint64_t *addr, const int *len, int n, PlatWatchHit hit);
+
 // Fibers: execution contexts with stacks of their own that threads switch between; a fiber may resume on another
 // thread. Each switch keeps the callee-saved registers and the floating-point control state.
 typedef struct PlatFiber PlatFiber;

@@ -68,6 +68,16 @@ int mem_copy_readable(uint8_t *const *dst, const uint64_t (*src)[2], int n, uint
     return 0;
 }
 uint64_t kern_now_ns(void) { return 0; }
+// the floor watch (off here)
+int floor_watch_wanted(void) { return 0; }
+int floor_watch_found(const uint64_t *addr, const float *val, const int *unit, int n, const float link[3]) {
+    (void)addr, (void)val, (void)unit, (void)n, (void)link;
+    return 0;
+}
+int floor_watch_present(const float link[3], int link_ok, float frames) {
+    (void)link, (void)link_ok, (void)frames;
+    return 0;
+}
 void plat_mutex_lock(PlatMutex *m) { (void)m; }     // one thread here
 void plat_mutex_unlock(PlatMutex *m) { (void)m; }
 

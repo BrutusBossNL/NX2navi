@@ -332,6 +332,12 @@ int plat_intr_resume(PlatIntr *t, uint64_t to) {
     return 1;
 }
 
+// Hardware data watchpoints are Windows' only (platform.h plat_watch_set): the diagnosis that uses them is off here.
+int plat_watch_set(const uint64_t *addr, const int *len, int n, PlatWatchHit hit) {
+    (void)addr, (void)len, (void)n, (void)hit;
+    return -1;
+}
+
 // ---- fibers: a stack switch of our own. glibc's swapcontext saves and restores the signal mask with a system call
 // on every switch, and the game switches fibers often. fiber_swap saves the callee-saved registers, the MXCSR and the
 // x87 control word on the current stack, stores the stack pointer in *save and loads the other one. A new fiber's

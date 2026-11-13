@@ -49,6 +49,7 @@
 
 #include "debug_tools.h"
 #include "cfg.h"
+#include "floor_watch.h"
 #include "gfx.h"
 #include "host.h"
 #include "input.h"
@@ -1025,11 +1026,14 @@ static void floor_probe(void) {
 // keeps none arms the scan again, three times at most. From then on, once a second, it logs Link's position and move
 // over that second and one line per survivor (FLOOR_SCAN_SHOW at most) with its address, position and move over the
 // same second, so a stretch at a higher frame rate shows each one's own speed. The value is the number of lines to
-// write (1 means 20000); off it costs one test per present.
+// write (1 means 20000); off it costs one test per present. NX2NAVI_FLOOR_WATCH switches the scan on too and gets its
+// survivors when the logging starts, with those that lie in the platform's rigid body controller unit marked
+// (floor_watch.c).
 #define FLOOR_SCAN_ARM 30
 #define FLOOR_SCAN_MAX 2000000   // candidate triplets a snapshot keeps
 #define FLOOR_SCAN_SHOW 64       // survivors logged each second
 static int floor_scan_left = -1;   // lines still to write; -1 before the setting was read
+static int floor_watching;         // floor_watch.c has the survivors and is not done (NX2NAVI_FLOOR_WATCH)
 static struct {
     int state, run, tries;         // state 0: waiting for a drift, 1: filtering, 2: logging
     float link0[3], last[3], start[3], path, sec_link[3];
@@ -1201,6 +1205,7 @@ static void floor_scan(const float link[3], int link_ok) {
     if (floor_scan_left < 0) {
         const char *e = cfg_get("NX2NAVI_FLOOR_SCAN");
         int n = e && *e ? atoi(e) : 0;
+        if (n <= 0 && floor_watch_wanted()) n = 1;   // the watch takes its addresses from the scan
         floor_scan_left = !RT_V111 || n <= 0 ? 0 : n == 1 ? 20000 : n;
         if (floor_scan_left) rt_log("floor scan: on for %d lines", floor_scan_left);
     }
@@ -1267,6 +1272,14 @@ static void floor_scan(const float link[3], int link_ok) {
         for (int k = 1; k < fs.n; k++)
             if (fs.val[3 * k + 1] < fs.val[3 * deep + 1]) deep = k;
         floor_scan_dump(fs.addr[deep]);
+        if (floor_watch_wanted()) {   // the survivors in the platform's rigid body controller unit (floor_watch.c)
+            int unit[FLOOR_SCAN_SHOW];
+            for (int k = 0; k < fs.n; k++) {
+                uint64_t at = 0;
+                unit[k] = vtable_below(fs.addr[k], &at) == MOD_MAIN_BASE + 0x4bf8a88;
+            }
+            floor_watching = floor_watch_found(fs.addr, fs.val, unit, fs.n, link);
+        }
         memcpy(fs.sec_link, link, 12);
         fs.sec_ns = plat_now_ns();
         fs.state = 2;
@@ -1326,10 +1339,11 @@ void frame_step_present(uint64_t display_ns, int interval) {
                           memory_order_relaxed);
     world_clock(dt, step);
     floor_probe();
-    if (floor_scan_left) {   // after its first read the scan costs this test alone while off
+    if (floor_scan_left || floor_watching) {   // after its first read the scan costs this test alone while off
         float link[3];
-        int ok = floor_scan_left > 0 ? player_pos(link) : 0;
-        floor_scan(link, ok);
+        int ok = floor_scan_left > 0 || floor_watching ? player_pos(link) : 0;
+        if (floor_scan_left) floor_scan(link, ok);
+        if (floor_watching) floor_watching = floor_watch_present(link, ok, frame_step_frames());
     }
     if (rt_trace & RT_TRACE_PERF) {
         time_dump();
