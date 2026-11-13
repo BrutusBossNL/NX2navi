@@ -65,6 +65,13 @@ int64_t vk_dlaa_vram(void);
 // frame (vk_dlaa_frame).
 typedef struct VkExec VkExec;
 void vk_dlaa_pass(VkExec *ex);
+// vk_exec.c vk_exec_pass_begin, in every replay thread, after the pass hooks: with the upscaler run before the bloom to
+// the picture's size (NX2NAVI_DLSS_PREBLOOM), the passes after it that draw into the light target or the bloom
+// composite's target are moved to images of the picture's size (vk_dlaa.c "before the bloom").
+void vk_dlaa_retarget(VkExec *ex);
+// The scale from the game's viewport and scissor to such a moved pass; 0 for any other pass (vk_exec.c vk_exec_scissor,
+// vk_dlaa_viewport).
+int vk_dlaa_target_scale(const VkExec *ex, float *sx, float *sy);
 // vk_exec_draw.c untranslated_dispatch_fallback, after the stand-in of the game's own upscaler wrote its output image
 // (in GENERAL, of format fmt and w x h): DLSS or FSR runs there on the armed scene and its picture goes over it.
 void vk_dlaa_upscaler(VkExec *ex, VkImage out, VkFormat fmt, uint32_t w, uint32_t h);

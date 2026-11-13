@@ -667,6 +667,12 @@
 # takes, and counts the changes of size that kept the picture against those that made a network. 0 is the default:
 # the shared network has been compiled and not yet run on a graphics card. Read at start.
 # dlss_range = 0
+# Where DLSS or FSR 3.1 works in the frame (a test, off by default). 0: on the finished picture, after the game has
+# added its bloom, applied its exposure and tonemapped it. 1: on the scene's own light, before the bloom chain and the
+# tonemap, as these upscalers are made for; the bloom, the lens flares and the tonemap then work on the upscaler's
+# picture, drawn at the picture's size when the scene is smaller. Frames without the bloom (menus) stay as with 0.
+# The log says where it ran (lines starting with "dlaa: prebloom"). Changes apply at the next frame.
+# dlss_prebloom = 0
 # Per-object motion vectors for DLSS: characters, animals and moving objects get their own motion instead of the
 # camera's, so DLSS keeps their history instead of smearing or rejecting it. Costs some CPU time each frame (about 1-2 ms
 # on a laptop CPU); 0 leaves camera-only motion. Read at start.

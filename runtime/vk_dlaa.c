@@ -573,6 +573,15 @@ static struct {
     uint32_t hl_w, hl_h;
     VkFormat hl_fmt;
     int hl_fresh;
+    // before the bloom (NX2NAVI_DLSS_PREBLOOM, prebloom_run)
+    int pre_on;                  // the setting, read at each present
+    int pre;                     // this frame: the upscaler ran before the bloom chain; 1 back into the light target
+                                 // (no upscaling), 2 to the picture's size (PB), whose passes the retarget moves there
+    int pre_at;                  // where the last evaluation ran: 1 before the bloom, 0 at the game's upscaler
+    int comp;                    // this frame: the bloom composite was drawn into PB.comp (vk_dlaa_retarget)
+    VkImage comp_game;           // the game's target that composite was meant for
+    uint32_t pic_w, pic_h;       // the size of the game's upscaler's output, the last one seen (vk_dlaa_upscaler)
+    uint64_t pre_misses;         // frames with the setting on that found no bloom chain to run before
 } D = {.mv_ok = -1, .cfg_seen = ~0u};
 
 // What this frame drew into a D32F depth at least DLAA_SCENE_MIN_W wide before DLSS ran (vk_dlaa_draw), for the line a
@@ -1484,6 +1493,7 @@ static struct Snap *mask_pass(VkCommandBuffer cb, VkImageView cv, uint32_t w, ui
 
 // ---------------------------------------------------------------- teardown
 // The HUD-less picture's images, a half-made pair too. The device must be idle, or the images not yet used.
+static void pb_destroy(void);   // the picture-size images of the upscaler before the bloom (prebloom_run)
 static void hl_destroy(void) {
     const VkCtx *c = vk_ctx();
     if (D.hl_view) vkDestroyImageView(c->device, D.hl_view, NULL);
@@ -1559,6 +1569,7 @@ void vk_dlaa_release(void) {
     for (int i = 0; i < 5; i++) destroy_size(&D.sizes[i]);
     for (int i = 0; i < SNAPS; i++) destroy_snap(&R.s[i]);
     hl_destroy();
+    pb_destroy();
     if (D.mv_pipe) vkDestroyPipeline(c->device, D.mv_pipe, NULL);
     if (D.mv_layout) vkDestroyPipelineLayout(c->device, D.mv_layout, NULL);
     if (D.mv_dsl) vkDestroyDescriptorSetLayout(c->device, D.mv_dsl, NULL);
@@ -1614,6 +1625,10 @@ static int jitter_draw(const VkExec *ex) {
 }
 
 void vk_dlaa_viewport(VkExec *ex, VkViewport *v) {
+    float sx, sy;
+    // a pass moved to the picture's size (vk_dlaa_retarget); without a game viewport it covers the pass already
+    if (ex->has_vp && vk_dlaa_target_scale(ex, &sx, &sy))
+        v->x *= sx, v->y *= sy, v->width *= sx, v->height *= sy;
     ex->vp_jittered = jitter_draw(ex);
     if (!ex->vp_jittered) return;
     ex->pass_jit = 1;
@@ -1792,7 +1807,7 @@ static void window_line(void) {
 }
 
 // dst: the target DLSS's picture goes to, NULL for the light target itself (DLAA in place).
-static void hudless(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_t h);
+static void hudless(VkCommandBuffer cb, VkImage src, uint32_t w, uint32_t h);
 
 // Another light target than last frame's. The game draws its scene into one of a few pooled targets of the same size
 // and moves to another whenever its pass list changes, in the middle of play with the camera and the scene carrying
@@ -2181,6 +2196,18 @@ static void evaluate(VkExec *ex, const VkExecTarget *dst) {
     }
     struct Size *e = size_for(cb, w, h, ow, oh);
     if (!e) return dl_fail("work image creation", 0);
+    // Before the bloom the input is the scene's light before the exposure and the tonemap, at the game's upscaler the
+    // tonemapped picture: a history built from one does not hold for the other (prebloom_run).
+    {
+        const int at = D.pre ? 1 : 0;
+        static int told;
+        if (D.evals && at != D.pre_at) {
+            D.reset = 1;
+            if (told < 8)
+                told++, rt_log("dlaa: the upscaler now runs %s: a new history", at ? "before the bloom" : "after the tonemap");
+        }
+        D.pre_at = at;
+    }
     // Read once: vk_dlaa_frame runs on the present's thread and can clear fsr_frame while this replay is between the
     // checks below, which would send the rest of this function to DLSS's path without NGX after all.
     const int fsr = use_fsr();
@@ -2377,7 +2404,9 @@ evaluated:
     vkCmdBlitImage(cb, shown, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
     full_barrier(cb);
     if (dst != t) vk_dlaa_swap_img = t->img, vk_dlaa_swap_view = e->out_view;   // the scaling draw reads DLSS's picture
-    if (vk_dlaa_hudless_wanted) hudless(cb, e, ow, oh);   // frame generation keeps the HUD out of its generated frames
+    // frame generation keeps the HUD out of its generated frames; before the bloom, DLSS's output is not yet the picture
+    // and the HUD-less one is taken at the game's upscaler (vk_dlaa_upscaler)
+    if (vk_dlaa_hudless_wanted && !D.pre) hudless(cb, e->out, ow, oh);
     ex->recorded += 4;
     vk_exec_draw_new_cb();   // NGX bound pipelines and descriptor sets of its own: the next draw binds everything again
     D.jdepth = z->image, D.jw = z->width, D.jh = z->height;
@@ -2412,7 +2441,9 @@ evaluated:
 // (vk_hdr_encode): DLSS's output is kept as RGBA16F for the same encode. The game's own HDR (native) encodes inside the
 // game, which this cannot follow: no HUD-less picture there.
 int vk_dlaa_hudless_wanted;
-static void hudless(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_t h) {
+// src: the picture without the HUD, linear, w x h, in GENERAL: DLSS's output where the upscaler ran at the game's
+// upscaler, the game's upscaler's output where it ran before the bloom (vk_dlaa_upscaler).
+static void hudless(VkCommandBuffer cb, VkImage src, uint32_t w, uint32_t h) {
     const VkCtx *c = vk_ctx();
     int hdr = vk_hdr_wanted() && !vk_hdr_native();
     if (vk_hdr_native()) return;
@@ -2452,7 +2483,7 @@ static void hudless(VkCommandBuffer cb, struct Size *e, uint32_t w, uint32_t h) 
     }
     VkImageBlit b = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}},
                      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
-    vkCmdBlitImage(cb, e->out, VK_IMAGE_LAYOUT_GENERAL, hdr ? D.hl : D.hl_srgb, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
+    vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, hdr ? D.hl : D.hl_srgb, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
                    VK_FILTER_NEAREST);
     full_barrier(cb);
     if (hdr) {
@@ -2493,6 +2524,227 @@ static int output_target(VkFormat f) { return srgb8(f) || vk_hdr_native_picture(
 
 double wide_dlss_share(void);   // widescreen.c: the DLSS mode's share of the picture (1 DLAA), 0 off
 
+// ---------------------------------------------------------------- before the bloom (NX2NAVI_DLSS_PREBLOOM)
+// What the upscaler gets at the game's upscaler (vk_dlaa_upscaler) is the armed pair of the bloom composite: measured on
+// frame dumps (NX2NAVI_DUMP; 2880x1620 scene in a 3840x2160 picture, and 1280x720 in 2560x1440 with DLSS), the light
+// target holds the lit scene with its fog, transparents and lens flares as linear light up to about 160; the one
+// full-screen draw that reads it and the bloom's smallest target writes the second light target with the scene depth
+// attached, and that shader adds the bloom, applies the exposure, converts to the tonemap's colour space and ends in the
+// fitted filmic curve and a 0..1 clamp (vk_hdr.c tonemap_splice finds the same curve). Its output, 0..1 and linear
+// (the post pass after it stores its square root), is what DLSS anti-aliased and enlarged: a picture already exposed,
+// tonemapped and bloomed, which the IsHDR and auto-exposure flags describe wrongly.
+// With the setting on, the upscaler runs at the start of the bloom chain's first pass instead: two light-format targets
+// smaller than the scene, no depth, right after the transparents (prebloom_start). Its input is then the scene's linear
+// light before exposure and tonemap, at the render size, with the scene depth.
+// - Without upscaling (DLAA) DLSS's picture goes back into the light target and the game's own passes (bloom, flares,
+//   composite and tonemap, post pass, its upscaler at 1:1, HUD) all run on it as they are.
+// - With upscaling the game's passes after it are drawn at the render size, and the post pass and the game's upscaler
+//   are compute dispatches whose sizes the game sets, so they cannot be moved to the picture's size. What is moved
+//   (vk_dlaa_retarget) are the render passes from the light target on: DLSS's picture goes into PB.scene at the
+//   picture's size; a pass drawing into the light target (the lens flares, additive, no depth test) draws into
+//   PB.scene, and the bloom composite into PB.comp, both at the picture's size without the depth attachment, with
+//   their viewports and scissors scaled (vk_dlaa_viewport, vk_dlaa_target_scale). The composite samples the light
+//   target through its texture coordinates, so it reads PB.scene in its place (vk_dlaa_swap_img). The bloom chain
+//   reads the light target at its own small sizes; DLSS's picture is scaled back into it first, so the bloom starts
+//   from the resolved picture and does not shimmer with the jitter. The post pass and the game's upscaler then run on
+//   the game's composite target, which this frame never wrote, and at the game's upscaler PB.comp goes over their
+//   picture, as DLSS's did before (vk_dlaa_upscaler).
+// A frame without that bloom chain (menus, a loading screen) runs the upscaler at the game's upscaler as before.
+static struct {
+    VkImage scene, comp;         // DLSS's picture with the flares, and the composite's picture: B10G11R11, picture size
+    VmaAllocation scene_mem, comp_mem;
+    VkImageView scene_view, comp_view;
+    uint32_t w, h;
+    uint64_t used;               // D.presents when last used (idle_release frees them after IDLE_FREE_PRESENTS)
+} PB;
+
+static void pb_destroy(void) {
+    const VkCtx *c = vk_ctx();
+    if (PB.scene_view) vkDestroyImageView(c->device, PB.scene_view, NULL);
+    if (PB.comp_view) vkDestroyImageView(c->device, PB.comp_view, NULL);
+    if (PB.scene) vmaDestroyImage(c->vma, PB.scene, PB.scene_mem);
+    if (PB.comp) vmaDestroyImage(c->vma, PB.comp, PB.comp_mem);
+    memset(&PB, 0, sizeof PB);
+}
+
+// The two images at w x h, made again for another picture size (the old ones after the device is idle, as hudless).
+static int pb_images(VkCommandBuffer cb, uint32_t w, uint32_t h) {
+    PB.used = D.presents;
+    if (PB.scene && PB.w == w && PB.h == h) return 1;
+    if (PB.scene || PB.comp) {
+        vk_queue_lock(), vkDeviceWaitIdle(vk_ctx()->device), vk_queue_unlock();
+        pb_destroy();
+    }
+    VkImageUsageFlags u = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                          VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const VkFormat f = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    if (!image2d(w, h, f, u, &PB.scene, &PB.scene_mem, &PB.scene_view) ||
+        !image2d(w, h, f, u, &PB.comp, &PB.comp_mem, &PB.comp_view)) {
+        pb_destroy();
+        return 0;
+    }
+    VkImageMemoryBarrier2 ib[2];
+    VkImage im[2] = {PB.scene, PB.comp};
+    for (int i = 0; i < 2; i++)
+        ib[i] = (VkImageMemoryBarrier2){.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = im[i],
+                                        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 2,
+                           .pImageMemoryBarriers = ib};
+    vkCmdPipelineBarrier2(cb, &di);
+    PB.w = w, PB.h = h;
+    rt_log("dlaa: prebloom: the passes after the upscaler draw at %ux%u (two B10G11R11 images, %.0f MiB)", w, h,
+           2.0 * w * h * 4 / 1048576.0);
+    return 1;
+}
+
+// The bloom chain's first pass, on Ocarina's frame: two light-format targets, each smaller than the armed light target
+// both ways, no depth. In the dumps (2880x1620 and 1280x720 scenes) it is the only such pass and it comes right after
+// the last pass of transparents into the light target; its targets are 480x270 at both scene sizes. The passes in
+// between that read the light target at a third or half of its size have one target, or a light target with an R8 one.
+static int prebloom_start(const VkExec *ex) {
+    if (ex->pass_ncolor != 2 || ex->depth.image) return 0;
+    for (int i = 0; i < 2; i++) {
+        const VkExecTarget *t = &ex->color[i];
+        if (!t->image || t->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || t->samples > 1 || t->is3d ||
+            t->width >= D.color.width || t->height >= D.color.height)
+            return 0;
+    }
+    return 1;
+}
+
+// Runs the upscaler at the bloom chain's first pass (prebloom_start), before that pass begins. 0: not here this frame
+// (the picture's size not known yet, or not of the scene's shape): the game's upscaler runs it as before.
+static int prebloom_run(VkExec *ex) {
+    const uint32_t w = D.color.width, h = D.color.height;
+    const double share = wide_dlss_share();
+    const int native = share <= 0 || share >= 1;
+    uint32_t ow = D.pic_w, oh = D.pic_h;
+    if (!native) {
+        int known = ow > w && oh > h && (double)ow * h <= 1.03 * (double)oh * w && (double)oh * w <= 1.03 * (double)ow * h;
+        if (!known || !pb_images(ex->cb, ow, oh)) {
+            if (D.pre_misses++ < 4)
+                rt_log("dlaa: prebloom: the picture's size is not known yet (last %ux%u for a %ux%u scene): this frame "
+                       "runs the upscaler after the tonemap", ow, oh, w, h);
+            return 0;
+        }
+    }
+    vk_exec_hook_turn();   // as in vk_dlaa_pass: the replay workers' draws read the jitter and its end
+    D.ended = D.done = 1;
+    D.pre = native ? 1 : 2;
+    const uint64_t evals = D.evals;
+    if (native) {
+        evaluate(ex, NULL);   // into the light target, which the bloom and everything after it read
+    } else {
+        D.up = 1;
+        VkExecTarget dst = {.image = PB.scene, .format = VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+                            .aspect = VK_IMAGE_ASPECT_COLOR_BIT, .layers = 1, .width = ow, .height = oh, .samples = 1};
+        evaluate(ex, &dst);
+    }
+    if (D.evals == evals) {   // the evaluation failed (dl_fail) or did not run: nothing moves to the picture's size
+        D.pre = 0, D.up = 0;
+        return 1;
+    }
+    if (D.pre == 2) {
+        // the composite samples the light target: PB.scene, which the lens flares are then drawn into, in its place
+        vk_dlaa_swap_img = D.color.img, vk_dlaa_swap_view = PB.scene_view;
+        // and the bloom chain reads the light target itself, at its own sizes: the resolved picture, scaled back down
+        VkImageBlit b = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                         .srcOffsets = {{0, 0, 0}, {(int32_t)ow, (int32_t)oh, 1}},
+                         .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, D.color.level, D.color.base_layer, 1},
+                         .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
+        vkCmdBlitImage(ex->cb, PB.scene, VK_IMAGE_LAYOUT_GENERAL, D.color.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
+                       VK_FILTER_LINEAR);
+        full_barrier(ex->cb);
+        ex->recorded += 2;
+    }
+    static int told;
+    if (!told++)
+        rt_log("dlaa: prebloom: %s runs before the bloom, at the start of its first pass (two %ux%u targets, format %d), "
+               "on the light target %ux%u format %d with the depth %ux%u format %d; %s",
+               use_fsr() ? "FSR 3.1" : "DLSS", ex->color[0].width, ex->color[0].height, (int)ex->color[0].format, w, h,
+               (int)D.color.format, D.depth.width, D.depth.height, (int)D.depth.format,
+               native ? "its picture goes back into the light target (no upscaling)"
+                      : "its picture is the picture's size, where the lens flares and the bloom composite are drawn");
+    return 1;
+}
+
+// vk_exec.c vk_exec_pass_begin, in every replay thread, once the pass's targets are resolved and the pass hooks ran:
+// after the upscaler ran before the bloom to the picture's size (prebloom_run), a pass drawing into the light target
+// draws into PB.scene and the bloom composite (one light-format target of the scene's size, with the scene depth) into
+// PB.comp, each at the picture's size and without its depth attachment (neither tests depth in the dumps). Its draws'
+// viewports and scissors follow (vk_dlaa_viewport, vk_dlaa_target_scale). A pass of the same targets begun again (the
+// pass broken by a copy) keeps what it got: its targets are not resolved again.
+void vk_dlaa_retarget(VkExec *ex) {
+    if (D.pre != 2 || !PB.scene || ex->pass_ncolor != 1) return;
+    VkExecTarget *c = &ex->color[0];
+    if (!c->image || c->image == PB.scene || c->image == PB.comp) return;
+    if (c->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || c->samples > 1 || c->is3d || c->layers != 1) return;
+    VkImage to = VK_NULL_HANDLE;
+    int comp = 0;
+    if (c->image == D.color.image) to = PB.scene;
+    else if (c->width == D.color.width && c->height == D.color.height && ex->depth.image == D.depth.image &&
+             (!D.comp_game || D.comp_game == c->image))
+        to = PB.comp, comp = 1;
+    if (!to) return;
+    static int told[2];
+    if (!told[comp]++)
+        rt_log("dlaa: prebloom: %s (%ux%u format %d, %s) drawn at %ux%u", comp ? "the bloom composite" : "a pass into the light target",
+               c->width, c->height, (int)c->format, ex->depth.image ? "with the scene depth" : "no depth", PB.w, PB.h);
+    if (comp) D.comp_game = c->image, D.comp = 1;
+    c->image = to, c->img = NULL;
+    c->width = PB.w, c->height = PB.h;
+    c->level = c->base_layer = 0, c->scale = 1, c->blocks = 0, c->view_type = VK_IMAGE_VIEW_TYPE_2D;
+    memset(&ex->depth, 0, sizeof ex->depth);
+    ex->pass_depth = ex->pass_stencil = VK_FORMAT_UNDEFINED;
+    ex->pipe.depth_fmt = 0;
+    ex->pass_w = PB.w, ex->pass_h = PB.h, ex->pass_scale = 1, ex->pass_layers = 1, ex->pass_noatt = 0;
+}
+
+// The scale from the game's viewport and scissor to a pass vk_dlaa_retarget moved to the picture's size; 0 for any
+// other pass.
+int vk_dlaa_target_scale(const VkExec *ex, float *sx, float *sy) {
+    if (D.pre != 2 || !PB.scene || !D.color.width || !D.color.height) return 0;
+    VkImage t = ex->color[0].image;
+    if (!t || (t != PB.scene && t != PB.comp)) return 0;
+    *sx = (float)PB.w / (float)D.color.width, *sy = (float)PB.h / (float)D.color.height;
+    return 1;
+}
+
+// At the game's upscaler, with the upscaler run before the bloom: notes the picture's size, and puts the composite
+// drawn at the picture's size over the game's upscaler's output (2), or leaves that output, which is already made from
+// DLSS's picture (1). The HUD-less picture for frame generation is the result either way.
+static void prebloom_upscaler(VkExec *ex, VkImage out, uint32_t w, uint32_t h) {
+    VkCommandBuffer cb = ex->cb;
+    if (D.pre == 2) {
+        if (!D.comp) {
+            static int told;
+            if (told < 8)
+                told++, rt_log("dlaa: prebloom: frame %llu drew no bloom composite after the upscaler: the game's "
+                               "picture stays", (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+            return;
+        }
+        // the same size but for a picture size changed since the upscaler ran: scaled then, for that frame
+        VkImageBlit b = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                         .srcOffsets = {{0, 0, 0}, {(int32_t)PB.w, (int32_t)PB.h, 1}},
+                         .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                         .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
+        vkCmdBlitImage(cb, PB.comp, VK_IMAGE_LAYOUT_GENERAL, out, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
+                       PB.w == w && PB.h == h ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+        full_barrier(cb);
+        ex->recorded += 2;
+        static int told;
+        if (!told++) rt_log("dlaa: prebloom: the composite drawn at %ux%u goes into the game's upscaler's %ux%u output",
+                            PB.w, PB.h, w, h);
+    }
+    if (vk_dlaa_hudless_wanted) hudless(cb, out, w, h), ex->recorded += 2;
+}
+
 // Ocarina's own upscaler is the place for DLSS or FSR: its stand-in (vk_exec_draw.c untranslated_dispatch_fallback) has
 // just scaled the scene into the image the rest of the frame shows, and the upscaler's picture goes over it there.
 // Until this hook the upscaler ran at the pass after it (vk_dlaa_pass below), which was taken for the pass the HUD is
@@ -2510,7 +2762,13 @@ double wide_dlss_share(void);   // widescreen.c: the DLSS mode's share of the pi
 void vk_dlaa_upscaler(VkExec *ex, VkImage out, VkFormat fmt, uint32_t w, uint32_t h) {
     static int on = -1;
     if (on < 0) on = rt_knob("DLAA_AT_UPSCALER", "1");
-    if (!on || !dl_active() || !D.armed || D.done || D.gbuf || !out || fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32) return;
+    if (!dl_active() || !out || fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32) return;
+    if (D.armed && !D.gbuf && w >= D.color.width && h >= D.color.height) D.pic_w = w, D.pic_h = h;   // prebloom_run
+    if (D.pre) {
+        prebloom_upscaler(ex, out, w, h);
+        return;
+    }
+    if (!on || !D.armed || D.done || D.gbuf) return;
     uint32_t sw = D.color.width, sh = D.color.height;
     if (w < sw || h < sh || out == D.color.image) return;
     if ((double)w * sh > 1.03 * (double)h * sw || (double)h * sw > 1.03 * (double)w * sh) return;   // not the scene's shape
@@ -2528,7 +2786,8 @@ void vk_dlaa_pass(VkExec *ex) {
     const VkExecTarget *c = &ex->color[0], *z = &ex->depth;
     if (!dl_active()) return;
     if (D.done) {   // diagnostics: another scene drawn into a light target in the same present interval
-        if (ex->pass_ncolor == 1 && c->image && scene_color(c->format) && z->image && z->format == VK_FORMAT_D32_SFLOAT &&
+        // (not before the bloom: the flares and the composite after it are of that shape, and expected)
+        if (!D.pre && ex->pass_ncolor == 1 && c->image && scene_color(c->format) && z->image && z->format == VK_FORMAT_D32_SFLOAT &&
             c->width == D.color.width && c->height == D.color.height && z->width == c->width)
             F.second++, F.second_img = c->image;
         return;
@@ -2575,6 +2834,8 @@ void vk_dlaa_pass(VkExec *ex) {
     }
     if (!D.armed) return;
     if (!deferred) {   // Ocarina's shape: the output pass ends the scene and runs DLSS
+        // NX2NAVI_DLSS_PREBLOOM: before the bloom chain's first pass instead, where there is one (prebloom_run)
+        if (D.pre_on && prebloom_start(ex) && prebloom_run(ex)) return;
         int one = ex->pass_ncolor == 1 && c->image && !z->image && c->image != D.color.image && c->samples <= 1 &&
                   !c->is3d;
         if (one) F.one_n++, F.one_w = c->width, F.one_h = c->height, F.one_fmt = c->format;
@@ -2713,6 +2974,10 @@ static void idle_release(void) {
         rt_log("dlaa: the HUD-less picture for frame generation went unused for %d presents: freed", IDLE_FREE_PRESENTS);
         hl_destroy();
     }
+    if (PB.scene && D.presents - PB.used >= IDLE_FREE_PRESENTS) {   // prebloom off, or no upscaling, for that long
+        rt_log("dlaa: prebloom: the picture-size images went unused for %d presents: freed", IDLE_FREE_PRESENTS);
+        pb_destroy();
+    }
     if (D.on || D.presents - off_at < IDLE_FREE_PRESENTS) return;
     int n = 0;
     for (int i = 0; i < DLSS_SIZES; i++)
@@ -2734,6 +2999,11 @@ void vk_dlaa_frame(void) {
     else if (setting_presents) setting_presents--;
     cfg_seen = v, cfg_known = 1;
     vk_dlaa_swap_img = NULL, vk_dlaa_swap_view = VK_NULL_HANDLE;
+    D.pre = D.comp = 0, D.comp_game = VK_NULL_HANDLE;   // the frame before was recorded up to its present
+    int pre_on = cfg_bool("NX2NAVI_DLSS_PREBLOOM");   // live: the evaluation point changes at the next frame
+    if (pre_on != D.pre_on) rt_log("dlaa: prebloom %s", pre_on ? "on: the upscaler runs before the bloom where the frame has one"
+                                                               : "off: the upscaler runs at the game's upscaler");
+    D.pre_on = pre_on;
     dlss_mode();
     preset_check();
     if (!N.ngx_up) {   // FSR 3.1 follows the setting

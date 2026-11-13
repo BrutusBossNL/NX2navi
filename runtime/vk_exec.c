@@ -817,6 +817,7 @@ void vk_exec_pass_begin(VkExec *ex) {
         vk_contact_pass_begin(ex);
         vk_dlaa_pass(ex);   // DLAA runs before the bloom chain's first pass (vk_dlaa.c)
     }
+    vk_dlaa_retarget(ex);   // after DLSS ran before the bloom: the passes it moves to the picture's size (vk_dlaa.c)
     // Learned targets (VkTexImage.fb_learned) are attached in the feedback layout
     VkImage want[9];
     VkImageAspectFlags wasp[9];
@@ -967,6 +968,12 @@ VkRect2D vk_exec_scissor(const VkExec *ex) {
     int64_t k = ex->pass_scale > 1 ? ex->pass_scale : 1;
     int64_t x0 = ex->scissor.x * k, y0 = ex->scissor.y * k;
     int64_t x1 = x0 + (int64_t)ex->scissor.w * k, y1 = y0 + (int64_t)ex->scissor.h * k;
+    float sx, sy;
+    if (vk_dlaa_target_scale(ex, &sx, &sy)) {   // a pass DLSS moved to the picture's size (vk_dlaa.c vk_dlaa_retarget)
+        x0 = (int64_t)floor(ex->scissor.x * (double)sx), y0 = (int64_t)floor(ex->scissor.y * (double)sy);
+        x1 = (int64_t)ceil(((double)ex->scissor.x + ex->scissor.w) * sx);
+        y1 = (int64_t)ceil(((double)ex->scissor.y + ex->scissor.h) * sy);
+    }
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > w) x1 = w;

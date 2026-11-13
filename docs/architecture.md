@@ -219,6 +219,10 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   `taa` is DLSS or FSR at the scene's size with the game's SMAA. While DLSS or FSR runs (`dlaa`, any mode), the other
   values still choose the pass: in the native modes it smooths the upscaler's picture after the bloom, in the scaling
   modes it runs on the scene before the upscaler scales it.
+  DLSS and FSR 3.1 read the bloom composite's output, which the game has already exposed and tonemapped;
+  `NX2NAVI_DLSS_PREBLOOM=1` (a test, off by default) runs them at the bloom chain's first pass on the scene's linear
+  light instead, and draws the lens flares and the bloom composite after them at the picture's size (`vk_dlaa.c`,
+  "before the bloom").
 - HDR (`vk_hdr.c`): the game tonemaps its scene into a float target, upscales it, draws the HUD into a second float
   target and copies that into the 8-bit sRGB window texture it presents. With `NX2NAVI_HDR=1` the tonemap shader gets
   the function of `shaders/hdr_tonemap.frag` spliced in where its SDR curve clamps each channel, so the float picture
