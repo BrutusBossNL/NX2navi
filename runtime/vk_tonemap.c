@@ -1,5 +1,6 @@
 // Decode-and-scale pass standing in for the scene upscaler (vk.h vk_tonemap_record; used by vk_exec_draw.c
 // untranslated_dispatch_fallback).
+#include "platform/platform.h"
 #include "vk.h"
 
 #include <stdlib.h>
@@ -161,17 +162,39 @@ static void tm_filter_log(int easu, int edge, uint32_t sw, uint32_t sh, uint32_t
                                                                      : "the edge-adaptive pass is not there");
 }
 
-// Views of the scratch images the pass samples, kept for the process (the scratch images live as long).
+// Views of the images the pass samples: the fallback blit's scratch images, and a game image the pass reads as it is.
+// A view goes with its image (vk_tonemap_image_gone: the scratch image's replacement, vk_exec_image_gone for a game
+// image), so a new image that gets the old handle never finds the old image's view. Kept before for the process, with
+// a game image's view left naming a destroyed image, and no view at all past sixteen.
+static PlatMutex tm_view_lock = PLAT_MUTEX_INIT;   // the replay records, a texture's destroy (any thread) takes views away
+
 static VkImageView tm_view(VkImage img, VkFormat f) {
+    plat_mutex_lock(&tm_view_lock);
     for (int i = 0; i < TM.nviews; i++)
-        if (TM.views[i].img == img && TM.views[i].f == f) return TM.views[i].view;
-    if (TM.nviews == 16) return VK_NULL_HANDLE;
+        if (TM.views[i].img == img && TM.views[i].f == f) {
+            VkImageView v = TM.views[i].view;
+            plat_mutex_unlock(&tm_view_lock);
+            return v;
+        }
+    VkImageView v = VK_NULL_HANDLE;
     VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
                                 .format = f, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    VkImageView v;
-    if (vkCreateImageView(vk_ctx()->device, &vi, NULL, &v) != VK_SUCCESS) return VK_NULL_HANDLE;
-    TM.views[TM.nviews].img = img, TM.views[TM.nviews].f = f, TM.views[TM.nviews].view = v, TM.nviews++;
+    if (TM.nviews < 16 && vkCreateImageView(vk_ctx()->device, &vi, NULL, &v) == VK_SUCCESS)
+        TM.views[TM.nviews].img = img, TM.views[TM.nviews].f = f, TM.views[TM.nviews].view = v, TM.nviews++;
+    plat_mutex_unlock(&tm_view_lock);
     return v;
+}
+
+void vk_tonemap_image_gone(VkImage img) {
+    plat_mutex_lock(&tm_view_lock);
+    for (int i = 0; i < TM.nviews;)
+        if (TM.views[i].img == img) {
+            vk_defer_view(TM.views[i].view);   // a submission being recorded may sample it
+            TM.views[i] = TM.views[--TM.nviews];
+        } else {
+            i++;
+        }
+    plat_mutex_unlock(&tm_view_lock);
 }
 
 // Records the pass from src (sampled, sw x sh) into the pass's own RGBA16F image of dw x dh and returns it (the caller

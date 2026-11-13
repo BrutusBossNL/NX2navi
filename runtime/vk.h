@@ -687,6 +687,8 @@ VkDescriptorSetLayout vk_empty_set_layout(void);    // set 1 of layouts without 
 // image, which it returns for the caller to blit into the target; VK_NULL_HANDLE when it cannot. edge: 1 lets it scale
 // with the edge-adaptive filter (NX2NAVI_STANDIN_FILTER), 0 keeps the linear one (another upscaler's picture replaces
 // this one). The caller binds its own compute pipeline again afterwards.
+// The tonemap pass's views of img go (vk_defer_view): img is destroyed or replaced. Any thread.
+void vk_tonemap_image_gone(VkImage img);
 VkImage vk_tonemap_record(VkCommandBuffer cb, VkImage src, VkFormat sf, uint32_t sw, uint32_t sh, uint32_t dw,
                           uint32_t dh, int edge);
 // What vk_texture_by_id(id) returns can change only when this does: the slot is registered again, or a texture entry at

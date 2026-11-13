@@ -920,6 +920,7 @@ VkImageView vk_exec_target_view(const VkTexImage *img, VkFormat format, VkImageV
 }
 
 int vk_exec_image_gone(VkImage image) {
+    vk_tonemap_image_gone(image);   // its views in the tonemap pass, keyed by the handle a new image may get
     vk_exec_bc_gone(image);
     vk_hdr_image_gone(image);
     if (!views_by_image.klen) return 0;
@@ -6827,12 +6828,38 @@ static int fmt_rgba8(VkFormat f) {
            f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_A8B8G8R8_UNORM_PACK32 || f == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
 }
 
-// Scratch images for those blits, one per (size, format), kept for the life of the process (a handful).
+// Scratch images for those blits, one per (size, format). Up to FB_SCRATCH are kept; a new size past them takes the
+// place of the one used longest ago, which goes once the GPU is past the submission being recorded (vk_defer_image),
+// with the tonemap pass's view of it. Before, the first eight sizes were kept for the process and a ninth got no
+// scratch, so its blit was left out: the sizes come from the scene's resolution, which DLSS modes, the dynamic
+// resolution and a window or picture size change move, at up to 32 MiB each at 2160 lines. One used in the
+// submission being recorded is never the one replaced: the blit may have recorded it already.
+#define FB_SCRATCH 8
 static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) {
-    static struct { uint32_t w, h; VkFormat f; VkImage img; VmaAllocation a; } cache[8];
+    static struct { uint32_t w, h; VkFormat f; VkImage img; VmaAllocation a; uint64_t used; } cache[FB_SCRATCH];
     static int n;
-    for (int i = 0; i < n; i++) if (cache[i].w == w && cache[i].h == h && cache[i].f == f) return cache[i].img;
-    if (n == 8) return VK_NULL_HANDLE;
+    static PlatMutex lock = PLAT_MUTEX_INIT;   // replay workers record blits side by side
+    plat_mutex_lock(&lock);
+    for (int i = 0; i < n; i++)
+        if (cache[i].w == w && cache[i].h == h && cache[i].f == f) {
+            cache[i].used = ex->fence;
+            VkImage img = cache[i].img;
+            plat_mutex_unlock(&lock);
+            return img;
+        }
+    int slot = n;
+    if (n == FB_SCRATCH) {   // the one used longest ago, unless the submission being recorded uses it
+        slot = -1;
+        for (int i = 0; i < n; i++)
+            if (cache[i].used < ex->fence && (slot < 0 || cache[i].used < cache[slot].used)) slot = i;
+        if (slot < 0) {
+            plat_mutex_unlock(&lock);
+            return VK_NULL_HANDLE;
+        }
+        vk_tonemap_image_gone(cache[slot].img);
+        vk_defer_image(cache[slot].img, cache[slot].a);
+        cache[slot].img = VK_NULL_HANDLE;
+    }
     VkCtx *c = vk_ctx();
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
                             .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -6842,7 +6869,11 @@ static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) 
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VmaAllocationCreateInfo ia = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VkImage img; VmaAllocation a;
-    if (vmaCreateImage(c->vma, &ii, &ia, &img, &a, NULL) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (vmaCreateImage(c->vma, &ii, &ia, &img, &a, NULL) != VK_SUCCESS) {
+        if (slot < n) cache[slot] = cache[--n];   // the replaced entry's place stays empty
+        plat_mutex_unlock(&lock);
+        return VK_NULL_HANDLE;
+    }
     VkImageMemoryBarrier2 bar = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
                                  .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                  .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -6851,7 +6882,10 @@ static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) 
                                  .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &bar};
     vkCmdPipelineBarrier2(ex->cb, &di);
-    cache[n].w = w, cache[n].h = h, cache[n].f = f, cache[n].img = img, cache[n].a = a, n++;
+    cache[slot].w = w, cache[slot].h = h, cache[slot].f = f, cache[slot].img = img, cache[slot].a = a;
+    cache[slot].used = ex->fence;
+    if (slot == n) n++;
+    plat_mutex_unlock(&lock);
     return img;
 }
 
