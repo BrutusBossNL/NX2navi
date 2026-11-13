@@ -657,8 +657,9 @@ int vk_sampler_slot_count_locked(void);
 // VK_POOL_TEX covers the game's whole texture pool: Ocarina makes one of 33068 descriptors (nvnTexturePoolInitialize),
 // and with 32768 the translator's clamp sent every handle from 32768 up to slot 32767, so the textures the game
 // numbered there (some ground after an area load) were drawn with whatever slot 32767 held, often an empty image:
-// see-through ground until the area was loaded again (#569). 16 kinds x 40960 = 655,360 sampled images in set 2, under
-// NVIDIA's 1,048,576 update-after-bind limit with room for the bound slots. vk_texture_register logs a slot past it.
+// see-through ground until the area was loaded again. 16 kinds x 40960 = 655,360 sampled images in set 2, under
+// NVIDIA's 1,048,576 update-after-bind limit with room for the bound slots; vk_exec_draw.c pool_layout_make logs the
+// device's limits and says which one a failed layout passed. vk_texture_register logs a slot past the pool.
 #define VK_POOL_TEX 40960                           // as the translator's Accessor.TexturePoolLength
 #define VK_POOL_TEX_CARRIED 32768                   // the length before: carried translations still declare it
 #define VK_POOL_SAMP 4096                           // Accessor.SamplerPoolLength

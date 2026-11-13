@@ -2025,6 +2025,22 @@ static struct {
 
 static void pool_marks_make(void);
 
+// The device's limits for the sampled images of the pool's set: in one set, and in one shader stage of a pipeline
+// layout (the pool's bindings are visible to every stage, and a layout adds the bound textures of set 0 to them). The
+// update-after-bind limits apply when PL.uab, the plain ones otherwise. *set and *stage are 0 when unknown.
+static void pool_limits(VkCtx *c, uint64_t *set, uint64_t *stage) {
+    VkPhysicalDeviceVulkan12Properties p12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+    VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &p12};
+    vkGetPhysicalDeviceProperties2(c->phys, &p2);
+    if (PL.uab) {
+        *set = p12.maxDescriptorSetUpdateAfterBindSampledImages;
+        *stage = p12.maxPerStageDescriptorUpdateAfterBindSampledImages;
+    } else {
+        *set = p2.properties.limits.maxDescriptorSetSampledImages;
+        *stage = p2.properties.limits.maxPerStageDescriptorSampledImages;
+    }
+}
+
 static VkDescriptorSetLayout pool_layout_make(void) {
     VkCtx *c = vk_ctx();
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
@@ -2032,6 +2048,16 @@ static VkDescriptorSetLayout pool_layout_make(void) {
     vkGetPhysicalDeviceFeatures2(c->phys, &f2);   // create_device enables every supported feature
     PL.uab = f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingPartiallyBound &&
              f12.descriptorBindingUpdateUnusedWhilePending;
+    // The pool needs VK_POOL_KINDS x VK_POOL_TEX sampled images in its set, whatever the game uses: a translated shader
+    // indexes the whole array. A device whose limits are below that is told in the log before the layout is asked for;
+    // a driver that accepts the layout anyway is let go on, one that refuses it ends the start with the limit named.
+    uint64_t need = (uint64_t)VK_POOL_KINDS * VK_POOL_TEX, lim_set = 0, lim_stage = 0;
+    pool_limits(c, &lim_set, &lim_stage);
+    int over = (lim_set && need > lim_set) || (lim_stage && need > lim_stage);
+    rt_log("vk: bindless texture pools: %d kinds x %d textures = %llu sampled images; the device allows %llu in a set "
+           "and %llu in a stage (%s limits)%s", VK_POOL_KINDS, VK_POOL_TEX, (unsigned long long)need,
+           (unsigned long long)lim_set, (unsigned long long)lim_stage, PL.uab ? "update-after-bind" : "plain",
+           over ? ": WARNING, over the device's limit" : "");
     int marks = vk_pool_marks_enabled();
     uint32_t nb = VK_POOL_KINDS + 1 + (marks ? 1u : 0u);   // the marks buffer at VK_POOL_MARK_BINDING, last
     VkDescriptorSetLayoutBinding b[VK_POOL_KINDS + 2];
@@ -2054,7 +2080,10 @@ static VkDescriptorSetLayout pool_layout_make(void) {
                                           .flags = PL.uab ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT : 0,
                                           .bindingCount = nb, .pBindings = b};
     VkDescriptorSetLayout l;
-    if (vkCreateDescriptorSetLayout(c->device, &li, NULL, &l) != VK_SUCCESS) rt_fatal("vk: the texture pool layout failed");
+    if (vkCreateDescriptorSetLayout(c->device, &li, NULL, &l) != VK_SUCCESS)
+        rt_fatal("vk: the texture pool layout failed: it holds %llu sampled images, and this device allows %llu in a "
+                 "set and %llu in a stage (%s limits)", (unsigned long long)need, (unsigned long long)lim_set,
+                 (unsigned long long)lim_stage, PL.uab ? "update-after-bind" : "plain");
     VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_POOL_KINDS * VK_POOL_TEX},
                                   {VK_DESCRIPTOR_TYPE_SAMPLER, VK_POOL_SAMP}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
     uint32_t nps = marks ? 3 : 2;
