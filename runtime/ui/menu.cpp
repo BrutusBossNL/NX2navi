@@ -37,7 +37,6 @@ static int g_font_bad;
 #include "ui/amiibo_page.h"
 #include "ui/binds_page.h"
 #include "ui/debug_menu.h"
-#include "ui/coop_page.h"
 #include "ui/option_rows.h"
 #include "ui/perf_panel.h"
 
@@ -192,7 +191,7 @@ extern "C" void menu_event_mouse_pos(float x, float y) { push({EV_POS, 0, 0, x, 
 extern "C" void menu_event_mouse_button(int button, int down) { push({EV_BUTTON, button, down, 0, 0}); }
 extern "C" void menu_event_wheel(float dx, float dy) { push({EV_WHEEL, 0, 0, dx, dy}); }
 extern "C" void menu_event_focus(int focused) { push({EV_FOCUS, focused, 0, 0, 0}); }
-// a typed character, for the text fields of the co-op page and the debug menu
+// a typed character, for the text fields of the debug menu
 extern "C" void menu_event_char(unsigned c) { push({EV_CHAR, (int)c, 0, 0, 0}); }
 
 // The clipboard's text a page asked for (gfx_window_paste): the window thread reads it, the page takes it a frame later.
@@ -506,7 +505,7 @@ static int fonts_up(float scale) {
         // what the title face shows in the CJK languages: the menu's title and tabs (Simplified Chinese menu text) and
         // the boot screen's title (the game's language)
         static const UiTextId titles[] = {UI_MENU_TITLE, UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                          UI_MENU_TAB_CONTROLS, UI_MENU_TAB_COOP, UI_BOOT_TITLE};
+                                          UI_MENU_TAB_CONTROLS, UI_BOOT_TITLE};
         for (int i = 0; i < N; i++) {
             if (!data[i]) continue;
             ImFontGlyphRangesBuilder b;
@@ -572,10 +571,9 @@ extern "C" void menu_vk_release(void) {
 // optional) at that presented frame; changes live settings with no input, menu open or not. nx2navi.ini is written only by
 // the pseudo-key SAVE=1 (cfg_save, as a row change does; a failed write shows the menu's save note). FOCUS=<key> (the
 // NX2NAVI_ prefix optional) puts the cursor on that setting's row and scrolls it into view when the row is next drawn
-// (opt_focus_key), so a page's shot shows a row below the first screenful; it does not switch tabs. COOP_DO drives the
-// Co-op tab (ui/coop_page.h coop_test_set).
-// Ocarina of Time: the options this port has, and co-op (ui/coop_page.cpp)
-enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_COOP, TAB_COUNT };
+// (opt_focus_key), so a page's shot shows a row below the first screenful; it does not switch tabs.
+// Ocarina of Time: the options this port has
+enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_COUNT };
 enum { TEST_PAGE_FRAMES = 30, TEST_SETS = 16, TEST_OPENS = 8 };
 struct TestSet { uint64_t frame; char key[64], value[64]; };
 static struct {
@@ -641,11 +639,7 @@ static void test_apply_sets(uint64_t frame) {
             char row[80];
             snprintf(row, sizeof row, "%s%s", strncmp(t.value, "NX2NAVI_", strlen("NX2NAVI_")) ? "NX2NAVI_" : "", t.value);
             opt_focus_key(row);
-        } else if (!strcmp(t.key, "NX2NAVI_COOP_DO") && !cfg_from_env("NX2NAVI_MENU_TEST_SET")) {
-            // From nx2navi.ini the hook drives no part of the Co-op tab: a settings file someone hands a player could
-            // otherwise put them into a room. A test sets it in the environment.
-            rt_log("menu: test hook: %s is taken from the environment only, not from nx2navi.ini", t.key);
-        } else if (!coop_test_set(t.key, t.value)) {
+        } else {
             cfg_set(t.key, t.value);
         }
     }
@@ -1704,16 +1698,8 @@ static void rows_low_end(void) {
 #endif
 }
 
-// The Co-op tab (ui/coop_page.cpp): the rows, then the window a row opens.
-static void tab_coop(float scale) {
-    opt_begin("##coop", scale);
-    coop_rows(scale);
-    opt_end();
-    coop_after_page(scale);
-}
-
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_COOP};
+                                              UI_MENU_TAB_CONTROLS};
 static int g_tab;               // the tab shown
 static int g_tab_request = -1;  // select this tab at the next layout; -1 none
 static int g_focus_page = -1;   // this tab's first row takes the cursor once it is shown; -1 none
@@ -1800,7 +1786,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
     }
 
     // a text field takes Q and E as letters, and a window of a page keeps the tab keys
-    const bool keeps_keys = g_modal || binds_modal() || coop_modal() || ImGui::GetIO().WantTextInput;
+    const bool keeps_keys = g_modal || binds_modal() || ImGui::GetIO().WantTextInput;
     int step = keeps_keys                                                                                ? 0
              : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
              : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1
@@ -1834,7 +1820,6 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
             case TAB_GAME: tab_game(scale); break;
             case TAB_SOUND: tab_sound(scale); break;
             case TAB_CONTROLS: tab_controls(scale); break;
-            case TAB_COOP: tab_coop(scale); break;
             }
             ImGui::EndTabItem();
         }
@@ -1894,7 +1879,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
     if (skin_widget_button(quit, ImVec2(bw, 0), scale)) g_confirm_quit = true, ImGui::OpenPopup("##confirm");
     restart_confirm(scale);
     menu_sounds_frame();
-    bool was_modal = g_modal || binds_modal() || coop_modal() || ImGui::GetIO().WantTextInput;
+    bool was_modal = g_modal || binds_modal() || ImGui::GetIO().WantTextInput;
     if (!was_modal && (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)))
         set_open(0);
     ImGui::End();
@@ -2054,7 +2039,7 @@ static void perf_draw(const MenuTarget *t, float scale) {
 
 // The note after F8 (bugcap.c): the capture's number and its folder's name for a few seconds, top centre, in the
 // menu's look. It shows once the capture is written, so the capture's own picture is without it.
-static void capture_note(const MenuTarget *t, float scale, bool below_coop) {
+static void capture_note(const MenuTarget *t, float scale) {
     int number = 0, ok = 0;
     char name[64], line1[160], line2[160] = "";
     if (!bugcap_note(&number, &ok, name)) return;
@@ -2064,7 +2049,7 @@ static void capture_note(const MenuTarget *t, float scale, bool below_coop) {
     ImVec2 s1 = ImGui::CalcTextSize(line1), s2 = ImGui::CalcTextSize(line2);
     float padx = 16 * scale, pady = 10 * scale, gap = line2[0] ? 4 * scale : 0;
     float w = (s1.x > s2.x ? s1.x : s2.x) + padx * 2, h = s1.y + (line2[0] ? s2.y : 0) + gap + pady * 2;
-    ImVec2 p(((float)t->width - w) * 0.5f, (below_coop ? 96 : 12) * scale);   // co-op puts its lines at the top centre
+    ImVec2 p(((float)t->width - w) * 0.5f, 12 * scale);
     skin_panel(dl, p, ImVec2(p.x + w, p.y + h), scale * 0.6f, 0.92f);
     dl->AddText(ImVec2(p.x + (w - s1.x) * 0.5f, p.y + pady), SKIN_TEXT, line1);
     if (line2[0]) dl->AddText(ImVec2(p.x + (w - s2.x) * 0.5f, p.y + pady + s1.y + gap), SKIN_TEXT_DIM, line2);
@@ -2085,7 +2070,6 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
     if (g_perf_save.exchange(0)) cfg_save();
     perf_tick(plat_now_ns(), t);
     amiibo_tick();
-    const bool coop_draws = coop_overlay_tick();   // names of the other players, chat lines, an invite: over the game
     int cap_number, cap_ok;
     char cap_name[64];
     const bool capture_shows = bugcap_note(&cap_number, &cap_ok, cap_name) != 0;   // the note after F8
@@ -2106,7 +2090,7 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
             if (g_debug.load()) debug_menu_tab(0);
             set_open(1);
             open = true;
-        } else if (!g_perf_mode && !coop_draws && !capture_shows) {
+        } else if (!g_perf_mode && !capture_shows) {
             return 0;
         }
     }
@@ -2140,7 +2124,6 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
         io.ClearInputKeys();
         io.ClearInputMouse();
         binds_cancel();          // a cell waiting for a press when the menu closed: no press binds on the next opening
-        coop_cancel();           // the Co-op tab's window closes
         g_sound_fresh = true;
         g_last_ns = 0;
         g_focus_page = g_tab_request >= 0 ? g_tab_request : g_tab;   // opening: the first row has the cursor
@@ -2172,8 +2155,7 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
         layout_menu(t->width, t->height, scale);
     }
     perf_draw(t, scale);
-    if (coop_draws) coop_overlay_draw((float)t->width, (float)t->height, scale, open);
-    capture_note(t, scale, coop_draws);
+    capture_note(t, scale);
     ImGui::Render();
     if (open) g_save_pending = opt_save_tick(0);
     g_cost_ns += plat_now_ns() - t0;
