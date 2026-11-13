@@ -34,6 +34,7 @@
 #include "vk_mesh_fb.h"
 #include "vk_scratch_lru.h"
 #include "platform/platform.h"
+#include "stutter_map.h"
 #include "vk_dlaa.h"
 #include "mesh_emu_spirv.h"
 
@@ -4535,6 +4536,9 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         if (fs_wait && (ms = pool_ms(pool, x0))) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, &fs_wait, ms);
         pool_charge(pool, x0);
         wait_note(WK_SHADER, x0, vs_wait || ts_wait || fs_wait);
+        if (stutter_map_on)   // the shaders translated by now name it; one still translating is not known yet
+            stutter_miss(1, mesh && !fb, vs && !vs_wait ? gfx_shader_input_id(vs) : NULL,
+                         fs && !fs_wait ? gfx_shader_input_id(fs) : NULL, kern_now_ns() - x0, vs_wait || ts_wait || fs_wait);
         if (vs_wait || ts_wait || fs_wait)
             return perf_count(PERF_CNT_SHADER_SKIP), draw_skipped(ex, mesh, SK_SHADER_PENDING);
     }
@@ -4651,6 +4655,9 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
             pool_charge(last, b0);
         }
         if (m0) wait_note(kind, m0, pending), draw_stats_tick();
+        if (m0 && stutter_map_on)
+            stutter_miss(0, mesh && !fb, vs ? gfx_shader_input_id(vs) : NULL, fs ? gfx_shader_input_id(fs) : NULL,
+                         kern_now_ns() - m0, pending);
         cx->PM.valid = !pending && p && info;
         if (cx->PM.valid) cx->PM.s = s, cx->PM.info = info;
     }

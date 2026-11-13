@@ -52,6 +52,7 @@
 #include "platform/platform.h"
 #include "prp_file.h"
 #include "spirv_water.h"
+#include "stutter_map.h"
 #include "tex.h"
 #include "vk_build_gate.h"
 #include "vk_cache_file.h"
@@ -4721,6 +4722,8 @@ static void ready_note(Pipe *p, int fast) {
     int fresh = gfx_shader_origin(j->s.vs) == 2 || (j->s.fs && gfx_shader_origin(j->s.fs) == 2) ||
                 (j->s.ts && gfx_shader_origin(j->s.ts) == 2);
     P.g.ready_mesh += (uint64_t)mesh, P.g.ready_recorded += j->prebuild, P.g.ready_fresh += (uint64_t)fresh;
+    stutter_ready(mesh, gfx_shader_input_id(j->s.vs), j->s.fs ? gfx_shader_input_id(j->s.fs) : NULL, ms, j->prebuild,
+                  fresh, fast);
     if (mesh) {
         P.g.m_ready_fast += fast != 0, P.g.m_ready_ms += ms;
         if (ms > P.g.m_ready_max) P.g.m_ready_max = ms;
