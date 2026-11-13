@@ -48,6 +48,11 @@
 # rounded that step down to nothing: the window stayed until the area was left and its counting sound went on. 1 lets
 # it count at least one a frame; 0 is the game's own count.
 # pickup_count = 1
+# A movie's narration and fades follow the picture on screen: 1 counts their time from the shown picture's
+# timestamp, so they stay with it at any frame rate (with movie_fps = 0 too) and wait when the picture stalls; 0 counts
+# the game's redraws, as before, which keeps them with the music when the picture stalls. Read at start; needs game
+# code generated with this release.
+# movie_pts = 1
 # The step the game is given each frame: 1 keeps it steady (the same value from frame to frame while the frame rate
 # holds, exactly one 60 Hz frame at a 60 fps limit) and makes up for a late frame over the next second; 0 is the mean
 # of the last five frame times, which changes with every frame.

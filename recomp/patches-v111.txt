@@ -22,6 +22,7 @@ set zstd        NX2NAVI_ZSTD_NATIVE       1
 set osolver     NX2NAVI_PHYSICS_STEPS     1
 set opickup     NX2NAVI_PICKUP_COUNT      1
 set freecam     NX2NAVI_PATCH_FREECAM     0
+set omovie      NX2NAVI_MOVIE_PTS         1
 
 # Real-time step: the framework's per-frame update (main+0x6e6be0) gives the time manager **[main+0x4c7e890] its
 # nominal frame through main+0x3b4e300 (+0x10 frames per update, +0x14 the inverse, +0x18 seconds, +0x1c the rate),
@@ -86,8 +87,14 @@ site osolver main 38afd20 1e380001 1e280001
 # x8 = layer->controller->player->surface->timestamp in ns. Clamp negative timestamps to zero and convert to
 # the nearest 60 Hz timeline tick (WebM timestamps can be rounded to milliseconds). The original add of one
 # counts the first picture as frame one. x9 is scratch on both paths, and the replacement preserves flags.
-site ostep main 3b5c7c4 b942fa88 f9400a88 f9400108 f940f508 f9406108 8aa8fd08 d2800789 9b097d08 528ca009 72a3b9a9 8b090108 d37ff929 9ac90908
-site ostep main 3b5c908 b942fa88 f9400a88 f9400108 f940f508 f9406108 8aa8fd08 d2800789 9b097d08 528ca009 72a3b9a9 8b090108 d37ff929 9ac90908
+# At the movie cap (runtime/frame_rate.c movie_cap_hz, 60 fps) the two counts are the same while the decoder keeps up.
+# They differ when no new picture is ready for a redraw: the old count went on, so cues kept pace with the soundtrack,
+# which plays on its own; this count waits with the picture and goes on with it, a step of 2 or more when the decoder
+# drops a picture. main+0x3b3ec10 hands the counter out as a float frame (scvtf) through a virtual call, and its
+# readers were not traced, so whether they compare frames as ranges or exact values is not known: if exactly, a cue
+# on a dropped picture's tick would be missed. NX2NAVI_MOVIE_PTS=0 (movie_pts in nx2navi.ini) gives the old count.
+site omovie main 3b5c7c4 b942fa88 f9400a88 f9400108 f940f508 f9406108 8aa8fd08 d2800789 9b097d08 528ca009 72a3b9a9 8b090108 d37ff929 9ac90908
+site omovie main 3b5c908 b942fa88 f9400a88 f9400108 f940f508 f9406108 8aa8fd08 d2800789 9b097d08 528ca009 72a3b9a9 8b090108 d37ff929 9ac90908
 
 # Pick-up window count: the window that shows a pick-up above the character (its update is main+0xa67e50) moves the
 # number it shows (+0x360) to the new total (+0x35c) by trunc(frames per update * max(1, difference / 50)) a frame, and

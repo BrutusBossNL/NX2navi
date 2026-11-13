@@ -561,6 +561,12 @@ leaves the mode's own exit code and one `exit:` line. The second is what a libra
 process does when it faults in its detach: an injector's Vulkan layer did so at the end of every shader preparation on
 a player's PC, and the launcher took each finished preparation for a failed one. No game files, no GPU.
 
+A change to the movie timestamp sites of `recomp/patches-v111.txt` (set `omovie`) passes
+`python tests\movie_timeline_check.py --cc <clang>` (`.venv`, Unicorn): it lifts the twelve replacement words on
+their own and compares them with Unicorn over repeated, skipped and rounded timestamps, registers, flags and memory.
+It does not cover the sites as `gen.py` emits them inside their two functions, nor the add and store after them:
+a regenerate of the game code and a compile of the chunk that holds main+0x3b5c7c4 and main+0x3b5c908 does.
+
 A change to the memory gate of the background pipeline builds (`runtime/vk_build_gate.h`, `runtime/vk_pipeline.c`
 `gate_enter`) passes `python tests\build_gate_check.py [<game exe>]`, which builds the header alone and checks what it
 admits and refuses and that builds under way count through their reservations. With the executable it also runs
@@ -672,7 +678,6 @@ change passes these, all run with `.venv`:
 | `tests\diff\func.py` | whole functions as the generator emits them, loops, jump tables and calls included (calls go to a stub that checks the registers at the call) | yes |
 | `tests\flags_check.py` | the function-local flag helpers of `runtime\cpu.h` against its packed ones | no |
 | `tests\ds3_check.py` | the DualShock 3 report decoding and output report of `runtime\input_ds3.c` | no |
-| `tests\movie_timeline_check.py --cc PATH` | both 1.1.1 movie timestamp patches against Unicorn and lifted C, with repeated/skipped pictures, rounded timestamps and preserved registers/flags | no |
 | `tests\gpa_check.py` | the device address table of `runtime\vk_gpa.c` as a shader reads it: mapping, mirrors and twins, overlapping imports, and blocks given back and taken again while pool addresses climb (no GPU; any Python) | no |
 | `tests\excl_mt.py` | the exclusive monitor helpers under contention and ABA, on several threads | no |
 | `tests\jumptables_check.py` | `recomp/jumptables.py` against a Unicorn oracle; must report 0 disagreements, on 1.4.3 too | yes |
