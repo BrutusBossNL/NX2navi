@@ -293,15 +293,19 @@ static void window_settings_live(void) {
     static int started;
     static char present[16];   // the NX2NAVI_VK_PRESENT the swapchain was made with
     unsigned v = cfg_version();
+    // Frame generation that failed (vk_fg.cpp fail makes vk_fg_wanted 0 with no setting changed): its swapchain and
+    // both contexts go at the next present, not when some other setting moves. Only this way round at every present: a
+    // frame generation swapchain wanted and not made is tried again at a settings change, not at every frame.
+    if (started && vk_fg_active() && !vk_fg_wanted()) plat_xchg32(&g_dirty, 1);
     if (started && v == seen) return;
     seen = v;
     res_fov_live();
+    if (started && vk_fg_wanted() != vk_fg_active()) plat_xchg32(&g_dirty, 1);   // frame generation switched: its own swapchain
     const char *e = cfg_value("NX2NAVI_VK_PRESENT");
     if (!started || strncmp(e, present, sizeof present - 1)) {
         snprintf(present, sizeof present, "%s", e);
         if (started) plat_xchg32(&g_dirty, 1);
     }
-    if (started && vk_fg_wanted() != vk_fg_active()) plat_xchg32(&g_dirty, 1);   // frame generation switched: its own swapchain
     // HDR switched in the menu: a swapchain of the other format. Compared with what the swapchain was made for, not
     // with what it got: on a display without HDR10 the setting stays on and the swapchain SDR, and that is settled.
     if (started && vk_hdr_wanted() != g_sc_hdr_wanted) plat_xchg32(&g_dirty, 1);
