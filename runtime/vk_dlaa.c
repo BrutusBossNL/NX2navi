@@ -31,6 +31,7 @@
 #include "vk_dlaa.h"
 #include "vk_exec.h"
 #include "vk_ffx.h"
+#include "vk_fg.h"
 #include "vk_rec.h"
 #include "dlaa_mv_spv.h"
 #include "dlaa_sharpen_spv.h"
@@ -2523,8 +2524,61 @@ void vk_dlaa_upscaler(VkExec *ex, VkImage out, VkFormat fmt, uint32_t w, uint32_
     evaluate(ex, &dst);
 }
 
+// ---- what the upscaler holds after it is switched off
+// Switched off in the menu, or failed (dl_fail), the upscaler kept everything it had made for the process: per scene
+// size its output, motion vector, mask and sharpening images and a DLSS feature (at 2560x1440 with DLAA 81 MiB of
+// images, at 2160 lines 182 MiB, and a DLSS feature is about 0.5 GB), the snapshots of the reactive mask, the HUD-less
+// pair for frame generation (28 MiB, 63 MiB at 2160 lines) and the FSR 3.1 and FSR 4 contexts. RETIRE_PRESENTS presents
+// after the upscaler goes off they are freed, here on the replay thread, which makes every evaluation and so cannot be
+// inside one, after a wait for the device to be idle, as free_size does for a size it replaces: an evaluation may
+// still run on the GPU, and the present thread only learns of the switch at its next frame. The HUD-less pair goes the
+// same way while the upscaler runs and frame generation no longer asks for it (vk_dlaa_hudless_wanted, which the frame
+// generator's release clears), once no frame generation swapchain is up that could still read it. Switched on again,
+// the upscaler makes what it needs as at its first frame, with a new history, as any switch on does.
+#define RETIRE_PRESENTS 8
+static uint64_t retire_off_at, retire_hl_at;   // replay: D.presents when the upscaler, or the HUD-less picture, went unused
+static uint64_t retired_n;                     // replay: times the upscaler's memory was given back
+
+static int up_holds(void) {
+    for (int i = 0; i < DLSS_SIZES; i++)
+        if (D.sizes[i].out || D.sizes[i].feat) return 1;
+    for (int i = 0; i < SNAPS; i++)
+        if (R.s[i].before) return 1;
+    return D.hl != VK_NULL_HANDLE || vk_ffx_holds();
+}
+
+static void retire_idle(void) {
+    uint64_t now = __atomic_load_n(&D.presents, __ATOMIC_RELAXED);
+    int off = !dl_active(), hl_unused = D.hl && !vk_dlaa_hudless_wanted && !vk_fg_active();
+    if (!off) retire_off_at = 0;
+    if (!hl_unused) retire_hl_at = 0;
+    if (off && !retire_off_at) retire_off_at = now ? now : 1;
+    if (hl_unused && !retire_hl_at) retire_hl_at = now ? now : 1;
+    int all = off && now >= retire_off_at + RETIRE_PRESENTS && up_holds();
+    int hl = hl_unused && now >= retire_hl_at + RETIRE_PRESENTS;
+    if (!all && !hl) return;
+    vk_queue_lock(), vkDeviceWaitIdle(vk_ctx()->device), vk_queue_unlock();
+    if (hl || !vk_fg_active()) hl_destroy(), D.hl_fresh = 0;
+    if (all) {
+        int64_t was = vk_dlaa_vram();
+        for (int i = 0; i < DLSS_SIZES; i++) destroy_size(&D.sizes[i]);
+        for (int i = 0; i < SNAPS; i++) destroy_snap(&R.s[i]);
+        vk_ffx_release_idle();
+        D.last = NULL, D.host = NULL;
+        retired_n++;
+        rt_log("dlaa: the upscaler is off (%s) since %d presents: its images, DLSS features and FSR contexts are freed "
+               "(%llu time(s); DLSS reported %.0f MiB of its own); made again when it is switched on",
+               D.failed ? "it failed" : "the setting", RETIRE_PRESENTS, (unsigned long long)retired_n,
+               was > 0 ? was / 1048576.0 : 0.0);
+    } else {
+        rt_log("dlaa: frame generation no longer asks for the HUD-less picture: its images are freed");
+    }
+    retire_off_at = retire_hl_at = 0;
+}
+
 void vk_dlaa_pass(VkExec *ex) {
     const VkExecTarget *c = &ex->color[0], *z = &ex->depth;
+    retire_idle();
     if (!dl_active()) return;
     if (D.done) {   // diagnostics: another scene drawn into a light target in the same present interval
         if (ex->pass_ncolor == 1 && c->image && scene_color(c->format) && z->image && z->format == VK_FORMAT_D32_SFLOAT &&

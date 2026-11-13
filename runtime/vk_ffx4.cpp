@@ -28,6 +28,7 @@ extern "C" int vk_ffx4_upscale(VkCommandBuffer, const VkFfxImage *, const VkFfxI
     return 0;
 }
 extern "C" void vk_ffx4_release(void) {}
+extern "C" int vk_ffx4_holds(void) { return 0; }
 extern "C" int vk_ffx4_failed(void) { return 0; }
 extern "C" void vk_ffx4_retry(void) {}
 extern "C" void vk_ffx4_trim(uint64_t) {}
@@ -432,6 +433,12 @@ extern "C" ffxReturnCode_t vk_ffx4_api_query(ffxContext *ctx, ffxQueryDescHeader
 }
 extern "C" ffxReturnCode_t vk_ffx4_api_dispatch(ffxContext *ctx, const ffxDispatchDescHeader *desc) {
     return A.dispatch ? A.dispatch(ctx, desc) : FFX_API_RETURN_ERROR;
+}
+
+extern "C" int vk_ffx4_holds(void) {
+    for (Up &u : U)
+        if (u.ctx) return 1;
+    return 0;
 }
 
 extern "C" void vk_ffx4_release(void) {

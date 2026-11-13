@@ -431,6 +431,20 @@ extern "C" ffxReturnCode_t vk_ffx_dispatch(ffxContext *ctx, const ffxDispatchDes
     return A.ok ? A.dispatch(ctx, desc) : FFX_API_RETURN_ERROR;
 }
 
+// The upscaler is off (vk_dlaa.c retire_idle; the device is idle): FSR 3.1's and FSR 4's upscale contexts go, made again
+// at the next upscale. Frame generation's contexts are not these.
+extern "C" int vk_ffx_holds(void) {
+    for (Up &u : U)
+        if (u.ctx) return 1;
+    return vk_ffx4_holds();
+}
+extern "C" void vk_ffx_release_idle(void) {
+    vk_ffx4_release();
+    if (!A.ok) return;
+    for (Up &u : U)
+        if (u.ctx) destroy_up(&u, "the upscaler is off");
+}
+
 extern "C" void vk_ffx_release(void) {
     vk_ffx4_release();
     if (!A.ok) return;

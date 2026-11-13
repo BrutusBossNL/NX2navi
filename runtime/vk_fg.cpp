@@ -342,6 +342,9 @@ extern "C" void vk_fg_frame(VkCommandBuffer cb, VkSwapchainKHR sc, VkFormat fmt,
 }
 
 extern "C" void vk_fg_release(void) {
+    // the HUD-less picture is made for frame generation alone: a frame generator that runs again asks for it again
+    // (vk_fg_frame); left set, it was made and copied every frame after frame generation went off, and kept
+    vk_dlaa_hudless_wanted = 0;
     vk_fg4_release();
     if (F.fg) vk_ffx_destroy(&F.fg), F.fg = nullptr;
     if (F.sc) vk_ffx_destroy(&F.sc), F.sc = nullptr;
