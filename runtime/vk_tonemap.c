@@ -161,7 +161,14 @@ static void tm_filter_log(int easu, int edge, uint32_t sw, uint32_t sh, uint32_t
                                                                      : "the edge-adaptive pass is not there");
 }
 
-// Views of the scratch images the pass samples, kept for the process (the scratch images live as long).
+// Views of the scratch images the pass samples, kept as long as the image: vk_tonemap_forget drops those of an image
+// fallback_scratch frees, which also gives their places back.
+void vk_tonemap_forget(VkImage src) {
+    for (int i = 0; i < TM.nviews;)
+        if (TM.views[i].img == src) vk_defer_view(TM.views[i].view), TM.views[i] = TM.views[--TM.nviews];
+        else i++;
+}
+
 static VkImageView tm_view(VkImage img, VkFormat f) {
     for (int i = 0; i < TM.nviews; i++)
         if (TM.views[i].img == img && TM.views[i].f == f) return TM.views[i].view;

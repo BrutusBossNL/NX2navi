@@ -702,6 +702,9 @@ VkDescriptorSetLayout vk_empty_set_layout(void);    // set 1 of layouts without 
 // this one). The caller binds its own compute pipeline again afterwards.
 VkImage vk_tonemap_record(VkCommandBuffer cb, VkImage src, VkFormat sf, uint32_t sw, uint32_t sh, uint32_t dw,
                           uint32_t dh, int edge);
+// A source image of the stand-in goes (vk_exec_draw.c fallback_scratch): its views go through the deferred destruction,
+// before another image can take its handle. Called on the replaying thread, as vk_tonemap_record.
+void vk_tonemap_forget(VkImage src);
 // What vk_texture_by_id(id) returns can change only when this does: the slot is registered again, or a texture entry at
 // its storage address is created, dropped, released or taken back into use. Unlocked; read it before the lookup it
 // guards (a lookup may create an entry). 0 when the slot was never registered: nothing is kept under 0.

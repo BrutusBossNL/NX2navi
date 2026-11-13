@@ -32,6 +32,7 @@
 #include "vk_gpa.h"
 #include "mesh_fb.h"
 #include "vk_mesh_fb.h"
+#include "vk_scratch_lru.h"
 #include "platform/platform.h"
 #include "vk_dlaa.h"
 #include "mesh_emu_spirv.h"
@@ -6827,12 +6828,24 @@ static int fmt_rgba8(VkFormat f) {
            f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_A8B8G8R8_UNORM_PACK32 || f == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
 }
 
-// Scratch images for those blits, one per (size, format), kept for the life of the process (a handful).
+// Scratch images for those blits, one per (size, format), at most SCRATCH_N; a new size takes the place of the one used
+// longest ago (vk_scratch_lru.h), whose image goes through the deferred destruction.
+#define SCRATCH_N 8
 static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) {
-    static struct { uint32_t w, h; VkFormat f; VkImage img; VmaAllocation a; } cache[8];
-    static int n;
-    for (int i = 0; i < n; i++) if (cache[i].w == w && cache[i].h == h && cache[i].f == f) return cache[i].img;
-    if (n == 8) return VK_NULL_HANDLE;
+    static ScrEntry ent[SCRATCH_N];
+    static struct { VkImage img; VmaAllocation a; } cache[SCRATCH_N];
+    static int evictions;
+    int hit, evict, i = scr_pick(ent, SCRATCH_N, w, h, (uint32_t)f,
+                                 __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), &hit, &evict);
+    if (hit) return cache[i].img;
+    if (evict) {
+        if (evictions++ < 8)
+            rt_log("vk: a stand-in scratch image of %ux%u (format %d) makes room for one of %ux%u (format %d)",
+                   ent[i].w, ent[i].h, (int)ent[i].f, w, h, (int)f);
+        vk_tonemap_forget(cache[i].img);   // the stand-in's views of it, before a new image can take its handle
+        vk_defer_image(cache[i].img, cache[i].a);
+        ent[i].live = 0, cache[i].img = VK_NULL_HANDLE, cache[i].a = NULL;
+    }
     VkCtx *c = vk_ctx();
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
                             .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -6851,7 +6864,8 @@ static VkImage fallback_scratch(VkExec *ex, uint32_t w, uint32_t h, VkFormat f) 
                                  .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &bar};
     vkCmdPipelineBarrier2(ex->cb, &di);
-    cache[n].w = w, cache[n].h = h, cache[n].f = f, cache[n].img = img, cache[n].a = a, n++;
+    ent[i] = (ScrEntry){w, h, (uint32_t)f, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), 1};
+    cache[i].img = img, cache[i].a = a;
     return img;
 }
 
