@@ -56,6 +56,26 @@ int main(void) {
     snprintf(text, sizeof text, "%s 2x\n", key);
     CHECK(boot_warm_decide(text, key, 0, &tries) == BOOT_WARM_NO, "a count with a tail owes a warm");
 
+    // ---- a marker left by a start that ended while the boot built pipelines
+    int quiet = -1;
+    // A crash the handler saw: the prebuild is skipped at once, whatever the count.
+    snprintf(text, sizeof text, "%s 0\n", key);
+    CHECK(boot_end_decide(text, key, 1, &quiet) == BOOT_END_SKIP, "a reported crash does not skip the prebuild");
+    // No note: the start was closed or stopped. It counts, and the builds are made again, until BOOT_QUIET_ENDS in a row.
+    for (int n = 0; n < BOOT_QUIET_ENDS; n++) {
+        snprintf(text, sizeof text, "%s %d\n", key, n);
+        int want = n + 1 >= BOOT_QUIET_ENDS ? BOOT_END_SKIP : BOOT_END_COUNTED;
+        CHECK(boot_end_decide(text, key, 0, &quiet) == want && quiet == n + 1, "a stopped start after %d before it", n);
+    }
+    // A marker of 0.9.2 holds the GPU and driver alone: the first of its row.
+    CHECK(boot_end_decide(key, key, 0, &quiet) == BOOT_END_COUNTED && quiet == 1, "an old marker skips the prebuild");
+    CHECK(boot_end_decide(key, key, 1, &quiet) == BOOT_END_SKIP, "an old marker with a crash note does not skip");
+    // Another driver's marker says nothing about this one, crash note or not.
+    snprintf(text, sizeof text, "%s 2\n", other);
+    CHECK(boot_end_decide(text, key, 0, &quiet) == BOOT_END_OTHER && quiet == 0, "another driver's marker counted");
+    CHECK(boot_end_decide(text, key, 1, &quiet) == BOOT_END_OTHER, "another driver's crash blamed on this one");
+    CHECK(boot_end_decide("", key, 0, &quiet) == BOOT_END_OTHER, "an empty marker counted");
+
     printf("boot_warm_check: %s\n", fails ? "FAILED" : "passed");
     return fails ? 1 : 0;
 }

@@ -297,6 +297,7 @@ static void crash_handler(const PlatCrash *x) {
                mode_rc);
         plat_exit(mode_rc);
     }
+    vk_pipeline_crash_note();   // first: the next start tells a crash in the boot's builds from a stopped start by it
     rt_log_sync();   // the lines before the crash, then the report, each written as it is made
     char d[160];
     uintptr_t rip = x->rip;

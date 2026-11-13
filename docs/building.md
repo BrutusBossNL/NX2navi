@@ -580,7 +580,8 @@ as short. With the executable it also runs `--probe-memneed` (it prints the mach
 starts nothing) with `mem_need_mb` at 0, at 1 and at a value no machine has, and reads the warning line of the last.
 A change to when a start does the whole warm on the boot screen (`runtime/boot_warm.h`, `runtime/vk_pipeline.c`
 `bf_decide`) passes `python tests\boot_warm_check.py`, which builds the header alone: the warm after a driver change,
-its continuation by a later start, the end of the tries, and no second warm once one is done. The warm itself shows
+its continuation by a later start, the end of the tries, no second warm once one is done, and what a marker left by
+a start that ended in the boot's builds means with and without the crash handler's note. The warm itself shows
 in `--probe-prewarm` on a copy of an install's caches whose `pipeline-cache.bin` has another driver's header (bytes
 8 to 15 of the file are the vendor and device ids, the 16 after them the driver's cache id): the log names the whole
 warm, the compute pipelines on every core and the library warm's answer, and `boot-warm-owed.txt` ends as "done".

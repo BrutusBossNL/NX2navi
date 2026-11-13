@@ -49,6 +49,10 @@ VkResult vmaCreateBuffer(VmaAllocator a, const VkBufferCreateInfo *bi, const Vma
     return VK_SUCCESS;
 }
 void vmaDestroyBuffer(VmaAllocator a, VkBuffer buf, VmaAllocation alloc) { (void)a, (void)buf; free(alloc); }
+VkResult vmaInvalidateAllocation(VmaAllocator a, VmaAllocation alloc, VkDeviceSize off, VkDeviceSize n) {
+    (void)a, (void)alloc, (void)off, (void)n;
+    return VK_SUCCESS;
+}
 
 // A buffer's device address: its handle far above the GPU addresses the tests map.
 static uint64_t dev_of(VkBuffer b) { return (uint64_t)(uintptr_t)b << 28; }
@@ -71,6 +75,22 @@ static void gpu_done(void) {   // the submission being recorded is issued and fi
         if (queue[i].fence <= issued) queue[i].fn(queue[i].arg);
         else queue[k++] = queue[i];
     nqueue = k;
+}
+
+// A store the GPU runs in queue order (vk_gpa_flip_cmd): kept until gpu_runs_stores, as a command buffer keeps it
+// until the GPU reaches it.
+static struct { VkDeviceSize off, n; uint8_t data[32]; } stores[8];
+static int nstores;
+void vkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize n, const void *data) {
+    (void)cb, (void)b;
+    if (nstores == 8 || n > sizeof stores[0].data || (off | n) & 3) { printf("FAIL: a store the stand-in cannot hold\n"); exit(1); }
+    stores[nstores].off = off, stores[nstores].n = n;
+    memcpy(stores[nstores].data, data, (size_t)n);
+    nstores++;
+}
+static void gpu_runs_stores(void) {
+    for (int i = 0; i < nstores; i++) memcpy((uint8_t *)(uintptr_t)table + stores[i].off, stores[i].data, (size_t)stores[i].n);
+    nstores = 0;
 }
 
 // ---- the table as a shader reads it (the layout at the top of vk_gpa.c)
@@ -125,27 +145,35 @@ int main(void) {
     CHECK(read_through(a0 + 4096, 1) == dev_of(b0) + 4096, "a plain page is its own twin");
     gpu_done();
 
-    // a new mirror takes the writes first and the reads once its first copy has run (vk_memory.c mirror_create,
-    // gpa_switch): until then the pages read the imported buffer and the mirror is their twin
+    // a new mirror takes the pool's record over by a store the GPU runs after the mirror's first copy (vk_memory.c
+    // mirror_create, vk_mem_mirror_prologue): what is queued before the store reads and writes the imported buffer
+    // alone, what comes after it reads the mirror and writes both
     VkBuffer m1 = new_buf();
-    uint32_t w0 = vk_gpa_remap_writes(a0, a1, r0, m1, a0);
-    CHECK(w0 && w0 != r0, "a new mirror gets a record for the writes");
-    expect(a0, a1, b0, a0, "a new mirror before its first copy: reads stay on the imported buffer");
-    CHECK(read_through(a0 + 4096, 1) == dev_of(m1) + 4096 && read_through(a1 - 4096, 1) == dev_of(m1) + (a1 - 4096 - a0),
-          "a new mirror before its first copy is the twin, which takes the writes");
+    CHECK(vk_gpa_flip_cmd(VK_NULL_HANDLE, r0, m1, a0, 1), "a new mirror's store is recorded");
+    expect(a0, a1, b0, a0, "before the GPU reaches the store: reads stay on the imported buffer");
+    CHECK(read_through(a0 + 4096, 1) == dev_of(b0) + 4096 && read_through(a1 - 4096, 1) == dev_of(b0) + (a1 - 4096 - a0),
+          "before the GPU reaches the store nothing is written into the mirror");
+    gpu_runs_stores();
+    expect(a0, a1, m1, a0, "after the store: reads are on the mirror");
+    CHECK(read_through(a0 + 4096, 1) == dev_of(b0) + 4096 && read_through(a1 - 4096, 1) == dev_of(b0) + (a1 - 4096 - a0),
+          "after the store the imported buffer is the twin");
     gpu_done();
-    r0 = vk_gpa_remap(a0, a1, w0, m1, a0);
-    expect(a0, a1, m1, a0, "a new mirror after its first copy: reads move to it");
-    CHECK(read_through(a0 + 4096, 1) == dev_of(b0) + 4096, "and the imported buffer is the twin again");
-    // evicted while it still waits for its first copy: the pages go back to the imported buffer alone
+    // evicted: the pages go back to the imported buffer alone, on a record of their own
+    uint32_t was = r0;
     r0 = vk_gpa_remap_plain(a0, a1, r0, b0, a0);
-    gpu_done();
-    VkBuffer m2 = new_buf();
-    w0 = vk_gpa_remap_writes(a0, a1, r0, m2, a0);
-    r0 = vk_gpa_remap_plain(a0, a1, w0, b0, a0);
-    expect(a0, a1, b0, a0, "a mirror gone before its first copy");
+    CHECK(r0 && r0 != was, "an evicted mirror's pages take a new record");
+    expect(a0, a1, b0, a0, "an evicted mirror");
     CHECK(read_through(a0 + 4096, 1) == dev_of(b0) + 4096, "leaves the imported buffer as its own twin");
-    CHECK(!vk_gpa_remap_writes(a0, a1, 0, m2, a0), "a pool without a record gets none for a mirror's writes");
+    gpu_done();
+    // a mirror without a twin: the store names it twice
+    VkBuffer m2 = new_buf();
+    CHECK(vk_gpa_flip_cmd(VK_NULL_HANDLE, r0, m2, a0, 0), "an untwinned mirror's store is recorded");
+    gpu_runs_stores();
+    expect(a0, a1, m2, a0, "an untwinned mirror");
+    CHECK(read_through(a0 + 4096, 1) == dev_of(m2) + 4096, "is its own twin");
+    r0 = vk_gpa_remap_plain(a0, a1, r0, b0, a0);
+    expect(a0, a1, b0, a0, "and goes back to the imported buffer");
+    CHECK(!vk_gpa_flip_cmd(VK_NULL_HANDLE, 0, m2, a0, 1) && !nstores, "a pool without a record gets no store");
     gpu_done();
 
     // an unmapped range reads the zero buffer at once, and its blocks serve no other range while the GPU may still read

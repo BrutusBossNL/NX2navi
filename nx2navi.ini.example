@@ -245,6 +245,10 @@
 # 1: every start waits until every known pipeline is built.
 # 0: never more than the 20 seconds, also after a driver update.
 # prewarm_full = auto
+# The most seconds that first start after a driver update waits (0: no limit). When they are up the game starts and
+# the rest is built in the background while you play, as on any other start. Closing the window while it waits is
+# safe: the next start goes on with it.
+# prewarm_full_s = 600
 # Threads that translate known shaders at start (1 to 64; default: half the CPU threads, at most 16).
 # prewarm_xlate = 8
 # After an update that brings a new shader translator, 1 keeps using the shader cache's translations from the earlier
@@ -328,7 +332,8 @@
 # video memory: 1 turns on the settings written for them and measured on a Radeon RX 580, for every key below that
 # this file does not set itself. Mesh shaders run as compute where the card has none (mesh_emulation), video memory
 # stays within what the driver reports free (vram_heap_limit = auto, vram_reserve_mb = 512), large texture upload
-# batches go to the GPU early (upload_batch_mb = 256), game memory is copied for the GPU while a frame is recorded and
+# batches go to the GPU early (upload_batch_mb = 256; every batch goes at 64 MiB of staging at the latest with or
+# without it, so only a value below 64 acts), game memory is copied for the GPU while a frame is recorded and
 # the game waits less for the GPU (mirror_stage = 1, submit_finish_gpu = 0), frames are prepared on a thread of their
 # own (replay_async = 1, which can show a dark or flickering frame now and then), pools the game refills every frame
 # stay in system memory (mirror_hot = 25), and a texture read after another image was drawn over its memory gets
@@ -545,7 +550,9 @@
 # What DLSS works from: dlaa (the 3D scene at full size), quality, balanced, performance or ultra_performance (the
 # scene at 67, 58, 50 or 33 % of the output, scaled up by DLSS; these replace render_scale and sharpen texture filtering
 # to match). They apply only with dlaa = 1 and the DLSS model next to the executable; otherwise the scene follows
-# render_scale. Changes while the game runs take effect at once.
+# render_scale. Changes while the game runs take effect at once, with one limit: the game's memory for render targets
+# is sized at the start for the mode set then, so dlaa chosen in the menu of a run that started with a smaller mode
+# (or with dlaa = 0) renders at 75 % until the next start.
 # dlss = dlaa
 # AMD FSR in DLSS's place, on any GPU (Windows): with taa = fsr3 and dlaa = 1 the scene is scaled by AMD FSR 3.1 in the
 # mode dlss names (dlaa is FSR's Native AA). The menu's Upscaling row sets all of these. Changes while the game runs

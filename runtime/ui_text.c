@@ -130,8 +130,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                      "driver does not run out. Off: no limit.",
     [UI_MENU_LOWEND_UPLOAD_BATCH] = "Upload batch limit",
     [UI_MENU_LOWEND_UPLOAD_BATCH_DESC] = "Texture uploads waiting in staging memory are sent to the GPU early once they "
-                                       "hold this much, so an area load cannot run video memory out.",
-    [UI_MENU_LOWEND_NO_LIMIT] = "No limit",
+                                       "hold this much, so an area load cannot run video memory out. Every batch is "
+                                       "sent at 64 MB at the latest, so none of these choices changes anything now.",
+    [UI_MENU_LOWEND_NO_LIMIT] = "64 MB",
     [UI_MENU_LOWEND_ASTC_KEEP] = "Keep the ASTC decode buffer",
     [UI_MENU_LOWEND_ASTC_KEEP_DESC] = "The buffer that GPU-decodes compressed textures is kept between upload batches "
                                     "instead of being allocated again for each one.",

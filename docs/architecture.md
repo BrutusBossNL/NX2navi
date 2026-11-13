@@ -121,7 +121,10 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   prepared shader variants built into the driver's own cache when a sample says it lacks them (`vk_pipeline.c`
   `bf_decide`, `bf_wait`). `boot-warm-owed.txt` next to the caches lets a start go on with a warm that an earlier
   one began and did not end, three starts at most, and says when the warm for a GPU and driver is done
-  (`runtime/boot_warm.h`); `NX2NAVI_PREWARM_FULL=0` turns it off.
+  (`runtime/boot_warm.h`); it waits `NX2NAVI_PREWARM_FULL_S` seconds at most (600), after which the rest is built
+  beside the game, and `NX2NAVI_PREWARM_FULL=0` turns it off. A start that dies in the boot's builds leaves a
+  marker or a journal; the crash handler's note (`vk_pipeline_crash_note`) tells the next start whether that was
+  a crash, which skips the prebuild or the variants, or a start that was closed or stopped, which skips nothing.
   `NX2NAVI_PREWARM_WAIT_MS` caps the whole wait, after which the rest finishes in the background.
 - Translator updates: every cache key names the translator, so a new one has no translations. The cache carries the
   previous translator's (`NX2NAVI_SHADER_CARRY`, `runtime/gfx_shader.c` "Carry"): `shader-cache/identities.txt`

@@ -149,16 +149,21 @@ static void pass_marks_init(VkCtx *c) {
 // which every draw had finished: the draw that hung was recorded after it, with its shaders or those of one of the few
 // marks up to the one in word 4. It costs two marker writes per change, a few thousand a frame, so it is for the
 // player who can reproduce a loss, not for everyone.
+// The marks are numbered as they are recorded, by the replay thread and by its workers when a pass's chunks are
+// recorded side by side (vk_exec.c): the number is taken atomically and each number has its own slot of the ring, so
+// no two threads write one. The two marks the GPU names are exact either way. The numbers between them are in queue
+// order only where one thread recorded the pass; with workers some of them belong to chunks that ran earlier, which
+// the report says.
 #define VK_DRAW_MARKS 8192   // power of two
 typedef struct { uint32_t id, pass, draw; const GfxShader *vs, *fs; } DrawMark;
 static DrawMark dring[VK_DRAW_MARKS];
-static uint32_t dseq;        // draw marks made; only the replay thread writes it
+static volatile uint32_t dseq;   // draw marks made; any recording thread takes the next number
 int vk_draw_marks_on;
 
 void vk_draw_mark(VkCommandBuffer cb, const VkPassMark *m, const GfxShader *vs, const GfxShader *fs, uint32_t draw) {
     if (!vk_draw_marks_on || !cb) return;
-    uint32_t id = ++dseq;
-    if (!id) id = ++dseq;   // 0 means no mark
+    uint32_t id = __atomic_add_fetch(&dseq, 1, __ATOMIC_RELAXED);
+    if (!id) id = __atomic_add_fetch(&dseq, 1, __ATOMIC_RELAXED);   // 0 means no mark
     dring[id & (VK_DRAW_MARKS - 1)] = (DrawMark){id, m ? m->id : 0, draw, vs, fs};
     rec_pass_mark(cb, id, 2);
 }
@@ -793,7 +798,9 @@ static void draw_marks_report(void) {
     uint32_t reached = words[4], finished = words[5];
     char t[256];
     rt_log("vk: draw marks (NX2NAVI_DRAW_CRUMBS, %u made): the GPU last reached draw mark %u, and every draw before draw "
-           "mark %u had finished; the draws it had not finished follow these marks:", (unsigned)dseq, (unsigned)reached,
+           "mark %u had finished; the draws it had not finished follow these marks. The marks are numbered as they were "
+           "recorded: with replay workers on, the numbers between the two are not all later in the queue, and only the "
+           "two marks named here are certain:", (unsigned)__atomic_load_n(&dseq, __ATOMIC_RELAXED), (unsigned)reached,
            (unsigned)finished);
     uint32_t n = reached >= finished ? reached - finished + 1 : 1;
     if (n > DRAW_MARK_LINES) n = DRAW_MARK_LINES;
@@ -803,6 +810,10 @@ static void draw_marks_report(void) {
     }
     if (reached >= finished && reached - finished + 1 > n)
         rt_log("vk:   and %u more up to draw mark %u", (unsigned)(reached - finished + 1 - n), (unsigned)reached);
+    if (reached < finished || reached - finished + 1 > n) {   // the mark the GPU last reached, when the list left it out
+        describe_draw_mark(reached, t, sizeof t);
+        rt_log("vk:   draw mark %u, the last the GPU reached: %s", (unsigned)reached, t);
+    }
 }
 
 void vk_pass_marks_report(void) {

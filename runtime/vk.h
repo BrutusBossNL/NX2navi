@@ -192,7 +192,8 @@ void vk_pass_marks_format(const char *source, uint32_t started, uint32_t finishe
 void vk_pass_marks_report(void);    // vk_device.c device_fault_report: the AMD words and the NVIDIA checkpoints, formatted
 // Draw marks (vk_crumbs.c, NX2NAVI_DRAW_CRUMBS=1 with VK_AMD_buffer_marker; off by default): a mark where the shaders
 // or the pipeline state change inside pass m, before the draw with index draw in that pass, so a lost device's report
-// names the shaders of the draws the GPU had not finished. Replay thread only; nothing while vk_draw_marks_on is 0.
+// names the shaders of the draws the GPU had not finished. From any thread that records draws (the replay and its
+// workers): the mark takes its number atomically. Nothing while vk_draw_marks_on is 0.
 extern int vk_draw_marks_on;
 void vk_draw_mark(VkCommandBuffer cb, const VkPassMark *m, const GfxShader *vs, const GfxShader *fs, uint32_t draw);
 
@@ -381,6 +382,7 @@ void vk_mvprev_frame(void);   // each present, beside vk_dlaa_frame
 void vk_mem_mirror_begin(void);
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence);
 int vk_mem_mirror_pending(void);
+int vk_mem_gpa_late(void);   // --probe-vkmem: NX2NAVI_GPA_LATE, the table takes a new mirror up in queue order
 void vk_mem_mirror_prologue(VkCommandBuffer cb);
 // Staged mirror uploads (vk_memory.c): the GPU of the submission being recorded reads guest memory itself (noted by
 // vk_mem_note_live); vk_mem_take_live returns that and starts the next submission's note.

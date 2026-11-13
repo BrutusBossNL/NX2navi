@@ -359,11 +359,15 @@ uint64_t res_heap_extra_kib(void);                         // added to the HeapD
 int res_heapdef_build(const void *in, size_t n, void **out, size_t *out_n);   // the HeapDef table (.byml.zs) with
                                                            // the grown heaps, malloc'd; 0 = cannot (logged)
 void res_heapdef_served(void);                             // romfs.c serves the grown table
+int res_heapdef_ok(void);                                  // 1 once it does; 0 after fs_init: the game has the shipped heaps
 void wide_init(void);
 void wide_present(void);                                    // each present: DLSS's render scale (res_fixed)                                      // after rt_patches_init: widescreen.c, NX2NAVI_GAME_ASPECT
 int wide_available(void);                                  // the generated C has the widescreen sets
 void wide_picture(unsigned *w, unsigned *h);               // the picture the game draws (its scene is never larger)
 uint64_t wide_heap_extra_kib(void);                        // the texture heap's growth for the widescreen picture
+// The most res_heap_extra_kib may be (memory.c): with more the application pool passes the heap region and the
+// game's own SetHeapSize is refused. A whole number of 2 MiB.
+uint64_t mem_heap_extra_max_kib(void);
 void res_init(void);                                       // after rt_patches_init: the patch page and the sets
 float res_dlss_lod_bias(void);                             // NX2NAVI_DLSS upscaling: texture LOD bias (<= 0)
 int res_dlss_mode(const char *mode);                       // NX2NAVI_DLSS changed while running: new scene size
@@ -456,6 +460,9 @@ int vk_pipeline_warm_shaders(void);                        // vk_pipeline.c: --w
 int vk_pipeline_prepare_pipelines(void);                   // vk_pipeline.c: --prepare-pipelines (the shared pipeline list)
 int vk_pipeline_probe_prewarm(void);                       // vk_pipeline.c: --probe-prewarm
 int vk_pipeline_probe_buildgate(void);                     // vk_pipeline.c: --probe-buildgate
+// main.c crash_handler: a fault while the boot builds pipelines or stage libraries leaves a note, which tells the
+// next start that the marker or journal it finds is a crash's and not a stopped start's (vk_pipeline.c pm_skipped).
+void vk_pipeline_crash_note(void);
 int vk_ffx_probe_cache(void);                              // vk_ffx.cpp: --probe-ffx-cache
 // vk_device.c: the drivers' own shader caches beside the exe (MESA_SHADER_CACHE_DIR, on NVIDIA's Linux driver
 // __GL_SHADER_DISK_CACHE_PATH and _SIZE) in the environment, once; before any thread can load a Vulkan driver
