@@ -198,18 +198,37 @@ static int shrink_sharpen(VkCommandBuffer cb, VkImage src, const int crop[4], Vk
     return 2;
 }
 
+// Presents in a row that FSR 1 did not scale (another upscaler chosen, or a picture the window shows at its own size)
+// after which its two images at the window's size go (56 MiB at 2560x1440, 127 MiB at 2160 lines; kept for the process
+// before). A present that scales again makes them anew.
+#define FSR_IDLE_PRESENTS 300
+static unsigned fsr_idle;
+
+static void fsr_unused(void) {
+    if (!F.img[0] || ++fsr_idle < FSR_IDLE_PRESENTS) return;
+    VkCtx *c = vk_ctx();
+    vk_queue_lock();
+    vkDeviceWaitIdle(c->device);   // earlier presents may still read them
+    vk_queue_unlock();
+    free_images(c);
+    fsr_idle = 0;
+    rt_log("vk: FSR 1 has not scaled a picture for %d presents: its images are freed", FSR_IDLE_PRESENTS);
+}
+
 int vk_fsr_record(VkCommandBuffer cb, unsigned slot, VkImage src, VkFormat fmt, int sw, int sh, const int crop[4],
                   VkImage dst, const int out[4]) {
     int cw = crop[2], ch = crop[3];
     uint32_t dw = (uint32_t)out[2], dh = (uint32_t)out[3];
-    if (strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr") || !fmt || (dw == (uint32_t)cw && dh == (uint32_t)ch)) return 0;
+    if (strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr") || !fmt || (dw == (uint32_t)cw && dh == (uint32_t)ch))
+        return fsr_unused(), 0;
     int sharp = cfg_int("NX2NAVI_SHARPNESS");
     if (sharp < 0) sharp = 0;
     if (sharp > 100) sharp = 100;
     // EASU only enlarges: a picture smaller than the crop in either direction takes the shrink path, which without
     // sharpening is the plain blit of the caller
     int shrink = dw < (uint32_t)cw || dh < (uint32_t)ch;
-    if (shrink && !sharp) return 0;
+    if (shrink && !sharp) return fsr_unused(), 0;
+    fsr_idle = 0;
     VkCtx *c = vk_ctx();
     if (!F.tried) init(c);
     if (!F.ok || !ensure_images(c, dw, dh)) return 0;

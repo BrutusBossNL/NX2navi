@@ -75,10 +75,13 @@ static struct {
     int none_told;
 } A = {.frame_read = ~0ull, .composed = 1};
 
+static void smaa_idle(int mode);
+
 int vk_aa_mode(void) {
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (f == A.frame_read) return A.mode;
     A.frame_read = f;
+    smaa_idle(A.mode);   // the frame before's mode
     const char *v = cfg_value("NX2NAVI_AA");
     int want = VK_AA_GAME;
     for (int i = 1; i < 4; i++)
@@ -260,6 +263,22 @@ static int tables_make(void) {
     vk_upload_flush(1);
     P.tables = 1;
     return 1;
+}
+
+// SMAA's work images (35 MiB at a 2560x1440 scene, 79 MiB at 2160 lines) were kept for the process once SMAA had run.
+// After SMAA_IDLE_FRAMES frames of another mode they go, once the GPU is past the submission being recorded
+// (img_free defers); SMAA chosen again makes them anew. The lookup textures, a few hundred KiB, stay.
+#define SMAA_IDLE_FRAMES 600
+static void smaa_idle(int mode) {
+    static unsigned idle;
+    if (mode == VK_AA_SMAA || !P.luma.img) {
+        idle = 0;
+        return;
+    }
+    if (++idle < SMAA_IDLE_FRAMES) return;
+    img_free(&P.luma), img_free(&P.edges), img_free(&P.weights);
+    P.w = P.h = 0, idle = 0;
+    rt_log("aa: SMAA has not run for %d frames: its work images are freed", SMAA_IDLE_FRAMES);
 }
 
 // SMAA's work images at the scene's size, made again when it changes
