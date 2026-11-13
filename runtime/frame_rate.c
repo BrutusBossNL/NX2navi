@@ -759,10 +759,13 @@ static void world_clock(double dt, double step) {
 // 32-byte entries at +0x30, each starting with the group; a group's transform is three rows of four floats at +0x88,
 // +0x98 and +0xa8 (main+0x386a7e8..0x386a800), its translation in their fourth lanes. Each update the probe reads every
 // group's translation and Link's position (Player +0x31c, player_pos), and logs the step, Link's position and how far
-// he moved since the last update, and the moving group nearest to him (within FLOOR_PROBE_RADIUS horizontally) with
-// how far it moved: at 60 fps the two moves match while he stands on it. The value is the number of lines to write
-// (1 means 4000); off it costs one test per present. The guest memory is read where the host can read it directly.
+// he moved since the last update, and the FLOOR_PROBE_NEAR groups nearest to him (within FLOOR_PROBE_RADIUS
+// horizontally), moved or not, each with its translation and how far it moved since the last present; with no group
+// that near, one line in 30 presents still gives Link alone. At 60 fps the moves of Link and of the group under him
+// match while he stands on it. The value is the number of lines to write (1 means 4000); off it costs one test per
+// present.
 #define FLOOR_PROBE_RADIUS 8.0f
+#define FLOOR_PROBE_NEAR 4   // the groups a line names: the nearest, moved or not
 // The manager holds a few thousand groups (5345 in the Deku Tree; most entries are empty), and a readability check per
 // read costs a system call: at one per group a present the probe made every frame about 1.9 s. So the entries and the
 // groups' rows are read in two batched copies a present (memory.c mem_copy_readable: one lock, no system call for
@@ -841,27 +844,42 @@ static void floor_probe(void) {
         which[n++] = i;
     }
     mem_copy_readable(dst, (const uint64_t (*)[2])src, n, ok);
-    int best = -1;
-    float best_d2 = FLOOR_PROBE_RADIUS * FLOOR_PROBE_RADIUS, best_t[3] = {0}, best_m[3] = {0};
+    int near[FLOOR_PROBE_NEAR], nn = 0;
+    float near_d2[FLOOR_PROBE_NEAR], near_t[FLOOR_PROBE_NEAR][3], near_m[FLOOR_PROBE_NEAR][3];
     for (int k = 0; k < n; k++) {
         if (!ok[k]) continue;
         uint32_t i = which[k];
         const float *r = rows + 12 * k;
         float t[3] = {r[3], r[7], r[11]}, *last = floor_last + 3 * i;
         if (!isfinite(t[0]) || !isfinite(t[1]) || !isfinite(t[2])) continue;
-        float m[3] = {t[0] - last[0], t[1] - last[1], t[2] - last[2]};
-        int moved = i < floor_last_n && (m[0] != 0 || m[1] != 0 || m[2] != 0);
+        float m[3] = {0, 0, 0};
+        if (i < floor_last_n) m[0] = t[0] - last[0], m[1] = t[1] - last[1], m[2] = t[2] - last[2];
         memcpy(last, t, sizeof t);
-        if (!moved) continue;
         float d2 = (t[0] - link[0]) * (t[0] - link[0]) + (t[2] - link[2]) * (t[2] - link[2]);
-        if (d2 < best_d2) best = (int)i, best_d2 = d2, memcpy(best_t, t, sizeof t), memcpy(best_m, m, sizeof m);
+        if (d2 >= FLOOR_PROBE_RADIUS * FLOOR_PROBE_RADIUS) continue;
+        if (nn == FLOOR_PROBE_NEAR && d2 >= near_d2[nn - 1]) continue;   // insertion by distance, the farthest drops
+        int at = nn < FLOOR_PROBE_NEAR ? nn++ : nn - 1;
+        while (at > 0 && near_d2[at - 1] > d2) {
+            near[at] = near[at - 1], near_d2[at] = near_d2[at - 1];
+            memcpy(near_t[at], near_t[at - 1], sizeof near_t[at]);
+            memcpy(near_m[at], near_m[at - 1], sizeof near_m[at]);
+            at--;
+        }
+        near[at] = (int)i, near_d2[at] = d2, memcpy(near_t[at], t, sizeof t), memcpy(near_m[at], m, sizeof m);
     }
     floor_last_n = count;
-    if (link_ok && floor_link_ok && best >= 0) {
-        rt_log("floor probe: step %.4f frames; link %.4f %.4f %.4f moved %.5f %.5f %.5f; "
-               "group %d of %u at %.4f %.4f %.4f moved %.5f %.5f %.5f", (double)frame_step_frames(), link[0], link[1],
-               link[2], link[0] - floor_link[0], link[1] - floor_link[1], link[2] - floor_link[2], best, count,
-               best_t[0], best_t[1], best_t[2], best_m[0], best_m[1], best_m[2]);
+    static unsigned quiet;   // presents since the last line without a group near Link
+    if (floor_link_ok && (nn > 0 || ++quiet >= 30)) {
+        quiet = 0;
+        char line[160 + FLOOR_PROBE_NEAR * 120];
+        int o = snprintf(line, sizeof line, "floor probe: step %.4f frames; link %.4f %.4f %.4f moved %.5f %.5f %.5f; "
+                         "%d of %u groups within %.0f m", (double)frame_step_frames(), link[0], link[1], link[2],
+                         link[0] - floor_link[0], link[1] - floor_link[1], link[2] - floor_link[2], nn, count,
+                         (double)FLOOR_PROBE_RADIUS);
+        for (int k = 0; k < nn && o > 0 && o < (int)sizeof line; k++)
+            o += snprintf(line + o, sizeof line - o, "; group %d at %.4f %.4f %.4f moved %.5f %.5f %.5f", near[k],
+                          near_t[k][0], near_t[k][1], near_t[k][2], near_m[k][0], near_m[k][1], near_m[k][2]);
+        rt_log("%s", line);
         floor_probe_left--;
     }
     if (link_ok) memcpy(floor_link, link, sizeof link);
