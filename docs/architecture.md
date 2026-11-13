@@ -222,6 +222,17 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   while the swapchain is SDR, and a change of the setting makes the swapchain again in the other format
   (`gfx_present.c` `window_settings_live`). Only `native` waits for a restart, as the game asks about the display
   once. `NX2NAVI_HDR_LIVE=0` leaves the HDR path out of a run that starts with HDR off.
+- Low latency (`vk_lowlat.c`, `NX2NAVI_LOW_LATENCY`, off by default): the graphics driver holds each frame's start, so
+  the pad is read as late as the picture's time allows and no finished picture waits. NVIDIA's mode runs through
+  `VK_NV_low_latency2`: the window's swapchain is made with the latency mode, the frame sleeps in the driver before its
+  first pad read or window image acquire, whichever the game makes first, and its stages are marked with the frame's
+  number, on the guest thread up to the first submission, on the replaying thread at the end of its submissions and on
+  the present thread around the host present. AMD's runs through `VK_AMD_anti_lag`: its input stage where the frame
+  starts, its present stage before the host present. While the mode is in effect the driver's sleep keeps the frame
+  limit and the pacer holds nothing (`nvn_api_obj.c` `nvnQueuePresentTexture`, `vk_lowlat_pace`); the pacer takes the
+  limit back while a movie plays, while no present goes out, and for the rest of the run when the frames show that the
+  driver does not hold it. DLSS Frame Generation brings its own low latency (`vk_dlssg.c`), and the direct path is off
+  in such a run; NVIDIA's is also off while another frame generation presents the frames.
 - ASTC textures are uploaded as they are where the device samples ASTC, and decoded by a compute shader everywhere
   else (`vk_astc.c`); under 20 GiB of video memory the decoder encodes them to BC3.
 - Texture detail (`texture_detail`, `vk_texture.c` "texture detail"): on a card with little video memory the large
