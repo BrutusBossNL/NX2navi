@@ -994,6 +994,98 @@ static void floor_scan_read(int n, float *out) {
 
 static float hdist(const float a[3], const float b[3]) { return hypotf(a[0] - b[0], a[2] - b[2]); }
 
+// The owner of a floor point (floor_scan, once, when its survivors are known): the 0x500 bytes from 0x400 before the
+// point to 0x100 after it as 8-byte words, the words that point into main's data (where its vtables are) named as
+// main offsets, and the objects that hold a pointer to it. Those are found by one more walk of the heap and alias
+// regions, for the start of each of the FLOOR_SCAN_BASES objects nearest below the point (a word that points into
+// main's data is taken as the vtable that starts one), and each holder is logged with the vtable nearest below it. So
+// one run gives the class whose object the platform's position is in, and the classes that refer to it (the character
+// controller's ground reference among them), for the code that reads it to be found by its vtable.
+#define FLOOR_SCAN_BASES 4
+#define FLOOR_SCAN_HOLDERS 24
+static int main_data_word(uint64_t w) {
+    return w >= MOD_MAIN_BASE + 0x4800000 && w < MOD_MAIN_BASE + MOD_MAIN_SIZE && !(w & 7);
+}
+
+// The nearest word at or below a (within 0x400) that points into main's data: the vtable of the object a is in.
+static uint64_t vtable_below(uint64_t a, uint64_t *where) {
+    uint64_t buf[0x80];
+    uint8_t ok = 0, *dst = (uint8_t *)buf;
+    uint64_t lo = (a & ~7ull) - 0x3f8, src[1][2] = {{lo, sizeof buf}};
+    *where = 0;
+    if (mem_copy_readable(&dst, (const uint64_t (*)[2])src, 1, &ok) != 1) return 0;
+    for (int i = 0x7f; i >= 0; i--)
+        if (main_data_word(buf[i])) {
+            *where = lo + 8ull * i;
+            return buf[i];
+        }
+    return 0;
+}
+
+static void floor_scan_dump(uint64_t a) {
+    enum { PIECE = 16 << 20 };
+    uint64_t base = (a & ~7ull) - 0x400, words[0xa0];
+    uint8_t ok = 0, *dst = (uint8_t *)words;
+    uint64_t src[1][2] = {{base, sizeof words}};
+    if (mem_copy_readable(&dst, (const uint64_t (*)[2])src, 1, &ok) != 1) {
+        rt_log("floor scan: the words around %#llx cannot be read", (unsigned long long)a);
+        return;
+    }
+    rt_log("floor scan: the words from %#llx to %#llx around the floor point %#llx:", (unsigned long long)base,
+           (unsigned long long)(base + sizeof words), (unsigned long long)a);
+    for (int i = 0; i < 0xa0; i += 4)
+        rt_log("floor scan:   %#llx: %016llx %016llx %016llx %016llx", (unsigned long long)(base + 8ull * i),
+               (unsigned long long)words[i], (unsigned long long)words[i + 1], (unsigned long long)words[i + 2],
+               (unsigned long long)words[i + 3]);
+    uint64_t starts[FLOOR_SCAN_BASES];
+    int nb = 0;
+    for (int i = 0x9f; i >= 0; i--) {
+        if (!main_data_word(words[i])) continue;
+        uint64_t at = base + 8ull * i;
+        rt_log("floor scan:   %#llx (point %+lld) holds main+%#llx", (unsigned long long)at, (long long)(at - a),
+               (unsigned long long)(words[i] - MOD_MAIN_BASE));
+        if (at <= a && nb < FLOOR_SCAN_BASES) starts[nb++] = at;
+    }
+    if (!nb) return;
+    // the holders: every 8-byte word in the heap and alias regions that holds one of the starts
+    uint64_t t0 = plat_now_ns(), holder[FLOOR_SCAN_HOLDERS], held[FLOOR_SCAN_HOLDERS];
+    int nh = 0;
+    const RtGuestLayout *l = mem_layout();
+    const RtRange ranges[2] = {l->heap, l->alias};
+    for (int r = 0; r < 2 && nh < FLOOR_SCAN_HOLDERS; r++) {
+        uint64_t x = ranges[r].base, end = ranges[r].base + ranges[r].size;
+        while (x < end && nh < FLOOR_SCAN_HOLDERS) {
+            RtMemoryInfo mi;
+            if (mem_query(x, &mi) || !mi.size) break;
+            uint64_t stop = mi.base + mi.size < end ? mi.base + mi.size : end;
+            if (!mi.state || (mi.perm & 3) != 3) {
+                x = stop;
+                continue;
+            }
+            while (x < stop && nh < FLOOR_SCAN_HOLDERS) {
+                uint64_t n = stop - x < PIECE ? stop - x : PIECE;
+                if (n >= 8 && mem_read_hold(x, n)) {
+                    const uint64_t *w = (const uint64_t *)(uintptr_t)x;
+                    for (uint64_t i = 0; i < n / 8 && nh < FLOOR_SCAN_HOLDERS; i++)
+                        for (int b = 0; b < nb; b++)
+                            if (w[i] == starts[b]) holder[nh] = x + 8 * i, held[nh++] = starts[b];
+                    mem_read_release();
+                }
+                x += n;
+            }
+        }
+    }
+    rt_log("floor scan: %d holders of the %d object starts below the point found in %.0f ms", nh, nb,
+           (plat_now_ns() - t0) / 1e6);
+    for (int h = 0; h < nh; h++) {
+        uint64_t at = 0, vt = vtable_below(holder[h], &at);
+        rt_log("floor scan:   %#llx holds %#llx; its object's vtable main+%#llx at %#llx (holder %+lld)",
+               (unsigned long long)holder[h], (unsigned long long)held[h],
+               (unsigned long long)(vt ? vt - MOD_MAIN_BASE : 0), (unsigned long long)at,
+               (long long)(at ? holder[h] - at : 0));
+    }
+}
+
 static void floor_scan(const float link[3], int link_ok) {
     if (floor_scan_left < 0) {
         const char *e = cfg_get("NX2NAVI_FLOOR_SCAN");
@@ -1060,6 +1152,10 @@ static void floor_scan(const float link[3], int link_ok) {
             return;
         }
         fs.n = kept < FLOOR_SCAN_SHOW ? kept : FLOOR_SCAN_SHOW;
+        int deep = 0;   // the owner of the survivor deepest below Link: the floor's own body or matrix
+        for (int k = 1; k < fs.n; k++)
+            if (fs.val[3 * k + 1] < fs.val[3 * deep + 1]) deep = k;
+        floor_scan_dump(fs.addr[deep]);
         memcpy(fs.sec_link, link, 12);
         fs.sec_ns = plat_now_ns();
         fs.state = 2;
