@@ -82,7 +82,7 @@ static void want_room(int what, const char *code) {
         else coop_join(code);
         return;
     }
-    if (g_view.state == COOP_OFF) opt_apply("NX2NAVI_COOP", "1");
+    if (g_view.state == COOP_OFF) opt_apply("NX2NAVI_COOP_STEAM", "1");
     g_pending = what;
     snprintf(g_pending_code, sizeof g_pending_code, "%s", code ? code : "");
     g_pending_until = plat_now_ms() + PENDING_MS;
@@ -112,7 +112,7 @@ static void settings_rows(void) {
     opt_toggle("NX2NAVI_COOP_SHARE", UI_MENU_COOP_SHARE, UI_MENU_COOP_SHARE_DESC);
     opt_toggle("NX2NAVI_COOP_NAMES", UI_MENU_COOP_NAMES, UI_MENU_COOP_NAMES_DESC);
     opt_toggle("NX2NAVI_COOP_CHAT", UI_MENU_COOP_CHAT_SHOW, UI_MENU_COOP_CHAT_SHOW_DESC);
-    opt_toggle("NX2NAVI_COOP", UI_MENU_COOP_ON, UI_MENU_COOP_ON_DESC);
+    opt_toggle("NX2NAVI_COOP_STEAM", UI_MENU_COOP_ON, UI_MENU_COOP_ON_DESC);
 }
 
 static void chat_text(const CoopChatLine &l, char *out, size_t cap) {
@@ -122,7 +122,7 @@ static void chat_text(const CoopChatLine &l, char *out, size_t cap) {
 
 static void rows_out(void) {
     if (g_view.state == COOP_OFF && !g_pending) {
-        opt_toggle("NX2NAVI_COOP", UI_MENU_COOP_ON, UI_MENU_COOP_ON_DESC);
+        opt_toggle("NX2NAVI_COOP_STEAM", UI_MENU_COOP_ON, UI_MENU_COOP_ON_DESC);
         return;
     }
     if (g_view.local) opt_text(UI_MENU_COOP_LOCAL);
@@ -439,7 +439,7 @@ static bool g_over_on;
 bool coop_overlay_tick(void) {
     static unsigned cfg_seen = ~0u;
     static uint32_t serial;
-    if (unsigned v = cfg_version(); v != cfg_seen) cfg_seen = v, g_over_on = cfg_bool("NX2NAVI_COOP") != 0;
+    if (unsigned v = cfg_version(); v != cfg_seen) cfg_seen = v, g_over_on = cfg_bool("NX2NAVI_COOP_STEAM") != 0;
     if (!g_over_on) return false;
     if (uint32_t s = coop_serial(); s != serial) serial = s, coop_view(&g_over);
     if (g_over.invite_room) return true;

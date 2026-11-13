@@ -590,7 +590,7 @@ static void coop_main(void *arg) {
     while (!__atomic_load_n(&P.stop, __ATOMIC_ACQUIRE)) {
         uint64_t now = plat_now_ms();
         unsigned v = cfg_version();
-        if (v != cfg_seen) cfg_seen = v, on = cfg_bool("NX2NAVI_COOP") && RT_V111;
+        if (v != cfg_seen) cfg_seen = v, on = cfg_bool("NX2NAVI_COOP_STEAM") && RT_V111;
         if (!on) {
             net_down();
             if (G.state != COOP_OFF) G.state = COOP_OFF, G.note = COOP_NOTE_NONE, publish(now);

@@ -5,7 +5,7 @@ other players' names where their Link stands in your world, you can chat, and pr
 counts for everyone.
 
 **Co-op is experimental and off by default.** Turn it on in the menu's Co-op tab (*Co-op (experimental)*), or with
-`coop = 1` under `[coop]` in `nx2navi.ini`. With it off the game uses no network at all.
+`coop_steam = 1` under `[coop]` in `nx2navi.ini`. With it off the game uses no network at all.
 
 Not in this version: the other players are shown as a name with a distance, not as a Link model, and enemies, pots
 and the time of day are each game's own.
@@ -90,7 +90,7 @@ dropped and counted in the log.
 
 | Key | Default | |
 |---|---|---|
-| `coop` | `0` | on or off, at once. On: the game signs in to Steam; off: no network |
+| `coop_steam` | `0` | on or off, at once. On: the game signs in to Steam; off: no network. (`coop`, the switch of the co-op of versions up to 0.9.2, does nothing: a line of it left in a file turns nothing on) |
 | `coop_share` | `1` | in a room, share progress, items and songs (above) |
 | `coop_names` | `1` | show the other players' names where they stand. Needs DLSS, FSR or TAA on: only then does the menu know where the camera looks |
 | `coop_chat` | `1` | show new chat lines, and who joined or left, over the game for a few seconds while the menu is closed |
