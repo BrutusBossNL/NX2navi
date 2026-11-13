@@ -448,9 +448,15 @@ static void resolve_target(const tex_t *t, const view_t *v, int has_v, int depth
     if (img && !depth_slot && bc_target(t, v, has_v, img, o)) return;   // a 3D BC image: its stand-in
     VkImageUsageFlags need = depth_slot ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     int is3d = img && img->type == VK_IMAGE_TYPE_3D && !depth_slot;   // slices drawn through 2D views (2D_ARRAY_COMPATIBLE)
+    // A replay worker's lookup that needs its turn returns no image (vk_texture_deferred), and the op is replayed again
+    // in turn (resolve_rt's callers): not a target left out, so not logged as one. Logged, the first such lookup read
+    // as if the game drew into depth or cube targets the replay could not render.
+    if (!img && vk_texture_deferred()) return;
     if (!img || !(img->usage & need) || (img->type != VK_IMAGE_TYPE_2D && !is3d)) {
-        warn_once(W_UNRENDERABLE, "render target format %#x target %d (%ux%u) is not renderable here: left out",
-                  t->d.format, t->d.target, t->d.width, t->d.height);
+        warn_once(W_UNRENDERABLE, "render target format %#x target %d (%ux%u) is not renderable here (%s): left out",
+                  t->d.format, t->d.target, t->d.width, t->d.height,
+                  !img ? "no image" : !(img->usage & need) ? (depth_slot ? "no depth attachment usage" : "no colour attachment usage")
+                                    : "not a 2D image");
         return;
     }
     uint32_t level = has_v && v->set_levels ? v->base_level : 0;
