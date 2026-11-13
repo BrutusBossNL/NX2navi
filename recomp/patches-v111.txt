@@ -79,6 +79,31 @@ site osolver main 38afd10 bd440d02 1e2a1002   # the same three words in the seco
 site osolver main 38afd1c 1f010800 1f218800
 site osolver main 38afd20 1e380001 1e280001
 
+# Fixed steps of the height-field surfaces: the physics' two water managers, phive::InteractiveWaterMgr (its update
+# main+0x3875f20, the vtable slot at main+0x4c32f90) and phive::ResponsiveWaterMgr (main+0x3882660, the slot at
+# main+0x4c33a88; the names are those of their postUpdateWorld profiler scopes, and their bodies are named
+# InteractiveWater_* and ResponsiveWater_* WaterBody, IceBody and SandBody), and the game's interactive floor
+# simulation built on the same base (main+0x632cb0, the slot at main+0x4c338e0; its object is made at main+0x990040 by
+# the code that sets up the InteractiveFloorBody, main+0x98fb70; the Deku Tree's ground webs are such a floor, the
+# "SimulationCarpet" of DgnObj_Spiderweb_Ground's InteractiveFloorControllerExtensionParam, 24 x 24 points) simulate
+# their surfaces in fixed steps of 1/60 s. Each update takes the frame's seconds (s0, kept in s8), divides them by 1/60
+# (main+0x3876014, main+0x38827f8, main+0x632cfc) and cuts the quotient to a whole number of steps, n = trunc(seconds *
+# 60) (fcvtzs into w8, w8 and w22); it keeps n, and min(max(n, 0), 3) as the count of steps it queues, each with a step
+# of 1/60 s (main+0x38764d8, main+0x3882cb0, main+0x632d40), and skips the whole simulation while n is under 1
+# (main+0x3876230, main+0x38829e8, main+0x632f20). Nothing keeps the fraction: at 60 fps every update runs one step, at
+# 30 two, and every update shorter than 1/60 s none, so above 60 fps those surfaces stood still whatever pushed into
+# them, a web under Link among them. After the division each site calls the page's +0xf20
+# (runtime/frame_rate.c frame_rate_sim_host): s0 becomes the whole steps in the quotient plus a remainder kept for the
+# object (x19, the function's x0 at all three), as a float, and the game's own cut and clamp follow. So the surfaces
+# run 60 steps a second at any frame rate, and an update of exactly 1/60 s gives what the game computes. The host
+# writes only s0's low lane, which the division wrote; x30 is the function's own, saved by its prologue
+# (main+0x3875f2c, main+0x388266c, main+0x632cbc) and read only by its return after the epilogue reloads it; nothing
+# reads or writes the flags.
+set owater NX2NAVI_WATER_STEPS 1
+site owater main 3876014 1e201900 1e201900 9458abc3   # fdiv s0, s8, s0 -> fdiv s0, s8, s0; bl page+0xf20 (InteractiveWaterMgr)
+site owater main 38827f8 1e201900 1e201900 945879ca   # the same at ResponsiveWaterMgr's
+site owater main 632cfc 1e201900 1e201900 9521b889    # the same at the interactive floors'
+
 # Movie-synchronised event timelines: the movie layer advances its counter at +760 on each draw of a ready
 # picture. main+0x3b3ec10 reads that counter for the event dispatcher, so rendering a picture twice also
 # advances voices and overlays twice. Both ready paths reach these sites only after main+0x3b5ce80 checks

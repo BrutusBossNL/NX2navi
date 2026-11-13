@@ -48,6 +48,10 @@
 # rounded that step down to nothing: the window stayed until the area was left and its counting sound went on. 1 lets
 # it count at least one a frame; 0 is the game's own count.
 # pickup_count = 1
+# Water surfaces and the springy floors (the Deku Tree's webs) are simulated in fixed steps of 1/60 s, as many as the
+# frame's time holds, and the game dropped the rest: above 60 fps every frame ran none, so they stood still under Link.
+# 1 keeps the rest for the next frame, 60 steps a second at any frame rate; 0 is the game's own count. Read at start.
+# water_steps = 1
 # A movie's narration and fades follow the picture on screen: 1 counts their time from the shown picture's
 # timestamp, so they stay with it at any frame rate (with movie_fps = 0 too) and wait when the picture stalls; 0 counts
 # the game's redraws, as before, which keeps them with the music when the picture stalls. Read at start; needs game

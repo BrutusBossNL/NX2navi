@@ -87,7 +87,25 @@ static uint32_t day(uint64_t object, float secs) {   // frame_rate_day_host: x19
     frame_rate_day_host(&cpu);
     return (uint32_t)cpu.x[8];
 }
-
+// frame_rate_sim_host as the surfaces' sites call it (set owater): after the site's division, the update's seconds over
+// 1/60 s in s0 and the object in x19; then the game's own cut of s0 (fcvtzs) gives the steps. Only s0's low lane may
+// change: every general register, the other lanes and vector registers and the flags stay as they were.
+static uint32_t sim(uint64_t object, float seconds) {
+    Cpu c, before;
+    uint8_t *p = (uint8_t *)&c;
+    for (size_t i = 0; i < sizeof c; i++) p[i] = (uint8_t)(i * 37u + 11u);
+    float quotient = seconds / (1.0f / 60.0f);   // the site's fdiv s0, s8, s0 (the literal is 1/60 as a float)
+    uint32_t bits;
+    memcpy(&bits, &quotient, 4);
+    c.v[0] = bits, c.x[19] = object;   // the division wrote s0 and zeroed the lanes above it
+    before = c;
+    frame_rate_sim_host(&c);
+    int same = c.nzcv == before.nzcv && c.sp == before.sp && !memcmp(&c.v[1], &before.v[1], sizeof c.v - sizeof c.v[0]) &&
+               c.v[0] >> 32 == 0 && !memcmp(c.x, before.x, sizeof c.x);
+    CHECK(same, "the surfaces' site changed something besides s0's low lane");
+    memcpy(&quotient, &c.v[0], 4);
+    return cut_fcvtzs(quotient);   // the game's fcvtzs after the site
+}
 int main(int argc, char **argv) {
     int mean = argc > 1 && !strcmp(argv[1], "mean");
     if (mean) steady = "0";
@@ -220,6 +238,32 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 60; i++) CHECK(water(pond, 1.0f) == 1, "one frame, call %d", i);
         for (int i = 0; i < 30; i++) CHECK(water(pond, 2.0f) == 2, "two frames, call %d", i);
         CHECK(water(pond, 0.5f) == 1, "the half frame kept through the whole ones");
+    }
+    // The water managers and the floors (set owater): at 120, 144 and 240 fps each runs 60 fixed steps a second (the cut
+    // gave none above 60), beside 64 water objects; at 60 and 30 fps one and two steps an update, as the game counts them.
+    {
+        const uint64_t interactive = 0x7400000000ull, responsive = 0x7400001000ull, floor = 0x7400002000ull,
+                       first = 0x7500000000ull;
+        const float rates[] = {144.0f, 240.0f, 120.0f};
+        for (int r = 0; r < 3; r++) {
+            uint32_t a = 0, b = 0, c = 0, w = 0;
+            int frames = (int)(rates[r] * 10);
+            for (int f = 0; f < frames; f++) {
+                a += sim(interactive, 1.0f / rates[r]);
+                for (int k = 0; k < 64; k++) w += water(first + 0x1000 * (uint64_t)k, 60.0f / rates[r]);
+                b += sim(responsive, 1.0f / rates[r]);
+                c += sim(floor, 1.0f / rates[r]);
+            }
+            CHECK(a >= 599 && a <= 600 && b >= 599 && b <= 600 && c >= 599 && c <= 600,
+                  "%.0f fps: the managers and the floor ran %u, %u and %u steps in 10 s",
+                  rates[r], a, b, c);
+            CHECK(w >= 64 * 599, "%.0f fps: the water objects beside the managers ran %u steps", rates[r], w);
+        }
+        for (int i = 0; i < 120; i++) CHECK(sim(interactive, 1.0f / 60.0f) == 1, "60 fps, update %d", i);
+        for (int i = 0; i < 60; i++) CHECK(sim(responsive, 1.0f / 30.0f) == 2, "30 fps, update %d", i);
+        CHECK(sim(interactive, 0.0f) == 0 && sim(interactive, -1.0f / 60.0f) == 0xffffffffu &&
+                  sim(interactive, NAN) == 0, "no time, negative time and NaN are cut as fcvtzs cuts");
+        CHECK(sim(interactive, 1.0f / 15.0f) == 4, "four steps for a 15 fps update (the game's clamp to 3 follows)");
     }
     printf("frame_step_check: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;

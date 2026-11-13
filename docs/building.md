@@ -462,12 +462,14 @@ and runs each step as a start of the game on a profile it makes: the export, an 
 exported, its backup and swap at the next start, the zips it refuses and Cancel. No game files.
 
 A change to the step Ocarina is given each frame (`runtime/frame_rate.c` `ocarina_step`), or to the whole numbers the
-game's counters get out of it (`whole_take`, `frame_rate_day_host`, `frame_rate_water_host`), passes
+game's counters get out of it (`whole_take`, `frame_rate_day_host`, `frame_rate_water_host`, `frame_rate_sim_host`), passes
 `python tests\frame_step_check.py`, which builds `frame_rate.c` with the rest of the runtime stubbed and feeds it
 display times: a held 60 fps limit gives exactly one frame every frame, a 240 fps limit never less than a quarter
 frame, uneven frame times one steady step, and game time follows the clock. It calls the two hooks as their patch
-sites do: at 144 fps each of 64 water objects gets its ripple steps and the day its seconds, and a step of one frame
-gives what the game computes. No game files.
+sites do: at 144 fps each of 64 water objects gets its ripple steps and the day its seconds, at 120, 144 and 240 fps
+the water managers and floors of the set `owater` get 60 fixed steps a second with only s0 changed, and a step of one
+frame gives what the game computes. It also checks that each of those sites in `recomp/patches-v111.txt` ends in one
+`bl` to its page slot. No game files.
 
 A change to how the mixer applies volumes (`runtime/audio_mixer.c` `accumulate_ramp`, the voice and splitter paths
 of `audio_mixer_render`) or to what it owes the device after a stall (`ring_pull`, `audio_mixer_owed`) passes

@@ -488,7 +488,8 @@ static double ocarina_step(double dt) {
 // above 60 fps, the cut loses the fraction every frame. whole_frames keeps it per counter (by its guest address) and
 // hands out the whole part, so each counter moves at the game's pace at any frame rate; at a step of exactly one it
 // gives what the game computes. A value that is not positive, or too large for a count, is cut as fcvtzs cuts it.
-// The water's ripples keep their remainders per water object in a table of their own (frame_rate_water_host).
+// The water's ripples keep their remainders per water object in a table of their own (frame_rate_water_host), and so do
+// the fixed steps of the water and floor surfaces (frame_rate_sim_host).
 #define WHOLE_SLOTS 8
 #define WATER_SLOTS 64
 typedef struct { uint64_t at; float rem; uint64_t used; } WholeSlot;   // used: whole_calls at the slot's last use
@@ -570,6 +571,43 @@ void frame_rate_water_host(Cpu *c) {
             rt_log("frame rate: the water's ripples got %llu steps in %.1f s, asked %llu times (cut to whole steps "
                    "each time, as the game cuts them, %llu)", (unsigned long long)g, t / 1e9, (unsigned long long)n,
                    (unsigned long long)k);
+    }
+}
+
+// The fixed steps of the physics' height-field surfaces (patches-v111.txt owater): the water managers (main+0x3875f20,
+// main+0x3882660) and the interactive floors' simulation (main+0x632cb0, the spider webs' sinking floor). Each update
+// divides its seconds by 1/60 s into s0 and cuts that to the number of steps of exactly 1/60 s it runs (at most 3),
+// dropping the fraction, so every frame shorter than 1/60 s ran none. The site calls this between the division and
+// the game's own cut: s0 becomes the whole steps in the quotient plus the remainder kept for the object in x19, as a
+// float the cut keeps exactly, and only s0 changes (its upper lanes stay zero, as the division left them). A quotient
+// that is not positive, or too large for a count, stays for the cut. The remainders are in a table of their own: an
+// object that shares slots with the counters above would lose its fraction to them.
+// NX2NAVI_TRACE=perf: every 10 s, the steps the objects were given beside those the cut alone would have given.
+#define SIM_SLOTS 8
+static WholeSlot sim_slot[SIM_SLOTS];
+
+void frame_rate_sim_host(Cpu *c) {
+    uint32_t bits = (uint32_t)c->v[0];
+    float steps;
+    memcpy(&steps, &bits, 4);
+    uint32_t whole = whole_take(sim_slot, SIM_SLOTS, c->x[19], steps);
+    if (steps > 0.0f && steps < 2147483648.0f) {   // whole_take's own range: outside it the game's cut stands
+        float f = (float)whole;
+        memcpy(&bits, &f, 4);
+        c->v[0] = bits;
+    }
+    if (rt_trace & RT_TRACE_PERF) {
+        static uint64_t t0, asked, given, cut;
+        uint64_t now = plat_now_ns(), n = 0, g = 0, k = 0, t = 0;
+        plat_mutex_lock(&whole_lock);
+        asked++, given += whole, cut += cut_fcvtzs(steps);
+        if (!t0) t0 = now;
+        if (now - t0 >= 10000000000ull) n = asked, g = given, k = cut, t = now - t0, t0 = now, asked = given = cut = 0;
+        plat_mutex_unlock(&whole_lock);
+        if (n)
+            rt_log("frame rate: the water and floor surfaces got %llu fixed steps in %.1f s, asked %llu times (cut to "
+                   "whole steps each time, as the game cuts them, %llu)", (unsigned long long)g, t / 1e9,
+                   (unsigned long long)n, (unsigned long long)k);
     }
 }
 
