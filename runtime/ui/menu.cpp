@@ -766,13 +766,14 @@ static void row_texture_detail(void) {
     opt_choice_list("NX2NAVI_TEXTURE_DETAIL", UI_MENU_TEX_DETAIL, vals, names, 4, UI_MENU_TEX_DETAIL_DESC);
 }
 
-// Video memory use (cfg.c VRAMLOW, cfg_vram_keep): low sets smaller texture caches and builds the shared pipeline list
-// at first use, high keeps what switched-off features made. Read at the start, so the row notes the restart.
+// Video memory use (cfg.c vram_use_value, cfg_vram_keep): low, the default, lets released textures go after the hold
+// (vk_texture.c drop_aged) and frees what switched-off features made; high keeps both. Any value but high is low, as
+// cfg.c reads it (balanced, the default before 0.10, among them). Read at the start, so the row notes the restart.
 static void row_vram_use(void) {
-    static const char *const vals[] = {"low", "balanced", "high"};
-    const char *names[] = {menu_text(UI_MENU_VRAM_USE_LOW), menu_text(UI_MENU_VRAM_USE_BALANCED),
-                           menu_text(UI_MENU_VRAM_USE_HIGH)};
-    opt_choice_list("NX2NAVI_VRAM_USE", UI_MENU_VRAM_USE, vals, names, 3, UI_MENU_VRAM_USE_DESC);
+    static const char *const vals[] = {"low", "high"};
+    const char *names[] = {menu_text(UI_MENU_VRAM_USE_LOW), menu_text(UI_MENU_VRAM_USE_HIGH)};
+    opt_choice_list("NX2NAVI_VRAM_USE", UI_MENU_VRAM_USE, vals, names, 2, UI_MENU_VRAM_USE_DESC,
+                    cfg_vram_keep() ? 1 : 0);
 }
 
 static void row_shadow_scale(void) {

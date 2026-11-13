@@ -333,8 +333,21 @@
 # Percent of the video memory in use above which textures give way: first those the game released, then those no
 # shader sampled for a while (tex_disuse); each is made again when used. The default lies under the 87 percent past
 # which game memory gets no copy in video memory (memory = mirror), which costs far more frame time than a texture
-# uploaded again. 0: textures never give way for video memory.
+# uploaded again. 0: textures never give way for video memory. 70 frees more on a card short of memory, and more
+# textures are made again (the low of the 0.10 previews set it).
 # tex_vram_pressure = 80
+# Seconds a texture the game released is kept once nothing uses it (0 to 900); then it goes, however much room is
+# left. In play the game took released textures back within a minute or not at all; one taken back after its drop is
+# made again and shows its stand-in for a frame. A texture whose content only the GPU made waits twice as long, and one
+# the GPU drew into since its last copy back to game memory stays. 0: released textures stay up to tex_released_mb for
+# the whole session (as before 0.10). Default: 180; vram_use = high sets 0. Read at start.
+# tex_released_hold = 180
+# Megabytes the released textures may hold (0: no bound). Past it the oldest go even when young; while tex_released_hold
+# is on, young ones may stay past it, up to twice it, as long as video memory and the system's commit have room.
+# Default: a quarter of the video memory budget where the PC has an eighth of its memory to match, at least a
+# thirty-second of the PC's memory (512 to 2048), at most 8192. 1024 (the low of the 0.10 previews) holds less, but
+# textures the game takes back after their drop are made again and show their stand-in for a frame. Read at start.
+# tex_released_mb = 4096
 # Texture compaction (experimental). Video memory is taken in blocks (vma_block_mb), and a block goes back to the
 # driver only once everything in it is freed: after a long session the blocks hold textures scattered between holes,
 # and the game holds a gigabyte or two of video memory it does not use. 1: textures no shader sampled for ten seconds
@@ -540,14 +553,15 @@
 # cpu or astc_bc = 0) and the budget is under 20480 MiB, auto goes one step lower, as they take four times the memory.
 # The log says what was picked ("texture detail:"). Read at start.
 # texture_detail = auto
-# Video memory use (the Screen tab's row): low, balanced or high. balanced, the default, frees what DLSS, frame
-# generation's HUD-less picture, FSR 1 and SMAA held once they have been switched off for a while (about 0.9 GiB with
-# DLSS off at 5120x2142); high keeps it, so switching them on again makes nothing. low also sets, unless set here:
-# tex_released_mb = 1024 (released textures keep at most 1 GiB instead of a quarter of the video memory budget; one
-# the game takes back after its drop is made and uploaded again and shows its stand-in for a frame),
-# tex_vram_pressure = 70 (textures give way from 70% of the budget) and pipe_seed_boot = 0 (0.3-0.6 GiB of video
-# memory and 2-4 GB of commit less; a first visit to an area can miss a few objects for a frame). Read at start.
-# vram_use = balanced
+# Video memory use (the Screen tab's row): low or high. low, the default, lets go of released textures once nothing has
+# used them for tex_released_hold (180 s), and frees what DLSS, frame generation's HUD-less picture, FSR 1 and SMAA
+# held once they have been switched off for a while (about 0.9 GiB with DLSS off at 5120x2142). high keeps both for the
+# whole session (tex_released_hold = 0: released textures up to tex_released_mb), so switching those features on again
+# makes nothing. balanced, the default before 0.10, means low. The low of the 0.10 previews traded memory for work
+# done again; its values are keys of their own: tex_released_mb = 1024, tex_vram_pressure = 70 and pipe_seed_boot = 0
+# (0.3-0.6 GiB of video memory and 2-4 GB of commit less, but a first visit to an area misses objects for a frame
+# while their pipelines are made). Read at start.
+# vram_use = low
 # Sun shadow map size: game (the game's own, which changes with the view and drops to about 400 near the ground, so
 # leaf shadows look blocky and jump) or a fixed 256, 512, 768, 1024, 1536 or 2048. Above 960 the texture heap grows with
 # it. 256 is coarser than the game's own and is for integrated GPUs short of memory bandwidth. Read at start.

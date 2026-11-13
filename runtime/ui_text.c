@@ -99,12 +99,12 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_AUTO] = "Automatic: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Full", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduced", [UI_MENU_TEX_DETAIL_LOW] = "Low",
     [UI_MENU_VRAM_USE] = "Video memory use",
-    [UI_MENU_VRAM_USE_DESC] = "How much video memory the game keeps for later. Low keeps fewer textures of places you "
-                              "left and builds some graphics only when first needed: returning to a place can show "
-                              "simpler surfaces for a moment, and a first visit can miss a few objects for a frame. High "
-                              "also keeps what an upscaler or anti-aliasing switched off had made. Takes effect after a "
-                              "restart.",
-    [UI_MENU_VRAM_USE_LOW] = "Low", [UI_MENU_VRAM_USE_BALANCED] = "Balanced", [UI_MENU_VRAM_USE_HIGH] = "High",
+    [UI_MENU_VRAM_USE_DESC] = "How much video memory the game keeps for later. Low, the default, lets go of the textures "
+                              "of places you left once they have gone unused for three minutes, and of what an upscaler "
+                              "or anti-aliasing switched off had made; in play the game asked for such textures again "
+                              "within a minute or not at all. High keeps both for the whole session. Takes effect after "
+                              "a restart.",
+    [UI_MENU_VRAM_USE_LOW] = "Low", [UI_MENU_VRAM_USE_HIGH] = "High",
     [UI_MENU_LOWEND_INTRO] = "The settings of the low-end GPU mode. Each can be changed here; most take effect after a restart.",
     [UI_MENU_LOWEND_RESTART] = "The mode turns on after a restart. Its settings are listed here then.",
     [UI_MENU_LOWEND_NOT_FOR_CARD] = "Not for this graphics card: it has mesh shaders and 8 GB of video memory or more. "
@@ -924,12 +924,12 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_AUTO] = "Авто: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Полная", [UI_MENU_TEX_DETAIL_REDUCED] = "Сниженная", [UI_MENU_TEX_DETAIL_LOW] = "Низкая",
     [UI_MENU_VRAM_USE] = "Расход видеопамяти",
-    [UI_MENU_VRAM_USE_DESC] = "Сколько видеопамяти игра держит про запас. «Низкий» хранит меньше текстур покинутых мест и "
-                              "создаёт часть графики только при первой надобности: при возвращении поверхности могут на "
-                              "миг выглядеть проще, а при первом посещении на кадр могут пропасть несколько объектов. "
-                              "«Высокий» также хранит то, что создали отключённые масштабирование или сглаживание. "
-                              "Действует после перезапуска.",
-    [UI_MENU_VRAM_USE_LOW] = "Низкий", [UI_MENU_VRAM_USE_BALANCED] = "Сбалансированный", [UI_MENU_VRAM_USE_HIGH] = "Высокий",
+    [UI_MENU_VRAM_USE_DESC] = "Сколько видеопамяти игра держит про запас. «Низкий», по умолчанию, освобождает текстуры "
+                              "покинутых мест, не использованные три минуты, и то, что создали отключённые "
+                              "масштабирование или сглаживание; в игре такие текстуры запрашивались снова в течение "
+                              "минуты или не запрашивались вовсе. «Высокий» хранит и то и другое всю сессию. Действует "
+                              "после перезапуска.",
+    [UI_MENU_VRAM_USE_LOW] = "Низкий", [UI_MENU_VRAM_USE_HIGH] = "Высокий",
     [UI_MENU_SHARPNESS] = "Резкость FSR",
     [UI_MENU_SHARPNESS_DESC] = "Насколько FSR повышает резкость. 0 отключает.",
     [UI_MENU_SHARPNESS_NEEDS_FSR] = "только с AMD FSR 1",
@@ -1902,12 +1902,12 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_AUTO] = "Automático: %s",
     [UI_MENU_TEX_DETAIL_FULL] = "Completo", [UI_MENU_TEX_DETAIL_REDUCED] = "Reduzido", [UI_MENU_TEX_DETAIL_LOW] = "Baixo",
     [UI_MENU_VRAM_USE] = "Uso da memória de vídeo",
-    [UI_MENU_VRAM_USE_DESC] = "Quanta memória de vídeo o jogo guarda para depois. Baixo guarda menos texturas dos "
-                              "lugares que você deixou e cria parte dos gráficos só quando são precisos pela primeira "
-                              "vez: ao voltar a um lugar, as superfícies podem parecer mais simples por um instante, e "
-                              "numa primeira visita alguns objetos podem faltar por um quadro. Alto também guarda o que "
-                              "um escalonador ou antisserrilhamento desligado criou. Vale depois de reiniciar.",
-    [UI_MENU_VRAM_USE_LOW] = "Baixo", [UI_MENU_VRAM_USE_BALANCED] = "Equilibrado", [UI_MENU_VRAM_USE_HIGH] = "Alto",
+    [UI_MENU_VRAM_USE_DESC] = "Quanta memória de vídeo o jogo guarda para depois. Baixo, o padrão, libera as texturas "
+                              "dos lugares que você deixou após três minutos sem uso, e o que um escalonador ou "
+                              "antisserrilhamento desligado criou; em jogo, essas texturas foram pedidas de novo em "
+                              "menos de um minuto ou nunca. Alto guarda tudo isso durante a sessão inteira. Vale depois "
+                              "de reiniciar.",
+    [UI_MENU_VRAM_USE_LOW] = "Baixo", [UI_MENU_VRAM_USE_HIGH] = "Alto",
     [UI_MENU_COLOR] = "Cor",
     [UI_MENU_COLOR_PRESET] = "Perfil de cor",
     [UI_MENU_COLOR_PRESET_DESC] = "Define os quatro valores abaixo. Vívido: mais contraste e saturação, sombras um "
@@ -2741,9 +2741,9 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_TEX_DETAIL_AUTO] = "自动：%s",
     [UI_MENU_TEX_DETAIL_FULL] = "完整", [UI_MENU_TEX_DETAIL_REDUCED] = "降低", [UI_MENU_TEX_DETAIL_LOW] = "低",
     [UI_MENU_VRAM_USE] = "显存占用",
-    [UI_MENU_VRAM_USE_DESC] = "游戏为之后保留多少显存。“低”保留较少已离开地点的纹理，部分图形在首次需要时才创建：回到某地时表面可能"
-                              "短暂显得较简单，首次到访时可能有几个物体缺失一帧。“高”还会保留已关闭的放大或抗锯齿创建的内容。重启后生效。",
-    [UI_MENU_VRAM_USE_LOW] = "低", [UI_MENU_VRAM_USE_BALANCED] = "平衡", [UI_MENU_VRAM_USE_HIGH] = "高",
+    [UI_MENU_VRAM_USE_DESC] = "游戏为之后保留多少显存。“低”（默认）会释放已离开地点中三分钟未使用的纹理，以及已关闭的放大或抗锯齿"
+                              "创建的内容；实际游玩中，这类纹理要么在一分钟内再次被使用，要么不再使用。“高”在整个游戏过程中保留两者。重启后生效。",
+    [UI_MENU_VRAM_USE_LOW] = "低", [UI_MENU_VRAM_USE_HIGH] = "高",
     [UI_MENU_HDR_GROUP] = "HDR",
     [UI_MENU_HDR] = "HDR 输出",
     [UI_MENU_HDR_DESC] = "在 HDR 显示器上呈现更亮的高光。请先在 Windows 中开启 HDR。",

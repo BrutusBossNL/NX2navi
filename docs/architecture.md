@@ -266,7 +266,15 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
   swapchain, DLSS and frame generation features); `mem: host` gives the host-visible allocations, the process's
   commit and working set and the game's heap; `vk: released textures` how often released textures came back and how
   old they were, and how many were made again after a drop (`vk_memory.c` `owner_log`). A figure that only climbs over
-  a session is a leak. `vram_use` (`cfg.c` `VRAMLOW`) trades these caches for work done again.
+  a session is a leak.
+- Released textures by age: the game releases a texture when what uses it leaves the view and takes it back when that
+  returns; the cache keeps the released image so that the take-back finds it. In play the take-backs came within a
+  minute of the release or never, so a released texture goes once it has gone unused for a hold of three minutes, six
+  for content only the GPU made (`vk_texture.c` `drop_aged`, `vk_tex_release.h`, `tex_released_hold`). The size bound
+  (a quarter of the video memory budget) stays as the safety net for a burst of area changes, and young textures may
+  pass it, up to twice it, while the card and the system's commit have room. Times are wall seconds from a clock of
+  the presents, not present counts. `vram_use = high` (`cfg.c` `vram_use_value`) turns the hold off and keeps what a
+  switched-off upscaler or SMAA holds; the default, low, frees both.
 - Allocation: Vulkan Memory Allocator. Debugging: Vulkan validation layers, per-pass frame dumps (`NX2NAVI_DUMP`,
   `vk_dump.c`), a sampling profiler (`NX2NAVI_PROFILE`, `tools/prof_report.py`) and a flight recorder
   (`NX2NAVI_FLIGHT`). RenderDoc cannot capture, because it hides `VK_EXT_external_memory_host` from the application.
