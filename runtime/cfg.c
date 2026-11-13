@@ -248,7 +248,7 @@ static const CfgMeta metas[] = {
     {"WATER_STEPS", "1", "0|1", RESTART},
     // frame_rate.c floor_probe: lines about Link on a moving floor (0 off, 1 = 4000 lines, or a count)
     {"FLOOR_PROBE", "0", NULL, RESTART},
-    // frame_rate.c floor_scan: finds the moving floor under Link in guest memory (0 off, 1 = 6000 lines, or a count)
+    // frame_rate.c floor_scan: finds the moving floor under Link in guest memory (0 off, 1 = 20000 lines, or a count)
     {"FLOOR_SCAN", "0", NULL, RESTART},
     {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR|pl", RESTART},
     {"OPERATION_MODE", "docked", "docked|handheld", LIVE},

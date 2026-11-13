@@ -902,29 +902,30 @@ static void floor_probe(void) {
 
 // ---- NX2NAVI_FLOOR_SCAN (floor_scan in nx2navi.ini, 0 by default): finds the moving floor under Link in guest memory
 // (diagnosis, 1.1.1). The Deku Tree's floating platform is not one of the engine's ground groups (floor_probe), and
-// where its position lives is not known. While Link is carried at the 60 fps rate (a step of one frame, a horizontal
-// move of 2 to 30 mm a present for FLOOR_SCAN_ARM presents in a row, the gamepad's left stick under 20%), the scan
-// takes one snapshot of every 4-byte-aligned float triplet in the game's heap and alias regions whose x and z lie
-// within 6 m of Link and whose y lies within 4 m (walked as the debug menu's memory search walks them, debug_tools.c
-// dbg_search_new), and logs how long that took. FLOOR_SCAN_ARM presents later it keeps the triplets that moved
-// horizontally as far as Link (within a fifth, 2 cm at least): Link's own copies (his actor, body, bones) and the
-// floor's (its matrix, its body, its drive). From then on each present logs the step, Link, and the survivors farthest
-// from him horizontally (the floor's points sit away from him; his own copies stay within half a metre), each with its
-// address, position and move, so a run at a higher frame rate shows which of those move and how fast. A snapshot that
-// leaves no survivor farther than half a metre arms the scan again, three times at most. The value is the number of
-// lines to write (1 means 6000); off it costs one test per present.
+// where its position lives is not known. The scan arms while Link drifts at the 60 fps rate: a step of one frame, the
+// gamepad's left stick under 20%, and for FLOOR_SCAN_ARM presents in a row a horizontal move of 2 to 30 mm a present,
+// his height within 5 mm of the present before, and the whole stretch straight (its end within 80% of the sum of its
+// moves), so a floor that only sinks does not arm it. It then takes one snapshot of every 4-byte-aligned float triplet
+// in the game's heap and alias regions whose x and z lie within 6 m of Link and whose y lies from 4 m below him to
+// 0.5 m above (walked as the debug menu's memory search walks them, debug_tools.c dbg_search_new), and logs how long
+// that took. FLOOR_SCAN_ARM presents later it keeps the triplets that moved horizontally as far as Link (within a
+// fifth, 2 cm at least) and lie more than 0.3 m below him or more than 0.5 m from him horizontally: the floor's
+// matrix, body and drive, but not Link's own copies (his actor, body, feet) nor what rides above him. A snapshot that
+// keeps none arms the scan again, three times at most. From then on, once a second, it logs Link's position and move
+// over that second and one line per survivor (FLOOR_SCAN_SHOW at most) with its address, position and move over the
+// same second, so a stretch at a higher frame rate shows each one's own speed. The value is the number of lines to
+// write (1 means 20000); off it costs one test per present.
 #define FLOOR_SCAN_ARM 30
 #define FLOOR_SCAN_MAX 2000000   // candidate triplets a snapshot keeps
-#define FLOOR_SCAN_SHOW 12       // survivors a line names
+#define FLOOR_SCAN_SHOW 64       // survivors logged each second
 static int floor_scan_left = -1;   // lines still to write; -1 before the setting was read
 static struct {
-    int state, run, tries;         // state 0: waiting for a carry, 1: filtering, 2: logging
-    float link0[3], last[3];
+    int state, run, tries;         // state 0: waiting for a drift, 1: filtering, 2: logging
+    float link0[3], last[3], start[3], path, sec_link[3];
     int have_last;
-    uint64_t *addr;
-    float *val;                    // the triplet at the snapshot, later the last logged one
+    uint64_t *addr, sec_ns;
+    float *val;                    // the triplets at the snapshot, then at the last line
     int n;
-    int show[FLOOR_SCAN_SHOW], shown;
 } fs;
 
 static void floor_scan_snapshot(const float link[3]) {
@@ -956,8 +957,8 @@ static void floor_scan_snapshot(const float link[3]) {
                     for (uint64_t i = 0; i + 2 < words; i++) {
                         float x = f[i];
                         if (!(fabsf(x - link[0]) < 6.0f)) continue;   // the cheap test first: most words fail it
-                        float y = f[i + 1], z = f[i + 2];
-                        if (!(fabsf(z - link[2]) < 6.0f) || !(fabsf(y - link[1]) < 4.0f)) continue;
+                        float y = f[i + 1] - link[1], z = f[i + 2];
+                        if (!(fabsf(z - link[2]) < 6.0f) || !(y > -4.0f && y < 0.5f)) continue;
                         if (fs.n < FLOOR_SCAN_MAX) {
                             fs.addr[fs.n] = a + 4 * i;
                             memcpy(fs.val + 3 * fs.n, f + i, 12);
@@ -972,8 +973,9 @@ static void floor_scan_snapshot(const float link[3]) {
         }
     }
     memcpy(fs.link0, link, 12);
-    rt_log("floor scan: snapshot of %.0f MB in %.0f ms: %d float triplets near Link at %.3f %.3f %.3f%s", bytes / 1e6,
-           (plat_now_ns() - t0) / 1e6, fs.n, link[0], link[1], link[2], over ? " (more were left out)" : "");
+    rt_log("floor scan: snapshot of %.0f MB in %.0f ms: %d float triplets around and below Link at %.3f %.3f %.3f%s",
+           bytes / 1e6, (plat_now_ns() - t0) / 1e6, fs.n, link[0], link[1], link[2],
+           over ? " (more were left out)" : "");
 }
 
 // Reads the n triplets at fs.addr into out (NAN where the memory could not be read), in one batched copy.
@@ -996,7 +998,7 @@ static void floor_scan(const float link[3], int link_ok) {
     if (floor_scan_left < 0) {
         const char *e = cfg_get("NX2NAVI_FLOOR_SCAN");
         int n = e && *e ? atoi(e) : 0;
-        floor_scan_left = !RT_V111 || n <= 0 ? 0 : n == 1 ? 6000 : n;
+        floor_scan_left = !RT_V111 || n <= 0 ? 0 : n == 1 ? 20000 : n;
         if (floor_scan_left) rt_log("floor scan: on for %d lines", floor_scan_left);
     }
     if (!floor_scan_left) return;
@@ -1004,20 +1006,29 @@ static void floor_scan(const float link[3], int link_ok) {
         fs.have_last = 0, fs.run = 0;
         return;
     }
-    float move = fs.have_last ? hdist(link, fs.last) : 0;
-    memcpy(fs.last, link, 12);
+    float move = fs.have_last ? hdist(link, fs.last) : 0, rise = fs.have_last ? fabsf(link[1] - fs.last[1]) : 0;
     int had = fs.have_last;
+    memcpy(fs.last, link, 12);
     fs.have_last = 1;
     if (fs.state == 0) {
         double pct[2] = {0, 0};
-        float step = frame_step_frames();
         int still = !input_pad_stick_percent(pct) || pct[0] < 20.0;
-        int carried = had && still && fabsf(step - 1.0f) < 0.05f && move > 0.002f && move < 0.03f;
-        fs.run = carried ? fs.run + 1 : 0;
-        if (fs.run >= FLOOR_SCAN_ARM && fs.tries < 3) {
-            fs.tries++, fs.run = 0;
-            floor_scan_snapshot(link);
-            if (fs.n) fs.state = 1;
+        int drift = had && still && fabsf(frame_step_frames() - 1.0f) < 0.05f && move > 0.002f && move < 0.03f &&
+                    rise < 0.005f;
+        if (!drift) {
+            fs.run = 0;
+            return;
+        }
+        if (!fs.run) memcpy(fs.start, link, 12), fs.path = 0;
+        fs.run++, fs.path += move;
+        if (fs.run >= FLOOR_SCAN_ARM) {
+            int straight = hdist(link, fs.start) >= 0.8f * fs.path;
+            fs.run = 0;
+            if (straight && fs.tries < 3) {
+                fs.tries++;
+                floor_scan_snapshot(link);
+                if (fs.n) fs.state = 1;
+            }
         }
         return;
     }
@@ -1029,64 +1040,51 @@ static void floor_scan(const float link[3], int link_ok) {
         if (!now) now = malloc(sizeof(float) * 3 * FLOOR_SCAN_MAX);
         if (!now) return;
         floor_scan_read(fs.n, now);
-        int kept = 0, far = 0;
+        int kept = 0, moved = 0;
         float tol = d_link * 0.2f > 0.02f ? d_link * 0.2f : 0.02f;
         for (int i = 0; i < fs.n; i++) {
             const float *v = now + 3 * i, *w = fs.val + 3 * i;
-            if (!isfinite(v[0]) || !isfinite(v[2])) continue;
+            if (!isfinite(v[0]) || !isfinite(v[1]) || !isfinite(v[2])) continue;
             float d = hypotf(v[0] - w[0], v[2] - w[2]);
             if (!(fabsf(d - d_link) <= tol) || d < 0.01f) continue;
-            fs.addr[kept] = fs.addr[i];
-            memcpy(fs.val + 3 * kept, v, 12);
-            far += hdist(v, link) > 0.5f;
+            moved++;
+            if (!(v[1] < link[1] - 0.3f || hdist(v, link) > 0.5f)) continue;   // Link's own copies stay at his feet
+            if (kept < FLOOR_SCAN_SHOW) fs.addr[kept] = fs.addr[i], memcpy(fs.val + 3 * kept, v, 12);
             kept++;
         }
-        fs.n = kept;
-        rt_log("floor scan: %d of the triplets moved with Link (%.3f m in %d presents), %d of them more than 0.5 m "
-               "from him",
-               kept, d_link, FLOOR_SCAN_ARM, far);
-        if (!far) {   // Link's own copies alone: the next carry arms the scan again
+        rt_log("floor scan: %d of %d triplets moved with Link (%.3f m in %d presents); %d of those lie below him or "
+               "away from his feet%s", moved, fs.n, d_link, FLOOR_SCAN_ARM, kept,
+               kept > FLOOR_SCAN_SHOW ? " (the first of them are logged)" : "");
+        if (!kept) {   // nothing below him: the next drift arms the scan again
             fs.state = 0, fs.n = 0;
             return;
         }
-        // the survivors to show: the farthest from Link horizontally
-        fs.shown = 0;
-        for (int j = 0; j < FLOOR_SCAN_SHOW; j++) {   // a selection: the farthest not yet shown, FLOOR_SCAN_SHOW times
-            int best = -1;
-            float best_d = -1;
-            for (int i = 0; i < fs.n; i++) {
-                int taken = 0;
-                for (int t = 0; t < fs.shown && !taken; t++) taken = fs.show[t] == i;
-                float d = hdist(fs.val + 3 * i, link);
-                if (!taken && d > best_d) best = i, best_d = d;
-            }
-            if (best < 0) break;
-            fs.show[fs.shown++] = best;
-        }
+        fs.n = kept < FLOOR_SCAN_SHOW ? kept : FLOOR_SCAN_SHOW;
+        memcpy(fs.sec_link, link, 12);
+        fs.sec_ns = plat_now_ns();
         fs.state = 2;
         return;
     }
-    // state 2: one line a present for the shown survivors
-    float v[FLOOR_SCAN_SHOW][3];
-    int k = fs.shown;
-    for (int j = 0; j < k; j++) {
-        uint8_t ok = 0, *dst = (uint8_t *)v[j];
-        uint64_t src[1][2] = {{fs.addr[fs.show[j]], 12}};
-        mem_copy_readable(&dst, (const uint64_t (*)[2])src, 1, &ok);
-        if (!ok) v[j][0] = v[j][1] = v[j][2] = NAN;
-    }
-    char line[256 + FLOOR_SCAN_SHOW * 110];
-    int o = snprintf(line, sizeof line, "floor scan: step %.4f frames; link %.4f %.4f %.4f moved %.5f",
-                     (double)frame_step_frames(), link[0], link[1], link[2], move);
-    for (int j = 0; j < k && o > 0 && o < (int)sizeof line; j++) {
-        float *w = fs.val + 3 * fs.show[j];
-        o += snprintf(line + o, sizeof line - o, "; %#llx at %.4f %.4f %.4f moved %.5f %.5f %.5f",
-                      (unsigned long long)fs.addr[fs.show[j]], v[j][0], v[j][1], v[j][2], v[j][0] - w[0],
-                      v[j][1] - w[1], v[j][2] - w[2]);
-        memcpy(w, v[j], 12);
-    }
-    rt_log("%s", line);
+    // state 2: once a second, Link and each survivor with its move over that second
+    uint64_t t = plat_now_ns();
+    if (t - fs.sec_ns < 1000000000ull) return;
+    double secs = (t - fs.sec_ns) / 1e9;
+    fs.sec_ns = t;
+    float v[FLOOR_SCAN_SHOW * 3];
+    floor_scan_read(fs.n, v);
+    rt_log("floor scan: step %.4f frames; link %.4f %.4f %.4f moved %.4f %.4f %.4f in %.3f s (%.3f m/s)",
+           (double)frame_step_frames(), link[0], link[1], link[2], link[0] - fs.sec_link[0], link[1] - fs.sec_link[1],
+           link[2] - fs.sec_link[2], secs, hdist(link, fs.sec_link) / secs);
+    memcpy(fs.sec_link, link, 12);
     floor_scan_left--;
+    for (int k = 0; k < fs.n && floor_scan_left > 0; k++) {
+        float *w = fs.val + 3 * k, *u = v + 3 * k;
+        rt_log("floor scan:   %#llx at %.4f %.4f %.4f moved %.4f %.4f %.4f (%.3f m/s)", (unsigned long long)fs.addr[k],
+               u[0], u[1], u[2], u[0] - w[0], u[1] - w[1], u[2] - w[2], hdist(u, w) / secs);
+        memcpy(w, u, 12);
+        floor_scan_left--;
+    }
+    if (floor_scan_left < 0) floor_scan_left = 0;
 }
 
 void frame_step_present(uint64_t display_ns, int interval) {

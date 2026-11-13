@@ -1014,9 +1014,10 @@
 # Diagnosis: one log line per frame while Link stands near a moving floor (the floating platforms): the frame's step,
 # how far he moved and how far the floor moved. 1 writes 4000 lines, a larger number that many; 0 is off.
 # floor_probe = 0
-# Diagnosis: while Link is carried by a moving floor at 60 fps and the left stick rests, one snapshot of the game's
-# memory finds the values that move with him (the floor's position among them) and logs them each frame from then on.
-# The snapshot holds the game for a moment once. 1 writes 6000 lines, a larger number that many; 0 is off.
+# Diagnosis: while a floor carries Link sideways at 60 fps and the left stick rests, one snapshot of the game's memory
+# finds the values below him that move with him (the floor's position among them) and logs them once a second from
+# then on. The snapshot holds the game for about a second once. 1 writes 20000 lines, a larger number that many; 0 is
+# off.
 # floor_scan = 0
 # 1: with trace = perf, walks of the process's address space count its private and write-combined memory every 600
 # frames (the "mem: process" line) and where its committed memory lies every 3600 frames (the "commit census" lines).
