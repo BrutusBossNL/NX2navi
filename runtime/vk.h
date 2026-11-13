@@ -377,6 +377,7 @@ void vk_mvprev_frame(void);   // each present, beside vk_dlaa_frame
 void vk_mem_mirror_begin(void);
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence);
 int vk_mem_mirror_pending(void);
+int vk_mem_gpa_late(void);   // --probe-vkmem: NX2NAVI_GPA_LATE, the table takes a new mirror up in queue order
 void vk_mem_mirror_prologue(VkCommandBuffer cb);
 // Staged mirror uploads (vk_memory.c): the GPU of the submission being recorded reads guest memory itself (noted by
 // vk_mem_note_live); vk_mem_take_live returns that and starts the next submission's note.

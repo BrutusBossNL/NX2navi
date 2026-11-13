@@ -24,9 +24,12 @@ uint32_t vk_gpa_remap(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, 
 // The same without the twin: the pages name buf alone (a pool whose VRAM mirror is evicted goes back to its imported
 // buffer).
 uint32_t vk_gpa_remap_plain(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, uint64_t buf_lo);
-// The pages of [lo, hi) that name old_rec keep reading old_rec's buffer and get buf as their twin: shaders read the
-// pool where they did and write buf too (a VRAM mirror until its first copy has run, vk_memory.c mirror_create).
-// Returns the new record, or 0 when there is none to give or twins are off (old_rec then stays as it is).
-uint32_t vk_gpa_remap_writes(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, uint64_t buf_lo);
+// Records into cb the store that hands record rec over to buf (a pool's new VRAM mirror) in queue order: what is
+// queued after it reads buf through rec's pages, with the buffer they read before as the twin (keep_twin) or buf
+// again; what was queued before it sees no change. 0 when nothing was recorded (no record, no table).
+int vk_gpa_flip_cmd(VkCommandBuffer cb, uint32_t rec, VkBuffer buf, uint64_t buf_lo, int keep_twin);
+// --probe-vkmem: the device addresses the table, read from its own memory, gives a shader for addr: the one it
+// reads and the one it writes as well. 0 when no page maps addr.
+int vk_gpa_probe(uint64_t addr, uint64_t *first, uint64_t *twin);
 void vk_gpa_report(void);
 void vk_gpa_shutdown(void);
