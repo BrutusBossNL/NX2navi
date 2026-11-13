@@ -108,6 +108,7 @@ Source shorthands:
 | 5.10 | **Transform feedback**, rasterizer discard. | `VK_EXT_transform_feedback`. | Ours: rasterizer discard without XFB = no draw (`nvn_api_cmd.c`). | OGD 0x0744 |
 | 5.11 | **Depth bounds, sample mask, conservative raster**. | Optional features. | Ours: ignored, logged (`nvn_ext.c`). | OGD 0x0fa4 |
 | 5.12 | **Blend factors on targets without alpha** (RGBX emulated as RGBA). | Destination alpha reads the stored value. | DST_ALPHA factors need replacing on no-alpha targets. | — |
+| 5.13 | **Quads, quad strips, polygons and line loops** are primitive types of their own, indexed or not. | No such topologies: a quad list read as a triangle list takes three indices at a time and joins corners of neighbouring quads; a line loop drawn as a strip lacks its closing line. A quad strip covers what a triangle strip of the same vertices covers, a convex polygon what a fan covers. | Ours: quad strips as triangle strips, polygons as fans (`vk_pipeline.c` `vk_pipeline_topology`); non-indexed quads and loops get indices made by the replay (`vk_exec_draw.c` `op_draw`); indexed ones are drawn with the game's indices unless `NX2NAVI_QUAD_INDEX=1` rewrites them (`draw_idx_rewritten`, `vk_index_rewrite.h`). The first indexed one is logged either way; no log of Ocarina has shown one so far. | — |
 
 ## 6. Checks for our runtime
 

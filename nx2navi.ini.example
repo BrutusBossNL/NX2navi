@@ -147,6 +147,12 @@
 # full count of the same object (or what was counted, if that is more). The log says how often it happens either way
 # ("samples-passed reports so far missed draws", at the 1st, 10th, 100th...). Read at start.
 # oq_hold = 0
+# Indexed quads and line loops, 0 or 1. Default: off. Vulkan has no quad or line-loop topology: draws without indices
+# are rewritten already, and 1 does the same for indexed ones (two triangles per quad, a closing line for a loop), which
+# otherwise are drawn with the game's indices as triangles and an open line, joining corners of neighbouring quads.
+# The log names the first such draw either way ("an indexed quad list"); without that line the game has drawn none.
+# Read at start.
+# quad_index = 0
 # EXPERIMENT, 0 or 1. Default: off. The game asks the video card how much of an object would show behind what is
 # already drawn (an occlusion query) and leaves hidden objects out. With 1 it asks nothing and draws them all: more
 # draws in a frame, and no queries to issue or results to wait for and read back. Whether that gains or loses frames

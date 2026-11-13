@@ -33,6 +33,7 @@
 #include "mesh_fb.h"
 #include "vk_mesh_fb.h"
 #include "vk_scratch_lru.h"
+#include "vk_index_rewrite.h"
 #include "platform/platform.h"
 #include "stutter_map.h"
 #include "vk_dlaa.h"
@@ -93,7 +94,8 @@ static int oneshot_budget_on(void) {
     return on;
 }
 
-enum { W_PROGRAM, W_SHADER, W_PIPELINE, W_NO_VS, W_INDEX, W_UB, W_BIND, W_SSBO_ALIGN, W_SSBO_SLOT, W_RESTART, W_INDIRECT, W_MESH, W_COUNT };
+enum { W_PROGRAM, W_SHADER, W_PIPELINE, W_NO_VS, W_INDEX, W_UB, W_BIND, W_SSBO_ALIGN, W_SSBO_SLOT, W_RESTART, W_INDIRECT, W_MESH, W_QUAD,
+       W_COUNT };
 
 static void warn_once(int key, const char *fmt, ...) {
     static volatile int32_t seen[W_COUNT];
@@ -6759,6 +6761,53 @@ static int restart_for(const VkExec *ex, int prim, int itype) {
     return 0;
 }
 
+// NX2NAVI_QUAD_INDEX (default 0): an indexed quad list is drawn as two triangles per quad and an indexed line loop as a
+// strip that comes back to its first vertex, from the game's indices (vk_index_rewrite.h), as the non-indexed ones are
+// (op_draw). Off, they go to the GPU with the game's indices under the triangle list and line strip topologies, and the
+// first such draw is logged either way. Read once.
+static int quad_index_on(void) {
+    static int on = -1;
+    if (on < 0) on = cfg_bool("NX2NAVI_QUAD_INDEX");
+    return on;
+}
+
+// An indexed quad list or line loop, drawn with indices made from the game's (NX2NAVI_QUAD_INDEX). 0: not one of those,
+// or left as it was (setting off, indices the CPU cannot read, a loop with primitive restart); the caller draws it.
+static int draw_idx_rewritten(VkExec *ex, const p_draw_idx *d, const VkMemSpan *sp, int restart) {
+    static const uint32_t isize[3] = {1, 2, 4};
+    int quads = d->prim == NVN_DRAW_PRIMITIVE_QUADS, loop = d->prim == NVN_DRAW_PRIMITIVE_LINE_LOOP;
+    if (!quads && !loop) return 0;
+    if (!quad_index_on()) {
+        warn_once(W_QUAD, "an indexed %s (%d indices): drawn with its indices as a %s (quad_index = 1 rewrites them)",
+                  quads ? "quad list" : "line loop", d->count, quads ? "triangle list" : "line strip");
+        return 0;
+    }
+    if (sp->alloc || (loop && restart)) {
+        warn_once(W_QUAD, "an indexed %s (%d indices, %s): drawn with its indices as they are", quads ? "quad list" : "line loop",
+                  d->count, sp->alloc ? "indices in device-local memory" : "primitive restart");
+        return 0;
+    }
+    uint32_t n = (uint32_t)d->count, unit = isize[d->itype];
+    if (quads && n < 4) return 1;   // no whole quad: nothing to draw
+    if (loop && n < 2) return 0;
+    uint32_t cap = quads ? 6 * (n / 4) : n + 1;
+    uint32_t *ix = malloc(sizeof *ix * (size_t)cap);
+    if (!ix) rt_fatal("vk: out of memory");
+    const uint8_t *src = (const uint8_t *)(uintptr_t)d->ibuf;
+    uint32_t m = quads ? idx_quads(src, unit, n, ix) : idx_loop(src, unit, n, ix);
+    vk_mem_count(sp->cls, VK_MUSE_CPU_READ, (uint64_t)n * unit);
+    vk_mem_count(VK_MCLS_SCRATCH, VK_MUSE_IB, sizeof *ix * (uint64_t)m);
+    bind_index(ex, ix, sizeof *ix * (uint64_t)m, VK_INDEX_TYPE_UINT32);
+    free(ix);
+    static int told;
+    if (!told++)
+        rt_log("vk: an indexed %s of %u indices drawn as %u indices of a %s (NX2NAVI_QUAD_INDEX)", quads ? "quad list" : "line loop",
+               n, m, quads ? "triangle list" : "line strip");
+    vkCmdDrawIndexed(ex->cb, m, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex, (uint32_t)d->base_instance);
+    ex->recorded++;
+    return 1;
+}
+
 static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     ex->dc->c0_binst = (uint32_t)d->base_instance;
     static const uint32_t isize[3] = {1, 2, 4};
@@ -6769,6 +6818,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     uint64_t bytes = (uint64_t)d->count * isize[d->itype];
     VkMemSpan sp;
     if (!vk_mem_resolve(d->ibuf, bytes, &sp)) return warn_once(W_INDEX, "index buffer %#llx is not backed: draws with it are skipped", (unsigned long long)d->ibuf);
+    if (draw_idx_rewritten(ex, d, &sp, restart)) return;
     if (d->itype == NVN_INDEX_TYPE_UNSIGNED_BYTE) {   // no uint8 index type here: widen (host-readable backing only)
         if (sp.alloc) return warn_once(W_INDEX, "byte indices in device-local memory: draw skipped");
         vk_mem_count(sp.cls, VK_MUSE_CPU_READ, bytes);
