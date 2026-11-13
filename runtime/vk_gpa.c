@@ -319,20 +319,20 @@ void vk_gpa_clear(uint64_t lo, uint64_t hi) {
     blocks_release(p0, p1);
 }
 
-static uint32_t remap(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, uint64_t buf_lo, int keep_twin) {
-    if (!vk_gpa_on() || !buf) return old_rec;
-    uint64_t dev = vk_gpa_device_address(buf);
-    uint64_t p0 = (lo + 4095) >> PAGE_SHIFT, p1 = hi >> PAGE_SHIFT;
-    plat_mutex_lock(&gpa_lock);
-    // the twin: the buffer the pages named before (the pool's imported buffer), so writes reach guest memory too.
-    // NX2NAVI_GPA_TWIN=0 (diagnosis): no twin, the writes go to the mirror alone, as before patch 0034.
+// NX2NAVI_GPA_TWIN=0 (diagnosis): no twin, the writes go to the mirror alone, as before patch 0034.
+static int twins_on(void) {
     static int twins = -1;
     if (twins < 0) { const char *e = cfg_get("NX2NAVI_GPA_TWIN"); twins = !(e && !strcmp(e, "0")); }
-    uint64_t twin = old_rec && twins && keep_twin ? (uint64_t)G.cpu[REC_WORD + old_rec * REC_WORDS] |
-                                                        (uint64_t)G.cpu[REC_WORD + old_rec * REC_WORDS + 1] << 32
-                                                  : dev - buf_lo;
-    uint32_t r = dev ? rec_alloc(dev - buf_lo, twin) : 0;
-    if (!r) { plat_mutex_unlock(&gpa_lock); return old_rec; }
+    return twins;
+}
+
+// gpa_lock held: the first address of record rec (the buffer its pages read).
+static uint64_t rec_first(uint32_t rec) {
+    return (uint64_t)G.cpu[REC_WORD + rec * REC_WORDS] | (uint64_t)G.cpu[REC_WORD + rec * REC_WORDS + 1] << 32;
+}
+
+// gpa_lock held: the pages of [p0, p1) that name old_rec (or none) name r from here on.
+static void pages_move(uint64_t p0, uint64_t p1, uint32_t old_rec, uint32_t r) {
     for (uint64_t p = p0; p < p1; p++) {
         uint32_t w = page_word(p, 1);
         if (!w) {
@@ -342,8 +342,32 @@ static uint32_t remap(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, 
         }
         if (!G.cpu[w] || G.cpu[w] == old_rec) page_put(w, r);
     }
+}
+
+static uint32_t remap(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, uint64_t buf_lo, int keep_twin) {
+    if (!vk_gpa_on() || !buf) return old_rec;
+    uint64_t dev = vk_gpa_device_address(buf);
+    uint64_t p0 = (lo + 4095) >> PAGE_SHIFT, p1 = hi >> PAGE_SHIFT;
+    plat_mutex_lock(&gpa_lock);
+    // the twin: the buffer the pages named before (the pool's imported buffer), so writes reach guest memory too.
+    uint64_t twin = old_rec && twins_on() && keep_twin ? rec_first(old_rec) : dev - buf_lo;
+    uint32_t r = dev ? rec_alloc(dev - buf_lo, twin) : 0;
+    if (!r) { plat_mutex_unlock(&gpa_lock); return old_rec; }
+    pages_move(p0, p1, old_rec, r);
     plat_mutex_unlock(&gpa_lock);
     if (old_rec) vk_completion_add(vk_sync_issued() + 1, rec_free_cb, (void *)(uintptr_t)old_rec);
+    return r;
+}
+
+uint32_t vk_gpa_remap_writes(uint64_t lo, uint64_t hi, uint32_t old_rec, VkBuffer buf, uint64_t buf_lo) {
+    if (!old_rec || !buf || !vk_gpa_on() || !twins_on()) return 0;
+    uint64_t dev = vk_gpa_device_address(buf);
+    uint64_t p0 = (lo + 4095) >> PAGE_SHIFT, p1 = hi >> PAGE_SHIFT;
+    plat_mutex_lock(&gpa_lock);
+    uint32_t r = dev ? rec_alloc(rec_first(old_rec), dev - buf_lo) : 0;
+    if (r) pages_move(p0, p1, old_rec, r);
+    plat_mutex_unlock(&gpa_lock);
+    if (r) vk_completion_add(vk_sync_issued() + 1, rec_free_cb, (void *)(uintptr_t)old_rec);
     return r;
 }
 

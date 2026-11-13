@@ -4749,6 +4749,8 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
         ex->recorded++;
         cx->B.st = s, cx->B.st_valid = 1;
         if (ex->mark && vk_exec_frame.draws == ex->mark_draws0) ex->mark->first[0] = vs, ex->mark->first[1] = fs;
+        if (vk_draw_marks_on)   // NX2NAVI_DRAW_CRUMBS: a lost device then names these shaders (vk_crumbs.c vk_draw_mark)
+            vk_draw_mark(ex->cb, ex->mark, vs, fs, (uint32_t)(vk_exec_frame.draws - ex->mark_draws0));
     }
     vk_pipeline_line_width(ex->cb, &s, ex->line_width);   // a draw of lines: the game's width; else nothing
     if (!mesh) {

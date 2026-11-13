@@ -28,6 +28,11 @@ void plat_thread_join(PlatThread *t);     // waits for fn to return, then frees 
 // Waits at most ns for fn to return: 1 when it did (t is freed), 0 when it still runs (t stays valid).
 int plat_thread_join_ns(PlatThread *t, uint64_t ns);
 void plat_thread_detach(PlatThread *t);   // frees t; the thread runs on
+// fn runs on every thread these calls make, when its function has returned and before the thread ends: for what a
+// thread keeps for itself alone (a decoder context). At most PLAT_THREAD_END_HOOKS, each added once.
+#define PLAT_THREAD_END_HOOKS 4
+void plat_thread_end_hook(void (*fn)(void));
+void plat_thread_end_run(void);            // the platform files' thread start functions call it
 // Restricts t (NULL: the calling thread) to the logical processors in mask (bit n = processor n of the first group).
 // Returns the previous mask, 0 on failure.
 uint64_t plat_thread_affinity(PlatThread *t, uint64_t mask);
@@ -258,6 +263,17 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 // pages in one call, where the watch works by protecting pages (Linux), so the stores do not fault page by page. The
 // pages count as written. Returns 0 when there is nothing to clear or it cannot be done; the write is valid either way.
 int plat_mem_prepare_write(uint64_t addr, uint64_t n);
+// Guest memory as dma-bufs (Linux, NX2NAVI_DMABUF, on by default; vk_memory.c "dma-buf imports"): the watched
+// reservations are shared mappings of one memfd, and /dev/udmabuf makes a dma-buf of a page range of it, which the GPU
+// driver imports like its own memory. plat_mem_dmabuf_ok: 1 when that is so, with udmabuf's size limit in bytes in *limit and the
+// first page of a shared reservation in *any; 0 with the reason in *why ("" when NX2NAVI_DMABUF=0 turned it off).
+// plat_mem_dmabuf: a new dma-buf file descriptor over [addr, addr + n) (whole pages inside one watched reservation),
+// -1 with errno on failure. Its pages stay pinned (a decommit zeroes them in place) until plat_mem_dmabuf_done is
+// told, after the last user of the dma-buf (the imported memory) is gone; the pages of its range that nothing has
+// committed then go back to the system. Elsewhere these report 0 and -1.
+int plat_mem_dmabuf_ok(uint64_t *limit, uint64_t *any, const char **why);
+int plat_mem_dmabuf(uint64_t addr, uint64_t n);
+void plat_mem_dmabuf_done(uint64_t addr, uint64_t n);
 // A write that faulted on a read-only page at addr goes to fn first; fn returns 1 when it made the page writable and
 // the write should run again, 0 to let the fault go on (to the crash handler). One hook per process.
 void plat_mem_fault_hook(int (*fn)(uint64_t addr));

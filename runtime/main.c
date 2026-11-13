@@ -264,20 +264,39 @@ static uint64_t lifted_function(uintptr_t rip) {
 
 static int readable(uint64_t a, uint64_t n) { return plat_mem_readable(a, n); }
 
-// A module another program put into the game's process: the Vulkan layer or the hook of a recorder, an overlay or a
-// capture tool, by the words such files carry in their names. A crash inside one is that program's: one report was an
-// access violation in a recorder's layer the moment the present mode changed and the swapchain was made again.
+// A module another program put into the game's process: the Vulkan layer or the hook of a recorder, an overlay, a
+// capture tool or a post-processing injector, by the words such files carry in their names. A crash inside one is that
+// program's: one report was an access violation in a recorder's layer the moment the present mode changed and the
+// swapchain was made again, another an injector's layer reading a null pointer at the end of every shader
+// preparation.
 static int foreign_hook(const char *module) {
     char low[160];
     size_t n = 0;
     for (; module && module[n] && n < sizeof low - 1; n++) low[n] = (char)tolower((unsigned char)module[n]);
     low[n] = 0;
-    return strstr(low, "vk_layer") || strstr(low, "hook") || strstr(low, "overlay");
+    return strstr(low, "vk_layer") || strstr(low, "hook") || strstr(low, "overlay") || strstr(low, "reshade");
 }
+
+// Set when main_run has returned: the mode's work is done and saved, and all that still runs is the C runtime's exit
+// and, inside ExitProcess, the detach call of every library in the process, the graphics driver's and those other
+// programs put there. A fault in one of them is not a failure of the run. On one PC an injector's Vulkan layer faulted
+// in its detach at the end of every `--warm-shaders` and `--prepare-shaders` (four runs over three versions): each
+// wrote a FATAL after "variants built into the driver cache" and ended with code 71, so the launcher took a finished
+// preparation for one that failed. crash_handler ends such a process with the code its mode returned. A fault in this
+// executable's own code on the way out (an atexit handler) is still reported.
+static volatile int32_t mode_done;
+static int mode_rc;
 
 static void crash_handler(const PlatCrash *x) {
     static volatile int32_t busy;
     if (plat_xchg32(&busy, 1)) plat_exit(71);
+    if (__atomic_load_n(&mode_done, __ATOMIC_ACQUIRE) && x->module) {
+        rt_log("exit: %s (%#x) in %s while the process was ending, after its work was done and saved%s: the run ends "
+               "with its own code %d", x->what, x->code, *x->module ? x->module : "code outside every module",
+               foreign_hook(x->module) ? " (that library is not part of the game: another program put it there)" : "",
+               mode_rc);
+        plat_exit(mode_rc);
+    }
     rt_log_sync();   // the lines before the crash, then the report, each written as it is made
     char d[160];
     uintptr_t rip = x->rip;
@@ -536,11 +555,23 @@ static int probe_crash(int null) {
     return 1;
 }
 
+// --probe-crash-exit: the fault of --probe-crash-call, made by an atexit handler after the mode has returned, the way
+// a library another program put into the process faults in its detach. The process must end with the mode's own code
+// (PROBE_EXIT_CODE) and an "exit:" line, with no FATAL (mode_done, crash_handler). tests/exit_fault_check.py runs it.
+#define PROBE_EXIT_CODE 3
+static void probe_exit_fault(void) { printf("%zu\n", probe_strlen((const char *)(uintptr_t)8)); }
+
+static int probe_crash_exit(void) {
+    atexit(probe_exit_fault);
+    printf("probe-crash-exit: returning %d; a library then faults while the process ends\n", PROBE_EXIT_CODE);
+    return PROBE_EXIT_CODE;
+}
+
 static int usage(const char *argv0) {
     fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR] [--profile DIR] [--audio-device VALUE] [--monitor VALUE] [--list-audio-devices | --list-monitors | --selftest | --probe-loader | "
                     "--probe-cfg | --probe-dpi | --probe-mods | --probe-kernel | --probe-ipc | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-shader | --probe-vkmem | "
-                    "--probe-vkexec | --probe-meshfb | --probe-astc | --probe-zstd | --probe-input | --probe-movie | --probe-crash-call | --probe-crash-null | --probe-discord | --probe-coop | "
+                    "--probe-vkexec | --probe-meshfb | --probe-astc | --probe-zstd | --probe-input | --probe-movie | --probe-crash-call | --probe-crash-null | --probe-crash-exit | --probe-discord | --probe-coop | "
                     "--prepare-shaders | --warm-shaders | --prepare-pipelines | --probe-prewarm | --probe-buildgate | --probe-ffx-cache | --probe-memneed | --probe-devlost | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
@@ -577,7 +608,16 @@ static void portable_paths(RtConfig *c) {
     c->profile = portable_path(exe, "NX2NAVI_PROFILE_DIR", "profile", NULL, pp_profile, sizeof pp_profile, c->profile);
 }
 
+static int main_run(int argc, char **argv);
+
+// A game run never comes back here: it ends in plat_exit (boot.c, gfx_present.c). Every other mode returns its code.
 int main(int argc, char **argv) {
+    mode_rc = main_run(argc, argv);
+    __atomic_store_n(&mode_done, 1, __ATOMIC_RELEASE);   // from here on only the exit runs (mode_done, above)
+    return mode_rc;
+}
+
+static int main_run(int argc, char **argv) {
     mem_init();   // first: claim the guest address space before anything else can land there; reads nx2navi.ini
     // The build that wrote the log, at its top: an attached log from another install or version shows at a glance.
     rt_log("version: NX2navi %s, game %d.%d.%d", rt_port_version, rt_game_version / 100, rt_game_version / 10 % 10,
@@ -671,6 +711,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-loader")) return probe_loader();
     if (!strcmp(mode, "--probe-crash-call")) return probe_crash(0);
     if (!strcmp(mode, "--probe-crash-null")) return probe_crash(1);
+    if (!strcmp(mode, "--probe-crash-exit")) return probe_crash_exit();
     if (!strcmp(mode, "--probe-cfg")) return probe_cfg();
 #ifdef _WIN32
     if (!strcmp(mode, "--probe-dpi")) return probe_dpi();   // the Win32 DPI awareness of nx2navi.manifest

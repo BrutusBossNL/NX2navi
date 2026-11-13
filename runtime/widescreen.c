@@ -90,11 +90,23 @@ static unsigned picture_height(void) {
 static double dlss_share(void);
 double wide_dlss_share(void) { return dlss_share(); }   // vk_dlaa.c: the mode's share, 0 off
 
+static double heap_share(void);
+
 static double dlss_share(void) {
     if (!vk_dlaa_wanted() || !cfg_bool("NX2NAVI_DLAA") || (!vk_dlaa_fsr3() && !vk_dlaa_available())) return 0;
     const char *m = cfg_value("NX2NAVI_DLSS");
-    return !strcmp(m, "quality") ? 2.0 / 3 : !strcmp(m, "balanced") ? 0.58 : !strcmp(m, "performance") ? 0.5
-         : !strcmp(m, "ultra_performance") ? 1.0 / 3 : 1.0;
+    double s = !strcmp(m, "quality") ? 2.0 / 3 : !strcmp(m, "balanced") ? 0.58 : !strcmp(m, "performance") ? 0.5
+             : !strcmp(m, "ultra_performance") ? 1.0 / 3 : 1.0;
+    // Never more than the texture heap was made for at the start (heap_share): only an upscaler switched on in the
+    // menu of a run that began without one can ask for more, and it gets the whole picture after a restart.
+    if (s > heap_share()) {
+        static int said;
+        if (!said++)
+            rt_log("widescreen: the scene stays at %.0f%% of the picture until a restart: the game's render-target heap "
+                   "was sized at the start, without an upscaler, and %.0f%% does not fit it", heap_share() * 100, s * 100);
+        s = heap_share();
+    }
+    return s;
 }
 
 // Without DLSS or FSR 3.1 (FSR 1, bilinear) the game's dynamic resolution took the scene down to a third of the picture
@@ -109,6 +121,25 @@ static double scene_share(void) {
     }
     double s = dlss_share();
     return s > 0 ? s : plain;
+}
+
+// The largest share of the picture the scene can have in this run, which the texture heap is made for
+// (wide_heap_extra_kib). Decided once, at the first call, which is the start (memory.c sizes the application pool
+// from it before any device exists): the whole picture when the upscaler setting is on, whatever its mode, since
+// the menu changes the mode in play and DLAA and FSR at native size render all of it; else the game's own most,
+// PLAIN_SHARE, or NX2NAVI_SCENE_SHARE when that asks for more. From the settings, not from what runs: DLSS is known
+// to run only once the device is up.
+static double heap_share(void) {
+    static double share = -1;
+    if (share < 0) {
+        const char *e = cfg_get("NX2NAVI_SCENE_SHARE");
+        double s = e && *e ? atof(e) : PLAIN_SHARE;
+        if (s < PLAIN_SHARE) s = PLAIN_SHARE;
+        if (s > 1) s = 1;
+        if (rt_patch_set("res_fixed") >= 0 && cfg_bool("NX2NAVI_DLAA")) s = 1;
+        share = s;
+    }
+    return share;
 }
 
 // The game turns the scale at +240 into a scene size against its own 1440-line picture while the picture is taller
@@ -154,15 +185,20 @@ static int picture_size(unsigned *ow, unsigned *oh, int quiet) {
 
 // The texture heap: the engine's render targets live in "DynamicTextureAllocatorMem" of the HeapDef table
 // (System/HeapSize/Product.Nin_Ounce_NVN2.HeapDef.byml.zs; 312320 KiB, carved from "Graphics"), made for the 2560x1440
-// picture. Larger pictures' targets did not fit: the render-target manager's search for a free block (main+0x3ed00)
-// fell to its out-of-memory path and read through a null block when the pause menu's blur needed one at 5120x2160.
-// The heap and its parent grow by the shipped size times the picture's pixels over 2560x1440 (its targets are the
-// picture's size or a share of it), in whole MiB; resolution.c rewrites the table (res_heapdef_build) and memory.c adds
-// the amount to the application pool, so no other heap shrinks. 0 without the widescreen sets or for the game's size.
+// picture with the scene at three quarters of it at most. Larger pictures' targets did not fit: the render-target
+// manager's search for a free block (main+0x3ed00) fell to its out-of-memory path and read through a null block when
+// the pause menu's blur needed one at 5120x2160. So did a larger scene in the game's own picture: with DLAA the scene
+// is all of the picture, 2560x1440 where the game never goes past 1920x1080, and a player's game ended in that same
+// function, reading address 0x48, each time a dialogue closed in Castle Town (0.8.0, 1440 lines, dlss = dlaa).
+// The heap and its parent grow by the shipped size times the picture's pixels over 2560x1440 and times the scene's
+// pixels over the game's most (heap_share: its targets are the picture's size or the scene's), in whole MiB;
+// resolution.c rewrites the table (res_heapdef_build) and memory.c adds the amount to the application pool, so no
+// other heap shrinks. 0 for the game's picture and scene, and for a larger picture without the widescreen sets.
 uint64_t wide_heap_extra_kib(void) {
     unsigned ow, oh;
-    if (!wide_available() || !picture_size(&ow, &oh, 1)) return 0;
-    double grow = (double)ow * oh / ((double)GAME_W * GAME_H) - 1;
+    if (!wide_available() || !picture_size(&ow, &oh, 1)) ow = GAME_W, oh = GAME_H;
+    double k = heap_share() / PLAIN_SHARE;
+    double grow = (double)ow * oh / ((double)GAME_W * GAME_H) * k * k - 1;
     return grow > 0 ? (uint64_t)ceil(GAME_DTA_KIB * grow / 1024) * 1024 : 0;
 }
 

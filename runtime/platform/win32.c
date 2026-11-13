@@ -31,11 +31,23 @@ struct PlatThread {
     HANDLE h;
     PlatThreadFn fn;
     void *arg;
+    volatile int32_t state;   // 0 running and owned by its maker, 1 detached, 2 its function has returned
 };
+
+// What a thread made here keeps for itself is given back when its function returns: the handles below (the sleep
+// timer of plat_wait_ns, the events of plat_file_pread and plat_file_pwrite), what the other files keep per thread
+// (plat_thread_end_hook) and, for a detached thread, its PlatThread. The game makes and ends threads all through
+// play, each a host thread: nothing closed them, so every ended thread that had slept, read or written left up
+// to three kernel handles behind for the rest of the run. A guest thread ends by returning here too (kernel.c:
+// ExitThread jumps back to the thread's start).
+static void thread_handles_close(void);
 
 static DWORD WINAPI thread_main(LPVOID p) {
     PlatThread *t = p;
     t->fn(t->arg);
+    plat_thread_end_run();
+    thread_handles_close();
+    if (plat_xchg32(&t->state, 2) == 1) free(t);   // detached while it ran: nobody else frees it
     return 0;
 }
 
@@ -73,10 +85,12 @@ int plat_thread_join_ns(PlatThread *t, uint64_t ns) {
     return 1;
 }
 
-// The thread keeps using t->fn and t->arg, so the struct stays allocated (a few bytes per detached thread).
+// The thread still reads t->fn and t->arg when it starts, so the struct goes when the thread's function has
+// returned (thread_main), or here when it already has.
 void plat_thread_detach(PlatThread *t) {
     CloseHandle(t->h);
     t->h = NULL;
+    if (plat_xchg32(&t->state, 1) == 2) free(t);
 }
 
 int plat_cpu_cores(uint64_t *all, uint64_t *first) {
@@ -474,13 +488,22 @@ uint64_t plat_now_ns(void) {
     return plat_scaled(qpc_ns, (uint64_t)t.QuadPart);
 }
 
-// A high-resolution waitable timer per sleeping thread (Windows 10 1803+; one handle per thread, kept until exit)
+// A high-resolution waitable timer per sleeping thread (Windows 10 1803+; one handle per thread, closed when the
+// thread's function returns, thread_handles_close)
 // wakes within about 0.1-0.5 ms; the last PLAT_SPIN_NS are spent yielding so the deadline is met closely.
 // Without that timer kind, Sleep(1) granularity applies.
 #define PLAT_SPIN_NS 300000u
 
 static __thread HANDLE sleep_timer;
 static __thread int sleep_timer_tried;
+static __thread HANDLE pread_ev, pwrite_ev;   // plat_file_pread, plat_file_pwrite: the event of their overlapped call
+
+static void thread_handles_close(void) {
+    if (sleep_timer) CloseHandle(sleep_timer);
+    if (pread_ev) CloseHandle(pread_ev);
+    if (pwrite_ev) CloseHandle(pwrite_ev);
+    sleep_timer = pread_ev = pwrite_ev = NULL, sleep_timer_tried = 0;
+}
 
 void plat_wait_ns(uint64_t ns) {
     if (!sleep_timer_tried) {
@@ -865,6 +888,11 @@ int plat_mem_prepare_write(uint64_t addr, uint64_t n) {
     (void)addr; (void)n;
     return 0;
 }
+
+// Guest memory as dma-bufs is Linux's (platform.h).
+int plat_mem_dmabuf_ok(uint64_t *limit, uint64_t *any, const char **why) { *limit = *any = 0, *why = ""; return 0; }
+int plat_mem_dmabuf(uint64_t addr, uint64_t n) { (void)addr; (void)n; return -1; }
+void plat_mem_dmabuf_done(uint64_t addr, uint64_t n) { (void)addr; (void)n; }
 
 // Contains code Copyright (c) 2026 Peiikai (MIT; see THIRD_PARTY_NOTICES.md).
 // GetWriteWatch with the reset flag.
@@ -1297,8 +1325,8 @@ void plat_file_close(PlatFile *f) {
 }
 
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
-    static __thread HANDLE ev;
-    if (!ev && !(ev = CreateEventW(NULL, TRUE, FALSE, NULL))) return -1;
+    HANDLE ev = pread_ev;
+    if (!ev && !(ev = pread_ev = CreateEventW(NULL, TRUE, FALSE, NULL))) return -1;
     OVERLAPPED ov = {.Offset = (DWORD)off, .OffsetHigh = (DWORD)(off >> 32), .hEvent = ev};
     DWORD got = 0;
     if (ReadFile((HANDLE)f, buf, n, &got, &ov)) return got;
@@ -1556,8 +1584,8 @@ PlatFile *plat_fs_open(const char *path, int write, int *err) {
 PlatFile *plat_fs_create(const char *path, int *err) { return fs_open(path, GENERIC_WRITE, 0, CREATE_NEW, err); }
 
 int64_t plat_file_pwrite(PlatFile *f, const void *buf, uint32_t n, uint64_t off) {
-    static __thread HANDLE ev;
-    if (!ev && !(ev = CreateEventW(NULL, TRUE, FALSE, NULL))) return -1;
+    HANDLE ev = pwrite_ev;
+    if (!ev && !(ev = pwrite_ev = CreateEventW(NULL, TRUE, FALSE, NULL))) return -1;
     OVERLAPPED ov = {.Offset = (DWORD)off, .OffsetHigh = (DWORD)(off >> 32), .hEvent = ev};
     DWORD put = 0;
     if (WriteFile((HANDLE)f, buf, n, &put, &ov)) return put;

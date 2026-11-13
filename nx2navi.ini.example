@@ -204,8 +204,10 @@
 # build_reserve_mb = 64
 # 1: the log says how many pipelines came from pipeline-cache.bin; 2 also logs every compute pipeline built. 0: off.
 # pipe_feedback = 1
-# pipeline-cache.bin larger than this (MB) starts empty and is rewritten (0: no limit).
-# pipeline_cache_max_mb = 512
+# pipeline-cache.bin larger than this (MB) starts empty and is rewritten (0: no limit). With the pipeline list of
+# 0.9.1 and later a full cache is about 550 MB on an NVIDIA card, so the limit has to stay well above that: under
+# it the cache is thrown away at every start and the pipelines are built again each time. Default: 1024.
+# pipeline_cache_max_mb = 1024
 # 1: the pipelines a run compiles go into pipeline-cache-play.bin, a small file of its own, so pipeline-cache.bin
 # (hundreds of MB) is not written again while you play; the small file is folded into the large one at a start once
 # it has grown. 0: one file, written whole whenever a run made a new pipeline.
@@ -227,9 +229,22 @@
 # Count the shared pipeline list that comes with the release (seed-pipeline-keys.bin) as known pipelines, so a new
 # install builds them at the start instead of at their first draw. 0: only the pipelines this install drew.
 # pipe_seed = 1
-# 1: the start waits until every known pipeline is built. Default 0: with the graphics pipeline library the start
-# builds them for at most 20 seconds and the rest in the background while you play.
-# prewarm_full = 0
+# Whether the start builds the pipelines of that list which this install has never drawn. They take 2 to 4 GB of
+# memory (commit) on an NVIDIA card and about 1.5 GB on an AMD one for the whole run, drawn or not.
+# auto (default): built at the start, except on a PC that starts with less memory free than the game takes in play
+#   (the start's "this machine has ... MB of memory left for the game" warning): there each is made at its first
+#   draw, from the pipeline cache, and built at the start from then on.
+# 1: always built at the start. 0: never; a first visit to an area can then hold a frame for a moment.
+# pipe_seed_boot = auto
+# How long the start waits for known pipelines on the "Preparing shaders" screen.
+# auto (default): with the graphics pipeline library the start builds them for at most 20 seconds and the rest in the
+#   background while you play. The first start after a graphics driver update (or with another GPU) waits for
+#   everything instead, because nothing is built then and the game would crawl while it all compiles beside it: every
+#   known pipeline, the compute pipelines and the driver's own shader cache. That takes minutes, once per driver; a
+#   start closed during it goes on with it the next time (three starts at most).
+# 1: every start waits until every known pipeline is built.
+# 0: never more than the 20 seconds, also after a driver update.
+# prewarm_full = auto
 # Threads that translate known shaders at start (1 to 64; default: half the CPU threads, at most 16).
 # prewarm_xlate = 8
 # After an update that brings a new shader translator, 1 keeps using the shader cache's translations from the earlier
@@ -900,6 +915,17 @@
 # last one it finished. Unset: on AMD GPUs (VK_AMD_buffer_marker). 1: also on NVIDIA GPUs
 # (VK_NV_device_diagnostic_checkpoints), which NVIDIA says costs a little. 0: off.
 # pass_crumbs = 1
+# Pipelines built without the video driver's shader optimiser: the same picture, slower shaders in those pipelines.
+# mesh: only the pipelines with task and mesh shaders (terrain, foliage). 1: all. 0: none.
+# Unset (default): mesh on AMD's Windows driver for the RX 5000 and RX 6000 series and older, where the device is lost
+# ("driver timeout") in render passes that start with such a pipeline; 0 on every other driver. On those cards 0 gives
+# the optimised pipelines back.
+# vk_noopt = mesh
+# GPU draw marks, for a GPU crash (device lost) that comes back in the same place on an AMD GPU: inside each render pass
+# a mark is written wherever the shaders change, and after the crash the log names the shaders of the draws the GPU had
+# not finished, not only the pass. It costs a little frame rate, so it is off unless a crash is being tracked down.
+# Needs the pass marks above (AMD GPUs). Default: 0.
+# draw_crumbs = 1
 # A test of how the game ends when the video card stops answering (device lost): the hand-over to the GPU queue with
 # this number is not made and is taken as one the driver refused with a lost device. The log then holds one report and
 # one FATAL line, and the game ends with exit code 72. 0: never. Default: 0.
@@ -1028,3 +1054,8 @@
 # those second writes cost about 3 ms of GPU time a frame. 0 (default): every mirror sends them. A pool that needs them
 # and is left without shows as foliage stretched into columns or flickering.
 # gpa_twin_max_kb = 0
+# 1 (default): shaders that follow the game's pointers read a memory pool's new copy in video memory only once that
+# copy has been filled; until then they read the game's own memory. 0: they read the new copy at once, as up to 0.9.2,
+# where a card over its video memory budget could lose the device at an area load (a GPU read fault at the first byte
+# of the new copy).
+# gpa_late = 1

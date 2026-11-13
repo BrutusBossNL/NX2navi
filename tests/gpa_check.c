@@ -125,6 +125,29 @@ int main(void) {
     CHECK(read_through(a0 + 4096, 1) == dev_of(b0) + 4096, "a plain page is its own twin");
     gpu_done();
 
+    // a new mirror takes the writes first and the reads once its first copy has run (vk_memory.c mirror_create,
+    // gpa_switch): until then the pages read the imported buffer and the mirror is their twin
+    VkBuffer m1 = new_buf();
+    uint32_t w0 = vk_gpa_remap_writes(a0, a1, r0, m1, a0);
+    CHECK(w0 && w0 != r0, "a new mirror gets a record for the writes");
+    expect(a0, a1, b0, a0, "a new mirror before its first copy: reads stay on the imported buffer");
+    CHECK(read_through(a0 + 4096, 1) == dev_of(m1) + 4096 && read_through(a1 - 4096, 1) == dev_of(m1) + (a1 - 4096 - a0),
+          "a new mirror before its first copy is the twin, which takes the writes");
+    gpu_done();
+    r0 = vk_gpa_remap(a0, a1, w0, m1, a0);
+    expect(a0, a1, m1, a0, "a new mirror after its first copy: reads move to it");
+    CHECK(read_through(a0 + 4096, 1) == dev_of(b0) + 4096, "and the imported buffer is the twin again");
+    // evicted while it still waits for its first copy: the pages go back to the imported buffer alone
+    r0 = vk_gpa_remap_plain(a0, a1, r0, b0, a0);
+    gpu_done();
+    VkBuffer m2 = new_buf();
+    w0 = vk_gpa_remap_writes(a0, a1, r0, m2, a0);
+    r0 = vk_gpa_remap_plain(a0, a1, w0, b0, a0);
+    expect(a0, a1, b0, a0, "a mirror gone before its first copy");
+    CHECK(read_through(a0 + 4096, 1) == dev_of(b0) + 4096, "leaves the imported buffer as its own twin");
+    CHECK(!vk_gpa_remap_writes(a0, a1, 0, m2, a0), "a pool without a record gets none for a mirror's writes");
+    gpu_done();
+
     // an unmapped range reads the zero buffer at once, and its blocks serve no other range while the GPU may still read
     // the old L1 entries
     uint32_t old_blk[3] = {block_of(a0), block_of(a0 + 16 * MiB), block_of(a0 + 32 * MiB)};
