@@ -243,8 +243,9 @@ static int name_has(const char *s, const char *sub) {
     return 0;
 }
 
-// First discrete GPU with Vulkan 1.3, the required extensions and a graphics+present queue; NX2NAVI_GPU_INDEX (index) or
-// NX2NAVI_GPU_NAME (case-insensitive part of the name) overrides.
+// First discrete GPU with Vulkan 1.3, the required extensions and a graphics+present queue (of one GPU listed by two
+// drivers, the newer driver's listing); NX2NAVI_GPU_INDEX (index) or NX2NAVI_GPU_NAME (case-insensitive part of the
+// name) overrides.
 static int pick_device(void) {
     uint32_t n = 0;
     vk_dlssg_enumerate(g_vk.instance, &n, NULL);
@@ -255,6 +256,7 @@ static int pick_device(void) {
     int want = e && *e ? atoi(e) : -1;
     const char *name = cfg_get("NX2NAVI_GPU_NAME");
     int best = -1, best_score = -1, listed = 0;
+    uint32_t best_driver = 0;   // the driver version of the best one so far
 retry:
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
@@ -276,7 +278,19 @@ retry:
         if (fam == UINT32_MAX) { rt_log("vk: gpu %u skipped: no graphics+compute+present queue family", i); continue; }
         int score = (int)i == want ? 100 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3
                   : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
-        if (score > best_score) { best_score = score; best = (int)i; }
+        if (score > best_score) { best_score = score; best = (int)i; best_driver = p.driverVersion; continue; }
+        // The same GPU listed again by another installed driver (a laptop with the vendor's processor graphics and its
+        // card has both drivers list the card): the newer driver's listing. The older one, there to serve the processor
+        // graphics, was reported to crash in its shader compiler with the card.
+        if (score == best_score && best >= 0) {
+            VkPhysicalDeviceProperties b;
+            vkGetPhysicalDeviceProperties(pd[best], &b);
+            if (b.vendorID == p.vendorID && b.deviceID == p.deviceID && p.driverVersion > best_driver) {
+                if (!listed) rt_log("vk: gpu %u is gpu %d listed by a newer driver (%#x over %#x): gpu %u", i, best,
+                                    p.driverVersion, best_driver, i);
+                best = (int)i, best_driver = p.driverVersion;
+            }
+        }
     }
     // A chosen GPU that is not usable or no longer there (the menu's GPU row, an unplugged card, a driver that lists the
     // devices in another order): the best usable one instead, so the game still starts and the choice can be changed
