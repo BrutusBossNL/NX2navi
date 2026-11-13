@@ -584,7 +584,10 @@ void frame_rate_water_host(Cpu *c) {
 // that is not positive, or too large for a count, stays for the cut. The remainders are in a table of their own: an
 // object that shares slots with the counters above would lose its fraction to them.
 // NX2NAVI_TRACE=perf: every 10 s, the steps the objects were given beside those the cut alone would have given.
-#define SIM_SLOTS 8
+// Every interactive floor of a place (the Deku Tree's ground webs are such floors) and both water managers ask once an
+// update, each for its own object, so the table holds as many as the waters' does: with fewer slots than objects each
+// would take another's slot in turn, start without a remainder every update and stand still again above 60 fps.
+#define SIM_SLOTS 64
 static WholeSlot sim_slot[SIM_SLOTS];
 
 void frame_rate_sim_host(Cpu *c) {

@@ -277,6 +277,16 @@ int main(int argc, char **argv) {
                   sim(interactive, NAN) == 0, "no time, negative time and NaN are cut as fcvtzs cuts");
         CHECK(sim(interactive, 1.0f / 15.0f) == 4, "four steps for a 15 fps update (the game's clamp to 3 follows)");
     }
+    // A place with many interactive floors: 2 water managers and 30 floors, each asking once an update at 144 fps, all
+    // keep their own remainder and run 60 fixed steps a second (with 8 slots they took each other's and ran none).
+    {
+        const uint64_t first = 0x7600000000ull;
+        uint32_t steps[32] = {0};
+        for (int f = 0; f < 1440; f++)
+            for (int k = 0; k < 32; k++) steps[k] += sim(first + 0x1000 * (uint64_t)k, 1.0f / 144.0f);
+        for (int k = 0; k < 32; k++)
+            CHECK(steps[k] >= 599 && steps[k] <= 600, "surface %d of 32 at 144 fps: %u steps in 10 s", k, steps[k]);
+    }
     printf("frame_step_check: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;
 }
