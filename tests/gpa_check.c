@@ -38,9 +38,10 @@ void rt_log(const char *fmt, ...) {
 
 static const uint32_t *table;   // the first buffer vk_gpa.c creates
 static uintptr_t next_handle = 0x1000;
-VkResult vmaCreateBuffer(VmaAllocator a, const VkBufferCreateInfo *bi, const VmaAllocationCreateInfo *ai, VkBuffer *buf,
-                         VmaAllocation *alloc, VmaAllocationInfo *info) {
-    (void)a, (void)ai;
+// vk.h sends vmaCreateBuffer and vmaDestroyBuffer to these wrappers (vk_vma_budget.c)
+VkResult vk_vma_create_buffer(VmaAllocator a, const VkBufferCreateInfo *bi, const VmaAllocationCreateInfo *ai, VkBuffer *buf,
+                              VmaAllocation *alloc, VmaAllocationInfo *info, const char *file) {
+    (void)a, (void)ai, (void)file;
     void *mem = calloc(1, (size_t)bi->size);
     if (!table) table = mem;
     *buf = (VkBuffer)(next_handle += 0x1000);

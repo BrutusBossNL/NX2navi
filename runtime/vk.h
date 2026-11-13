@@ -8,17 +8,30 @@
 #pragma clang diagnostic pop
 // Every VMA allocation goes by the device-local heaps' live budgets (vk_vma_budget.c): a heap within the reserve of its
 // budget takes nothing new while another heap can.
+// Each allocation is also counted under its owner, by the source file that made it, until it is freed through the
+// wrappers below (vk_vma_owner_bytes, for the memory report: vk_memory.c owner_log).
 VkResult vk_vma_create_image(VmaAllocator vma, const VkImageCreateInfo *ici, const VmaAllocationCreateInfo *ai, VkImage *img,
-                             VmaAllocation *a, VmaAllocationInfo *info);
+                             VmaAllocation *a, VmaAllocationInfo *info, const char *file);
 VkResult vk_vma_create_buffer(VmaAllocator vma, const VkBufferCreateInfo *bci, const VmaAllocationCreateInfo *ai,
-                              VkBuffer *buf, VmaAllocation *a, VmaAllocationInfo *info);
+                              VkBuffer *buf, VmaAllocation *a, VmaAllocationInfo *info, const char *file);
 VkResult vk_vma_allocate_memory(VmaAllocator vma, const VkMemoryRequirements *req, const VmaAllocationCreateInfo *ai,
-                                VmaAllocation *a, VmaAllocationInfo *info);
+                                VmaAllocation *a, VmaAllocationInfo *info, const char *file);
+void vk_vma_destroy_image(VmaAllocator vma, VkImage img, VmaAllocation a);
+void vk_vma_destroy_buffer(VmaAllocator vma, VkBuffer buf, VmaAllocation a);
+void vk_vma_free_memory(VmaAllocator vma, VmaAllocation a);
 uint64_t vk_vma_moved(void);   // allocations placed outside a full heap so far
+// The owners of VMA allocations (vk_vma_budget.c owner_of says which files make each one's).
+enum { VK_OWN_TEXTURES, VK_OWN_POOLS, VK_OWN_UPSCALER, VK_OWN_REPLAY, VK_OWN_USNAP, VK_OWN_GPA, VK_OWN_ASTC,
+       VK_OWN_PRESENT, VK_OWN_HEADROOM, VK_OWN_OTHER, VK_OWN_N };
+// The bytes of an owner's live allocations on the device-local heaps (local 1) or on the others (local 0). No lock.
+uint64_t vk_vma_owner_bytes(int owner, int local);
 #ifndef VK_VMA_BUDGET_IMPL
-#define vmaCreateImage vk_vma_create_image
-#define vmaCreateBuffer vk_vma_create_buffer
-#define vmaAllocateMemory vk_vma_allocate_memory
+#define vmaCreateImage(v, ici, ai, img, a, info) vk_vma_create_image(v, ici, ai, img, a, info, __FILE__)
+#define vmaCreateBuffer(v, bci, ai, buf, a, info) vk_vma_create_buffer(v, bci, ai, buf, a, info, __FILE__)
+#define vmaAllocateMemory(v, req, ai, a, info) vk_vma_allocate_memory(v, req, ai, a, info, __FILE__)
+#define vmaDestroyImage vk_vma_destroy_image
+#define vmaDestroyBuffer vk_vma_destroy_buffer
+#define vmaFreeMemory vk_vma_free_memory
 #endif
 #include "nvn_obj.h"   // pool_t, tex_t, view_t, samp_par, NVNcopyRegion (memory and textures block)
 #include "gfx.h"       // GfxShader, GfxShaderRes, GfxShaderAnswers (pipelines block)
@@ -762,10 +775,16 @@ void vk_texture_write_back(uint64_t addr, uint64_t size);   // writes those imag
 void vk_texture_range_gone(uint64_t lo, uint64_t size, VmaAllocation alloc);   // vk_pool_fini: drop the images there
 void vk_texture_stats(uint64_t *images, uint64_t *uploads, uint64_t *reuploads);
 // Entries now, live and released (TextureFinalize, kept until sweep_released), with the bytes of their own memory
-// (images not bound into pool memory).
-typedef struct { uint64_t live, released, own_live, own_released, bytes_live, bytes_released; } VkTexCensus;
+// (images not bound into pool memory). Of the live bytes: those whose content only the GPU made (render targets and
+// what the GPU drew or copied into), and the idle ones no lookup reached lately (vk_texture.c idle, what the VRAM
+// pressure may evict); of the released bytes: those released too lately for any bound to drop them (stale_after).
+typedef struct {
+    uint64_t live, released, own_live, own_released, bytes_live, bytes_released;
+    uint64_t bytes_live_gpu, bytes_live_idle, bytes_released_young;
+} VkTexCensus;
 void vk_texture_census(VkTexCensus *s);
 void vk_texture_census_log(uint64_t frame);         // vk_memory.c vram_log: the live entries' memory by kind and format
+void vk_texture_reuse_log(uint64_t frame);          // vk_memory.c owner_log: released textures taken back, made again
 // The holes in VMA's blocks that hold textures (vk_texture.c "compaction", vk_tex_compact.h), for vk_memory.c holes_log.
 // A VkBlockRow is an allocation of another kind that the caller knows to lie in one of VMA's blocks (a VRAM mirror):
 // the block's device memory handle and size, the allocation's size and memory type.

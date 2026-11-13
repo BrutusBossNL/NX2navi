@@ -196,6 +196,9 @@ int mem_start_note(int probe);                             // a game's start: a 
                                                            // below the game's need (mem_need.h); 1 when it is
 void mem_guest_census(uint64_t frame);   // NX2NAVI_TRACE=perf: committed bytes per guest region
 void mem_lazy_heap_report(uint64_t frame);   // NX2NAVI_TRACE=perf: the lazy heap's faults since the last line
+// The game's own memory for the memory report (vk_memory.c owner_log): its heap's size, the part of it committed (the
+// size itself unless the heap is lazy), and the physical memory it mapped. No lock: a log may read a figure late.
+void mem_guest_usage(uint64_t *heap, uint64_t *heap_committed, uint64_t *phys_maps);
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr);                      // 0x01
 uint32_t mem_set_permission(uint64_t a, uint64_t n, uint32_t perm);             // 0x02
 uint32_t mem_set_attribute(uint64_t a, uint64_t n, uint32_t mask, uint32_t at); // 0x03
