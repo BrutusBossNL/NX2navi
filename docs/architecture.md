@@ -209,7 +209,9 @@ keeps per-core data without locks and relies on that, so the host models it (`ru
 - The game's tensor-core upscaler is replaced by a decode-and-scale pass (`vk_tonemap.c`), which enlarges the scene
   with FSR 1's edge-adaptive filter (`NX2NAVI_STANDIN_FILTER`, `bilinear` for the plain one) unless DLSS or FSR 3.1
   scales it; `NX2NAVI_NATIVE_TENSOR=1` runs the game's own network programs instead (`vk_exec_draw.c` `native_tensor`,
-  off by default). `vk_fsr.c` runs AMD FSR 1 (EASU, RCAS) on the present when the window is larger than the picture.
+  off by default). Without DLSS or FSR the scene is `scene_share` of the picture (`widescreen.c` `plain_share`, the
+  game's own 3/4 by default); at 1, the Upscaling row's Native, it is the picture's size and the pass only decodes it,
+  texel for texel. `vk_fsr.c` runs AMD FSR 1 (EASU, RCAS) on the present when the window is larger than the picture.
 - Anti-aliasing (`vk_aa.c`, `NX2NAVI_AA`): the game anti-aliases with its own SMAA, three compute passes after the bloom
   composite (edges, blending weights, composition into the scene target as square-rooted RGB9E5 words). `off`, `fxaa`
   and `smaa` leave out the first two and replace the composition with `shaders/aa_post.comp` or SMAA at its Ultra preset

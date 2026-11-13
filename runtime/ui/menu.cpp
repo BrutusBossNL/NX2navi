@@ -67,6 +67,11 @@ void vk_queue_unlock(void);
 void res_sizes(unsigned out[2], unsigned scene[2]);
 int res_adjustable(void);
 int wide_available(void);
+int wide_scene_settable(void);
+void wide_picture(unsigned *w, unsigned *h);
+double wide_scene_share(void);
+double wide_scene_wanted(void);
+int wide_scene_restart(void);
 const char *const *vk_color_preset(const char *name);
 int vk_hdr_wanted(void);
 int vk_hdr_active(void);
@@ -939,6 +944,14 @@ static const char *fsr4_label(void) {
     return s;
 }
 
+// Native (the Upscaling row): the scene drawn at the picture's own size, which the upscaler's stand-in then only
+// decodes 1:1 (vk_tonemap.c), with no DLSS or FSR. It is scene_share = 1 (widescreen.c plain_share) with dlaa = 0; a
+// scene_share of 1 or more set by hand in nx2navi.ini reads the same.
+static bool share_native(void) {
+    const char *s = cfg_get("NX2NAVI_SCENE_SHARE");
+    return s && *s && atof(s) >= 1;
+}
+
 // The Upscaling row's name of what is set now, for the performance overlay.
 static void upscaling_name(char *out, size_t size) {
     static const char *const modes[] = {"dlaa", "quality", "balanced", "performance", "ultra_performance"};
@@ -946,7 +959,8 @@ static void upscaling_name(char *out, size_t size) {
     static const UiTextId fsr3[] = {UI_MENU_FSR3_NATIVE, UI_MENU_DLSS_QUALITY, UI_MENU_DLSS_BALANCED, UI_MENU_DLSS_PERFORMANCE, UI_MENU_DLSS_ULTRA};
     // FSR 3.1 set where it cannot load runs nothing (vk_dlaa.c vk_dlaa_fsr3): the game scales the picture as the rest says
     if (!cfg_bool("NX2NAVI_DLAA") || (!strcmp(cfg_value("NX2NAVI_TAA"), "fsr3") && !vk_ffx_available())) {
-        if (strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr")) snprintf(out, size, "%s", menu_text(UI_MENU_UPSCALER_BILINEAR));
+        if (share_native() && wide_scene_settable()) snprintf(out, size, "%s", menu_text(UI_MENU_UPSCALING_NATIVE));
+        else if (strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr")) snprintf(out, size, "%s", menu_text(UI_MENU_UPSCALER_BILINEAR));
         else snprintf(out, size, menu_text(UI_MENU_OV_FMT_FSR), cfg_int("NX2NAVI_SHARPNESS"));
         return;
     }
@@ -985,8 +999,9 @@ static void row_upscaling(void) {
     static const UiTextId fsr_names[] = {UI_MENU_FSR3_NATIVE, UI_MENU_DLSS_QUALITY, UI_MENU_DLSS_BALANCED,
                                          UI_MENU_DLSS_PERFORMANCE, UI_MENU_DLSS_ULTRA};
     // FSR 4 (vk_ffx4.cpp) is the same setting as FSR 3.1 with NX2NAVI_FSR4 on, and takes the same modes: listed where
-    // it runs on this device, after FSR 3.1's
-    enum { BILINEAR, FSR1, DLSS, FSR3, FSR4 };
+    // it runs on this device, after FSR 3.1's. Native (share_native) is listed where the scene's share can be set
+    // (widescreen.c wide_scene_settable), after the two entries that enlarge the game's smaller scene.
+    enum { BILINEAR, FSR1, NATIVE, DLSS, FSR3, FSR4 };
     struct Entry { int kind, mode; };
     static char text[15][96];
     Entry list[18];
@@ -996,6 +1011,7 @@ static void row_upscaling(void) {
         list[n] = {kind, mode};
         if (kind == BILINEAR) names[n] = menu_text(UI_MENU_UPSCALER_BILINEAR);
         else if (kind == FSR1) names[n] = menu_text(UI_MENU_UPSCALER_FSR);
+        else if (kind == NATIVE) names[n] = menu_text(UI_MENU_UPSCALING_NATIVE);
         else {
             char *t = text[(kind == FSR4 ? 10 : kind == FSR3 ? 5 : 0) + mode];
             if (kind == DLSS) snprintf(t, sizeof text[0], mode ? "DLSS %s" : "NVIDIA %s", menu_text(mode_names[mode]));
@@ -1005,7 +1021,7 @@ static void row_upscaling(void) {
         n++;
     };
     // what is set now
-    Entry now = {strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr") ? BILINEAR : FSR1, 0};
+    Entry now = {share_native() ? NATIVE : strcmp(cfg_value("NX2NAVI_UPSCALER"), "fsr") ? BILINEAR : FSR1, 0};
     if (cfg_bool("NX2NAVI_DLAA")) {
         now = {strcmp(cfg_value("NX2NAVI_TAA"), "fsr3") ? DLSS : vk_ffx_fsr4() ? FSR4 : FSR3, 0};   // set where it does
         for (int i = 0; i < 5; i++)                                                                // not run: FSR 3.1 does
@@ -1014,6 +1030,7 @@ static void row_upscaling(void) {
     const bool dlss = dlss_offered(), fsr = vk_ffx_available(), fsr4 = fsr && vk_ffx4_available();
     add(BILINEAR, 0);
     add(FSR1, 0);
+    if (wide_scene_settable() || now.kind == NATIVE) add(NATIVE, 0);
     for (int i = 0; dlss && i < 5; i++) add(DLSS, i);
     for (int i = 0; fsr && i < 5; i++) add(FSR3, i);
     for (int i = 0; fsr4 && i < 5; i++) add(FSR4, i);
@@ -1022,10 +1039,21 @@ static void row_upscaling(void) {
     int cur = 0;
     for (int i = 0; i < n; i++)
         if (list[i].kind == now.kind && list[i].mode == now.mode) cur = i;
-    // FSR 3.1 still set where it cannot load: nothing upscales, so the row says so under its value
+    // FSR 3.1 still set where it cannot load: nothing upscales, so the row says so under its value. A scene larger than
+    // the render-target heap the start made (Native, or DLAA chosen in a run that started with a smaller scene) waits
+    // for a restart; at the heap's limit for this picture it stays smaller, and the note says how large it is
+    // (widescreen.c wide_scene_restart, heap_share)
     const char *note = nullptr;
+    static char in_use[64];
+    const double share = wide_scene_settable() ? wide_scene_share() : 0;
     if (!fsr && now.kind == FSR3) note = menu_text(UI_MENU_FSR3_OFF);
-    else if (upscaling_restart()) note = menu_text(UI_MENU_AFTER_RESTART);
+    else if (upscaling_restart() || (share > 0 && wide_scene_restart())) note = menu_text(UI_MENU_AFTER_RESTART);
+    else if (share > 0 && wide_scene_wanted() > share + 0.001) {
+        char pct[16];
+        snprintf(pct, sizeof pct, "%.0f %%", share * 100);
+        snprintf(in_use, sizeof in_use, menu_text(UI_MENU_PRESENT_IN_USE), pct);
+        note = in_use;
+    }
     int nv = opt_choice_index("NX2NAVI_UPSCALER", UI_MENU_UPSCALING, names, n, cur, 1,
                               !fsr ? UI_MENU_UPSCALING_DESC_NO_FSR : dlss ? UI_MENU_UPSCALING_DESC : UI_MENU_UPSCALING_DESC_FSR,
                               note);
@@ -1034,6 +1062,10 @@ static void row_upscaling(void) {
     opt_apply("NX2NAVI_UPSCALER", e.kind == FSR1 ? "fsr" : "bilinear");
     opt_apply("NX2NAVI_DLAA", e.kind >= DLSS ? "1" : "0");
     if (e.kind < DLSS) opt_apply("NX2NAVI_FRAMEGEN", "off");   // it needs DLSS's or FSR 3.1's motion vectors (row_framegen)
+    // Native is scene_share = 1. Leaving it unsets the key (the game's own share, widescreen.c PLAIN_SHARE); a share of
+    // the whole picture set by hand beside DLSS or FSR stays while one of their modes is chosen
+    if (e.kind == NATIVE) opt_apply("NX2NAVI_SCENE_SHARE", "1");
+    else if (share_native() && (e.kind < DLSS || now.kind == NATIVE)) opt_apply("NX2NAVI_SCENE_SHARE", "");
     if (e.kind >= DLSS) opt_apply("NX2NAVI_DLSS", modes[e.mode]);
     if (e.kind >= DLSS) opt_apply("NX2NAVI_TAA", e.kind >= FSR3 ? "fsr3" : "dlss");
     if (e.kind >= FSR3) opt_apply("NX2NAVI_FSR4", e.kind == FSR4 ? "1" : "0");
@@ -1585,6 +1617,7 @@ static int restart_pending(void) {
     bool prompts;
     prompts_note(&prompts);
     return cfg_pending_count() + upscaling_restart() + framegen_restart() + (vk_hdr_needs_restart() != 0)
+           + (wide_scene_settable() && wide_scene_share() > 0 && wide_scene_restart() && !upscaling_restart())
            + (prompts && !cfg_pending("NX2NAVI_PROMPTS"));
 }
 
@@ -2053,6 +2086,14 @@ static void perf_tick(uint64_t now, const MenuTarget *t) {
 static void perf_picture(const MenuTarget *t, PerfPanel *p) {
     unsigned out[2], scene[2];
     res_sizes(out, scene);
+    // Ocarina's build has no output and scene patch sets, so res_sizes holds the other builds' placeholders there: the
+    // picture and the scene are widescreen.c's, the scene at the share it writes for the game (wide_present; in the
+    // first two seconds of a run the game's own dynamic resolution still sizes it)
+    const double share = !res_adjustable() && wide_scene_settable() ? wide_scene_share() : 0;
+    if (share > 0) {
+        wide_picture(&out[0], &out[1]);
+        scene[0] = (unsigned)lround(out[0] * share), scene[1] = (unsigned)lround(out[1] * share);
+    }
     char (*v)[64] = p->picture;
     snprintf(v[0], sizeof v[0], menu_text(UI_MENU_OV_FMT_SIZE), t->width, t->height);
     snprintf(v[1], sizeof v[1], menu_text(UI_MENU_OV_FMT_SIZE), (unsigned)t->image_w, (unsigned)t->image_h);

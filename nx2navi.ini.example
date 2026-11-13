@@ -553,6 +553,14 @@
 # is softer and costs a little less GPU time. DLSS and FSR 3.1 (dlaa = 1) scale the scene themselves, so this changes
 # nothing there, and it does not touch the movies. Changes while the game runs take effect at once.
 # standin_filter = easu
+# The 3D scene's share of the game resolution without DLSS or FSR 3.1 (dlaa = 0), Ocarina of Time: 0.75, the default,
+# is the game's own most (1920x1080 in its 2560x1440 picture), which the scaling above enlarges; 1 draws the scene at
+# the picture's full size and nothing enlarges it (the menu's Upscaling row calls it Native (100%)); 0 leaves the size
+# to the game's dynamic resolution, down to a third of the picture under load. A larger scene needs more of the
+# memory the game keeps for its render targets, which is set aside at the start: 1 takes 238 MiB more than 0.75 at
+# 2560x1440, 533 MiB more at 3840x2160 and 712 MiB more at 5120x2160, as dlss = dlaa does. Changes while the game runs
+# take effect at once up to the share the game started with, a larger one at the next start.
+# scene_share = 0.75
 # Picture shape when the window's shape differs from the game resolution's (a 16:9 picture in a 21:9 fullscreen
 # window): fit, the default, keeps the shape, with black bars at the sides or above and below, so a 16:9 game in a wider
 # window is no longer stretched as it used to be; stretch fills the window. Changes while the game runs take effect at
