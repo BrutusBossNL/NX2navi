@@ -74,20 +74,50 @@ static char g_log_early[32768];
 static size_t g_log_early_n;
 static uint64_t g_log_bytes;
 
-// The log's destinations. logq.c calls it: from the log thread in a game run, else from the thread that logs.
+// stderr's writes (log_sink). g_log_final: rt_log_sync has run, so the process is ending: an exit, a fatal error or a
+// crash report.
+static PlatMutex g_err_lock = PLAT_MUTEX_INIT;
+static volatile int32_t g_log_final;
+
+// The log's destinations: the file first, then stderr. logq.c calls it: from the log thread in a game run, else from
+// the thread that logs. A write to stderr can block for as long as its reader likes: a console window holds every write
+// back while a selection is made in it, and the log thread then stays in that write. The file has the lines by then, and
+// the lines of the process's end (rt_log_sync) skip stderr while another thread is stuck in a write to it, so the exit
+// and FATAL lines still reach the file. stderr goes through plat_stderr_write, which holds no lock of the C runtime's
+// stderr stream, so fflush(stderr) and plat_exit's fflush(NULL) do not wait for a stuck write either.
 static void log_sink(const char *p, size_t n) {
-    fwrite(p, 1, n, stderr);
-    if (__atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE) != LOG_FILE) return;
-    uint64_t at = __atomic_fetch_add(&g_log_bytes, n, __ATOMIC_RELAXED);
-    if (at + n <= LOG_CAP) {
-        plat_append_write(g_log_file, p, n);
-    } else if (at <= LOG_CAP) {   // the first write past the cap says so, once
-        static const char cut[] = "[host] log: the file reached 64 MiB, the rest of this run goes to stderr only\n";
-        plat_append_write(g_log_file, cut, sizeof cut - 1);
+    int file = __atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE) == LOG_FILE;
+    if (file) {
+        uint64_t at = __atomic_fetch_add(&g_log_bytes, n, __ATOMIC_RELAXED);
+        if (at + n <= LOG_CAP) {
+            plat_append_write(g_log_file, p, n);
+        } else if (at <= LOG_CAP) {   // the first write past the cap says so, once
+            static const char cut[] = "[host] log: the file reached 64 MiB, the rest of this run goes to stderr only\n";
+            plat_append_write(g_log_file, cut, sizeof cut - 1);
+        }
     }
+    // without the file stderr is the log (run_game.py, `2> file`), and it is waited for
+    if (file && __atomic_load_n(&g_log_final, __ATOMIC_ACQUIRE)) {
+        if (!plat_mutex_trylock(&g_err_lock)) return;
+    } else {
+        plat_mutex_lock(&g_err_lock);
+    }
+    plat_stderr_write(p, n);
+    plat_mutex_unlock(&g_err_lock);
 }
 
-void rt_log_sync(void) { logq_sync(); }
+void rt_log_sync(void) {
+    __atomic_store_n(&g_log_final, 1, __ATOMIC_RELEASE);
+    logq_sync();
+}
+
+// The console window was closed, or Ctrl+C or Ctrl+Break pressed in it (platform.h plat_console_setup): the end of a
+// closed game window, which writes the settings, the caches and the saves and logs the exit (gfx_present.c
+// gfx_window_closed). Left to Windows, a closed console ended the process with nothing saved.
+static void console_closed(const char *what) {
+    rt_log("console: %s; the game ends as when its window is closed", what);
+    gfx_window_closed();
+}
 
 void rt_log_raw(const char *p, size_t n) {
     if (__atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE) == LOG_EARLY) {
@@ -696,6 +726,9 @@ static int main_run(int argc, char **argv) {
     if (cfg.seconds && mode) return usage(argv[0]);
     log_open(!mode);
     if (!mode) {
+        // the console of a game started directly: no QuickEdit to stop the log, and its close saves (console_closed)
+        if (plat_console_setup(console_closed))
+            rt_log("console: QuickEdit off; closing the console ends the game as its window does");
         mem_start_note(0);   // memory.c: a warning when the machine has less memory free than the game takes
         cfg.boot = cfg.seconds > 0;   // --seconds starts the game like --boot, with its checkpoints
         vk_driver_cache_env();   // before the threads below and rt_boot's, any of which may load the Vulkan driver

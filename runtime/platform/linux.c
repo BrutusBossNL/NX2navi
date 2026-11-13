@@ -1884,6 +1884,21 @@ int plat_stderr_path(char *out, size_t cap) {
     return 1;
 }
 
+int plat_stderr_write(const void *p, size_t n) {
+    for (const char *c = p; n;) {
+        ssize_t k = write(2, c, n);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return 0;
+        c += k, n -= (size_t)k;
+    }
+    return 1;
+}
+
+int plat_console_setup(void (*on_close)(const char *what)) {   // a Windows console's settings only
+    (void)on_close;
+    return 0;
+}
+
 // ---- process
 
 #ifdef NX2NAVI_PGO_GEN

@@ -1197,6 +1197,52 @@ __attribute__((constructor)) static void pgo_flush_start(void) {
 }
 #endif
 
+// ---- the console window (plat_console_setup)
+static HANDLE con_in = INVALID_HANDLE_VALUE;   // the console's input, while its QuickEdit mode is off; con_mode as it was
+static DWORD con_mode;
+static void (*con_close)(const char *what);
+static volatile LONG con_closing;
+
+// Runs on a thread the system starts for the event. A close returns only when on_close does, which it must not.
+static BOOL WINAPI con_ctrl(DWORD ev) {
+    const char *what = ev == CTRL_CLOSE_EVENT ? "closed" : ev == CTRL_C_EVENT ? "Ctrl+C"
+                     : ev == CTRL_BREAK_EVENT ? "Ctrl+Break" : NULL;
+    // log-off and shutdown reach a process with a window as WM_ENDSESSION (gfx_window_win.c), not here; a second event
+    // while on_close runs takes the default path, which ends the process at once
+    if (!what || !con_close || InterlockedExchange(&con_closing, 1)) return FALSE;
+    con_close(what);
+    return TRUE;
+}
+
+int plat_console_setup(void (*on_close)(const char *what)) {
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    DWORD m;
+    if (!err || err == INVALID_HANDLE_VALUE || !GetConsoleMode(err, &m)) return 0;
+    // CONIN$: the console's input even when stdin was redirected. ENABLE_EXTENDED_FLAGS makes the call change the
+    // QuickEdit bit at all.
+    HANDLE in = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, 0, NULL);
+    if (in != INVALID_HANDLE_VALUE && GetConsoleMode(in, &con_mode) && (con_mode & ENABLE_QUICK_EDIT_MODE) &&
+        SetConsoleMode(in, (con_mode & ~(DWORD)ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS))
+        con_in = in;
+    else if (in != INVALID_HANDLE_VALUE)
+        CloseHandle(in);
+    con_close = on_close;
+    if (on_close) SetConsoleCtrlHandler(con_ctrl, TRUE);
+    return 1;
+}
+
+int plat_stderr_write(const void *p, size_t n) {
+    int fd = _fileno(stderr);   // the descriptor fwrite(stderr) writes to; negative when the process has no stderr
+    if (fd < 0) return 0;
+    for (const char *c = p; n;) {
+        int k = _write(fd, c, n > (1u << 30) ? 1u << 30 : (unsigned)n);
+        if (k <= 0) return 0;
+        c += k, n -= (size_t)k;
+    }
+    return 1;
+}
+
 void (*plat_exit_hook)(void);
 
 void plat_exit(int code) {
@@ -1204,6 +1250,8 @@ void plat_exit(int code) {
 #ifdef NX2NAVI_PGO_GEN
     __llvm_profile_dump();
 #endif
+    // QuickEdit back on in a console that outlives the process (the one of the shell that started it)
+    if (con_in != INVALID_HANDLE_VALUE) SetConsoleMode(con_in, con_mode | ENABLE_EXTENDED_FLAGS);
     fflush(NULL);   // every open stream: nothing below runs the C runtime's own exit
     // The process ends here, without the libraries' detach calls that ExitProcess makes. The callers have saved what
     // is to be kept (gfx_present.c gfx_window_closed: settings, pipeline cache, profile, saves), and the game's other

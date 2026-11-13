@@ -102,6 +102,7 @@ void perf_cpu_start(void);   // the process's logical processors (NX2NAVI_CACHE_
 int perf_cpu_on_cache_die(void);   // 1 while the process runs on the die with the largest L3 cache alone (perf.c cpu_placement)
 void perf_summary_flush(void);                  // prints the frame-time summary of the running period (exit); the 60 s lines come from perf_present
 void gfx_exit_log(void);                        // back end's lines for the exit summary (weak no-op in prof_win.c)
+void gfx_window_closed(void);                   // gfx_present.c (gfx_wsys.h): the end of a closed window; does not return
 void perf_gpu_wait(uint64_t t0);                // a wait for a GPU fence ended (any thread; the render thread's also counts as PERF_FENCE)
 // GPU side of the 60-frame perf line, filled by the graphics back end when it set perf_gpu_stats. gpu_ns: GPU busy time
 // since the previous call (timestamp queries, overlaps counted once), have_gpu 0 when the device has no timestamps.

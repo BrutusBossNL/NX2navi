@@ -462,6 +462,18 @@ int plat_os_version(char *out, size_t cap);
 int plat_is_wine(void);                                   // 1 when the Windows build runs under Wine; 0 elsewhere
 // The file the process's stderr (the log) goes to, as a UTF-8 path; 0 when stderr is not a file (a console, a pipe).
 int plat_stderr_path(char *out, size_t cap);
+// Writes the bytes to stderr's file descriptor, past the C runtime's FILE stream (on Windows with its low-level _write,
+// which keeps the text mode's line ends): a write that blocks, on a console that holds its output back, then holds no
+// lock of the stderr stream, and fflush(stderr) or fflush(NULL) on another thread does not wait for it. 1 when all of
+// them were written.
+int plat_stderr_write(const void *p, size_t n);
+// When stderr is a console window (Windows): turns its QuickEdit mode off, since a selection made in the window with
+// the mouse holds back every write to it until the selection ends, and passes a close of the console, Ctrl+C and
+// Ctrl+Break to on_close, on a thread of the system's, with the event's name. on_close must end the process: Windows
+// ends it about 5 s after a close in any case. A second Ctrl+C or Ctrl+Break while on_close runs ends the process at
+// once, as without the handler. plat_exit puts QuickEdit back as it was. 1 when stderr is a console; elsewhere 0, and
+// nothing is changed.
+int plat_console_setup(void (*on_close)(const char *what));
 
 // ---- desktop: the in-game menu's "Copy system info" and "Open log folder"
 int plat_clipboard_set(const char *utf8);                 // replaces the clipboard's text; 1 on success

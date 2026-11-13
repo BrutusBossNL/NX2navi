@@ -1,6 +1,6 @@
 // Log writes on a thread of their own.
 //
-// A log line was written by the thread that logged it: to stderr and to the log file (main.c log_sink). A write can
+// A log line was written by the thread that logged it: to the log file and to stderr (main.c log_sink). A write can
 // stall: a console that scrolls, a pipe whose reader is busy, a virus scanner, a disk that flushes; hundreds of
 // milliseconds at worst. The render thread logs too, and a frame it spends in such a write is a hitch with nothing
 // else to show for it.

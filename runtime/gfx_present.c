@@ -83,6 +83,10 @@ void gfx_window_focus_changed(int in) {
 // (plat_restart), and the new process waits until this one is gone (main.c) before it moves the log and opens the
 // RomFS and the saves.
 void gfx_window_closed(void) {
+    // Once. The console's close (main.c console_closed) can come beside the window's: the later caller waits here
+    // while the first one saves and ends the process.
+    static volatile int32_t closing;
+    if (plat_xchg32(&closing, 1)) for (;;) plat_sleep_ms(1000);
     int restart = plat_cas32(&g_restart, 0, 0) != 0;
     rt_log("gfx: window closed; %s", restart ? "restarting" : "exiting");
     cfg_save();   // a menu change saves 400 ms later on the render thread (option_rows.cpp); closing sooner kept the old file
