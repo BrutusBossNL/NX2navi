@@ -36,7 +36,6 @@ static int g_font_bad;
 #pragma clang diagnostic pop
 #include "ui/amiibo_page.h"
 #include "ui/binds_page.h"
-#include "ui/coop_page.h"
 #include "ui/debug_menu.h"
 #include "ui/option_rows.h"
 #include "ui/perf_panel.h"
@@ -191,7 +190,7 @@ extern "C" void menu_event_mouse_pos(float x, float y) { push({EV_POS, 0, 0, x, 
 extern "C" void menu_event_mouse_button(int button, int down) { push({EV_BUTTON, button, down, 0, 0}); }
 extern "C" void menu_event_wheel(float dx, float dy) { push({EV_WHEEL, 0, 0, dx, dy}); }
 extern "C" void menu_event_focus(int focused) { push({EV_FOCUS, focused, 0, 0, 0}); }
-// a typed character, for the text fields of the co-op page and the debug menu
+// a typed character, for the text fields of the debug menu
 extern "C" void menu_event_char(unsigned c) { push({EV_CHAR, (int)c, 0, 0, 0}); }
 
 // The clipboard's text a page asked for (gfx_window_paste): the window thread reads it, the page takes it a frame later.
@@ -505,7 +504,7 @@ static int fonts_up(float scale) {
         // what the title face shows in the CJK languages: the menu's title and tabs (Simplified Chinese menu text) and
         // the boot screen's title (the game's language)
         static const UiTextId titles[] = {UI_MENU_TITLE, UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                          UI_MENU_TAB_CONTROLS, UI_MENU_TAB_COOP, UI_BOOT_TITLE};
+                                          UI_MENU_TAB_CONTROLS, UI_BOOT_TITLE};
         for (int i = 0; i < N; i++) {
             if (!data[i]) continue;
             ImFontGlyphRangesBuilder b;
@@ -571,10 +570,9 @@ extern "C" void menu_vk_release(void) {
 // optional) at that presented frame; changes live settings with no input, menu open or not. nx2navi.ini is written only by
 // the pseudo-key SAVE=1 (cfg_save, as a row change does; a failed write shows the menu's save note). FOCUS=<key> (the
 // NX2NAVI_ prefix optional) puts the cursor on that setting's row and scrolls it into view when the row is next drawn
-// (opt_focus_key), so a page's shot shows a row below the first screenful; it does not switch tabs. COOP_PAGE, COOP_JOIN
-// and COOP_ACCEPT_OFFER drive the Co-op tab (ui/coop_page.h coop_test_set).
-// Ocarina of Time: the options this port has, and co-op (ui/coop_page.cpp)
-enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_COOP, TAB_COUNT };   // co-op last: tabs_shown
+// (opt_focus_key), so a page's shot shows a row below the first screenful; it does not switch tabs.
+// Ocarina of Time: the options this port has
+enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_COUNT };
 enum { TEST_PAGE_FRAMES = 30, TEST_SETS = 16, TEST_OPENS = 8 };
 struct TestSet { uint64_t frame; char key[64], value[64]; };
 static struct {
@@ -633,21 +631,14 @@ static void test_parse(void) {
 static void test_apply_sets(uint64_t frame) {
     for (; g_test.next_set < g_test.n_sets && g_test.sets[g_test.next_set].frame <= frame; g_test.next_set++) {
         const TestSet &t = g_test.sets[g_test.next_set];
-        // a room's secret stays out of the log here too
-        const bool secret = !strcmp(t.key, "NX2NAVI_COOP_JOIN") || !strcmp(t.key, "NX2NAVI_COOP_ROOM");
-        rt_log("menu: test hook: frame %llu: %s=%s", (unsigned long long)frame, t.key, secret ? "(set, not shown)" : t.value);
+        rt_log("menu: test hook: frame %llu: %s=%s", (unsigned long long)frame, t.key, t.value);
         if (!strcmp(t.key, "NX2NAVI_SAVE")) {
             rt_log("menu: test hook: cfg_save %s", cfg_save() ? "wrote" : "failed");
         } else if (!strcmp(t.key, "NX2NAVI_FOCUS")) {
             char row[80];
             snprintf(row, sizeof row, "%s%s", strncmp(t.value, "NX2NAVI_", strlen("NX2NAVI_")) ? "NX2NAVI_" : "", t.value);
             opt_focus_key(row);
-        } else if (!strncmp(t.key, "NX2NAVI_COOP_", 13) && !cfg_from_env("NX2NAVI_MENU_TEST_SET")) {
-            // From nx2navi.ini the hook sets no co-op key and drives no part of the Co-op tab: a settings file
-            // someone hands a player could otherwise turn co-op on, join a room and accept its offer for them
-            // (COOP_JOIN, COOP_ACCEPT_OFFER). A test sets it in the environment.
-            rt_log("menu: test hook: %s is taken from the environment only, not from nx2navi.ini", t.key);
-        } else if (!coop_test_set(t.key, t.value)) {
+        } else {
             cfg_set(t.key, t.value);
         }
     }
@@ -1634,14 +1625,6 @@ static void tab_controls(float scale) {
     binds_after_page();
 }
 
-// The Co-op tab (ui/coop_page.cpp): the rows, then the window a row opens.
-static void tab_coop(float scale) {
-    opt_begin("##coop", scale);
-    coop_rows(scale);
-    opt_end();
-    coop_after_page(scale);
-}
-
 // ---- the settings of the low-end GPU mode, under its switch in the Game tab while that is on (tab_game): each is read
 // where the code it sets reads it
 static void rows_low_end(void) {
@@ -1715,12 +1698,8 @@ static void rows_low_end(void) {
 }
 
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_COOP};
+                                              UI_MENU_TAB_CONTROLS};
 static int g_tab;               // the tab shown
-
-// The tabs the menu shows: the Co-op tab is a beta, shown only with coop_beta = 1 in nx2navi.ini (NX2NAVI_COOP_BETA),
-// which no menu row sets. Co-op itself is untouched by it: coop = 1 still runs a session (docs/coop.md).
-static int tabs_shown(void) { return cfg_bool("NX2NAVI_COOP_BETA") ? TAB_COUNT : TAB_COOP; }
 static int g_tab_request = -1;  // select this tab at the next layout; -1 none
 static int g_focus_page = -1;   // this tab's first row takes the cursor once it is shown; -1 none
 
@@ -1806,13 +1785,12 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
     }
 
     // a text field takes Q and E as letters, and a window of a page keeps the tab keys
-    const bool keeps_keys = g_modal || binds_modal() || coop_modal() || ImGui::GetIO().WantTextInput;
+    const bool keeps_keys = g_modal || binds_modal() || ImGui::GetIO().WantTextInput;
     int step = keeps_keys                                                                                ? 0
              : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
              : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1
                                                                                                          : 0;
-    const int ntabs = tabs_shown();
-    if (g_tab >= ntabs) g_tab_request = 0;   // the Co-op tab was shown and coop_beta went off
+    const int ntabs = TAB_COUNT;
     if (step) g_tab_request = g_tab_sounded = (g_tab + step + ntabs) % ntabs;
     if (step) menu_sound_play(step > 0 ? MENU_SOUND_TAB_RIGHT : MENU_SOUND_TAB_LEFT);
     if (g_tab_request >= 0) g_focus_page = g_tab_request;   // the new page's first row takes the cursor
@@ -1841,7 +1819,6 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
             case TAB_GAME: tab_game(scale); break;
             case TAB_SOUND: tab_sound(scale); break;
             case TAB_CONTROLS: tab_controls(scale); break;
-            case TAB_COOP: tab_coop(scale); break;
             }
             ImGui::EndTabItem();
         }
@@ -1901,7 +1878,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
     if (skin_widget_button(quit, ImVec2(bw, 0), scale)) g_confirm_quit = true, ImGui::OpenPopup("##confirm");
     restart_confirm(scale);
     menu_sounds_frame();
-    bool was_modal = g_modal || binds_modal() || coop_modal() || ImGui::GetIO().WantTextInput;
+    bool was_modal = g_modal || binds_modal() || ImGui::GetIO().WantTextInput;
     if (!was_modal && (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)))
         set_open(0);
     ImGui::End();
@@ -2074,7 +2051,6 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
     if (g_perf_save.exchange(0)) cfg_save();
     perf_tick(plat_now_ns(), t);
     amiibo_tick();
-    const bool toast = coop_toast_tick();   // a co-op player came or went: a toast over the game, the menu closed
     if (g_booting.load(std::memory_order_relaxed)) g_booting.store(0, std::memory_order_release);   // the game runs
     bool open = g_open.load(std::memory_order_relaxed);
     // the frame the menu is first laid out after opening: also when its g_reset went to an earlier frame of the overlay
@@ -2092,7 +2068,7 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
             if (g_debug.load()) debug_menu_tab(0);
             set_open(1);
             open = true;
-        } else if (!g_perf_mode && !toast) {
+        } else if (!g_perf_mode) {
             return 0;
         }
     }
@@ -2126,7 +2102,6 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
         io.ClearInputKeys();
         io.ClearInputMouse();
         binds_cancel();          // a cell waiting for a press when the menu closed: no press binds on the next opening
-        coop_cancel();           // the Co-op tab's window closes and its secret hides
         g_sound_fresh = true;
         g_last_ns = 0;
         g_focus_page = g_tab_request >= 0 ? g_tab_request : g_tab;   // opening: the first row has the cursor
@@ -2158,7 +2133,6 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
         layout_menu(t->width, t->height, scale);
     }
     perf_draw(t, scale);
-    if (!open && toast) coop_toast_draw((float)t->width, (float)t->height, scale);
     ImGui::Render();
     if (open) g_save_pending = opt_save_tick(0);
     g_cost_ns += plat_now_ns() - t0;
@@ -2167,7 +2141,7 @@ static int overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot)
         const char *dir = cfg_get("NX2NAVI_MENU_TEST_DIR");
         snprintf(path, sizeof path, "%s/menu-test-%llu-%d.png", dir ? dir : ".", (unsigned long long)frame, g_test.page);
         *shot = path;
-        if (++g_test.page == (g_debug.load() ? DEBUG_MENU_TABS : tabs_shown())) {
+        if (++g_test.page == (g_debug.load() ? DEBUG_MENU_TABS : TAB_COUNT)) {
             g_test.page = -1;
             g_test.opened = 0, g_test.next_at++;   // the next NX2NAVI_MENU_TEST frame opens it again
             set_open(0);   // the next frame lays out nothing

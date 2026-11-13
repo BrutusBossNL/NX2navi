@@ -3995,8 +3995,8 @@ class SaveShareTest(unittest.TestCase):
         self.assertEqual(len([n for n in names if n.startswith('save/')]), len(self.SAVE))
 
     def test_a_bug_report_keeps_the_private_settings_values_out(self):
-        """A co-op room's secret, the relay and the player's name are not in the nx2navi.ini a bug report carries;
-        every other byte of the file is."""
+        """The private settings' values (a room's secret, a relay and a name that an earlier version's co-op left in
+        the file) are not in the nx2navi.ini a bug report carries; every other byte of the file is."""
         ini = (b'\xef\xbb\xbf[coop]\r\ncoop = 1\r\n  Coop_Room = H7K3WM-BCDFGH-234567\r\ncoop_server=relay.example:24680\r\n'
                b'# coop_name = in a comment\r\ncoop_name =\r\ncoop_accept = 1a2b3c4d\nfps_limit = 60')
         self.game_with_save(self.game, self.SAVE)

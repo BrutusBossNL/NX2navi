@@ -16,7 +16,6 @@
 
 #include "cfg.h"
 #include "cheats.h"
-#include "coop.h"
 #include "fs.h"
 #include "kernel.h"
 #include "ipc.h"
@@ -324,7 +323,6 @@ void rt_frame_presented(const tex_t *t, uint64_t n) {
     stats_line();
     fflush(stdout);
     fflush(stderr);
-    coop_shutdown();   // LEAVE and BYE to the room, before the process ends
     fs_save_flush();
     vk_pipeline_prewarm_marker_clear();   // an orderly end, not a driver crash in the boot's builds (vk_pipeline.c pm_skipped)
     vk_pipeline_save_exit();   // no-op without the Vulkan back end
