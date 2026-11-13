@@ -529,6 +529,14 @@ files.
 A change to how a gamepad's axes are read (`runtime/input.c` `pad_axis`: an axis counts once it has been seen at rest)
 passes `python tests\pad_rest_check.py`, which builds that function with stand-ins for SDL. No game files.
 
+A change to HD rumble's encoding or report schedule (`runtime/rumble_hd.c`: a vibration value as the bytes of a Switch
+controller's rumble report, and which reports are written when) passes `python tests\rumble_hd_check.py`, which builds
+that file alone: known values and the neutral one, the frequency and amplitude clamps (no amplitude step above the
+actuators' safe maximum), a report's data for two actuators and for one, and a batch of values reduced to the reports
+written (the newest value at once, a held one again every 30 ms, the neutral value three times once the game stops).
+The script then decodes a sweep of encoded values with formulae of its own. No game files, no SDL, no controller: what
+a controller does with the reports is not covered.
+
 A change to how a mesh pipeline's fragment module gets the inputs no mesh output feeds (`runtime/vk_pipeline.c`
 `spirv_mesh_outputs`, `spirv_fs_fill_inputs`) passes `python tests\fs_fill_inputs_check.py`, which builds both
 functions and runs them on mesh and fragment shaders it compiles with glslang, then validates the result. No game
