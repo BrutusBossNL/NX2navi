@@ -104,6 +104,20 @@ site owater main 3876014 1e201900 1e201900 9458abc3   # fdiv s0, s8, s0 -> fdiv 
 site owater main 38827f8 1e201900 1e201900 945879ca   # the same at ResponsiveWaterMgr's
 site owater main 632cfc 1e201900 1e201900 9521b889    # the same at the interactive floors'
 
+# The sound manager's job (main+0x415300, its task's phase in w2: 0 hands the time manager's step, [[main+0x4c7e890]]
+# +0x10, to the sound system; 1 runs the sound objects' updates; 2 the system's own update, main+0x3798410; any other
+# returns through main+0x4155fc). Above 60 fps the set ostep makes that step a fraction of one, and fed fractions the
+# game has been reported to hold sounds after an area unloads until no voice is free, then go silent
+# (runtime/frame_rate.c, "the sound manager's job at whole steps"). The set
+# runs the job at 60 Hz then: after the prologue (add x29, sp, #0x20) the page's +0xf10 decides from the phase and the
+# step whether the job runs this frame, and puts phase 3 in w2 when it does not, so cbnz w2 and the phase tests send it
+# to its own epilogue; after phase 0's load of the step (ldr s0, [x8, #0x10]) the page's +0xf00 makes a fraction one
+# whole step. At a step of one or more the job runs every frame with the game's step. x30 was saved by the prologue
+# (stp x29, x30, [sp, #0x20]) and is reloaded by every way out; no word reads or writes the flags.
+set osound NX2NAVI_SOUND_STEPS 1
+site osound main 41531c 910083fd 910083fd 952a2efd   # add x29, sp, #0x20 -> add x29, sp, #0x20; bl page+0xf10
+site osound main 415334 bd401100 bd401100 952a2ef3   # ldr s0, [x8, #0x10] -> ldr s0, [x8, #0x10]; bl page+0xf00
+
 # Movie-synchronised event timelines: the movie layer advances its counter at +760 on each draw of a ready
 # picture. main+0x3b3ec10 reads that counter for the event dispatcher, so rendering a picture twice also
 # advances voices and overlays twice. Both ready paths reach these sites only after main+0x3b5ce80 checks

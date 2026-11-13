@@ -40,7 +40,18 @@ int vk_dlssg_active(void) { return fg_mult > 1; }
 int vk_lowlat_on(void) { return 0; }
 void rtss_limit_want(int64_t millihz) { (void)millihz; }
 int rtss_limit_active(void) { return 0; }
-int plat_mem_read(uint64_t a, void *out, size_t n) { (void)a, (void)out, (void)n; return 0; }
+// The time manager the sound job's gate reads its step from (frame_rate.c sound_job_step), while the sound checks run:
+// [main+0x4c7e890] holds the slot, the slot the manager, the manager +0x10 the step. Nothing else reads.
+static int fake_manager;
+static float fake_step = 1.0f;
+int plat_mem_read(uint64_t a, void *out, size_t n) {
+    const uint64_t slot = 0x7700000000ull, manager = 0x7700001000ull;
+    if (!fake_manager) return 0;
+    if (a == MOD_MAIN_BASE + 0x4c7e890 && n == 8) return memcpy(out, &slot, 8), 1;
+    if (a == slot && n == 8) return memcpy(out, &manager, 8), 1;
+    if (a == manager + 0x10 && n == 4) return memcpy(out, &fake_step, 4), 1;
+    return 0;
+}
 int plat_mem_readable(uint64_t a, size_t n) { (void)a, (void)n; return 0; }
 void mem_kernel_access(uint64_t a, uint64_t n) { (void)a, (void)n; }
 int mem_host_readable(uint64_t a, uint64_t n) { (void)a, (void)n; return 0; }
@@ -286,6 +297,49 @@ int main(int argc, char **argv) {
             for (int k = 0; k < 32; k++) steps[k] += sim(first + 0x1000 * (uint64_t)k, 1.0f / 144.0f);
         for (int k = 0; k < 32; k++)
             CHECK(steps[k] >= 599 && steps[k] <= 600, "surface %d of 32 at 144 fps: %u steps in 10 s", k, steps[k]);
+    }
+    // The sound job (set osound). At 60 and 30 fps every phase of every frame runs with the game's step; at 144 and 240
+    // fps it runs 60 times a second with a step of one, phases 1 and 2 with phase 0; a skipped phase gets 3 in w2.
+    {
+        fake_manager = 1;
+        const float steps[] = {1.0f, 2.0f, 60.0f / 144.0f, 0.25f};
+        const int frames[] = {600, 300, 1440, 2400};   // 10 s each
+        for (int r = 0; r < 4; r++) {
+            fake_step = steps[r];
+            int ran[3] = {0}, odd = 0;
+            float fed = 0;
+            for (int f = 0; f < frames[r]; f++) {
+                for (uint32_t phase = 0; phase < 3; phase++) {
+                    cpu.x[2] = phase;
+                    frame_rate_sound_gate_host(&cpu);
+                    if (cpu.x[2] == phase) ran[phase]++;
+                    else odd += cpu.x[2] != 3;
+                    if (phase == 0 && cpu.x[2] == 0) {   // phase 0 runs on to its load of the step
+                        uint32_t bits;
+                        memcpy(&bits, &fake_step, 4);
+                        cpu.v[0] = bits;
+                        frame_rate_sound_step_host(&cpu);
+                        float s;
+                        memcpy(&s, &cpu.v[0], 4);
+                        fed += s;
+                        CHECK(cpu.v[0] >> 32 == 0, "the step's upper lanes stay zero");
+                    }
+                }
+            }
+            const int want = steps[r] >= 1.0f ? frames[r] : 600;
+            CHECK(ran[0] >= want - 1 && ran[0] <= want && ran[1] == ran[0] && ran[2] == ran[0] && !odd,
+                  "step %.3f: phases ran %d, %d, %d of %d frames (want %d)", steps[r], ran[0], ran[1], ran[2], frames[r],
+                  want);
+            CHECK(fed >= 599.0f && fed <= 600.5f, "step %.3f: the sound system was fed %.2f frames in 10 s", steps[r], fed);
+        }
+        // Owed fractions survive a whole step, and a step that is not positive runs and clears them.
+        SoundGate g = {0.0f, 1};
+        CHECK(!sound_gate_take(&g, 0, 0.5f) && !sound_gate_take(&g, 1, 1.0f), "half a frame: the job and its phase 1 wait");
+        CHECK(sound_gate_take(&g, 0, 1.0f) && sound_gate_take(&g, 2, 1.0f) && g.owed == 0.5f, "a whole frame runs, the half kept");
+        CHECK(sound_gate_take(&g, 0, 0.5f) && g.owed == 0.0f, "the kept half and a new one run");
+        CHECK(!sound_gate_take(&g, 0, 0.75f) && sound_gate_take(&g, 0, NAN) && g.owed == 0.0f &&
+                  sound_gate_take(&g, 0, 0.0f), "NaN and 0 run as the game has them and clear what is owed");
+        fake_manager = 0;
     }
     printf("frame_step_check: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;

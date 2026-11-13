@@ -20,7 +20,8 @@ PAGE = 0x4ea0000   # the patch page of 1.1.1, main+0x4ea0000
 FDIV = 0x1e201900   # fdiv s0, s8, s0
 HOST_SITES = [('ostep', 0x3cdfc0, 0x1e380008, [], 0xf60), ('ostep', 0x475f8, 0x1e380009, [], 0xf50),
               ('owater', 0x3876014, FDIV, [FDIV], 0xf20), ('owater', 0x38827f8, FDIV, [FDIV], 0xf20),
-              ('owater', 0x632cfc, FDIV, [FDIV], 0xf20)]
+              ('owater', 0x632cfc, FDIV, [FDIV], 0xf20),
+              ('osound', 0x41531c, 0x910083fd, [0x910083fd], 0xf10), ('osound', 0x415334, 0xbd401100, [0xbd401100], 0xf00)]
 
 
 def compiler():

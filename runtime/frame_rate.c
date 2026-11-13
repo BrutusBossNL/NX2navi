@@ -615,6 +615,78 @@ void frame_rate_sim_host(Cpu *c) {
     }
 }
 
+// ---- the sound manager's job at whole steps (patches-v111.txt osound)
+// The job (main+0x415300) runs in three phases a frame, the phase in w2: 0 loads the time manager's step, frames per
+// update at [[main+0x4c7e890]] +0x10, and hands it to the sound system ([[main+0x4c80c38]] +0xa8, and with its inverse
+// +0x18 of the object at +0x10 of [[main+0x4c806d0]]); 1 runs the sound objects' updates, 2 the system's own
+// (main+0x3798410). Any other phase returns at once (main+0x4155fc); the task wrappers main+0x4151f0 and main+0x4152d0
+// skip a 3 themselves. The sound system counts its fades, delays and parameter ramps in updates of at least one step.
+// With the set ostep the step is the display interval in 60 Hz frames, a fraction of one above 60 fps. Fed fractions,
+// this game has been reported to keep sounds held after an area unloaded until no voice was left free, so that new
+// sounds, then the music, went silent until a restart (not reproduced on this build: the fault takes a few area
+// changes above 60 fps). With the set osound the job runs at 60 Hz while the step is a fraction:
+// - frame_rate_sound_gate_host, after the job's prologue: phase 0 adds the step to what the job is owed and runs once
+//   a whole step has built up, keeping the rest; phases 1 and 2 follow that frame's choice. A job that does not run
+//   gets phase 3 in w2, so it returns through its own epilogue.
+// - frame_rate_sound_step_host, after phase 0's load of the step: a fraction becomes one whole step.
+// A step of one or more (60 fps and below) runs as the game has it and leaves what is owed for the next fractions; a
+// step that is not positive (or NaN) runs as the game has it and clears it. So the sound clock keeps the game's on
+// average at any frame rate, and at 60 fps the job runs every frame as before.
+typedef struct {
+    float owed;   // steps given since the job last ran, under one
+    int run;      // phase 0's choice, which the frame's other phases follow
+} SoundGate;
+static SoundGate sound_gate = {0.0f, 1};   // every phase runs until a phase 0 has chosen
+
+static int sound_gate_take(SoundGate *g, uint32_t phase, float step) {
+    if (phase != 0) return g->run;
+    if (!(step > 0.0f)) {
+        g->owed = 0.0f;
+        return g->run = 1;
+    }
+    if (step >= 1.0f) return g->run = 1;
+    g->owed += step;
+    g->run = g->owed >= 1.0f;
+    if (g->run) g->owed -= 1.0f;
+    return g->run;
+}
+
+// The step the job's phase 0 loads (1 when the time manager is not there: the gate then lets the phase run).
+static float sound_job_step(void) {
+    uint64_t slot = read_ptr(MOD_MAIN_BASE + 0x4c7e890), mgr = slot ? read_ptr(slot) : 0;
+    float step = 1.0f;
+    if (mgr && !read_guest(mgr + 0x10, &step, 4)) step = 1.0f;
+    return step;
+}
+
+// NX2NAVI_TRACE=perf: every 10 s, how often phase 0 ran of the times it was asked.
+void frame_rate_sound_gate_host(Cpu *c) {
+    uint32_t phase = (uint32_t)c->x[2];
+    float step = phase == 0 ? sound_job_step() : 1.0f;
+    uint64_t asked = 0, ran = 0, t = 0;
+    plat_mutex_lock(&whole_lock);   // the phases may come from different threads
+    int run = sound_gate_take(&sound_gate, phase, step);
+    if (phase == 0 && (rt_trace & RT_TRACE_PERF)) {
+        static uint64_t t0, n, r;
+        uint64_t now = plat_now_ns();
+        n++, r += (uint64_t)run;
+        if (!t0) t0 = now;
+        if (now - t0 >= 10000000000ull) asked = n, ran = r, t = now - t0, t0 = now, n = r = 0;
+    }
+    plat_mutex_unlock(&whole_lock);
+    if (!run) c->x[2] = 3;
+    if (asked)
+        rt_log("frame rate: the sound job ran %llu of %llu frames in %.1f s (step %.3f)", (unsigned long long)ran,
+               (unsigned long long)asked, t / 1e9, step);
+}
+
+void frame_rate_sound_step_host(Cpu *c) {
+    uint32_t bits = (uint32_t)c->v[0];
+    float step;
+    memcpy(&step, &bits, 4);
+    if (step > 0.0f && step < 1.0f) c->v[0] = 0x3f800000u;   // 1.0f, the lanes above it zero as the load left them
+}
+
 // The 60 Hz frames the game steps at each update where the set ostep gives them (Ocarina); 1 elsewhere, the game's own
 // nominal frame. The mouse camera divides by it (mouse_direct.c): the game multiplies camera input by this step.
 float frame_step_frames(void) {
