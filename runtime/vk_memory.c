@@ -4497,9 +4497,9 @@ static void census_main(void *arg) {
         snprintf(path, sizeof path, "%.*svma-frame%llu.json", sl ? (int)(sl - lp) + 1 : 0, lp, (unsigned long long)j.frame);
         char *json = NULL;
         vmaBuildStatsString(j.c->vma, &json, VK_TRUE);
-        FILE *f = json ? fopen(path, "wb") : NULL;
-        int ok = f && fputs(json, f) >= 0;
-        if (f && fclose(f)) ok = 0;
+        // Through a temporary file and a rename: nobody waits for this thread when the game closes, and a map cut short
+        // there would read as a whole one
+        int ok = json && plat_file_write_cached(path, json, strlen(json));
         rt_log("mem: vma detailed map %s %s", ok ? "written to" : "not written:", path);
         if (json) vmaFreeStatsString(j.c->vma, json);
     }

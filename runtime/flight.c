@@ -20,6 +20,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "input.h"
+#include "part_file.h"
 #include "vk.h"
 #include "vk_exec.h"
 #include "platform/platform.h"
@@ -200,11 +201,12 @@ static void copy_events(DumpJob *j, uint64_t first) {
 static const char *const tex_kind_names[FLIGHT_TEX_N] = {"new", "up", "reup", "release", "takeback", "drop", "bytes",
                                                          "reg", "blank", "toblank", "blanksub", "direct", "unreg"};
 
-// <dir>/events.tsv: one line per texture event of the dump's frames (flight_tex).
+// <dir>/events.tsv: one line per texture event of the dump's frames (flight_tex). Like the dump's other files it is
+// written as a part file and renamed when complete (part_file.h): the game may close under the dump thread.
 static void write_events(const DumpJob *j) {
     char path[PLAT_PATH_MAX + 32];
     snprintf(path, sizeof path, "%s/events.tsv", j->dir);
-    FILE *f = fopen(path, "w");
+    FILE *f = part_file_open(path, "w");
     if (!f) {
         rt_log("flight: cannot write %s", path);
         return;
@@ -253,7 +255,7 @@ static void write_events(const DumpJob *j) {
                 e->kind < FLIGHT_TEX_N ? tex_kind_names[e->kind] : "?", (unsigned long long)e->addr, e->format, e->w,
                 e->h, e->layers, fl, detail, e->us);
     }
-    fclose(f);
+    if (!part_file_close(f, path, 1)) rt_log("flight: cannot write %s", path);
 }
 
 // ---------------------------------------------------------------- PNG (RGB, Paeth rows, fixed-Huffman deflate)
@@ -369,7 +371,7 @@ static int write_png(const char *path, const uint8_t *rgba, PngBufs *pb) {
             }
     }
     size_t zn = deflate_fixed(pb->raw, (size_t)row * h, pb->z, pb->head);
-    FILE *f = fopen(path, "wb");
+    FILE *f = part_file_open(path, "wb");
     if (!f) return 0;
     static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 13, 10, 26, 10};
     uint8_t ihdr[13] = {0, 0, (uint8_t)(w >> 8), (uint8_t)w, 0, 0, (uint8_t)(h >> 8), (uint8_t)h, 8, 2, 0, 0, 0};
@@ -377,7 +379,7 @@ static int write_png(const char *path, const uint8_t *rgba, PngBufs *pb) {
     chunk(f, "IHDR", ihdr, 13);
     chunk(f, "IDAT", pb->z, (uint32_t)zn);
     chunk(f, "IEND", NULL, 0);
-    return fclose(f) == 0;
+    return part_file_close(f, path, 1);
 }
 
 // ---------------------------------------------------------------- dump thread
@@ -419,7 +421,7 @@ static void dump_main(void *arg) {
     }
     char path[PLAT_PATH_MAX + 32];
     snprintf(path, sizeof path, "%s/frames.tsv", j->dir);
-    FILE *f = fopen(path, "w");
+    FILE *f = part_file_open(path, "w");
     if (!f) {
         rt_log("flight: cannot write %s", path);
         free(have), free(j->ev), free(j);
@@ -439,7 +441,7 @@ static void dump_main(void *arg) {
         fprintf(f, "\t%.4f\t%.4f\t%llu", r->step_page, r->step_game, (unsigned long long)r->guest_presents);
         fprintf(f, "\t%d\n", have ? have[i] : 0);
     }
-    fclose(f);
+    if (!part_file_close(f, path, 1)) rt_log("flight: cannot write %s", path);
     rt_log("flight: dump %s: %s at frame %llu (%.1f ms), frames %llu-%llu, %d thumbnails, %zu texture events, written "
            "in %llu ms; recorder %.1f us per frame (max %.0f us)", j->dir,
            j->why, (unsigned long long)j->trig_frame, j->trig_interval_us / 1000.0, (unsigned long long)j->r[0].frame,

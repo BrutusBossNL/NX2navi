@@ -501,6 +501,14 @@ A change to what a host thread gives back when it ends (`runtime/platform/win32.
 sleep, read a file and end, half joined and half detached; the end hook runs once on each, and on Windows the process
 holds as many handles afterwards as before (each thread's sleep timer and read event are closed). No game files.
 
+A file a detached thread writes piece by piece (the flight recorder's dump, `runtime/flight.c` `dump_main`) goes
+through `runtime/part_file.h`: it is written as `<name>.part` and renamed when complete, because the window's close
+ends the process under such a thread and a file cut short there would read as a whole one. A file made in memory
+first uses `plat_file_write_cached` or `plat_file_write_atomic`, which do the same in one call. A change to the
+helper passes `python tests\part_file_check.py`, which builds it with the platform layer: nothing stands under the
+name while a file is written, an older file stays until the new one is complete and after a write that was given up,
+and a writer killed in the middle leaves the older file whole and the half as `.part`. No game files.
+
 A change to the log queue (`runtime/logq.c`) passes `python tests\logq_check.py`, which builds it with the platform
 layer and a destination of its own: 160,000 lines from eight threads arrive whole and in each thread's order, a line
 logged while the queue's lock is taken waits and does not pass the lines queued before it, a destination that takes
