@@ -73,7 +73,7 @@ static const char *const known[] = {
     "SVC_SLOW_MS",
     "SHOTS_FULL", "SPEED_PROBE", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_IDLE", "SPLIT_IN_PASS", "SPLIT_US", "SPV_MARK_TEST", "SPV_OVERRIDE", "STICK_DEADZONE", "STICK_SENS",
     "SWKBD_ANSWER",
-    "SET_AT", "SWKBD_TEST", "TAA", "DBG_TEST", "DEBUG_MENU", "MENU_TEST_DEBUG", "FSR4", "FSR4_FG", "FG4_VERSION", "FG4_SWAPCHAIN", "TEST_PAD", "TEST_PAD_AT", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "DEPTH_INIT_INLINE", "DEPTH_ALIAS_LOG", "TEX_DISUSE", "TEX_DISUSE_EVICT", "TEX_GEN_UNDO", "TEX_MEMO", "TEX_VRAM_PRESSURE", "TEX_RELEASED_MB", "TEX_RELEASED_MAX", "TEX_REUSE", "TEX_SPLIT_FILL", "TEX_COMMIT_FREE_MB", "TEX_PROC_COMMIT_MB", "TEX_EVICT", "TEX_COMMIT_EVICT", "MIRROR_EVICT", "VRAM_BUDGET_MB", "TIMER_1MS", "TRACE", "TXD_TRANSPOSE", "UBO_SNAPSHOT", "EVO_TRACE", "EVENT_AT_SYNC", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NAN_PRESERVE", "VK_NOOPT", "VK_NO_FLOAT64",
+    "SET_AT", "SWKBD_TEST", "TAA", "DBG_TEST", "DEBUG_MENU", "MENU_TEST_DEBUG", "FSR4", "FSR4_FG", "FG4_VERSION", "FG4_SWAPCHAIN", "TEST_PAD", "TEST_PAD_AT", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "DEPTH_INIT_INLINE", "DEPTH_ALIAS_LOG", "TEX_DISUSE", "TEX_DISUSE_EVICT", "TEX_GEN_UNDO", "TEX_MEMO", "TEX_VRAM_PRESSURE", "TEX_RELEASED_MB", "TEX_RELEASED_MAX", "TEX_RELEASED_HOLD", "TEX_REUSE", "TEX_SPLIT_FILL", "TEX_COMMIT_FREE_MB", "TEX_PROC_COMMIT_MB", "TEX_EVICT", "TEX_COMMIT_EVICT", "MIRROR_EVICT", "VRAM_BUDGET_MB", "TIMER_1MS", "TRACE", "TXD_TRANSPOSE", "UBO_SNAPSHOT", "EVO_TRACE", "EVENT_AT_SYNC", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NAN_PRESERVE", "VK_NOOPT", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECONVERGE", "VK_NAN_BITS", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VS_OUTS", "WATER_PROJECTIVE",
     "WAIT_WATCH_S", "WALK_KEY", "WALK_SCALE", "WB_EXACT", "WB_FENCE_LIMIT", "WB_MERGE", "WB_NO_REUP", "WB_MERGE_MAX", "WB_PROBE", "WB_SPLIT", "WB_LAZY", "WB_LAZY_CHUNK", "WB_LAZY_TOUCH", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_KEEP", "XLATE_PROCS",
     "UPLOAD_BATCH_MB", "VRAM_HEAP_LIMIT", "VRAM_RESERVE_MB", "TEX_CLOBBER", "LOW_END_GPU",
@@ -149,7 +149,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"PIPE_SEED_BOOT", "performance"}, {"LIB_PREBUILD", "performance"}, {"LIB_PREBUILD_THREADS", "performance"}, {"LIB_WARM", "performance"}, {"PIPE_LINK_MS", "performance"}, {"PIPE_LINK_DRAW_MS", "performance"}, {"PIPE_AHEAD", "performance"}, {"LINE_WIDTH", "performance"}, {"POOL_SHOWN_FIRST", "performance"}, {"POOL_DATA_FIRST", "performance"}, {"TEX_REUSE_NAMED", "performance"}, {"TEX_OVERWRITTEN_USED", "performance"}, {"PIPE_FAST_WORKERS", "performance"}, {"GPL_FEEDBACK", "performance"}, {"GPL_MESH", "performance"}, {"FRAME_HOLD_MS", "performance"}, {"PACE_SMOOTH", "performance"}, {"OQ_BATCH", "performance"}, {"CLEAR_SMALL_CPU", "performance"}, {"PATCH_OCCLUSION_OFF", "performance"}, {"GATE_WAIT_MS", "performance"}, {"PIPE_PREBUILD", "performance"}, {"PIPE_SEED", "performance"},
     {"COMPUTE_KEEP", "performance"},
     {"PREWARM_XLATE", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"},
-    {"TEX_ALIAS", "performance"}, {"DEPTH_INIT_INLINE", "performance"}, {"DEPTH_ALIAS_LOG", "diagnostics"}, {"TEX_DISUSE", "performance"}, {"TEX_DISUSE_EVICT", "performance"}, {"TEX_GEN_UNDO", "performance"}, {"TEX_REUSE", "performance"}, {"TEX_SPLIT_FILL", "performance"}, {"TEX_VRAM_PRESSURE", "performance"}, {"TEX_PROC_COMMIT_MB", "performance"}, {"ASTC_BC", "performance"}, {"LOD_GUARD", "performance"}, {"FIX_C0", "performance"}, {"FIX_ZERO", "performance"}, {"WATER_PROJECTIVE", "performance"},
+    {"TEX_ALIAS", "performance"}, {"DEPTH_INIT_INLINE", "performance"}, {"DEPTH_ALIAS_LOG", "diagnostics"}, {"TEX_DISUSE", "performance"}, {"TEX_DISUSE_EVICT", "performance"}, {"TEX_GEN_UNDO", "performance"}, {"TEX_REUSE", "performance"}, {"TEX_SPLIT_FILL", "performance"}, {"TEX_VRAM_PRESSURE", "performance"}, {"TEX_RELEASED_HOLD", "performance"}, {"TEX_PROC_COMMIT_MB", "performance"}, {"ASTC_BC", "performance"}, {"LOD_GUARD", "performance"}, {"FIX_C0", "performance"}, {"FIX_ZERO", "performance"}, {"WATER_PROJECTIVE", "performance"},
     {"BIND_SKIP", "performance"}, {"SHADER_CACHE_FLUSH", "performance"}, {"SHADER_CARRY", "performance"}, {"PIPELINE_CACHE_PLAY", "performance"}, {"PIPELINE_CACHE_PLAY_MB", "performance"}, {"FFX_PIPE_CACHE", "performance"}, {"SHADER_MEMO", "performance"}, {"PIPE_MEMO", "performance"}, {"TEX_MEMO", "performance"}, {"DESC_TEMPLATE", "performance"},
     {"TEX_CLOBBER", "performance"}, {"LOW_END_GPU", "performance"},
     {"PUSH_SKIP", "performance"}, {"SPLIT_DRAWS", "performance"}, {"SPLIT_IDLE", "performance"}, {"SPLIT_IN_PASS", "performance"}, {"SPLIT_US", "performance"}, {"VK_VALIDATION", "performance"},
@@ -208,10 +208,10 @@ static const CfgMeta metas[] = {
     {"ASPECT", "fit", "fit|stretch", LIVE}, {"FOV", "100", "70..140", LIVE},
     {"ANISO", "16", "game|2|4|8|16", LIVE},   // vk_texture.c sampler_features, vk_sampler_aniso_live; 16: the game asks 1x or 2x
     {"TEXTURE_DETAIL", "auto", "auto|full|reduced|low", RESTART},   // vk_texture.c "texture detail", read at the first texture
-    // video memory use: low sets the VRAMLOW defaults below (vk_texture.c released_cap_bytes and sweep_pressure,
-    // vk_pipeline.c seed_boot); high keeps what features switched off hold (cfg_vram_keep: vk_dlaa.c idle_release,
-    // vk_fsr.c idle_note, vk_aa.c work_idle)
-    {"VRAM_USE", "balanced", "low|balanced|high", RESTART},
+    // video memory use: low, the default, keeps released textures for the hold and frees what features switched off
+    // hold; high sets the VRAMHIGH defaults below and keeps those (cfg_vram_keep: vk_dlaa.c idle_release, vk_fsr.c
+    // idle_note, vk_aa.c work_idle). balanced, the default before 0.10, reads as low.
+    {"VRAM_USE", "low", "low|high", RESTART},
     // colour adjustment (vk_color.c); the preset is the menu's, the four values are what the present uses
     {"COLOR_PRESET", "default", "default|vivid|clarity|custom", LIVE}, {"COLOR_BRIGHTNESS", "0", "-30..30", LIVE},
     {"COLOR_CONTRAST", "100", "70..150", LIVE}, {"COLOR_SATURATION", "100", "50..200", LIVE},
@@ -358,7 +358,9 @@ static const CfgMeta metas[] = {
     {"PASS_TIMES", "0", "0|1", RESTART}, {"DUMP_KEY", "", NULL, RESTART},   // vk_crumbs.c, vk_dump.c
     // textures and memory
     {"ASTC", "auto", "auto|gpu|native|cpu", RESTART}, {"MEMORY", "auto", "auto|import|mirror|verify", RESTART},
-    {"TEX_ALIAS", "1", "0|1", RESTART}, {"DEPTH_INIT_INLINE", "1", "0|1", RESTART}, {"DEPTH_ALIAS_LOG", "0", "0|1", RESTART}, {"TEX_DISUSE", "1", "0|1|2", RESTART}, {"TEX_DISUSE_EVICT", "0", "0|1", RESTART}, {"TEX_GEN_UNDO", "1", "0|1", RESTART}, {"TEX_REUSE", "1", "0|1", RESTART}, {"TEX_SPLIT_FILL", "1", "0|1|2", RESTART}, {"TEX_VRAM_PRESSURE", "80", "0..100", RESTART}, {"ASTC_BC", "", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},
+    {"TEX_ALIAS", "1", "0|1", RESTART}, {"DEPTH_INIT_INLINE", "1", "0|1", RESTART}, {"DEPTH_ALIAS_LOG", "0", "0|1", RESTART}, {"TEX_DISUSE", "1", "0|1|2", RESTART}, {"TEX_DISUSE_EVICT", "0", "0|1", RESTART}, {"TEX_GEN_UNDO", "1", "0|1", RESTART}, {"TEX_REUSE", "1", "0|1", RESTART}, {"TEX_SPLIT_FILL", "1", "0|1|2", RESTART}, {"TEX_VRAM_PRESSURE", "80", "0..100", RESTART},
+    // vk_texture.c drop_aged: seconds a released texture is kept unused (vk_tex_release.h); vram_use = high sets 0
+    {"TEX_RELEASED_HOLD", "180", "0..900", RESTART}, {"ASTC_BC", "", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},
     {"TEX_CLOBBER", "0", "0|1", RESTART},
     {"LOW_END_GPU", "0", "0|1", RESTART},   // LOWEND below
     {"STG_ARENA", "1", "0|1", RESTART}, {"ASTC_GPU_DESWIZZLE", "1", "0|1", RESTART},
@@ -646,26 +648,33 @@ static const char *lowend_value(const char *key) {
     return NULL;
 }
 
-// vram_use = low (NX2NAVI_VRAM_USE, the Screen tab's Video memory use row): defaults for the keys the player does not
-// set, after the device profile and the low-end mode. Each trades memory for work the game then does again:
-// - TEX_RELEASED_MB 1024: released textures keep at most 1 GiB (by default a quarter of the video memory budget, 4 GiB
-//   on a 32 GB card, 1.9 GiB on an 8 GB one). One the game takes back after its drop is made and uploaded or decoded
-//   again, and its first frame shows the stand-in (vk_texture.c released_cap_bytes).
-// - TEX_VRAM_PRESSURE 70: textures that come back intact give way from 70% of the budget on, not 80% (sweep_pressure).
+// vram_use (NX2NAVI_VRAM_USE, the Screen tab's Video memory use row): low, the default, or high. low keeps a released
+// texture until it has gone unused for the hold (vk_texture.c drop_aged, TEX_RELEASED_HOLD 180 s; vk_tex_release.h has
+// the take-back figures behind it: in play the game took released textures back within a minute or not at all) and
+// frees what a switched-off upscaler or SMAA holds.
+// high sets the VRAMHIGH defaults for the keys the player does not set, after the device profile and the low-end mode:
+// TEX_RELEASED_HOLD 0, released textures stay up to the size bound (a quarter of the video memory budget) for the whole
+// session, as before 0.10; and it keeps what a switched-off feature holds (cfg_vram_keep). balanced, the default before
+// 0.10, and anything else read as low.
+// What the low of the 0.10 previews set and did cost something stays to be set on its own:
+// - TEX_RELEASED_MB 1024: released textures keep at most 1 GiB; those the game takes back after a drop are made and
+//   uploaded or decoded again and show their stand-in for a frame (81 to 218 in each 3600 presents of a session on an
+//   RTX 5090, vk_texture.c released_cap_bytes).
+// - TEX_VRAM_PRESSURE 70: textures that come back intact give way from 70% of the budget on, not 80% (sweep_pressure),
+//   and are made again when next used.
 // - PIPE_SEED_BOOT 0: the shared list's pipelines this install never drew are made at their first draw, not at the
-//   start, which leaves out 0.3-0.6 GiB of video memory and 2-4 GB of commit; a first visit to an area can miss a few
-//   objects for a frame or two while they are made (vk_pipeline.c seed_boot).
-// Unsampled live textures are not dropped in any of the three (tex_disuse_evict stays 0): that eviction left the
-// ground flat and see-through for good (vk_texture.c disuse_evict_on). high keeps what a switched-off feature holds
-// (cfg_vram_keep), as before balanced, the default, frees it.
-static const struct { const char *key, *value; } VRAMLOW[] = {
-    {"TEX_RELEASED_MB", "1024"}, {"TEX_VRAM_PRESSURE", "70"}, {"PIPE_SEED_BOOT", "0"},
+//   start, which leaves out 0.3-0.6 GiB of video memory and 2-4 GB of commit; a session so set missed 1,091 pipelines
+//   at a draw, 115 of them for 8 to 34 ms, and their draws were skipped (vk_pipeline.c seed_boot).
+// Unsampled live textures are not dropped in either (tex_disuse_evict stays 0): that eviction left the ground flat and
+// see-through for good (vk_texture.c disuse_evict_on).
+static const struct { const char *key, *value; } VRAMHIGH[] = {
+    {"TEX_RELEASED_HOLD", "0"},
 };
 static const char *vram_use_value(const char *key) {
     const char *set = raw_get(PREFIX "VRAM_USE");
-    if (!set || strcmp(set, "low")) return NULL;
-    for (size_t i = 0; i < sizeof VRAMLOW / sizeof *VRAMLOW; i++)
-        if (!strcasecmp(VRAMLOW[i].key, key)) return VRAMLOW[i].value;
+    if (!set || strcmp(set, "high")) return NULL;
+    for (size_t i = 0; i < sizeof VRAMHIGH / sizeof *VRAMHIGH; i++)
+        if (!strcasecmp(VRAMHIGH[i].key, key)) return VRAMHIGH[i].value;
     return NULL;
 }
 int cfg_vram_keep(void) {
