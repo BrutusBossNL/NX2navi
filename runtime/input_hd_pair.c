@@ -31,6 +31,7 @@ static char *path[2];                           // the HID paths hd_pair_find sa
 static PlatMutex dev_lock = PLAT_MUTEX_INIT;    // guards dev[] and number[], and is held across a write
 static SDL_hid_device *dev[2];
 static unsigned number[2];                      // the next report's number, per device
+static volatile int32_t ended;                  // hd_pair_end ran: hd_pair_write, under dev_lock, writes nothing
 
 int hd_pair_find(void) {
     char *found[2] = {NULL, NULL};
@@ -71,6 +72,11 @@ static int write_side(int s, const uint8_t v[RUMBLE_HD_SIDE]) {
 int hd_pair_write(const uint8_t data[RUMBLE_HD_DATA]) {
     int ok = 1;
     plat_mutex_lock(&dev_lock);
+    if (__atomic_load_n(&ended, __ATOMIC_ACQUIRE)) {   // under the write's lock: no stop between this and the write
+        plat_mutex_unlock(&dev_lock);
+        SDL_SetError("HD rumble has ended");
+        return 0;
+    }
     if (!dev[0] || !dev[1]) {
         close_devices();
         char *p[2];
@@ -110,4 +116,9 @@ void hd_pair_close(int neutral, unsigned wait_ms) {
         if (dev[s]) write_side(s, rumble_hd_neutral);
     close_devices();
     plat_mutex_unlock(&dev_lock);
+}
+
+void hd_pair_end(unsigned wait_ms) {
+    __atomic_store_n(&ended, 1, __ATOMIC_RELEASE);   // before the lock: a write that holds it now is the last one
+    hd_pair_close(1, wait_ms);
 }

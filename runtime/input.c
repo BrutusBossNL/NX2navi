@@ -667,9 +667,11 @@ static int hd_tick(void) {
     plat_mutex_unlock(&lock);
     if (close_pair) hd_pair_close(1, 0);
     if (due && kind == HD_PAIR) {
-        int ok = hd_pair_write(d);   // waits for the two writes, so not under lock
+        // waits for the two writes, so not under lock; after input_rumble_hd_stop it writes nothing (hd_pair_end)
+        int ok = hd_pair_write(d);
         plat_mutex_lock(&lock);
-        if (pad && pad_hd == HD_PAIR) hd_wrote(ok, d, now, ok ? "" : SDL_GetError());   // unless the pair left meanwhile
+        // unless the pair left or the stop came meanwhile (hd_ended is written under lock as well)
+        if (pad && pad_hd == HD_PAIR && !hd_ended) hd_wrote(ok, d, now, ok ? "" : SDL_GetError());
         plat_mutex_unlock(&lock);
     }
     return idle;
@@ -732,7 +734,7 @@ void input_rumble_hd_stop(void) {
         }
     }
     plat_mutex_unlock(&lock);
-    if (pair) hd_pair_close(1, 100);
+    if (pair) hd_pair_end(100);
     if (wait) plat_wait_ns(30000000);   // SDL writes the report on a thread of its own: time for it before the process ends
 }
 
