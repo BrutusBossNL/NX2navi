@@ -91,7 +91,8 @@ static struct {
     PFN_vkAntiLagUpdateAMD antilag;
     VkSemaphore sem;          // NVIDIA: the timeline the driver signals to end a sleep
     // NVIDIA's calls name the swapchain and nothing says they may run at once on two threads: all of them, and the
-    // swapchain's replacement, hold m. None of them waits (the sleep's wait is on the semaphore, outside m).
+    // swapchain's replacement, hold m. None of them waits (the sleep's wait is on the semaphore, outside m). AMD's
+    // stage calls hold it shared and its switch-off exclusively (amd_stage).
     PlatMutex m;
     VkSwapchainKHR sc;        // m: the swapchain made with the latency mode, or none
     uint32_t mode;            // m to write, atomic to read: the sleep mode as last set on sc (mode_want), or MODE_UNSET
@@ -217,13 +218,20 @@ static int nv_sleep(void) {
 // ---- AMD
 // vkAntiLagUpdateAMD with a stage of frame id: the antiLag feature is enabled (vk_device.c create_device keeps
 // has_anti_lag only with it), both structures have their types, the mode and the stage are values of their enums.
+// The stage calls hold m shared, and make none once the path is off: the input stage waits inside the call at a
+// frame's start while the present thread makes the present stage of the frame before, which must not wait for it
+// (the command has no parameter the caller has to synchronize, so the two may run at once). The switch-off (refresh)
+// holds m exclusively: it waits for a stage call in flight, so a stage call with the mode on cannot come after it and
+// leave the driver on.
 static void amd_stage(VkAntiLagStageAMD stage, uint64_t id) {
     uint32_t us = LOAD(&L.interval_us);
     VkAntiLagPresentationInfoAMD pi = {.sType = VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD, .stage = stage,
                                        .frameIndex = id};
     VkAntiLagDataAMD d = {.sType = VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD, .mode = VK_ANTI_LAG_MODE_ON_AMD,
                           .maxFPS = us ? (1000000u + us / 2) / us : 0, .pPresentationInfo = &pi};
-    L.antilag(L.dev, &d);
+    plat_mutex_lock_shared(&L.m);
+    if (LOAD(&L.on)) L.antilag(L.dev, &d);
+    plat_mutex_unlock_shared(&L.m);
 }
 
 // ---- both
@@ -232,9 +240,11 @@ static void amd_stage(VkAntiLagStageAMD stage, uint64_t id) {
 static int refresh(void) {
     if (L.kind == LL_AMD) {
         int want = level_eff() > 0, was = __atomic_exchange_n(&L.on, want, __ATOMIC_ACQ_REL);
-        if (was && !want) {   // switched off: the driver is told once, without a stage
+        if (was && !want) {   // switched off: told once, without a stage, after any stage call in flight (amd_stage)
             VkAntiLagDataAMD d = {.sType = VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD, .mode = VK_ANTI_LAG_MODE_OFF_AMD};
-            L.antilag(L.dev, &d);
+            plat_mutex_lock(&L.m);
+            if (!LOAD(&L.on)) L.antilag(L.dev, &d);   // not when another thread switched it on again meanwhile
+            plat_mutex_unlock(&L.m);
         }
         say(want, LOAD(&L.failed) ? "the driver refused it" : "the setting");
         return want;
