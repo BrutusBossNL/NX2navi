@@ -763,10 +763,12 @@ static void world_clock(double dt, double step) {
 // how far it moved: at 60 fps the two moves match while he stands on it. The value is the number of lines to write
 // (1 means 4000); off it costs one test per present. The guest memory is read where the host can read it directly.
 #define FLOOR_PROBE_RADIUS 8.0f
-// Every read checks that the host can read the address (mem_host_readable), which costs a system call: a count read
-// from a manager that is not one yet (the title screen) walked up to 16,384 groups a present, about 1.9 s a frame. So
-// the walk waits for the player, and a count above FLOOR_PROBE_GROUPS is taken for a wrong manager and skipped.
-#define FLOOR_PROBE_GROUPS 512
+// The manager holds a few thousand groups (5345 in the Deku Tree; most entries are empty), and a readability check per
+// read costs a system call: at one per group a present the probe made every frame about 1.9 s. So the entries and the
+// groups' rows are read in two batched copies a present (memory.c mem_copy_readable: one lock, no system call for
+// memory that is neither armed nor probed), and only while there is a player (on the title screen the manager is not
+// one yet). A count above FLOOR_PROBE_GROUPS is taken for a wrong manager and skipped.
+#define FLOOR_PROBE_GROUPS 16384
 static int floor_probe_left = -1;   // lines still to write; -1 before the setting was read
 static float *floor_last;            // the groups' translations at the last update (x, y, z each)
 static uint32_t floor_last_n;
@@ -807,19 +809,50 @@ static void floor_probe(void) {
         if (!told++) rt_log("floor probe: a ground group count of %u is not plausible: skipped until it is", count);
         return;
     }
-    if (!floor_last) floor_last = calloc(FLOOR_PROBE_GROUPS * 3, sizeof(float));
+    static uint64_t *entry;              // the manager's entries: 32 bytes each, the group first
+    static float *rows;                  // each group's three rows of four floats (+0x88, +0x98, +0xa8)
+    static uint64_t (*src)[2];
+    static uint8_t **dst, *ok;
+    if (!floor_last) {
+        floor_last = calloc(FLOOR_PROBE_GROUPS * 3, sizeof(float));
+        entry = calloc(FLOOR_PROBE_GROUPS * 4, sizeof(uint64_t));
+        rows = calloc(FLOOR_PROBE_GROUPS * 12, sizeof(float));
+        src = calloc(FLOOR_PROBE_GROUPS, sizeof *src);
+        dst = calloc(FLOOR_PROBE_GROUPS, sizeof *dst);
+        ok = calloc(FLOOR_PROBE_GROUPS, 1);
+    }
+    if (!floor_last || !entry || !rows || !src || !dst || !ok || !count) return;
+    // the entries' range is checked once a present (one system call); the groups they name are the game's own objects
+    // and must lie in the guest heap, which mem_copy_readable then copies from without asking the system
+    uint64_t heap = 0, heap_size = 0;
+    if (!mem_info(4, &heap) || !mem_info(5, &heap_size) || !mem_host_readable(array, 32ull * count)) return;
+    uint8_t *edst = (uint8_t *)entry, eok = 0;
+    uint64_t esrc[1][2] = {{array, 32ull * count}};
+    if (mem_copy_readable(&edst, (const uint64_t (*)[2])esrc, 1, &eok) != 1) return;
+    int n = 0;
+    static uint32_t *which;   // the group index of each batched read
+    if (!which) which = calloc(FLOOR_PROBE_GROUPS, sizeof *which);
+    if (!which) return;
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t grp = entry[4 * i];
+        if (grp < heap || grp + 0x88 + 48 > heap + heap_size) continue;
+        src[n][0] = grp + 0x88, src[n][1] = 48;
+        dst[n] = (uint8_t *)(rows + 12 * n);
+        which[n++] = i;
+    }
+    mem_copy_readable(dst, (const uint64_t (*)[2])src, n, ok);
     int best = -1;
     float best_d2 = FLOOR_PROBE_RADIUS * FLOOR_PROBE_RADIUS, best_t[3] = {0}, best_m[3] = {0};
-    for (uint32_t i = 0; i < count && floor_last; i++) {
-        uint64_t grp = direct_ptr(array + 32ull * i);
-        float t[3], rows[12], *last = floor_last + 3 * i;   // the three rows in one read: one readability check
-        if (!grp || !direct_read(grp + 0x88, rows, sizeof rows)) continue;
-        t[0] = rows[3], t[1] = rows[7], t[2] = rows[11];
+    for (int k = 0; k < n; k++) {
+        if (!ok[k]) continue;
+        uint32_t i = which[k];
+        const float *r = rows + 12 * k;
+        float t[3] = {r[3], r[7], r[11]}, *last = floor_last + 3 * i;
         if (!isfinite(t[0]) || !isfinite(t[1]) || !isfinite(t[2])) continue;
         float m[3] = {t[0] - last[0], t[1] - last[1], t[2] - last[2]};
         int moved = i < floor_last_n && (m[0] != 0 || m[1] != 0 || m[2] != 0);
         memcpy(last, t, sizeof t);
-        if (!moved || !link_ok) continue;
+        if (!moved) continue;
         float d2 = (t[0] - link[0]) * (t[0] - link[0]) + (t[2] - link[2]) * (t[2] - link[2]);
         if (d2 < best_d2) best = (int)i, best_d2 = d2, memcpy(best_t, t, sizeof t), memcpy(best_m, m, sizeof m);
     }

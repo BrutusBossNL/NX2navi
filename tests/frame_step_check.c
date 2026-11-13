@@ -44,6 +44,11 @@ int plat_mem_read(uint64_t a, void *out, size_t n) { (void)a, (void)out, (void)n
 int plat_mem_readable(uint64_t a, size_t n) { (void)a, (void)n; return 0; }
 void mem_kernel_access(uint64_t a, uint64_t n) { (void)a, (void)n; }
 int mem_host_readable(uint64_t a, uint64_t n) { (void)a, (void)n; return 0; }
+int mem_info(uint32_t id, uint64_t *out) { (void)id, (void)out; return 0; }   // the floor probe (off here)
+int mem_copy_readable(uint8_t *const *dst, const uint64_t (*src)[2], int n, uint8_t *ok) {
+    (void)dst, (void)src, (void)n, (void)ok;
+    return 0;
+}
 uint64_t kern_now_ns(void) { return 0; }
 void plat_mutex_lock(PlatMutex *m) { (void)m; }     // one thread here
 void plat_mutex_unlock(PlatMutex *m) { (void)m; }
