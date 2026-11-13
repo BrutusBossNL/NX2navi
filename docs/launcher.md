@@ -432,6 +432,21 @@ game folder is the default `<launcher>\game`. The dump is never touched.
 `rebuild [--game D]`, `fonts`. `NX2navi.exe --desktop-shortcut on|off` and `--shortcuts on|off` are the stub's own.
 `NX2navi-Setup.exe` takes `--dest DIR`, `--no-shortcuts`, `--no-launch` and `--quiet`.
 
+## One launcher, one job
+
+One process works in a launcher folder at a time (`launcher/locks.py`). The window holds the folder's lock,
+`data/launcher.lock`, while it is open, every command of `launcher/cli.py` but `check` holds it while it runs, and a
+job that changes files takes it too (the window's own jobs share the window's). The operating system keeps the lock
+(`msvcrt.locking` on Windows, `flock` elsewhere) and lets go of it when the process ends, however it ends; who holds
+it is written to `data/launcher.lock.owner`. A second window says who holds the folder in a message box and closes;
+a command prints it and ends with exit code 1; a job fails with it before its first step.
+
+Within one process, a job names what it changes (`jobs.Job.claims`: `game`, the game folder and the build tools;
+`app`, the app folder's versions and the downloads), and a second job on the same thing fails at once with the first
+one's name. An install, a rebuild and the rebuild of an update claim `game`; an update's download and the background
+download claim `app`; the update check claims nothing and runs beside anything. Two launcher folders that share one
+game folder are not kept apart: the lock belongs to the launcher folder.
+
 ## Releases
 
 1. Bump `VERSION`; build the shader translator (`tools/build_xlate.py`).
@@ -511,7 +526,9 @@ folder, refusals), the shared save's zip (export of the save the game would load
 files, the import of a zip with its backup, a zip in the saves folder, the menu's waiting import dropped, the zips it
 refuses: no manifest, another format or game, a newer format, paths outside the save, links, damage), the install
 job with a fake
-`make_game.py` (with and without the prompts row), and the window's selftest when a display is there.
+`make_game.py` (with and without the prompts row), the folder's lock (a second launcher process refused and told who
+holds it, the lock gone when its holder is killed, a job and the command line refused while another process holds
+it, two jobs on one folder), and the window's selftest when a display is there.
 
 What goes wrong around a build is tested the same way, on made-up folders and stand-in processes: an update that
 stops in its compile (the game stays installed, home says how to finish, the install goes on from the unpacked

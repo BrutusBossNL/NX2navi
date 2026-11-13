@@ -7,7 +7,7 @@ import threading
 import time
 import traceback
 
-from . import build, feed, gamefiles, net, toolchain, updater, versions, winsys
+from . import build, feed, gamefiles, locks, net, toolchain, updater, versions, winsys
 
 RECHECK = 3600   # seconds between update checks while the launcher stays open, hidden during play included
 
@@ -15,7 +15,7 @@ PENDING, RUNNING, DONE, SKIPPED, FAILED = 'pending', 'running', 'done', 'skipped
 
 # Failures whose message says all there is to say: the log gets one line for them (failure_line), not a traceback.
 # A refused update check wrote 22 lines of two tracebacks into launcher.log each time.
-PLAIN_FAILURES = (feed.FeedError, build.BuildError)
+PLAIN_FAILURES = (feed.FeedError, build.BuildError, locks.Busy)
 
 
 def failure_line(e):
@@ -102,6 +102,12 @@ class Step:
 class Job:
     kind = 'job'
     title = ''
+    # What the job changes while it runs, for the lock between jobs (launcher/locks.py claim): 'game' is the game
+    # folder and the build tools, 'app' the app folder's versions and the downloads. A job with claims also holds the
+    # launcher folder's lock between processes while it runs; one without (the update check) changes no file and
+    # runs beside anything.
+    claims = ()
+    task = ''   # the job as the holder of a lock is named (doing)
 
     def __init__(self, ctx, step_ids, ver=''):
         self.ctx = ctx
@@ -229,8 +235,31 @@ class Job:
         self._main()
         return self
 
-    def _main(self):
+    def doing(self):
+        """The job in a few words ("the rebuild of the game"), for the one a lock refuses because of it."""
+        return self.task or f'a {self.kind} job'
+
+    def _hold(self):
+        """Take what the job needs to itself before it runs (launcher/locks.py): the launcher folder against other
+        processes, then its claims against the other jobs of this one. locks.Busy, with nothing held, when either is
+        taken. Returns what _main lets go of when the job has ended."""
+        if not self.claims:
+            return None, None
+        layout = self.ctx.layout
         try:
+            file = locks.FileLock(layout.instance_lock, self.doing(), where=layout.root)
+        except locks.Busy as e:
+            raise locks.Busy(f'{e}. Close it, or wait until it is done, and try again') from None
+        try:
+            return file, locks.claim(layout.root, self.claims, self.doing())
+        except locks.Busy:
+            file.release()
+            raise
+
+    def _main(self):
+        file = claimed = None
+        try:
+            file, claimed = self._hold()
             self.run()
             self.result = 'ok'
         except net.Cancelled:
@@ -246,6 +275,9 @@ class Job:
                 if s.state == RUNNING:
                     s.state = FAILED if self.result == 'failed' else PENDING
                     s.value = 'Stopped' if self.result == 'failed' else 'Cancelled'
+            locks.release_claim(claimed)
+            if file:
+                file.release()
             self.finished = time.time()
             self._touch()
 
@@ -359,6 +391,8 @@ class Job:
 class InstallJob(Job):
     kind = 'install'
     title = 'Installing'
+    claims = ('game',)
+    task = 'the installation of the game'
 
     def __init__(self, ctx, dump, game_dir):
         super().__init__(ctx, ['tools', 'check', 'exefs', 'romfs', 'lift', 'compile', 'shaders', *prompt_rows(ctx),
@@ -392,6 +426,8 @@ class InstallJob(Job):
 class RebuildJob(Job):
     kind = 'rebuild'
     title = 'Rebuilding'
+    claims = ('game',)
+    task = 'the rebuild of the game'
     retune = True   # Rebuild the Game: the game's code for this processor's level (build.rebuild_args)
 
     def __init__(self, ctx, game_dir, dump=''):
@@ -431,12 +467,14 @@ class ModsRebuildJob(RebuildJob):
 class UpdateDownloadJob(Job):
     """Before the restart: download, check and stage the release, then switch app/current.txt to it."""
     kind = 'update'
+    claims = ('app',)
 
     def __init__(self, ctx, release):
         ver = versions.display(release.version)
         super().__init__(ctx, ['download', 'verify', 'tools_update', 'lift', 'compile_changed', 'swap', 'shaders'], ver)
         self.release, self.ver = release, ver
         self.title = f'Updating to {ver}'
+        self.task = f'the update to {ver}'
 
     def run(self):
         layout = self.ctx.layout
@@ -463,12 +501,14 @@ class ContinueUpdateJob(RebuildJob):
     """After the restart, in the new version: bring the tools to its lock and rebuild the game."""
     retune = False   # an update keeps the compiled game's level, so it compiles only what changed
     kind = 'update'
+    claims = ('game', 'app')   # the rebuild, then updater.prune in the app folder
 
     def __init__(self, ctx, game_dir, old, dump=''):
         Job.__init__(self, ctx, ['download', 'verify', 'tools_update', 'lift', 'compile_changed', 'swap', 'shaders',
                                  *prompt_rows(ctx), 'scan'], ctx.layout.version)
         self.game_dir, self.dump, self.old = str(game_dir), dump, old
         self.title = f'Updating to {versions.display(ctx.layout.version)}'
+        self.task = f'the update to {versions.display(ctx.layout.version)}'
         for sid, value in (('download', 'Done'), ('verify', 'Checksum OK')):
             self.step(sid).state, self.step(sid).value, self.step(sid).fraction = DONE, value, 1.0
 
@@ -507,11 +547,13 @@ class StageJob(Job):
     (updater.stage), while the launcher runs and the game too. Its thread runs at background priority, so the game
     shares only the network with it. No screen shows it: the home screen's Updates row reads it."""
     kind = 'stage'
+    claims = ('app',)
 
     def __init__(self, ctx, release):
         ver = versions.display(release.version)
         super().__init__(ctx, ['download'], ver)
         self.release, self.ver = release, ver
+        self.task = f'the background download of {ver}'
 
     def run(self):
         winsys.background_thread()

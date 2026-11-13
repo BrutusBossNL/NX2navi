@@ -37,7 +37,7 @@ import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog
 
-from .. import NAME, build, feed, gameini, gamefiles, jobs, mods, saves, steam, versions, winsys
+from .. import NAME, build, feed, gameini, gamefiles, jobs, locks, mods, saves, steam, versions, winsys
 from ..context import Context
 from . import art, picture, sound
 
@@ -2673,28 +2673,26 @@ def parse_args(argv):
 
 
 def single_instance(layout, wait):
-    """An exclusive lock on data/launcher.lock for this process's life, or None when another launcher holds it after
-    wait seconds (the one an update restart replaces may still be closing)."""
-    path = layout.data / 'launcher.lock'
-    deadline = time.time() + wait
-    while True:
-        try:
-            f = open(path, 'a+')
-            try:
-                if os.name == 'nt':
-                    import msvcrt
-                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return f
-            except OSError:
-                f.close()
-                raise
-        except OSError:
-            if time.time() >= deadline:
-                return None
-            time.sleep(0.25)
+    """The launcher folder's lock (launcher/locks.py) for this window's life. locks.Busy, naming the holder, when
+    another launcher or a command of launcher/cli.py still holds it after wait seconds (the launcher an update
+    restart replaces may still be closing)."""
+    return locks.FileLock(layout.instance_lock, 'the launcher window', wait=wait, where=layout.root)
+
+
+def tell(text):
+    """A sentence for the player before the window is up: a message box that waits for OK."""
+    try:
+        if os.name == 'nt':
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, text, NAME, 0x40)
+        else:
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(NAME, text, parent=root)
+            root.destroy()
+    except Exception:   # no display, no toolkit: the terminal that started it
+        print(text, file=sys.stderr)
 
 
 def play_only(ctx):
@@ -2743,14 +2741,23 @@ def main(argv=None):
             return code
     lock = None
     if not a.selftest:
-        lock = single_instance(ctx.layout, 20 if (a.continue_update or a.rolled_back) else 2)
-        if lock is None:
-            ctx.log('another launcher is running')
+        try:
+            lock = single_instance(ctx.layout, 20 if (a.continue_update or a.rolled_back) else 2)
+        except locks.Busy as e:
+            # A second window on the same folder would run its own jobs into the same game folder and settings. The
+            # first one may be out of sight (hidden while the game runs), so the player is told who holds the folder
+            ctx.log(f'not started: {e}')
+            tell(f'NX2navi is already running: {e}.\n\nIts window may be hidden while the game runs; it comes back '
+                 'when you quit the game.')
             return 0
-    root = tk.Tk(className='NX2navi')
-    app = App(root, ctx, a)
-    if a.selftest:
-        from .selftest import run
-        root.after(300, lambda: run(app, a.shots))
-    root.mainloop()
+    try:
+        root = tk.Tk(className='NX2navi')
+        app = App(root, ctx, a)
+        if a.selftest:
+            from .selftest import run
+            root.after(300, lambda: run(app, a.shots))
+        root.mainloop()
+    finally:
+        if lock:
+            lock.release()
     return 0

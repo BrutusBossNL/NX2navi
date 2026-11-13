@@ -72,6 +72,9 @@ class Layout:
         self.cache = self.data / 'cache'
         self.downloads = self.data / 'downloads'
         self.settings = self.data / 'launcher.json'
+        # held by whichever process works in this folder: the window while it is open, launcher/cli.py for a command
+        # and every job that changes files (launcher/locks.py)
+        self.instance_lock = self.data / 'launcher.lock'
         tool_root = self.root
         if not ansi_safe(tool_root):
             tool_root = Path(os.environ.get('SystemDrive', 'C:') + '\\') / 'NX2navi'

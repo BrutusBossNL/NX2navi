@@ -49,7 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'tools'))
 
-from launcher import build, feed, gameini, gamefiles, jobs, net, saves, settings, toolchain, updater, versions, winsys  # noqa: E402
+from launcher import build, feed, gameini, gamefiles, jobs, locks, net, saves, settings, toolchain, updater, versions, winsys  # noqa: E402
 from launcher.context import Context  # noqa: E402
 from launcher.paths import Layout  # noqa: E402
 
@@ -3679,6 +3679,167 @@ class JobTest(Tmp):
         self.assertNotIn('--nup', again)
         (game / 'romfs' / 'romfs.bin').unlink()   # the image is gone: only the dump brings it back
         self.assertEqual(jobs.InstallJob(ctx, self.tmp / 'g.nup', game).args()[0], '--nup')
+
+
+# ---------------------------------------------------------------- one launcher, one job
+
+# Another launcher process: it takes the lock file argv[2] as argv[3], says so and holds it until its input closes.
+HOLDER = ('import sys; sys.path.insert(0, sys.argv[1]); from launcher import locks; '
+          'lock = locks.FileLock(sys.argv[2], sys.argv[3]); print("held", flush=True); sys.stdin.read()')
+
+
+class LockTest(Tmp):
+    """launcher/locks.py: one process works in a launcher folder at a time, and in it one job on the same thing."""
+
+    make_ctx, patch_tools = JobTest.make_ctx, JobTest.patch_tools
+
+    def holder(self, layout, what='the launcher window'):
+        """A second process holding layout's lock as what, until the test ends or it is killed."""
+        p = subprocess.Popen([sys.executable, '-c', HOLDER, str(ROOT), str(layout.instance_lock), what],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+        def end():
+            p.kill()
+            p.wait()
+            p.stdin.close()
+            p.stdout.close()
+        self.addCleanup(end)
+        self.assertEqual(p.stdout.readline().strip(), 'held')
+        return p
+
+    def test_a_second_launcher_is_refused_and_told_who_holds_the_folder(self):
+        other = self.holder(self.layout)
+        with self.assertRaises(locks.Busy) as refused:
+            locks.FileLock(self.layout.instance_lock, 'the launcher window', where=self.layout.root)
+        self.assertIn(f'the launcher window (process {other.pid}, since ', str(refused.exception))
+        self.assertIn(str(self.layout.root), str(refused.exception))
+        try:
+            from launcher.ui import app
+        except ImportError as e:
+            self.skipTest(f'no window toolkit: {e}')
+        said = []
+        with mock.patch.object(app, 'tell', said.append), mock.patch.object(app.tk, 'Tk') as window, \
+                mock.patch.object(app.winsys, 'dpi_aware'), mock.patch.object(app.winsys, 'app_id'), \
+                mock.patch.object(app, 'single_instance', lambda layout, wait: locks.FileLock(
+                    layout.instance_lock, 'the launcher window', where=layout.root)):   # without the wait
+            self.assertEqual(app.main(['--root', str(self.layout.root)]), 0)
+        window.assert_not_called()                 # no second window
+        self.assertEqual(len(said), 1)
+        self.assertIn(f'NX2navi is already running: the launcher window (process {other.pid}', said[0])
+
+    def test_the_lock_goes_when_its_process_dies(self):
+        other = self.holder(self.layout)
+        other.kill()                               # no clean exit: the operating system lets go of the lock
+        other.wait()
+        mine = locks.FileLock(self.layout.instance_lock, 'the launcher window', wait=10)
+        self.addCleanup(mine.release)
+        # the window's own jobs share its lock, and it stays the window's until the window lets go of it
+        job = locks.FileLock(self.layout.instance_lock, 'a job')
+        job.release()
+        job.release()                              # letting go twice lets go once
+        self.assertIn(locks._key(self.layout.instance_lock), locks._files)
+        mine.release()
+        self.assertNotIn(locks._key(self.layout.instance_lock), locks._files)
+
+    def test_a_folder_that_cannot_hold_a_lock_file_refuses_nobody(self):
+        gone = self.tmp / 'no such folder' / 'launcher.lock'
+        with locks.FileLock(gone, 'the launcher window'), locks.FileLock(gone, 'another'):
+            self.assertFalse(gone.exists())
+
+    def test_a_job_does_not_run_while_another_process_holds_the_folder(self):
+        self.patch_tools()
+        ctx = self.make_ctx('ok')
+        self.addCleanup(ctx._file.close)
+        other = self.holder(ctx.layout, '"rebuild" from the command line')
+        j = jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game').run_inline()
+        self.assertEqual(j.result, 'failed')
+        self.assertIn(f'"rebuild" from the command line (process {other.pid}', j.error)
+        self.assertIn('try again', j.error)
+        self.assertEqual({s.state for s in j.steps}, {jobs.PENDING})     # nothing of it ran
+        self.assertFalse(any('working on' in ln for ln in j.lines))
+        check = jobs.Job(ctx, [])                  # a job that changes no file (the update check) runs beside it
+        check.run = lambda: None
+        self.assertEqual(check.run_inline().result, 'ok')
+        other.stdin.close()                        # the other process ends
+        other.wait()
+        j = jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game').run_inline()
+        self.assertEqual(j.result, 'ok', j.error)
+        self.assertEqual(locks._files, {})         # and the job let go of the folder when it ended
+
+    def test_two_jobs_on_one_folder(self):
+        self.patch_tools()
+        ctx = self.make_ctx('ok')
+        self.addCleanup(ctx._file.close)
+        started, go = threading.Event(), threading.Event()
+
+        class Slow(jobs.RebuildJob):
+            def run(self):
+                started.set()
+                go.wait(30)
+
+        first = Slow(ctx, self.tmp / 'game').start()
+        self.addCleanup(go.set)
+        self.assertTrue(started.wait(30))
+        second = jobs.RebuildJob(ctx, self.tmp / 'game').run_inline()
+        self.assertEqual(second.result, 'failed')
+        self.assertEqual(second.error, 'the rebuild of the game is still running: wait for it to end, or cancel it')
+        self.assertEqual({s.state for s in second.steps}, {jobs.PENDING})
+        install = jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game').run_inline()
+        self.assertEqual(install.result, 'failed')                       # another kind of job on the same folder
+        self.assertIn('the rebuild of the game is still running', install.error)
+
+        class Download(jobs.Job):                  # what the background download claims: the app folder, not the game
+            claims = ('app',)
+            task = 'the background download of 9.9.9'
+
+            def run(self):
+                pass
+
+        self.assertEqual(Download(ctx, []).run_inline().result, 'ok')
+        elsewhere = Context(Layout(root=self.tmp / 'other root', app=ctx.layout.app))
+        self.addCleanup(elsewhere._file.close)
+        self.assertEqual(jobs.InstallJob(elsewhere, self.tmp / 'g.nup', self.tmp / 'game 2').run_inline().result, 'ok')
+        go.set()
+        for _ in range(300):
+            if first.result is not None:
+                break
+            time.sleep(0.1)
+        self.assertEqual(first.result, 'ok')
+        again = jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game').run_inline()
+        self.assertEqual(again.result, 'ok', again.error)                # the first job let go when it ended
+        self.assertEqual((locks._files, locks._claims), ({}, {}))
+
+    def test_a_failed_job_lets_go_of_the_folder(self):
+        self.patch_tools()
+        ctx = self.make_ctx('--fail')
+        self.addCleanup(ctx._file.close)
+        self.assertEqual(jobs.InstallJob(ctx, self.tmp / 'g.nup', self.tmp / 'game').run_inline().result, 'failed')
+        self.assertEqual((locks._files, locks._claims), ({}, {}))
+
+    def test_the_command_line_takes_the_folders_lock(self):
+        from launcher import cli
+        ctx = self.make_ctx('ok')
+        ctx._file.close()
+        root = ['--root', str(ctx.layout.root)]
+        ran = []
+
+        def run(a, ctx, held):
+            ran.append((a.cmd, held is not None and locks._key(ctx.layout.instance_lock) in locks._files))
+            ctx._file.close()
+            return 0
+        err = io.StringIO()
+        with mock.patch.object(cli, 'run', run), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(root + ['tools']), 0)
+            self.assertEqual(ran, [('tools', True)])                     # held while the command runs
+            self.assertEqual(locks._files, {})                           # and let go of after
+            other = self.holder(ctx.layout)
+            self.assertEqual(cli.main(root + ['rebuild']), 1)
+            self.assertEqual(cli.main(root + ['install', '--dump', 'd.nup', '--game', str(self.tmp / 'game')]), 1)
+            self.assertEqual(len(ran), 1)                                # neither ran, and no setting was written
+            self.assertEqual(cli.main(root + ['check']), 0)              # the update check changes nothing: it runs
+            self.assertEqual(ran[-1], ('check', False))
+        self.assertIn(f'error: the launcher window (process {other.pid}', err.getvalue())
+        self.assertIn('try again', err.getvalue())
 
 
 # ---------------------------------------------------------------- the icon
