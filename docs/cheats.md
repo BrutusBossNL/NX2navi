@@ -155,3 +155,8 @@ A temporary copy of the test process's collection registry exercised a checked n
 original registry. The original contained 11,657 records: collection queries therefore allow a larger bounded
 registry instead of incorrectly rejecting saves above 10,000 entries. Policy tests also exercise 12,000 records.
 No primary process or save file was written by that fixture; all 70 original save/backup/transaction files stayed unchanged.
+
+The additional world integration was exercised in isolated Lost Woods, Death Mountain Crater and Kakariko sessions.
+Grotto, bean, checked Great Fairy, native chest and upgrade icons appeared on the map/minimap. A separate Kakariko
+run kept upgrade icons visible with grotto markers disabled. Disabled markers detach only after the native position
+calculation, which needs their parent pane. All 70 primary save/backup/transaction files remained unchanged.

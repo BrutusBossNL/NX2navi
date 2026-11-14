@@ -72,12 +72,18 @@ void world_chests_master_host(Cpu *c) {
     }
     if(reveal)c->x[8]=c->x[9]=1;
 }
-void world_facility_visibility_host(Cpu *c) {
-    if(context(c->x[19])) {
-        const WorldExtra *entry=facility(c->x[19],c->x[24]);
-        if(entry)c->x[1]=enabled(entry->category);
-    }
-    rt_call(c,MAIN+0x208350,2,(uint64_t)c->x[0],(uint64_t)c->x[1]);
+void world_facility_position_host(Cpu *c) {
+    uint64_t map=c->x[19],index=c->x[24];
+    rt_call(c,MAIN+0x20a3e0,1,(uint64_t)c->x[0]);
+    if(!context(map))return;
+    const WorldExtra *entry=facility(map,index);
+    if(!entry || enabled(entry->category) || index>=word(map+0xe0))return;
+    uint64_t element=ptr(ptr(map+0xe8)+index*8),parent=ptr(map+0x58);
+    if(!element || !parent)return;
+    // Positioning needs the native parent. Detach only after its transform has finished.
+    Cpu saved=*c;
+    rt_call(c,MAIN+0x2095e0,2,element,parent);
+    *c=saved;
 }
 void world_facility_style_host(Cpu *c) {
     if(context(c->x[19])) {
