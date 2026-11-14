@@ -49,6 +49,9 @@ extern void bomb_arrows_frame_host(Cpu *c);
 extern void world_map_master_host(Cpu *c);
 extern void world_map_visibility_host(Cpu *c);
 extern void world_map_style_host(Cpu *c);
+extern void world_chests_master_host(Cpu *c);
+extern void world_facility_visibility_host(Cpu *c);
+extern void world_facility_style_host(Cpu *c);
 __attribute__((constructor)) static void spin_register(void) {
     if (RT_V111) rt_register_host(RT_PATCH_PAGE + 0xef0, cheats_spin_range_host);
     if (RT_V111) rt_register_host(RT_PATCH_PAGE + 0xee0, bomb_arrows_tick_host);
@@ -56,6 +59,9 @@ __attribute__((constructor)) static void spin_register(void) {
     if (RT_V111) rt_register_host(RT_PATCH_PAGE + 0xec0, world_map_master_host);
     if (RT_V111) rt_register_host(RT_PATCH_PAGE + 0xeb0, world_map_visibility_host);
     if (RT_V111) rt_register_host(RT_PATCH_PAGE + 0xea0, world_map_style_host);
+    if (RT_V111) rt_register_host(RT_PATCH_PAGE + 0xe90, world_chests_master_host);
+    if (RT_V111) rt_register_host(RT_PATCH_PAGE + 0xe80, world_facility_visibility_host);
+    if (RT_V111) rt_register_host(RT_PATCH_PAGE + 0xe70, world_facility_style_host);
 }
 #endif
 

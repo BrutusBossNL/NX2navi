@@ -3508,11 +3508,12 @@ class FileCheckTest(Tmp):
 # PromptToolsTest.test_the_prompt_tools_logic_is_the_recorded_one. If the change can alter what the tools write, give
 # PROMPT_TOOLS a new value (every install then draws its prompts again) and record both here; if it cannot, record
 # only the new digests.
-PROMPT_LOGIC = ('181cd6e02d58828332b1c4fdcd1555e63a004200ec046452f4713edf2cccb72a',
+PROMPT_LOGIC = ('6a5ad3419b223527ba42da6c569148dc996f1dfb3500bc7df7663292a50ad1df',
                 {'pad_prompts.py': '780c246b5fde7a0e9dbf3f59ad16372e1737592add6f2f2d9825bee6df4e296f',
                  'prompt_art.py': '87edacabcddb4952f5862373815d7d46a05c67f350e0734025ae4d2f83b12038',
                  'button_icons.py': '3804e371a030965bc9eb4226f333b611651f25efaa67ee523b404edc3257818a',
-                 'world_map_night.py': 'b880a7d325f9176979e2182b5f396f84b1389ec293f2fc2413215fb62f2ee98e'})
+                 'world_map_night.py': 'b880a7d325f9176979e2182b5f396f84b1389ec293f2fc2413215fb62f2ee98e',
+                 'world_extra_art.py': 'f97e45598792baf298f5f7eb0f833230a5c31650e88ef299f6a63dfcbb82d732'})
 
 
 def load_pad_prompts():
@@ -3601,7 +3602,7 @@ class PromptToolsTest(Tmp):
         out = self.tmp / 'game'
         out.mkdir()
         ident = 'nup C:\\dumps\\game.nup 28000000000 1760000000'
-        released = '181cd6e02d58828332b1c4fdcd1555e63a004200ec046452f4713edf2cccb72a'   # includes night-icon composition after prompt generation
+        released = '6a5ad3419b223527ba42da6c569148dc996f1dfb3500bc7df7663292a50ad1df'   # includes night-icon composition after prompt generation
         with mock.patch.object(make_game, 'KIT', kit):
             self.assertNotEqual(make_game.PROMPT_TOOLS, 'ad59f2c4533f6ea2630b916ef5f3695f72daffe9b2b7663eea4168a4f08e4249')
             pictures = make_game.tree_digest(kit / 'prompt-art', ('**/*.png',))

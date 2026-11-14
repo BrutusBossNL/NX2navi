@@ -113,6 +113,7 @@ def prepare(game):
     import json
     from pad_prompts import Romfs, compress, write_overlay
     import world_map_night as night
+    import world_extra,world_extra_art,world_byml
     game = Path(game)
     destination = game/'romfs-patches-world'
     stamp = destination/'generator.sha256'
@@ -122,23 +123,31 @@ def prepare(game):
     original = romfs.raw(ARCHIVE)
     original_textures=romfs.raw(night.TEXTURES)
     key = hashlib.sha256(Path(__file__).read_bytes()+Path(night.__file__).read_bytes()+
-        hashlib.sha256(original).digest()+hashlib.sha256(original_textures).digest()).hexdigest()
-    required=['manifest.tsv',ARCHIVE,night.TEXTURES,'skull-night.bin','night-texture-patch.json','night-icons.stamp']
+        Path(world_extra.__file__).read_bytes()+Path(world_extra_art.__file__).read_bytes()+Path(world_byml.__file__).read_bytes()+
+        hashlib.sha256(original).digest()+hashlib.sha256(original_textures).digest()+
+        hashlib.sha256(romfs.raw(world_extra.MAP)).digest()).hexdigest()
+    required=['manifest.tsv',ARCHIVE,night.TEXTURES,world_extra.MAP,'extra-world.bin','skull-night.bin','night-texture-patch.json','night-icons.stamp']
     if stamp.is_file() and stamp.read_text() == key and all((destination/name).is_file() for name in required):
         return
     archive, dictionary = romfs.load(ARCHIVE)
     def ordinary_shadows(body):
         # Reuse the two dedicated checked-shadow textures for night variants; ordinary shadows use the main alpha.
-        for name in night.SHADOWS:
-            old=name.encode()+b'\0';new=name.replace('CheckSh','Check').encode()+b'\0'
+        for name in night.SHADOWS+world_extra_art.SHADOWS:
+            old=name.encode()+b'\0';new=name.replace('Sh_','_').encode()+b'\0'
             body=body.replace(old,new+bytes(len(old)-len(new)))
         return body
     result = archive_replace(archive, MEMBER, collectible_layout,ordinary_shadows)
+    result = archive_replace(result,world_extra_art.MEMBER,world_extra_art.layout)
     textures,texture_dictionary=romfs.load(night.TEXTURES)
     patches=night.texture_patch(textures,game/'build-cache/world-art')
+    patches+=world_extra_art.textures(textures,game/'build-cache/world-art')
     changed=night.apply_texture_patch(textures,patches)
     outputs={ARCHIVE:compress(result,dictionary,9),night.TEXTURES:compress(changed,texture_dictionary,9)}
-    write_overlay(destination,outputs,{ARCHIVE:original,night.TEXTURES:original_textures})
+    map_data,map_dictionary,metadata,report=world_extra.build(romfs)
+    outputs[world_extra.MAP]=compress(map_data,map_dictionary,9)
+    write_overlay(destination,outputs,{ARCHIVE:original,night.TEXTURES:original_textures,world_extra.MAP:romfs.raw(world_extra.MAP)})
+    (destination/'extra-world.bin').write_bytes(metadata)
+    (destination/'extra-world-report.json').write_text(json.dumps(report,indent=2))
     ids=night.night_ids(romfs)
     (destination/'skull-night.bin').write_bytes(b'NXWNT001'+struct.pack('<I',len(ids))+struct.pack('<'+'Q'*len(ids),*ids))
     (destination/'night-texture-patch.json').write_text(json.dumps(patches))

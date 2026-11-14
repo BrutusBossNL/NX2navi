@@ -10,7 +10,7 @@ The earlier spin measurements below used NX2navi 0.9.2.
 |---|---|
 | Link | Infinite health, magic and rupees; unlimited air jumps; sprint speed normal / 2× / 3.5× / 5× |
 | Equipment | Bomb arrows; spin attack range normal / 1.5x / 2x / 2.5x; magic spin charging normal / instant. |
-| World | Show Gold Skulltulas and show heart pieces on the map and minimap, with checks for collected items. |
+| World | Independent map and minimap switches for Gold Skulltulas, heart pieces, hidden grottos, treasure chests, bean plots, Great Fairies and capacity upgrade venues. |
 | Inventory | Separate infinite magic beans and business seeds; contents of each unlocked bottle, up to five. |
 | Ammunition | Separate infinite arrows, bombs, bombchus, Deku nuts, slingshot seeds and Deku sticks. |
 | Timers | Freeze the supported shared countdown at its current remaining time. |
@@ -78,6 +78,24 @@ properties are checked before composition; a resource override without the valid
 Collection status comes from native per-instance Skulltula records and the native heart-piece query, including
 direct actors, chest rewards and event rewards, rather than inventory totals.
 
+Hidden grottos, Treasure chests, Bean planting spots, Great Fairies and Capacity upgrades each have their own
+live switch, off by default. Grotto markers identify entrances; they do not claim the grotto has been cleared.
+Chests retain the native opened icon and dungeon floor filtering, and can be revealed without owning a compass.
+Outdoor chests absent from the original map table are added from that area's actual placements.
+Bean markers identify soil locations for the current age. They currently have no planted check: the soil's
+insect-release flag is unrelated to planting and is deliberately excluded.
+
+Great Fairy checks use the corresponding native reward event. Upgrade venues receive a check only where a
+specific persistent reward flag is verified; venues without such a flag remain location markers. The Skulltula
+House check requires both wallet rewards. Native upgrade chests may also be revealed by Capacity upgrades
+without enabling all chests. No option grants a reward or writes a collection flag.
+
+Additional icons and map records are generated locally from the player's resources. If another mod overrides
+the required map table or shared UI textures, the additional facility hooks remain inactive. The initial generated
+dataset contains 73 age-specific grotto entrances, 20 bean plots, 10 Great Fairy locations and 11 upgrade venues;
+the same physical location can have separate child and adult records. This is not a claim that every reward
+venue has already been catalogued.
+
 ## Implementation and checks
 
 `runtime/cheats.c` validates the build, table shapes, key hashes, indices, readable memory and relevant object
@@ -97,6 +115,9 @@ the native query contract, CPU preservation, and the absence of progression writ
 `python tests/world_map_art_check.py` checks duplicate archive members and preservation of unrelated layout variants.
 `python tests/world_map_night_check.py` checks texture composition, fixed allocation sizes, idempotence, original
 resource guards and preservation of unrelated bytes. The map policy test includes checked/unchecked nocturnal frames.
+`python tests/world_extra_check.py` checks all five independent switches, native call preservation and verified
+completion queries against synthetic memory. `python tests/world_byml_check.py` checks preservation of native
+scalar types, 64-bit instance IDs and nested containers when generating map tables.
 Set `CC` to the UCRT64 clang executable when it is not on PATH. The test covers the build gate, health/death
 and capacity guards, magic capacity, wallet limits, item ownership, legacy no-op policies, all 13 contents in
 each of five bottles, locked-slot and invalid-enum rejection, countdown freezing, count-up exclusion and expired

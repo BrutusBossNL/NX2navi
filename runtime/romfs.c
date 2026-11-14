@@ -701,7 +701,8 @@ static void restbl_overlay(void) {
     for (size_t k = 0; k < noverlay; k++) {
         Overlay *o = &overlays[k];
         if (o->index == gi) served = o;
-        if ((!o->mod && o->prio != 1) || o->index == gi) continue;
+        // Built-in world resources can grow too; their lower priority must not exclude their allocation sizes.
+        if ((!o->mod && o->prio != 1 && !(world_map_ready() && o->prio == -1)) || o->index == gi) continue;
         char key[4200];
         restbl_key(o->name, key, sizeof key);
         int mc = ends_with(o->name, ".mc");
@@ -986,6 +987,11 @@ static void overlay_init(void) {
         break;
     }
     world_map_night_loaded(world_dir,night_ready);
+    int extra_ready=0;
+    for(size_t k=0;k<noverlay;k++)if(!strcmp(overlays[k].name,"Banc/BancBasedResource/MapParam.byml.zs")) {
+        size_t n=strlen(world_dir);extra_ready=!strncmp(overlays[k].path,world_dir,n) && overlays[k].path[n]=='/';break;
+    }
+    world_extra_loaded(world_dir,extra_ready,night_ready);
     mods_overlay_log();
     restbl_overlay();
     heapdef_overlay();
