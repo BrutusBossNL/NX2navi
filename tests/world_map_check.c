@@ -3,7 +3,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include "../runtime/world_map.c"
-static unsigned char area[0x500], manager[0xd00], table[48], record[0xc8];
+static unsigned char area[0x500], manager[0xd00], table[16*12000], record[0xc8];
 static int hearts,skulls,heart_got,queries,animations;
 static float animation;
 const char *cfg_get(const char *key) { (void)key;return NULL; }
@@ -51,9 +51,16 @@ int main(void) {
         world_map_style_host(&c);assert(animation==expected);
     }
     assert(queries==4 && animations==4);
+    night_ids[0]=10;night_ids[1]=20;night_count=2;night_ready=1;c.x[9]=7;
+    put64(record,20);style(&c);assert(arg_s(&c,0)==4.f);
+    put64(record,10);style(&c);assert(arg_s(&c,0)==5.f);
+    put64(record,30);style(&c);assert(arg_s(&c,0)==1.f);
+    night_ready=0;put64(record,20);style(&c);assert(arg_s(&c,0)==3.f);
     hearts=skulls=0;c.x[8]=0;saved=c;world_map_master_host(&c);assert(!memcmp(&saved,&c,sizeof c));
     world_map_style_host(&c);assert(queries==4 && animations==5);
     assert(skull_collected(10) && !skull_collected(20) && skull_collected(30) && !skull_collected(15));
     put64(area,0);saved=c;world_map_visibility_host(&c);assert(!memcmp(&saved,&c,sizeof c));
+    for(unsigned i=0;i<12000;i++) { put64(table+i*16,i+1);table[i*16+12]=i==11999; }
+    put32(manager+0xc58,12000);assert(skull_collected(12000) && !skull_collected(11999));
     puts("world_map_check: passed (independent toggles, native collected flags, CPU preservation, no progression writes)");
 }

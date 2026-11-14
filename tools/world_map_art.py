@@ -10,7 +10,7 @@ MEMBER = 'PaMapIconCollect_00.buil'
 
 
 def collectible_layout(original):
-    """Game 1.1.1 BFFH layout: retain checked states 0/1, add unchecked heart/skull states 2/3."""
+    """Retain checked states 0/1; add unchecked 2/3 and nocturnal skull states 4/5."""
     b = bytearray(original)
     u32 = lambda at: struct.unpack_from('<I', b, at)[0]
     u64 = lambda at: struct.unpack_from('<Q', b, at)[0]
@@ -36,16 +36,19 @@ def collectible_layout(original):
             raise ValueError('collectible animation domain changed')
         if u32(knot+16) != 3 or u32(curve+16) != 6:
             raise ValueError('collectible animation curves changed')
-        times = append(struct.pack('<7f',0,1,1,2,2,3,3))
-        values = append(struct.pack('<14f',0,0,0,0,1,0,1,0,2,0,2,0,3,0))
-        changes.extend([(knot,times,7),(curve,values,14)])
-    shadow = append(bytes(32));icon = append(bytes(32))
+        times = append(struct.pack('<11f',0,1,1,2,2,3,3,4,4,5,5))
+        values = append(struct.pack('<22f',0,0,0,0,1,0,1,0,2,0,2,0,3,0,3,0,4,0,4,0,5,0))
+        changes.extend([(knot,times,11),(curve,values,22)])
+    shadow = append(bytes(48));icon = append(bytes(48))
     extra.extend(bytes(-len(extra) % 8))
     delta = len(extra)
     strings = original[pool:]
     additions = b'MapIconCollectHeartPiece_00\0MapIconCollectSkullSign_00\0'
     heart = pool+delta+len(strings)
     skull = heart+len(b'MapIconCollectHeartPiece_00\0')
+    moon=heart+len(additions)
+    moon_checked=moon+len(b'MapIconCollectHeartPieceCheckSh_00\0')
+    additions+=b'MapIconCollectHeartPieceCheckSh_00\0MapIconCollectSkullSignCheckSh_00\0'
     # All serialized pointers are absolute file offsets. Existing object and vector addresses stay put;
     # the original string pool moves to make room for the extra vectors in the Default section.
     for at in range(0xf8,pool,8):
@@ -58,14 +61,14 @@ def collectible_layout(original):
     struct.pack_into('<I',b,0xd8,len(strings)+len(additions))
     struct.pack_into('<Q',b,0xe0,pool+delta)
     for at,ptr,count in changes:
-        if at in (0xd40,0xdb0): struct.pack_into('<ff',b,at,0,3)
+        if at in (0xd40,0xdb0): struct.pack_into('<ff',b,at,0,5)
         struct.pack_into('<QII',b,at+8,ptr,count,4)
     # The native shadow material supplies its own dark tint; an unchecked icon's alpha gives its matching shadow.
-    struct.pack_into('<4Q',b,shadow,0xfc0+delta,0xfe3+delta,heart,skull)
-    struct.pack_into('<4Q',b,icon,0x1005+delta,0x1026+delta,heart,skull)
-    struct.pack_into('<QII',b,0x580,shadow,4,8)
-    struct.pack_into('<QII',b,0x608,icon,4,8)
-    struct.pack_into('<I',b,0xcc4,3)
+    struct.pack_into('<6Q',b,shadow,0x1005+delta,0x1026+delta,heart,skull,moon,moon_checked)
+    struct.pack_into('<6Q',b,icon,0x1005+delta,0x1026+delta,heart,skull,moon,moon_checked)
+    struct.pack_into('<QII',b,0x580,shadow,6,8)
+    struct.pack_into('<QII',b,0x608,icon,6,8)
+    struct.pack_into('<I',b,0xcc4,5)
     return bytes(b)
 
 
@@ -87,7 +90,7 @@ def archive_nodes(data):
     return result
 
 
-def archive_replace(data, member, transform):
+def archive_replace(data, member, transform, preprocess=lambda body:body):
     nodes = archive_nodes(data)
     if not any(name==member for name,_,_,_ in nodes):
         raise ValueError('collectible layout missing')
@@ -96,7 +99,8 @@ def archive_replace(data, member, transform):
     for name,node,lo,hi in sorted(nodes, key=lambda item: item[2]):
         alignment = min(lo & -lo, 0x2000) if lo else 0x2000
         out.extend(bytes(-len(out) % alignment))
-        body = transform(data[lo:hi]) if name == member else data[lo:hi]
+        body=preprocess(data[lo:hi])
+        if name==member:body=transform(body)
         struct.pack_into('<II', out, node+8, len(out)-start, len(out)-start+len(body))
         out.extend(body)
     struct.pack_into('<I', out, 8, len(out))
@@ -106,7 +110,9 @@ def archive_replace(data, member, transform):
 def prepare(game):
     """Generate locally from the player's game; the original archive is never changed."""
     import hashlib
+    import json
     from pad_prompts import Romfs, compress, write_overlay
+    import world_map_night as night
     game = Path(game)
     destination = game/'romfs-patches-world'
     stamp = destination/'generator.sha256'
@@ -114,12 +120,29 @@ def prepare(game):
     if ARCHIVE not in romfs.paths():
         return  # This layout belongs only to the Switch 2 game.
     original = romfs.raw(ARCHIVE)
-    key = hashlib.sha256(Path(__file__).read_bytes()+hashlib.sha256(original).digest()).hexdigest()
-    if stamp.is_file() and stamp.read_text() == key and (destination/'manifest.tsv').is_file() and (destination/ARCHIVE).is_file():
+    original_textures=romfs.raw(night.TEXTURES)
+    key = hashlib.sha256(Path(__file__).read_bytes()+Path(night.__file__).read_bytes()+
+        hashlib.sha256(original).digest()+hashlib.sha256(original_textures).digest()).hexdigest()
+    required=['manifest.tsv',ARCHIVE,night.TEXTURES,'skull-night.bin','night-texture-patch.json','night-icons.stamp']
+    if stamp.is_file() and stamp.read_text() == key and all((destination/name).is_file() for name in required):
         return
     archive, dictionary = romfs.load(ARCHIVE)
-    result = archive_replace(archive, MEMBER, collectible_layout)
-    write_overlay(destination, {ARCHIVE: compress(result, dictionary, 9)}, {ARCHIVE: original})
+    def ordinary_shadows(body):
+        # Reuse the two dedicated checked-shadow textures for night variants; ordinary shadows use the main alpha.
+        for name in night.SHADOWS:
+            old=name.encode()+b'\0';new=name.replace('CheckSh','Check').encode()+b'\0'
+            body=body.replace(old,new+bytes(len(old)-len(new)))
+        return body
+    result = archive_replace(archive, MEMBER, collectible_layout,ordinary_shadows)
+    textures,texture_dictionary=romfs.load(night.TEXTURES)
+    patches=night.texture_patch(textures,game/'build-cache/world-art')
+    changed=night.apply_texture_patch(textures,patches)
+    outputs={ARCHIVE:compress(result,dictionary,9),night.TEXTURES:compress(changed,texture_dictionary,9)}
+    write_overlay(destination,outputs,{ARCHIVE:original,night.TEXTURES:original_textures})
+    ids=night.night_ids(romfs)
+    (destination/'skull-night.bin').write_bytes(b'NXWNT001'+struct.pack('<I',len(ids))+struct.pack('<'+'Q'*len(ids),*ids))
+    (destination/'night-texture-patch.json').write_text(json.dumps(patches))
+    (destination/'night-icons.stamp').write_text(hashlib.sha256(outputs[night.TEXTURES]).hexdigest())
     stamp.write_text(key)
     print('  collectible map icons prepared from the player\'s game', flush=True)
 

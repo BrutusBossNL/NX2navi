@@ -949,11 +949,11 @@ static void overlay_init(void) {
     if (plain_ok) plain[strlen(plain) - strlen("/manifest.tsv")] = 0;
     if (!patches && !prompts_loaded && plain_ok) patches = plain;
     if (patches && *patches && strcmp(patches, "0")) overlay_load(patches, 0, 0);
-    size_t mods_first = noverlay;
     char world_dir[2100], world_file[2400];
     need(snprintf(world_dir,sizeof world_dir,"%s/romfs-patches-world",index_dir)<(int)sizeof world_dir,"world map overlay path");
     need(snprintf(world_file,sizeof world_file,"%s/UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.blarc.zs",world_dir)<(int)sizeof world_file,"world map archive path");
     overlay_load(world_dir,1,-1); // Any explicit resource mod keeps precedence over the built-in collectible layout.
+    size_t mods_first = noverlay;
     if (mods && *mods && strcmp(mods, "0")) overlay_load(mods, 0, 1);
     mods_overlay_init();
     const char *clash = prompts_loaded ? overlay_clash(first, prompts_end, mods_first, noverlay) : NULL;
@@ -971,6 +971,21 @@ static void overlay_init(void) {
     int world_ready=0;
     for(size_t k=0;k<noverlay;k++) if(!strcmp(overlays[k].path,world_file))world_ready=1;
     world_map_art_loaded(world_ready);
+    int night_ready=0;
+    static const char texture_name[]="UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.bntx.zs";
+    if(world_ready)for(size_t k=0;k<noverlay;k++)if(!strcmp(overlays[k].name,texture_name)) {
+        char stamp[2400],expected[65]={0},actual[65];
+        size_t prefix=strlen(overlays[k].path)-strlen(texture_name);
+        if(prefix+strlen("night-icons.stamp")+1>sizeof stamp)break;
+        memcpy(stamp,overlays[k].path,prefix);strcpy(stamp+prefix,"night-icons.stamp");
+        FILE *file=fopen(stamp,"rb");
+        if(file) { int have=fread(expected,1,64,file)==64;fclose(file);
+            PlatFile *texture=have?open_read(overlays[k].path):NULL;
+            if(texture) { sha_range(texture,0,overlays[k].size,actual,0);plat_file_close(texture);night_ready=!strcmp(actual,expected); }
+        }
+        break;
+    }
+    world_map_night_loaded(world_dir,night_ready);
     mods_overlay_log();
     restbl_overlay();
     heapdef_overlay();

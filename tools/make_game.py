@@ -2455,6 +2455,8 @@ def step_prompts(out):
     if rc:
         fail('drawing the button prompts failed (the lines above say why); the game still runs. Run the build again '
              'to retry this step')
+    from world_map_night import patch_prompts
+    patch_prompts(out)
 
 
 AWAKE = None   # keep_awake's systemd-inhibit process on Linux; dropping it would close the pipe and end the hold

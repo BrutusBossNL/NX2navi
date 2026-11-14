@@ -748,7 +748,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     // Built-in cheat menu.
     [UI_MENU_CHEATS_WORLD] = "World",
     [UI_MENU_WORLD_SKULLTULAS] = "Show Gold Skulltulas",
-    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Show Gold Skulltula locations on the map and minimap. Collected tokens have a check mark.",
+    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Show Gold Skulltula locations on the map and minimap. Collected tokens have a check mark. A moon marks night-only Skulltulas.",
     [UI_MENU_WORLD_HEART_PIECES] = "Show heart pieces",
     [UI_MENU_WORLD_HEART_PIECES_DESC] = "Show heart piece locations on the map and minimap. Collected pieces have a check mark.",
     [UI_MENU_CHEATS_EQUIPMENT] = "Equipment",
@@ -1386,7 +1386,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     // Built-in cheat menu.
     [UI_MENU_CHEATS_WORLD] = "Мир",
     [UI_MENU_WORLD_SKULLTULAS] = "Показывать золотых скуллтул",
-    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Показывать золотых скуллтул на карте и мини-карте. Собранные жетоны отмечены галочкой.",
+    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Показывать золотых скуллтул на карте и мини-карте. Собранные жетоны отмечены галочкой. Луна отмечает скуллтул, появляющихся только ночью.",
     [UI_MENU_WORLD_HEART_PIECES] = "Показывать части сердца",
     [UI_MENU_WORLD_HEART_PIECES_DESC] = "Показывать части сердца на карте и мини-карте. Собранные части отмечены галочкой.",
     [UI_MENU_CHEATS_EQUIPMENT] = "Снаряжение",
@@ -2047,7 +2047,7 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     // Built-in cheat menu.
     [UI_MENU_CHEATS_WORLD] = "Mundo",
     [UI_MENU_WORLD_SKULLTULAS] = "Mostrar Skulltulas douradas",
-    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Mostra as Skulltulas douradas no mapa e minimapa. Fichas coletadas recebem uma marca.",
+    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Mostra as Skulltulas douradas no mapa e minimapa. Fichas coletadas recebem uma marca. Uma lua marca as Skulltulas que aparecem só à noite.",
     [UI_MENU_WORLD_HEART_PIECES] = "Mostrar pedaços de coração",
     [UI_MENU_WORLD_HEART_PIECES_DESC] = "Mostra os pedaços de coração no mapa e minimapa. Pedaços coletados recebem uma marca.",
     [UI_MENU_CHEATS_EQUIPMENT] = "Equipamento",
@@ -2794,7 +2794,7 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     // Built-in cheat menu.
     [UI_MENU_CHEATS_WORLD] = "世界",
     [UI_MENU_WORLD_SKULLTULAS] = "显示黄金骷髅蜘蛛",
-    [UI_MENU_WORLD_SKULLTULAS_DESC] = "在地图和小地图显示黄金骷髅蜘蛛位置。已收集的代币带有勾号。",
+    [UI_MENU_WORLD_SKULLTULAS_DESC] = "在地图和小地图显示黄金骷髅蜘蛛位置。已收集的代币带有勾号。 月亮标记仅在夜间出现的骷髅蜘蛛。",
     [UI_MENU_WORLD_HEART_PIECES] = "显示心之碎片",
     [UI_MENU_WORLD_HEART_PIECES_DESC] = "在地图和小地图显示心之碎片位置。已收集的碎片带有勾号。",
     [UI_MENU_CHEATS_EQUIPMENT] = "装备",

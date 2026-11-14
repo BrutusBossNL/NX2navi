@@ -64,12 +64,17 @@ Show Gold Skulltulas and Show heart pieces are independent live switches, both o
 the current area's native collectible locations on the map and minimap. A collected token or heart piece
 keeps the game's check-mark icon; an uncollected one uses its matching icon without a check mark.
 Skulltula locations remain visible during the day, including those whose actors only appear at night.
+A crescent marks night-only Skulltulas, on both unchecked and collected icons. The condition is read from the
+actor placements' native nocturnal property, independently of collection status and the current clock.
+Locations remain filtered by the game's current age, so a childhood-only Skulltula does not appear on the adult map.
 Dungeon floor selection and the game's map coordinates, zoom and clipping stay native. Turning a switch off restores
 the game's ordinary visibility for that category. These options do not collect anything or edit progression.
 
 The launcher builds the extended map layout locally from the player's game. Its textures are already present
-in that game's shared UI archive; no extracted assets are distributed. A resource mod replacing the same
+in that game's shared UI archive; crescent variants are generated locally from these icons. No extracted assets are distributed. A resource mod replacing the same
 layout archive takes precedence, and the reveal hooks remain inactive if the extended layout is unavailable.
+Night textures compose with generated controller prompts. Their unchanged allocation sizes and original texture
+properties are checked before composition; a resource override without the validated variants keeps ordinary icons.
 Collection status comes from native per-instance Skulltula records and the native heart-piece query, including
 direct actors, chest rewards and event rewards, rather than inventory totals.
 
@@ -90,6 +95,8 @@ not edited by hand or checked in.
 `python tests/world_map_check.py` checks independent category toggles, collected versus uncollected icon frames,
 the native query contract, CPU preservation, and the absence of progression writes.
 `python tests/world_map_art_check.py` checks duplicate archive members and preservation of unrelated layout variants.
+`python tests/world_map_night_check.py` checks texture composition, fixed allocation sizes, idempotence, original
+resource guards and preservation of unrelated bytes. The map policy test includes checked/unchecked nocturnal frames.
 Set `CC` to the UCRT64 clang executable when it is not on PATH. The test covers the build gate, health/death
 and capacity guards, magic capacity, wallet limits, item ownership, legacy no-op policies, all 13 contents in
 each of five bottles, locked-slot and invalid-enum rejection, countdown freezing, count-up exclusion and expired
@@ -116,6 +123,14 @@ native actor/detonation arguments, and CPU/stack preservation.
 
 On the 0.10.1 Windows integration, isolated save-copy sessions showed uncollected Gold Skulltulas on the Water Temple
 map and both checked and unchecked heart pieces in Kakariko. The Kakariko minimap showed the same collectible icons.
-The extended archive preserved all 624 unrelated layouts and extended all four collectible layout variants.
+The initial map integration preserved all 624 unrelated layouts and extended all four collectible layout variants.
+The crescent follow-up additionally redirects four facility-layout shadow references to the main icon alpha;
+the remaining 620 layouts stay byte-identical. Night textures retain the original archive's size and named slots.
 Runtime selftest, settings, input and all 3,483 UI-text checks passed. All 70 original save, backup and transaction
 files remained unchanged. Every location, age, floor and reward type has not been individually tested live.
+
+The nocturnal follow-up showed crescents on the Kakariko map and minimap with PlayStation prompts retained.
+A temporary copy of the test process's collection registry exercised a checked night icon, then restored the
+original registry. The original contained 11,657 records: collection queries therefore allow a larger bounded
+registry instead of incorrectly rejecting saves above 10,000 entries. Policy tests also exercise 12,000 records.
+No primary process or save file was written by that fixture; all 70 original save/backup/transaction files stayed unchanged.
