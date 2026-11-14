@@ -107,7 +107,7 @@ def archive_replace(data, member, transform, preprocess=lambda body:body):
     return bytes(out)
 
 
-def prepare(game):
+def prepare(game,compiler=None,env=None):
     """Generate locally from the player's game; the original archive is never changed."""
     import hashlib
     import json
@@ -139,8 +139,8 @@ def prepare(game):
     result = archive_replace(archive, MEMBER, collectible_layout,ordinary_shadows)
     result = archive_replace(result,world_extra_art.MEMBER,world_extra_art.layout)
     textures,texture_dictionary=romfs.load(night.TEXTURES)
-    patches=night.texture_patch(textures,game/'build-cache/world-art')
-    patches+=world_extra_art.textures(textures,game/'build-cache/world-art')
+    patches=night.texture_patch(textures,game/'build-cache/world-art',compiler=compiler,env=env)
+    patches+=world_extra_art.textures(textures,game/'build-cache/world-art',compiler=compiler,env=env)
     changed=night.apply_texture_patch(textures,patches)
     outputs={ARCHIVE:compress(result,dictionary,9),night.TEXTURES:compress(changed,texture_dictionary,9)}
     map_data,map_dictionary,metadata,report=world_extra.build(romfs)

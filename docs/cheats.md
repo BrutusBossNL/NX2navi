@@ -98,6 +98,11 @@ dataset contains 73 age-specific grotto entrances, 20 bean plots, 10 Great Fairy
 the same physical location can have separate child and adult records. This is not a claim that every reward
 venue has already been catalogued.
 
+The compile step passes its selected compiler and process environment through both icon generators to the
+local ASTC decoder build. Launcher installations use their private toolchain without requiring Clang on the
+user's PATH or a separate system MSYS2 installation. `tests/astc_toolchain_test.py` covers this propagation and
+cold-cache compiler invocation.
+
 ## Implementation and checks
 
 `runtime/cheats.c` validates the build, table shapes, key hashes, indices, readable memory and relevant object

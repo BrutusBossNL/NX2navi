@@ -52,11 +52,11 @@ def layout(original):
     return bytes(b)
 
 
-def textures(original,cache):
+def textures(original,cache,compiler=None,env=None):
     from PIL import Image,ImageDraw
     from pad_prompts import bntx_textures,read_level,write_level,astc_encode,bleed
     from ui_textures import astc_library
-    decoder=astc_library(cache);entries=bntx_textures(original)
+    decoder=astc_library(cache,compiler=compiler,env=env);entries=bntx_textures(original)
     count,table=struct.unpack_from('<IQ',original,0x24);infos={}
     for i in range(count):
         at=struct.unpack_from('<Q',original,table+i*8)[0];p=struct.unpack_from('<Q',original,at+0x60)[0]

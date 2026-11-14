@@ -75,13 +75,13 @@ def badge(image):
     return canvas.resize((64,64),Image.Resampling.LANCZOS)
 
 
-def texture_patch(textures,cache):
+def texture_patch(textures,cache,compiler=None,env=None):
     import ctypes
     from PIL import Image
     from pad_prompts import bntx_textures,read_level,write_level,astc_encode,bleed
     from ui_textures import astc_library
     cache.mkdir(parents=True,exist_ok=True)
-    decoder=astc_library(cache)
+    decoder=astc_library(cache,compiler=compiler,env=env)
     entries=bntx_textures(textures)
     count,table=struct.unpack_from('<IQ',textures,0x24)
     infos={}

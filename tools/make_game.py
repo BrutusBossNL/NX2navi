@@ -1938,9 +1938,9 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     obj.mkdir(parents=True, exist_ok=True)
     rt = KIT / 'runtime'
     from world_map_art import prepare as prepare_world_map
-    prepare_world_map(out)
-    runtime_headers(rt)
     clang, clangxx, env, vma = toolchain(msys)
+    prepare_world_map(out, compiler=clang, env=env)
+    runtime_headers(rt)
     if not romfs_job:
         romfs_index(out, gen)
     srcs = [(p, obj / f'{mod}_{p.stem}.o') for mod in ('main', 'sdk', 'subsdk0') for p in sorted((lift / mod).glob('*.c'))]

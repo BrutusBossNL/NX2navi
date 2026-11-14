@@ -3512,8 +3512,8 @@ PROMPT_LOGIC = ('6a5ad3419b223527ba42da6c569148dc996f1dfb3500bc7df7663292a50ad1d
                 {'pad_prompts.py': '780c246b5fde7a0e9dbf3f59ad16372e1737592add6f2f2d9825bee6df4e296f',
                  'prompt_art.py': '87edacabcddb4952f5862373815d7d46a05c67f350e0734025ae4d2f83b12038',
                  'button_icons.py': '3804e371a030965bc9eb4226f333b611651f25efaa67ee523b404edc3257818a',
-                 'world_map_night.py': 'b880a7d325f9176979e2182b5f396f84b1389ec293f2fc2413215fb62f2ee98e',
-                 'world_extra_art.py': 'f97e45598792baf298f5f7eb0f833230a5c31650e88ef299f6a63dfcbb82d732'})
+                 'world_map_night.py': 'c1d86c900c796453f3a73f30fbe04092fa5ed9412cfdf953b532f0ad511a6a3b',
+                 'world_extra_art.py': 'adf117f213ba8bb6fe79ffcbae4a9f9e3bc1f405a5cab3f2dae3a58c68e126f3'})
 
 
 def load_pad_prompts():
