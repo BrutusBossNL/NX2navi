@@ -133,7 +133,7 @@ SCAN_TOOL = '55ea0c150aaf9dac93a2e6fd3b4ca11e1c572b5eee8b6bd74960535964384634'
 # each time every install drew its prompts again, a minute. Changed by hand when a change to the scripts can change
 # what they write. Its value is their digest in 0.7.0 and 0.7.1, so the key of an install made by those stays what it
 # is. tests/launcher_test.py test_the_prompt_tools_logic_is_the_recorded_one asks the question when the logic changes.
-PROMPT_TOOLS = 'ad59f2c4533f6ea2630b916ef5f3695f72daffe9b2b7663eea4168a4f08e4249'
+PROMPT_TOOLS = '181cd6e02d58828332b1c4fdcd1555e63a004200ec046452f4713edf2cccb72a'
 
 # Bring-up fixes in the lifted SDK, each anchored on exact generated text that must occur once.
 LIFT_FIXES = [
