@@ -139,12 +139,14 @@ def apply_texture_patch(textures,patches):
 def patch_prompts(game):
     """Compose night badges after prompt generation; preserve each prompt overlay's original hashes."""
     from pad_prompts import Romfs,unpack,compress
+    from prompt_art import OVERLAYS
     game=Path(game);world=game/'romfs-patches-world'
     patch_file=world/'night-texture-patch.json'
     if not patch_file.is_file():return
     patches=json.loads(patch_file.read_text())
     _,dictionary=Romfs(game/'romfs').load(TEXTURES)
-    for folder in game.glob('romfs-patches-*'):
+    for name in OVERLAYS:
+        folder=game/name
         if folder.is_symlink() or folder.is_junction():continue
         manifest=folder/'manifest.tsv';texture=folder/TEXTURES
         if folder==world or not manifest.is_file() or not texture.is_file():continue

@@ -3512,7 +3512,7 @@ PROMPT_LOGIC = ('181cd6e02d58828332b1c4fdcd1555e63a004200ec046452f4713edf2cccb72
                 {'pad_prompts.py': '780c246b5fde7a0e9dbf3f59ad16372e1737592add6f2f2d9825bee6df4e296f',
                  'prompt_art.py': '87edacabcddb4952f5862373815d7d46a05c67f350e0734025ae4d2f83b12038',
                  'button_icons.py': '3804e371a030965bc9eb4226f333b611651f25efaa67ee523b404edc3257818a',
-                 'world_map_night.py': '656d83fd1f0709a9fac6d3237f29d9d4035003f0e2ab45fcf7a1ad9d4c012fe4'})
+                 'world_map_night.py': 'b880a7d325f9176979e2182b5f396f84b1389ec293f2fc2413215fb62f2ee98e'})
 
 
 def load_pad_prompts():
