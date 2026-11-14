@@ -48,9 +48,12 @@ int main(void) {
     c.x[0]=0x123456;ret_s(&c,7.f);world_facility_style_host(&c);assert(frame==7.f);q(records,100);
 
     w(map+0x358,1);w(map+0x180,1);q(map+0x188,addr(records));
-    for(int chest=0;chest<2;chest++)for(int upgrades=0;upgrades<2;upgrades++)for(int special=0;special<2;special++) {
-        switches[0]=chest;switches[4]=upgrades;q(records,special?104:100);c.x[23]=0;c.x[8]=c.x[9]=0;
-        world_chests_master_host(&c);assert(c.x[8]==(unsigned)(chest || (upgrades && special)));assert(c.x[9]==c.x[8]);
+    entries[5]=(WorldExtra){.id=200,.category=4,.flags=2};entries[6]=(WorldExtra){.id=201,.category=4,.flags=3};entry_count=7;
+    for(int chest=0;chest<2;chest++)for(int upgrades=0;upgrades<2;upgrades++)for(int kind=0;kind<4;kind++)for(int native=0;native<2;native++) {
+        const uint64_t ids[]={100,104,200,201};switches[0]=chest;switches[4]=upgrades;q(records,ids[kind]);c.x[23]=0;c.x[8]=c.x[9]=native;
+        world_chests_master_host(&c);
+        unsigned expected=chest || (upgrades && (kind&1))?1:kind>=2?0:(unsigned)native;
+        assert(c.x[8]==expected && c.x[9]==expected);
     }
     q(root,addr(manager));w(manager+0x10,11292);w(manager+0x2c,22584);q(manager+0x18,addr(values));q(manager+0x20,addr(hashes));
     unsigned hash=12345,index=67;w(hashes+(hash%22584)*8,hash);w(hashes+(hash%22584)*8+4,index);q(values+24*index,MAIN+0x1000);

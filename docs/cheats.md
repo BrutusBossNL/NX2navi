@@ -82,6 +82,8 @@ Hidden grottos, Treasure chests, Bean planting spots, Great Fairies and Capacity
 live switch, off by default. Grotto markers identify entrances; they do not claim the grotto has been cleared.
 Chests retain the native opened icon and dungeon floor filtering, and can be revealed without owning a compass.
 Outdoor chests absent from the original map table are added from that area's actual placements.
+These added records stay hidden when their applicable reveal switches are off, even where native map permissions
+would otherwise show a chest. Existing native chest visibility is preserved.
 Bean markers identify soil locations for the current age. They currently have no planted check: the soil's
 insect-release flag is unrelated to planting and is deliberately excluded.
 

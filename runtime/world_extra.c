@@ -29,7 +29,7 @@ void world_extra_loaded(const char *directory,int available,int artwork) {
         count>0 && count<=2048 && fread(entries,sizeof *entries,count,file)==count && fgetc(file)==EOF;
     fclose(file);if(!ok)return;
     for(unsigned i=0;i<count;i++)if(!entries[i].id || entries[i].category<1 || entries[i].category>4 ||
-        entries[i].conditions>2 || entries[i].flags>1 || (i && entries[i].id<=entries[i-1].id))return;
+        entries[i].conditions>2 || entries[i].flags>3 || (i && entries[i].id<=entries[i-1].id))return;
     entry_count=count;ready=1;rt_log("world map: %u additional world records loaded",count);
 }
 static const WorldExtra *lookup(uint64_t id) {
@@ -66,11 +66,11 @@ static int completed(const WorldExtra *entry) {
 void world_chests_master_host(Cpu *c) {
     uint64_t map=c->x[19],index=c->x[23];if(!context(map))return;
     int reveal=cfg_bool("NX2NAVI_WORLD_CHESTS");
-    if(!reveal && enabled(4) && index<word(map+0x358) && index<word(map+0x180)) {
-        const WorldExtra *entry=lookup(ptr(ptr(map+0x188)+index*32));
-        reveal=entry && (entry->flags&1);
-    }
+    const WorldExtra *entry=index<word(map+0x358) && index<word(map+0x180)?lookup(ptr(ptr(map+0x188)+index*32)):NULL;
+    if(!reveal && enabled(4))reveal=entry && (entry->flags&1);
     if(reveal)c->x[8]=c->x[9]=1;
+    // Added outdoor records have no ordinary map marker to restore when both applicable cheats are off.
+    else if(entry && (entry->flags&2))c->x[8]=c->x[9]=0;
 }
 void world_facility_position_host(Cpu *c) {
     uint64_t map=c->x[19],index=c->x[24];

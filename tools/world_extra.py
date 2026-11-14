@@ -73,8 +73,9 @@ def build(romfs):
             drop=actor.get('Dynamic',{}).get('Drop__DropActor','')
             if kind.startswith(('Obj_TBox_','TBox_')) and identity not in chests:
                 row.setdefault('TBox',[]).append(dict(InstanceID=Scalar(0xd5,identity),Trans=[Scalar(0xd2,float(v)) for v in position]));chests.add(identity)
+                records[identity]=(UPGRADES,records.get(identity,(UPGRADES,0,[]))[1]|2,[])
             capacity=any(part in str(drop) for part in ['Bag_Medium','Bag_Large','Quiver_Medium','Quiver_Large','Wallet_Medium','Wallet_Large'])
-            if capacity and kind.startswith(('Obj_TBox_','TBox_')):records[identity]=(UPGRADES,1,[])
+            if capacity and kind.startswith(('Obj_TBox_','TBox_')):records[identity]=(UPGRADES,records.get(identity,(UPGRADES,0,[]))[1]|1,[])
             if capacity and 'Scrub' in kind:add(area,UPGRADES,identity,position)
         # The rolling Goron's bag reward is a scene-logic reference, not a map facility.
         for group in groups[area]:
