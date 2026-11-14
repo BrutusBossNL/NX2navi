@@ -68,6 +68,9 @@ extern "C" bool tab_cheats(float scale) {
         static const char *const charges[] = {"normal", "instant"};
         const char *charge_names[] = {menu_text(UI_MENU_SPRINT_NORMAL), menu_text(UI_MENU_SPIN_INSTANT)};
         opt_choice_list("NX2NAVI_SPIN_CHARGE", UI_MENU_SPIN_CHARGE, charges, charge_names, 2, UI_MENU_SPIN_CHARGE_DESC);
+        opt_group(UI_MENU_CHEATS_WORLD);
+        opt_toggle("NX2NAVI_WORLD_SKULLTULAS", UI_MENU_WORLD_SKULLTULAS, UI_MENU_WORLD_SKULLTULAS_DESC);
+        opt_toggle("NX2NAVI_WORLD_HEART_PIECES", UI_MENU_WORLD_HEART_PIECES, UI_MENU_WORLD_HEART_PIECES_DESC);
         opt_group(UI_MENU_CHEATS_INVENTORY);
         builtin_row(13);
         builtin_row(14);

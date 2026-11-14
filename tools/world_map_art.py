@@ -1,0 +1,129 @@
+"""Extend the player's map collectible layout with unchecked icons already present in its texture archive.
+
+No game resources are stored here. Output belongs in an ignored build or game overlay directory.
+"""
+import struct
+from pathlib import Path
+
+ARCHIVE = 'UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.blarc.zs'
+MEMBER = 'PaMapIconCollect_00.buil'
+
+
+def collectible_layout(original):
+    """Game 1.1.1 BFFH layout: retain checked states 0/1, add unchecked heart/skull states 2/3."""
+    b = bytearray(original)
+    u32 = lambda at: struct.unpack_from('<I', b, at)[0]
+    u64 = lambda at: struct.unpack_from('<Q', b, at)[0]
+    if b[:4] != b'BFFH' or b[0xf8:0xfc] != b'UIL\0' or u32(8) != len(b):
+        raise ValueError('unrecognized collectible map layout')
+    pool = u32(0xd4)
+    if pool != 0xf80 or u32(0xd8) != len(b)-pool:
+        raise ValueError('collectible map layout sections changed')
+    expected = {0x580: (0x5b0,2,8), 0x608: (0x638,2,8)}
+    for at, value in expected.items():
+        if struct.unpack_from('<QII', b, at) != value:
+            raise ValueError('collectible texture banks changed')
+    if u32(0xcc4) != 1:
+        raise ValueError('collectible controller duration changed')
+    extra = bytearray()
+    def append(data):
+        extra.extend(bytes(-(pool+len(extra)) % 8))
+        at = pool+len(extra);extra.extend(data);return at
+    # Native step curves repeat each transition time, with a value/tangent pair at every knot.
+    changes = []
+    for knot, curve in [(0xd40,0xd68),(0xdb0,0xdd8)]:
+        if struct.unpack_from('<ff', b, knot) != (0.,1.) or struct.unpack_from('<ff', b, curve) != (1.,0.):
+            raise ValueError('collectible animation domain changed')
+        if u32(knot+16) != 3 or u32(curve+16) != 6:
+            raise ValueError('collectible animation curves changed')
+        times = append(struct.pack('<7f',0,1,1,2,2,3,3))
+        values = append(struct.pack('<14f',0,0,0,0,1,0,1,0,2,0,2,0,3,0))
+        changes.extend([(knot,times,7),(curve,values,14)])
+    shadow = append(bytes(32));icon = append(bytes(32))
+    extra.extend(bytes(-len(extra) % 8))
+    delta = len(extra)
+    strings = original[pool:]
+    additions = b'MapIconCollectHeartPiece_00\0MapIconCollectSkullSign_00\0'
+    heart = pool+delta+len(strings)
+    skull = heart+len(b'MapIconCollectHeartPiece_00\0')
+    # All serialized pointers are absolute file offsets. Existing object and vector addresses stay put;
+    # the original string pool moves to make room for the extra vectors in the Default section.
+    for at in range(0xf8,pool,8):
+        value=u64(at)
+        if pool <= value < len(original):struct.pack_into('<Q',b,at,value+delta)
+    b = b[:pool]+extra+strings+additions
+    struct.pack_into('<I',b,8,len(b))
+    struct.pack_into('<I',b,0xb0,u32(0xb0)+delta)
+    struct.pack_into('<I',b,0xd4,pool+delta)
+    struct.pack_into('<I',b,0xd8,len(strings)+len(additions))
+    struct.pack_into('<Q',b,0xe0,pool+delta)
+    for at,ptr,count in changes:
+        if at in (0xd40,0xdb0): struct.pack_into('<ff',b,at,0,3)
+        struct.pack_into('<QII',b,at+8,ptr,count,4)
+    # The native shadow material supplies its own dark tint; an unchecked icon's alpha gives its matching shadow.
+    struct.pack_into('<4Q',b,shadow,0xfc0+delta,0xfe3+delta,heart,skull)
+    struct.pack_into('<4Q',b,icon,0x1005+delta,0x1026+delta,heart,skull)
+    struct.pack_into('<QII',b,0x580,shadow,4,8)
+    struct.pack_into('<QII',b,0x608,icon,4,8)
+    struct.pack_into('<I',b,0xcc4,3)
+    return bytes(b)
+
+
+def archive_nodes(data):
+    """Keep every node: this archive contains several variants with the same member name."""
+    if data[:4] != b'SARC':
+        raise ValueError('unrecognized UI archive')
+    header = struct.unpack_from('<H',data,4)[0]
+    count = struct.unpack_from('<H',data,header+6)[0]
+    start = struct.unpack_from('<I',data,12)[0]
+    names = header+12+16*count+8
+    result=[]
+    for i in range(count):
+        node=header+12+16*i
+        _,attribute,lo,hi=struct.unpack_from('<4I',data,node)
+        name_at=names+(attribute&0xffffff)*4
+        name=data[name_at:data.index(0,name_at)].decode()
+        result.append((name,node,start+lo,start+hi))
+    return result
+
+
+def archive_replace(data, member, transform):
+    nodes = archive_nodes(data)
+    if not any(name==member for name,_,_,_ in nodes):
+        raise ValueError('collectible layout missing')
+    start = struct.unpack_from('<I', data, 12)[0]
+    out = bytearray(data[:start])
+    for name,node,lo,hi in sorted(nodes, key=lambda item: item[2]):
+        alignment = min(lo & -lo, 0x2000) if lo else 0x2000
+        out.extend(bytes(-len(out) % alignment))
+        body = transform(data[lo:hi]) if name == member else data[lo:hi]
+        struct.pack_into('<II', out, node+8, len(out)-start, len(out)-start+len(body))
+        out.extend(body)
+    struct.pack_into('<I', out, 8, len(out))
+    return bytes(out)
+
+
+def prepare(game):
+    """Generate locally from the player's game; the original archive is never changed."""
+    import hashlib
+    from pad_prompts import Romfs, compress, write_overlay
+    game = Path(game)
+    destination = game/'romfs-patches-world'
+    stamp = destination/'generator.sha256'
+    romfs = Romfs(game/'romfs')
+    if ARCHIVE not in romfs.paths():
+        return  # This layout belongs only to the Switch 2 game.
+    original = romfs.raw(ARCHIVE)
+    key = hashlib.sha256(Path(__file__).read_bytes()+hashlib.sha256(original).digest()).hexdigest()
+    if stamp.is_file() and stamp.read_text() == key and (destination/'manifest.tsv').is_file() and (destination/ARCHIVE).is_file():
+        return
+    archive, dictionary = romfs.load(ARCHIVE)
+    result = archive_replace(archive, MEMBER, collectible_layout)
+    write_overlay(destination, {ARCHIVE: compress(result, dictionary, 9)}, {ARCHIVE: original})
+    stamp.write_text(key)
+    print('  collectible map icons prepared from the player\'s game', flush=True)
+
+
+if __name__ == '__main__':
+    import sys
+    prepare(Path(sys.argv[1]))

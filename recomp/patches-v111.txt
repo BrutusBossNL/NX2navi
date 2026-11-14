@@ -388,3 +388,11 @@ site bomb_arrows main 2eabc30 d503237f aa1e03f0 947fd4ac
 
 # Process asynchronous bomb actor requests on the native framework thread.
 site bomb_arrows main 6e6be0 d503237f aa1e03f0 951ee8bc
+
+# Native map collectible visibility and texture selection. The same updater serves the full map and minimap.
+# Visibility loads run first; callbacks change their result. The style callback then makes the native animation call.
+# Floor selection and position transforms remain native.
+set world_map NX2NAVI_WORLD_MAP_PATCH 1
+site world_map main 2090a8 39517268 39517268 95325f86
+site world_map main 2091a4 b94017e9 b94017e9 95325f43
+site world_map main 20934c 94032691 95325ed5

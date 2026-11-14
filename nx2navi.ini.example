@@ -980,6 +980,9 @@
 # spin_range = normal
 # Magic spin charging: normal or instant; still requires the Great Fairy upgrade.
 # spin_charge = normal
+# World: reveal native collectible locations on the map and minimap; collected items keep a check mark.
+# world_skulltulas = 0
+# world_heart_pieces = 0
 # One line per cheat of the mods' cheat files, mods\<mod>\cheats\<build id>.txt (docs/cheats.md); the Cheats tab of
 # the menu writes them. cheat_<hash> = 1 switches a cheat on, the hash being FNV-1a 32 of "<mod folder>/<cheat name>".
 # Default: every cheat off.

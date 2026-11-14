@@ -43,6 +43,7 @@
 #include "restbl.h"
 #include "sha256.h"
 #include "stutter_map.h"
+#include "world_map.h"
 
 #include <zstd.h>
 
@@ -55,7 +56,7 @@ typedef struct { uint64_t offset, size; uint32_t name, len; } Entry;
 _Static_assert(sizeof(Entry) == 24, "index entry layout");
 
 typedef struct { uint32_t volume, pad; uint64_t file_id, size, write_time, create_time; } Identity;   // no padding
-// prio: which overlay serves a path two of them give (the higher); romfs-patches 0, the NX2NAVI_ROMFS_MODS manifest 1, a
+// prio: which overlay serves a path two of them give (the higher); collectible icons -1, romfs-patches 0, the NX2NAVI_ROMFS_MODS manifest 1, a
 // player mod 2 + its distance from the bottom of the order. mod: its index in mods_at + 1, 0 for any other overlay.
 typedef struct { uint64_t index, size; char *path, *name; Identity id; int prio, mod; } Overlay;
 
@@ -480,7 +481,7 @@ static int contest_order(const void *a, const void *b) {
 }
 
 static const char *owner_name(const Overlay *o) {
-    return o->mod ? mods_at(o->mod - 1)->name : o->prio ? "romfs_mods" : "the port's patches";
+    return o->mod ? mods_at(o->mod - 1)->name : o->prio > 0 ? "romfs_mods" : "the port's patches";
 }
 
 // One overlay per path: the highest prio serves it; the others are dropped and counted on their mod.
@@ -654,7 +655,7 @@ static Restbl *restbl_unpack(const void *z, size_t n) {
 // that mod's files, and each served mod file's entry raised to what its size needs (restbl_grow for a file the game
 // has, restbl_estimate for an added one). Never lowers the game's entries.
 static void restbl_overlay(void) {
-    int player = 0;
+    int player = world_map_ready();
     for (size_t k = 0; k < noverlay; k++) player |= overlays[k].mod || overlays[k].prio == 1;
     if (!player || !restbl_rel[0]) return;
     static const char keeps[] = "mod files that grew may fail to load";
@@ -949,6 +950,10 @@ static void overlay_init(void) {
     if (!patches && !prompts_loaded && plain_ok) patches = plain;
     if (patches && *patches && strcmp(patches, "0")) overlay_load(patches, 0, 0);
     size_t mods_first = noverlay;
+    char world_dir[2100], world_file[2400];
+    need(snprintf(world_dir,sizeof world_dir,"%s/romfs-patches-world",index_dir)<(int)sizeof world_dir,"world map overlay path");
+    need(snprintf(world_file,sizeof world_file,"%s/UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.blarc.zs",world_dir)<(int)sizeof world_file,"world map archive path");
+    overlay_load(world_dir,1,-1); // Any explicit resource mod keeps precedence over the built-in collectible layout.
     if (mods && *mods && strcmp(mods, "0")) overlay_load(mods, 0, 1);
     mods_overlay_init();
     const char *clash = prompts_loaded ? overlay_clash(first, prompts_end, mods_first, noverlay) : NULL;
@@ -963,6 +968,9 @@ static void overlay_init(void) {
     }
     restbl_collect();
     overlay_contest();
+    int world_ready=0;
+    for(size_t k=0;k<noverlay;k++) if(!strcmp(overlays[k].path,world_file))world_ready=1;
+    world_map_art_loaded(world_ready);
     mods_overlay_log();
     restbl_overlay();
     heapdef_overlay();

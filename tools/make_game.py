@@ -1937,6 +1937,8 @@ def step_compile(out, cache_dir, msys, jobs, romfs_job=None, update=False):
     gen.mkdir(parents=True, exist_ok=True)
     obj.mkdir(parents=True, exist_ok=True)
     rt = KIT / 'runtime'
+    from world_map_art import prepare as prepare_world_map
+    prepare_world_map(out)
     runtime_headers(rt)
     clang, clangxx, env, vma = toolchain(msys)
     if not romfs_job:

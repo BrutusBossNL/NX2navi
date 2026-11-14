@@ -746,6 +746,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_MODS_REPLACES_BUILTIN] = "Code patches in use: %d files. They replace the port's own patch %s, which "
                                       "stays off while this mod is on.",
     // Built-in cheat menu.
+    [UI_MENU_CHEATS_WORLD] = "World",
+    [UI_MENU_WORLD_SKULLTULAS] = "Show Gold Skulltulas",
+    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Show Gold Skulltula locations on the map and minimap. Collected tokens have a check mark.",
+    [UI_MENU_WORLD_HEART_PIECES] = "Show heart pieces",
+    [UI_MENU_WORLD_HEART_PIECES_DESC] = "Show heart piece locations on the map and minimap. Collected pieces have a check mark.",
     [UI_MENU_CHEATS_EQUIPMENT] = "Equipment",
     [UI_MENU_BOMB_ARROWS] = "Bomb arrows",
     [UI_MENU_BOMB_ARROWS_DESC] = "Explosive normal arrows with a black aura. Requires a bow and bombs; uses one arrow and one bomb per shot.",
@@ -1379,6 +1384,11 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_MODS_REPLACES_BUILTIN] = "Патчи кода в работе: файлов: %d. Они заменяют собственный патч порта %s, "
                                       "который выключен, пока этот мод включён.",
     // Built-in cheat menu.
+    [UI_MENU_CHEATS_WORLD] = "Мир",
+    [UI_MENU_WORLD_SKULLTULAS] = "Показывать золотых скуллтул",
+    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Показывать золотых скуллтул на карте и мини-карте. Собранные жетоны отмечены галочкой.",
+    [UI_MENU_WORLD_HEART_PIECES] = "Показывать части сердца",
+    [UI_MENU_WORLD_HEART_PIECES_DESC] = "Показывать части сердца на карте и мини-карте. Собранные части отмечены галочкой.",
     [UI_MENU_CHEATS_EQUIPMENT] = "Снаряжение",
     [UI_MENU_BOMB_ARROWS] = "Взрывные стрелы",
     [UI_MENU_BOMB_ARROWS_DESC] = "Обычные стрелы с чёрной аурой и взрывом. Требуются лук и бомбы; расходуется одна стрела и одна бомба.",
@@ -2035,6 +2045,11 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_MODS_REPLACES_BUILTIN] = "Patches de código em uso: %d arquivos. Eles substituem o patch do próprio port "
                                       "%s, que fica desligado enquanto este mod está ligado.",
     // Built-in cheat menu.
+    [UI_MENU_CHEATS_WORLD] = "Mundo",
+    [UI_MENU_WORLD_SKULLTULAS] = "Mostrar Skulltulas douradas",
+    [UI_MENU_WORLD_SKULLTULAS_DESC] = "Mostra as Skulltulas douradas no mapa e minimapa. Fichas coletadas recebem uma marca.",
+    [UI_MENU_WORLD_HEART_PIECES] = "Mostrar pedaços de coração",
+    [UI_MENU_WORLD_HEART_PIECES_DESC] = "Mostra os pedaços de coração no mapa e minimapa. Pedaços coletados recebem uma marca.",
     [UI_MENU_CHEATS_EQUIPMENT] = "Equipamento",
     [UI_MENU_BOMB_ARROWS] = "Flechas-bomba",
     [UI_MENU_BOMB_ARROWS_DESC] = "Flechas normais explosivas com aura preta. Requer arco e bombas; usa uma flecha e uma bomba por disparo.",
@@ -2777,6 +2792,11 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_MODS_EXEFS_ON] = "正在使用的代码补丁：%d 个文件。",
     [UI_MENU_MODS_REPLACES_BUILTIN] = "正在使用的代码补丁：%d 个文件。它们取代本移植自带的补丁 %s，此模组开启时该补丁保持关闭。",
     // Built-in cheat menu.
+    [UI_MENU_CHEATS_WORLD] = "世界",
+    [UI_MENU_WORLD_SKULLTULAS] = "显示黄金骷髅蜘蛛",
+    [UI_MENU_WORLD_SKULLTULAS_DESC] = "在地图和小地图显示黄金骷髅蜘蛛位置。已收集的代币带有勾号。",
+    [UI_MENU_WORLD_HEART_PIECES] = "显示心之碎片",
+    [UI_MENU_WORLD_HEART_PIECES_DESC] = "在地图和小地图显示心之碎片位置。已收集的碎片带有勾号。",
     [UI_MENU_CHEATS_EQUIPMENT] = "装备",
     [UI_MENU_BOMB_ARROWS] = "炸弹箭",
     [UI_MENU_BOMB_ARROWS_DESC] = "带黑色光晕的爆炸普通箭。需要弓和炸弹；每次射击消耗一支箭和一颗炸弹。",

@@ -10,6 +10,7 @@ The earlier spin measurements below used NX2navi 0.9.2.
 |---|---|
 | Link | Infinite health, magic and rupees; unlimited air jumps; sprint speed normal / 2× / 3.5× / 5× |
 | Equipment | Bomb arrows; spin attack range normal / 1.5x / 2x / 2.5x; magic spin charging normal / instant. |
+| World | Show Gold Skulltulas and show heart pieces on the map and minimap, with checks for collected items. |
 | Inventory | Separate infinite magic beans and business seeds; contents of each unlocked bottle, up to five. |
 | Ammunition | Separate infinite arrows, bombs, bombchus, Deku nuts, slingshot seeds and Deku sticks. |
 | Timers | Freeze the supported shared countdown at its current remaining time. |
@@ -57,6 +58,21 @@ modified. The shared clock was verified live in the Zora diving minigame on a lo
 references in other event scripts establish reuse of the interface, not testing of every event or its other
 failure conditions.
 
+## World
+
+Show Gold Skulltulas and Show heart pieces are independent live switches, both off by default. They reveal
+the current area's native collectible locations on the map and minimap. A collected token or heart piece
+keeps the game's check-mark icon; an uncollected one uses its matching icon without a check mark.
+Skulltula locations remain visible during the day, including those whose actors only appear at night.
+Dungeon floor selection and the game's map coordinates, zoom and clipping stay native. Turning a switch off restores
+the game's ordinary visibility for that category. These options do not collect anything or edit progression.
+
+The launcher builds the extended map layout locally from the player's game. Its textures are already present
+in that game's shared UI archive; no extracted assets are distributed. A resource mod replacing the same
+layout archive takes precedence, and the reveal hooks remain inactive if the extended layout is unavailable.
+Collection status comes from native per-instance Skulltula records and the native heart-piece query, including
+direct actors, chest rewards and event rewards, rather than inventory totals.
+
 ## Implementation and checks
 
 `runtime/cheats.c` validates the build, table shapes, key hashes, indices, readable memory and relevant object
@@ -71,6 +87,9 @@ that avoids division by zero. Original words at all patch sites are validated by
 not edited by hand or checked in.
 
 `python tests/cheats_check.py` compiles the real policies against synthetic guest memory, without game files.
+`python tests/world_map_check.py` checks independent category toggles, collected versus uncollected icon frames,
+the native query contract, CPU preservation, and the absence of progression writes.
+`python tests/world_map_art_check.py` checks duplicate archive members and preservation of unrelated layout variants.
 Set `CC` to the UCRT64 clang executable when it is not on PATH. The test covers the build gate, health/death
 and capacity guards, magic capacity, wallet limits, item ownership, legacy no-op policies, all 13 contents in
 each of five bottles, locked-slot and invalid-enum rejection, countdown freezing, count-up exclusion and expired
@@ -94,3 +113,9 @@ files remained unchanged by hash comparison. Enemy-hit behavior and every scene 
 exercised. `python tests/bomb_arrows_check.py` additionally checks shooter ownership and reference generations,
 elemental-arrow exclusion, cancellation without a bomb cost, one-shot consumption, asynchronous request timing,
 native actor/detonation arguments, and CPU/stack preservation.
+
+On the 0.10.1 Windows integration, isolated save-copy sessions showed uncollected Gold Skulltulas on the Water Temple
+map and both checked and unchecked heart pieces in Kakariko. The Kakariko minimap showed the same collectible icons.
+The extended archive preserved all 624 unrelated layouts and extended all four collectible layout variants.
+Runtime selftest, settings, input and all 3,483 UI-text checks passed. All 70 original save, backup and transaction
+files remained unchanged. Every location, age, floor and reward type has not been individually tested live.
