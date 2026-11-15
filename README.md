@@ -2,7 +2,8 @@
 
 # NX2navi
 
-This fork maintains the tested custom **0.10.1.9** build on **`main`**, based on upstream 0.10.1.
+We are continuing development independently from the NX2navi source, with the tested custom **0.10.1.9** build
+on **`main`**, based on upstream 0.10.1.
 It retains the complete launcher, cheat manager, bomb arrows, spin controls and independent World map switches.
 The upstream 0.11/0.12 integration and handover launcher are intentionally excluded.
 
@@ -10,6 +11,16 @@ Get the [custom 0.10.1.9 release](https://github.com/BrutusBossNL/NX2navi/releas
 For launcher updates, use Preview with repository `BrutusBossNL/NX2navi`.
 Report issues with this custom build in [this fork's issue tracker](https://github.com/BrutusBossNL/NX2navi/issues).
 Do not synchronize later upstream releases into this stable branch automatically.
+
+## Thanks and contributions
+
+Thank you to the original NX2navi developers, chrg6, Valiantsin Dzerakh, Peiikai, the MacNativeGames contributors,
+and everyone who contributed code, tests, documentation, bug reports and feedback. This continuation builds on
+your work. Original credits and third-party notices are retained.
+
+The source is public, and contributions are welcome. Please open [issues](https://github.com/BrutusBossNL/NX2navi/issues)
+for bugs and ideas, and [pull requests](https://github.com/BrutusBossNL/NX2navi/pulls) for fixes and improvements.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [license section](#license) before contributing.
 
 **Join the official NX2navi update discord server: https://discord.com/invite/uf6gSrsPpq** 
 
@@ -69,6 +80,11 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Installing
 
+The custom release currently provides the update package. A standalone installer is prepared locally; publishing it
+requires the permissions described in [LICENSE-ADDITIONS](LICENSE-ADDITIONS). It is not yet a public download.
+
+The installation workflow below applies when an authorized setup package is available.
+
 Download `NX2navi-Setup-<version>.exe` from the releases and start it next to your `.nup` dump. It is the only file
 you need. The launcher it
 installs finds the dump, downloads the build tools, builds the game on your PC (20 to 45 minutes, once) and starts
@@ -91,9 +107,11 @@ and `VK_EXT_mesh_shader`. The setup is not signed, so SmartScreen warns on its f
 
 ## License
 
-The source is public to read. Its additions and changes are all rights reserved ([LICENSE-ADDITIONS](LICENSE-ADDITIONS)):
-no part of them may be copied or published without written permission. The base import stays under its
-[MIT License](LICENSE), and third-party code keeps its own license ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+Our original contributions owned by BrutusBossNL are available under the [MIT license for custom additions](LICENSE-CUSTOM-ADDITIONS).
+This does not relicense upstream code. The base import retains its [MIT License](LICENSE); later upstream additions
+retain the restrictions in [LICENSE-ADDITIONS](LICENSE-ADDITIONS), and third-party code keeps its own terms
+([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). The source is public, but the repository as a whole cannot
+currently be described as fully open source under these combined terms.
 No license grants anything for Nintendo's game.
 
 NX2navi is an independent, non-commercial fan project, not affiliated with or endorsed by Nintendo. *The Legend
