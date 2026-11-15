@@ -2,6 +2,15 @@
 
 # NX2navi
 
+This fork maintains the tested custom **0.10.1.9** build on **`main`**, based on upstream 0.10.1.
+It retains the complete launcher, cheat manager, bomb arrows, spin controls and independent World map switches.
+The upstream 0.11/0.12 integration and handover launcher are intentionally excluded.
+
+Get the [custom 0.10.1.9 release](https://github.com/BrutusBossNL/NX2navi/releases/tag/v0.10.1.9).
+For launcher updates, use Preview with repository `BrutusBossNL/NX2navi`.
+Report issues with this custom build in [this fork's issue tracker](https://github.com/BrutusBossNL/NX2navi/issues).
+Do not synchronize later upstream releases into this stable branch automatically.
+
 **Join the official NX2navi update discord server: https://discord.com/invite/uf6gSrsPpq** 
 
 **NX2navi** is a static recompilation of *The Legend of Zelda: Ocarina of Time* for Nintendo Switch 2 (game
